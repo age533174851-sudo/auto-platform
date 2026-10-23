@@ -154,6 +154,9 @@ if (!src.includes("EXCHANGE_CONNECTION_COLUMNS")) {
     err('연결 조회 판정을 공유 정본에서 가져오지 않습니다 — 사본을 두면 한쪽만 고쳐집니다');
   }
   const caller = bodyOf(src, 'processPendingJobs') || '';
+  // **주석은 코드가 아니다.** 옛 모양을 주석에 인용해 두면 그 문장에
+  // 걸린다 — 그래서 `//` 줄을 걷어내고 본다.
+  const callerCode = caller.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
   if (/연결 없음/.test(caller) && !caller.includes('READ_FAILED')) {
     err('잡 처리에서 연결 조회 결과를 "연결 없음" 한 가지로만 적습니다 — '
       + '못 읽은 것(READ_FAILED)은 없는 것이 아닙니다');
@@ -200,6 +203,28 @@ if (!src.includes("EXCHANGE_CONNECTION_COLUMNS")) {
   }
   if (!src.includes("from '../../src/lib/supabase/jobClaimWindow'")) {
     err('잡 선택 조건을 공유 정본에서 가져오지 않습니다 — 사본을 두면 한쪽만 고쳐집니다');
+  }
+
+  // ── stale 회수가 **근거를 못 읽고** 되돌리지 않는가 ──
+  //
+  // 되돌리는 것은 "이 잡은 임자가 없다"는 주장이고 근거는 heartbeat다.
+  // `const { data: beats } = …`로 오류를 버리면 조회 실패가 **빈 집합**이
+  // 되어 모든 워커가 죽은 것으로 읽힌다 — 살아 있는 워커의 잡이 통째로
+  // PENDING으로 돌아가고 다른 워커가 집으면 주문·청산이 중복된다.
+  if (!callerCode.includes('staleRecoveryPlan')) {
+    err('stale 회수가 판정 정본을 쓰지 않습니다 — heartbeat를 못 읽은 것을 '
+      + '"살아 있는 워커 0명"으로 읽으면 살아 있는 워커의 잡을 회수합니다');
+  }
+  if (/const \{ data: beats \}/.test(callerCode)) {
+    err('heartbeat 조회에서 error를 버립니다 — 못 읽은 것은 워커 사망의 증거가 아닙니다');
+  }
+  if (!src.includes("from '../../src/lib/engine/staleJobRecovery'")) {
+    err('stale 회수 판정을 공유 정본에서 가져오지 않습니다 — 사본을 두면 한쪽만 고쳐집니다');
+  }
+  // 조회 이후 바뀐 잡을 덮어쓰지 않는다 (CAS)
+  if (callerCode.includes('staleRecoveryPlan') && !/eq\('locked_until'/.test(callerCode)) {
+    err('stale 회수 UPDATE가 읽을 때 본 locked_until을 조건에 걸지 않습니다 — '
+      + '조회 이후 다시 집힌 잡을 덮어씁니다');
   }
 }
 

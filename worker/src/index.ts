@@ -40,6 +40,7 @@ import {
 } from '../../src/lib/supabase/exchangeConnectionRead';
 import { killSwitchRecoveryVerdict } from '../../src/lib/engine/killSwitchRecovery';
 import { claimableFilter } from '../../src/lib/supabase/jobClaimWindow';
+import { staleRecoveryPlan } from '../../src/lib/engine/staleJobRecovery';
 import { exitMonitorPlan, exitMonitorOutcome, EXIT_MONITOR_INTERVAL_MS } from '../../src/lib/engine/exitMonitorSchedule';
 import { wakeCadenceHeaders } from '../../src/lib/engine/exitMonitorWake';
 
@@ -360,31 +361,56 @@ async function processPendingJobs() {
   lastStaleScanMs = Date.now();
   try {
     const cutoff = new Date(Date.now() - STALE_GRACE_MS).toISOString();
-    const { data: stale } = await sb().from('jobs')
+    const staleRes = await sb().from('jobs')
       .select('id, locked_by, locked_until')
       .eq('status', 'PROCESSING').lt('locked_until', cutoff).limit(20);
+    noteDb({ error: (staleRes as any).error });
 
-    if (Array.isArray(stale) && stale.length) {
-      // 최근 살아 있는 워커 목록
-      const aliveSince = new Date(Date.now() - 90_000).toISOString();
-      const { data: beats } = await sb().from('worker_heartbeat')
-        .select('worker_id, last_seen, status').gt('last_seen', aliveSince);
-      const alive = new Set(
-        (Array.isArray(beats) ? beats : [])
-          .filter((b: any) => b.status !== 'stopped')
-          .map((b: any) => String(b.worker_id)),
-      );
+    // **근거를 못 읽으면 되돌리지 않는다.**
+    //
+    // 되돌리는 것은 "이 잡은 임자가 없다"는 주장이고, 그 주장의 근거가
+    // heartbeat다. 예전에는 `const { data: beats } = …`로 오류를 버려서,
+    // 조회가 실패하면 살아 있는 워커 목록이 **빈 집합**이 됐다 — 즉 모든
+    // 워커가 죽은 것으로 읽혔다. 살아 있는 워커가 처리 중인 잡이 통째로
+    // PENDING으로 돌아가고, 다른 워커가 집으면 주문·청산이 중복된다.
+    const aliveSince = new Date(Date.now() - 90_000).toISOString();
+    // stale이 0건이면 heartbeat를 볼 이유가 없다 — 조회도 아낀다.
+    const needBeats = Array.isArray((staleRes as any).data) && (staleRes as any).data.length > 0;
+    const beatsRes = needBeats
+      ? await sb().from('worker_heartbeat')
+          .select('worker_id, last_seen, status').gt('last_seen', aliveSince)
+      : { data: [] as any[], error: null };
+    if (needBeats) noteDb({ error: (beatsRes as any).error });
 
-      for (const j of stale as any[]) {
-        if (j.locked_by && alive.has(String(j.locked_by))) {
-          console.warn(`[jobs] ${String(j.id).slice(0, 8)} 만료됐지만 보유 워커 ${j.locked_by}가 살아 있어 회수하지 않음`);
-          continue;
-        }
-        await sb().from('jobs')
-          .update({ status: 'PENDING', locked_by: null, updated_at: new Date().toISOString() })
-          .eq('id', j.id).eq('status', 'PROCESSING').eq('locked_by', j.locked_by);
-        console.warn(`[jobs] ${String(j.id).slice(0, 8)} stale 회수 (보유 워커 ${j.locked_by || '?'} heartbeat 없음)`);
+    const plan = staleRecoveryPlan({ stale: staleRes as any, beats: beatsRes as any });
+    if (plan.code === 'HEARTBEAT_UNREADABLE' || plan.code === 'STALE_UNREADABLE') {
+      // 조용히 멈추지 않는다 — 회수가 멈춘 사실이 어디엔가 남아야 한다.
+      await alert('system', 'warning', 'stale 잡 회수를 멈췄습니다',
+        { 사유: plan.reason }, `stale_halt:${plan.code}`);
+    }
+    for (const j of plan.skipped) {
+      console.warn(`[jobs] ${String(j.id).slice(0, 8)} 만료됐지만 보유 워커 ${j.locked_by}가 살아 있어 회수하지 않음`);
+    }
+    for (const j of plan.recover) {
+      // **조회 이후 바뀐 잡은 덮어쓰지 않는다.** 읽을 때 본 `locked_by`와
+      // `locked_until`을 조건에 함께 건다 — 그 사이 다른 워커가 집었거나
+      // 잠금이 갱신됐으면 0건이 갱신되고 그게 맞다.
+      //
+      // `locked_by`가 비어 있으면 `eq`로는 NULL 줄에 맞지 않는다(PostgREST는
+      // `is.null`을 요구한다). 예전 코드는 그래서 임자 없는 잡을 영원히
+      // 회수하지 못했다.
+      let q = sb().from('jobs')
+        .update({ status: 'PENDING', locked_by: null, updated_at: new Date().toISOString() })
+        .eq('id', j.id).eq('status', 'PROCESSING');
+      q = j.locked_by ? q.eq('locked_by', String(j.locked_by)) : q.is('locked_by', null);
+      if (j.locked_until) q = q.eq('locked_until', String(j.locked_until));
+      const { error: upErr } = await q;
+      noteDb({ error: upErr });
+      if (upErr) {
+        console.warn(`[jobs] ${String(j.id).slice(0, 8)} stale 회수 실패: ${upErr.message}`);
+        continue;
       }
+      console.warn(`[jobs] ${String(j.id).slice(0, 8)} stale 회수 (보유 워커 ${j.locked_by || '?'} heartbeat 없음)`);
     }
   } catch { /* 회수 실패는 다음 주기에 다시 시도한다 */ }
   }
