@@ -297,6 +297,21 @@ export function autoMergeGate(pr: PrFacts): GateVerdict {
     };
   }
 
+  // 필수 verify는 '실행됐다'만으로 충분하지 않다. skipped/neutral은
+  // 선택적 검사에서는 허용해도, 필수 검사의 통과 증거는 success뿐이다.
+  // 같은 이름의 검사 중 하나라도 성공이 아니면 성공 1건으로 덮지 않는다.
+  const requiredNotSuccessful = mine.filter(c =>
+    REQUIRED_CHECKS.includes(c.name)
+    && c.status === 'completed' && c.conclusion !== 'success');
+  if (requiredNotSuccessful.length > 0) {
+    return {
+      merge: false, code: 'CHECKS_FAILED', details: d,
+      reason: '필수 검사가 성공하지 않았습니다: '
+        + requiredNotSuccessful.map(c => `${c.name}(${c.conclusion ?? 'null'})`).join(' · ')
+        + ' — 필수 검사는 completed + success만 허용합니다',
+    };
+  }
+
   const bad = mine.filter(c =>
     c.status === 'completed' && BAD_CONCLUSIONS.has(String(c.conclusion)));
   const badStatuses = pr.statuses.filter(s =>
