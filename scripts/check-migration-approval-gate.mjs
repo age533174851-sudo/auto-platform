@@ -61,6 +61,10 @@ if (!/if \(!APPROVABLE_RISKS\.includes\(entry\.risk\)\)/.test(runnerCode)) {
 const { classifyMigration } = await loadPlan();
 for (const [sql, want] of [
   ['CREATE UNIQUE INDEX i ON public.jobs (a)', 'DATA_DEPENDENT'],
+  ['CREATE TABLE IF NOT EXISTS jobs (a int); CREATE UNIQUE INDEX i ON jobs (a)', 'DATA_DEPENDENT'],
+  ['CREATE TABLE IF NOT EXISTS jobs (a int); ALTER TABLE jobs ADD CONSTRAINT c CHECK (a > 0)', 'DATA_DEPENDENT'],
+  ['DROP INDEX IF EXISTS i; CREATE UNIQUE INDEX i ON jobs (a)', 'DATA_DEPENDENT'],
+  ['ALTER TABLE jobs DROP CONSTRAINT IF EXISTS c; ALTER TABLE jobs ADD CONSTRAINT c CHECK (a > 0)', 'DATA_DEPENDENT'],
   ['ALTER TABLE live_orders ADD CONSTRAINT c CHECK (q > 0)', 'DATA_DEPENDENT'],
   ['DROP TABLE jobs', 'DESTRUCTIVE'],
   ['create table if not exists t (id uuid)', 'ADDITIVE'],
