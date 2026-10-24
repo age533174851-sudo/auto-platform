@@ -79,12 +79,9 @@ const DATA_DEPENDENT_PATTERNS: Array<{ re: RegExp; what: string; nameAt: number 
 /**
  * 이 SQL이 **먼저 지우는** 인덱스·제약 이름들.
  *
- * 같은 이름을 지웠다 다시 만드는 것은 **이미 있던 제약을 고쳐 다는 것**
- * 이다. 그 제약이 이미 걸려 있었으므로 기존 줄은 이미 그것을 만족한다 —
- * 다시 만들어도 데이터 때문에 실패하지 않는다.
- *
- * 055(`smoke_runs_active_idx`)와 034(`autotrade_sizing_chk`)가 실제로
- * 그 모양이었고, 그래서 자동 적용 대상으로 남아야 한다.
+ * 진단용 DROP 목록이다. DROP이 성공했는지, 기존 제약 정의와 재생성
+ * 정의가 같은지는 정적 SQL만으로 증명할 수 없다. 자동 적용의 안전
+ * 근거로 이 목록을 사용하지 않는다.
  */
 export function objectsDroppedIn(sql: string): Set<string> {
   const out = new Set<string>();
@@ -104,13 +101,13 @@ function bareTable(raw: string): string {
   return String(raw).replace(/"/g, '').replace(/^[A-Za-z0-9_]+\./, '').toLowerCase();
 }
 
-/** 이 SQL이 **직접 만드는** 표 이름들. 그 표는 비어 있다. */
+/** 반드시 실행되는 CREATE TABLE만 기록한다. IF NOT EXISTS는 기존 표일 수 있다. */
 export function tablesCreatedIn(sql: string): Set<string> {
   const out = new Set<string>();
   // raw SQL을 정규식으로 검색하면 주석·COMMENT ON 문자열도 CREATE로 오인한다.
   for (const piece of splitStatements(sql).pieces) {
     const st = piece.code.replace(/\s+/g, ' ').trim();
-    const m = /^CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z0-9_."]+)/i.exec(st);
+    const m = /^CREATE\s+TABLE\s+(?!IF\s+NOT\s+EXISTS\b)([A-Za-z0-9_."]+)/i.exec(st);
     if (m) out.add(bareTable(m[1]));
   }
   return out;
@@ -125,7 +122,6 @@ export function tablesCreatedIn(sql: string): Set<string> {
 export function dataDependentReason(
   statement: string,
   createdHere: Set<string>,
-  droppedHere: Set<string> = new Set(),
 ): string | null {
   for (const { re, what, nameAt } of DATA_DEPENDENT_PATTERNS) {
     const m = re.exec(statement);
@@ -133,9 +129,7 @@ export function dataDependentReason(
     // 표는 항상 "이름이 아닌 쪽"이다.
     const table = bareTable(m[nameAt === 1 ? 2 : 1] ?? '');
     if (!table || createdHere.has(table)) continue;   // 이 파일이 만든 표 = 비어 있다
-    // 같은 이름을 먼저 지웠으면 **이미 걸려 있던 제약**을 고쳐 다는 것이다.
-    const objName = nameAt > 0 ? bareTable(m[nameAt] ?? '') : '';
-    if (objName && droppedHere.has(objName)) continue;
+    // 같은 이름을 DROP한 뒤 재생성해도 새 UNIQUE/CHECK가 더 엄격할 수 있다.
     return `이미 있는 표 \`${table}\`에 ${what} 제약을 겁니다 — 기존 줄에 따라 실패할 수 있고, `
       + '성공하면 그때부터 쓰기가 거부됩니다. 적용 전에 사람이 데이터를 봐야 합니다';
   }
@@ -477,10 +471,9 @@ export function classifyMigration(sql: string): MigrationClass {
   const danger: string[] = [];
   const unknown: string[] = [];
   const dataDependent: string[] = [];
-  // 실제로 앞에서 실행된 CREATE/DROP만 증거다. 뒤에 나오는 문장이나
-  // 주석·문자열은 앞의 UNIQUE/CONSTRAINT를 안전하게 만들지 않는다.
+  // 실제로 앞에서 반드시 만들어진 새 표만 안전 근거다.
+  // IF NOT EXISTS나 DROP/recreate는 기존 데이터의 적합성을 보증하지 않는다.
   const createdHere = new Set<string>();
-  const droppedHere = new Set<string>();
   for (const piece of statements) {
     const st = piece.code.replace(/\s+/g, ' ').trim();
 
@@ -506,11 +499,10 @@ export function classifyMigration(sql: string): MigrationClass {
     // **더하는 모양이어도 기존 표에 제약을 걸면 자동이 아니다.**
     // ADDITIVE 판정보다 **먼저** 본다 — `CREATE UNIQUE INDEX`는 아래
     // ADDITIVE_PATTERNS에도 걸리므로, 순서가 뒤면 그대로 통과한다.
-    const dd = dataDependentReason(st, createdHere, droppedHere);
+    const dd = dataDependentReason(st, createdHere);
     if (dd) { dataDependent.push(dd); continue; }
     if (ADDITIVE_PATTERNS.some(re => re.test(st))) {
       for (const name of tablesCreatedIn(st)) createdHere.add(name);
-      for (const name of objectsDroppedIn(st)) droppedHere.add(name);
       continue;
     }
     unknown.push(st.slice(0, 60));

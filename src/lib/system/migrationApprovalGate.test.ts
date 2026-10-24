@@ -34,7 +34,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_one_active_kill_switch_per_connection
 
 /** 같은 파일에서 표를 만들고 거기에 제약을 거는 경우 — 비어 있으니 안전하다 */
 const SQL_NEW_TABLE = `
-create table if not exists widget_log (
+create table widget_log (
   id uuid primary key default gen_random_uuid(),
   owner text not null
 );
@@ -69,7 +69,7 @@ export function runMigrationApprovalGateTests() {
   });
 
   test('표 이름을 스키마·따옴표와 무관하게 같은 것으로 본다', () => {
-    const made = tablesCreatedIn('create table if not exists "public"."jobs" (id uuid);');
+    const made = tablesCreatedIn('create table "public"."jobs" (id uuid);');
     eq(made.has('jobs'), true);
     eq(dataDependentReason('CREATE UNIQUE INDEX i ON public.jobs (a)', made), null,
       '같은 표인데 다른 표로 읽었습니다');
@@ -135,9 +135,49 @@ export function runMigrationApprovalGateTests() {
     eq(classifyMigration(sql).risk, 'DATA_DEPENDENT');
   });
 
-  test('실제 앞선 CREATE TABLE과 DROP INDEX는 기존 계약을 유지한다', () => {
+  test('실제 앞선 CREATE TABLE은 안전하지만 DROP 이름 재사용은 증거가 아니다', () => {
     eq(classifyMigration('CREATE TABLE new_jobs (a int); CREATE UNIQUE INDEX i ON new_jobs (a);').risk, 'ADDITIVE');
-    eq(classifyMigration('DROP INDEX IF EXISTS i; CREATE UNIQUE INDEX i ON jobs (a);').risk, 'ADDITIVE');
+    eq(classifyMigration('DROP INDEX IF EXISTS i; CREATE UNIQUE INDEX i ON jobs (a);').risk, 'DATA_DEPENDENT');
+  });
+
+  // ── SQL의 IF NOT EXISTS / DROP 재생성은 기존 데이터 안전 증거가 아니다 ──
+  test('★ IF NOT EXISTS 표는 이미 존재할 수 있어 UNIQUE 자동 적용 금지', () => {
+    const sql = 'CREATE TABLE IF NOT EXISTS jobs (id int, a int); '
+      + 'CREATE UNIQUE INDEX IF NOT EXISTS jobs_a_unique ON jobs (a);';
+    eq(tablesCreatedIn(sql).has('jobs'), false,
+      'IF NOT EXISTS는 실제 CREATE 성공 증거가 아닙니다');
+    eq(classifyMigration(sql).risk, 'DATA_DEPENDENT');
+    eq(classifyMigration(sql).autoApply, false);
+  });
+
+  test('★ IF NOT EXISTS 뒤의 CHECK 및 NOT NULL도 기존 표 제약이다', () => {
+    for (const sql of [
+      'CREATE TABLE IF NOT EXISTS jobs (a int); ALTER TABLE jobs ADD CONSTRAINT jobs_a_chk CHECK (a > 0);',
+      'CREATE TABLE IF NOT EXISTS jobs (a int); ALTER TABLE jobs ALTER COLUMN a SET NOT NULL;',
+    ]) {
+      eq(classifyMigration(sql).risk, 'DATA_DEPENDENT', sql);
+      eq(classifyMigration(sql).autoApply, false);
+    }
+  });
+
+  test('★ DROP INDEX 후 같은 이름으로 더 엄격한 UNIQUE를 재생성해도 승인 필요', () => {
+    const sql = 'DROP INDEX IF EXISTS jobs_a_unique; '
+      + 'CREATE UNIQUE INDEX jobs_a_unique ON jobs (a) WHERE status = 1;';
+    eq(classifyMigration(sql).risk, 'DATA_DEPENDENT');
+    eq(classifyMigration(sql).autoApply, false);
+  });
+
+  test('★ DROP CONSTRAINT 후 같은 이름의 CHECK 정의 변경도 승인 필요', () => {
+    const sql = 'ALTER TABLE jobs DROP CONSTRAINT IF EXISTS jobs_a_chk; '
+      + 'ALTER TABLE jobs ADD CONSTRAINT jobs_a_chk CHECK (a > 100);';
+    eq(classifyMigration(sql).risk, 'DATA_DEPENDENT');
+    eq(classifyMigration(sql).autoApply, false);
+  });
+
+  test('실제 CREATE TABLE이 앞에 있는 신규 표의 UNIQUE는 여전히 자동 가능', () => {
+    const sql = 'CREATE TABLE new_jobs (a int); CREATE UNIQUE INDEX i ON new_jobs (a);';
+    eq(tablesCreatedIn(sql).has('new_jobs'), true);
+    eq(classifyMigration(sql).risk, 'ADDITIVE');
   });
 
   // ── ③ 계획이 실제로 막는가 (승인 우회) ─────────────────────────
