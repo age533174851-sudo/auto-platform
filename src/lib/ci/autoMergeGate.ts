@@ -125,6 +125,22 @@ export interface StatusLike {
   state: string;
 }
 
+/**
+ * GET /commits/{sha}/status is paginated (default 30 statuses).
+ * A failed/malformed or truncated response is NOT proof that no status failed.
+ * Null means UNKNOWN and must prevent any merge attempt.
+ */
+export function completeCommitStatusesPage(payload: any): StatusLike[] | null {
+  const rows = payload?.statuses;
+  const total = payload?.total_count;
+  if (!Array.isArray(rows) || !Number.isSafeInteger(total)
+      || total < 0 || rows.length !== total) return null;
+  const states = new Set(['success', 'pending', 'failure', 'error']);
+  if (rows.some((s: any) => !s || typeof s.context !== 'string'
+      || s.context.length === 0 || !states.has(s.state))) return null;
+  return rows.map((s: any) => ({ context: s.context, state: s.state }));
+}
+
 export interface PrFacts {
   number: number;
   draft: boolean;
