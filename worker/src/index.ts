@@ -16,7 +16,8 @@
 //
 // 모르는 거래소는 UNSUPPORTED_EXCHANGE로 막는다. binance로 떨어뜨리지 않는다.
 import { sb, acquireLock, releaseLock, heartbeat, noteStartupResult, noteScheduler } from './supabase';
-import { mainLockGranted, MainLeaseKeeper } from '../../src/lib/runtime/mainLockGate';
+import { mainLockGranted, MainLeaseKeeper, mainLeaseHolder } from '../../src/lib/runtime/mainLockGate';
+import { randomUUID } from 'node:crypto';
 import { decryptSecret } from './crypto';
 import { redisAvailable, lockNxEx, unlock } from './redis';
 import { alert } from './telegram';
@@ -97,6 +98,8 @@ const WORKER_ID =
   || process.env.CLOUD_RUN_EXECUTION     // Cloud Run
   || process.env.HOSTNAME                // 컨테이너 일반
   || `worker-local-${Math.random().toString(36).slice(2, 8)}`;
+// WORKER_ID stays stable for job recovery; main lock holder is per process incarnation.
+const MAIN_LEASE_HOLDER = mainLeaseHolder(WORKER_ID, randomUUID());
 const POLL_SEC = Math.max(1, Math.min(15, parseInt(process.env.WORKER_POLL_SEC || '3', 10)));
 
 // ── DB 사용량 차단기 ────────────────────────────────────────────
@@ -1559,11 +1562,11 @@ async function tick() {
   await processPendingJobs();
   // main 임차를 증명하지 못하면 standby. 긴 tick 중에는 TTL/4마다 갱신한다.
   const mainAcquireStartedAt = Date.now();
-  const mainAcquired = await mainLockGranted(() => acquireLock('main', WORKER_ID, POLL_SEC * 4));
+  const mainAcquired = await mainLockGranted(() => acquireLock('main', MAIN_LEASE_HOLDER, POLL_SEC * 4));
   // A delayed ACK may arrive after the DB lease's effective lifetime has elapsed.
   const isMain = mainAcquired && Date.now() - mainAcquireStartedAt < POLL_SEC * 1000;
   const mainLease = isMain ? new MainLeaseKeeper(
-    () => mainLockGranted(() => acquireLock('main', WORKER_ID, POLL_SEC * 4)),
+    () => mainLockGranted(() => acquireLock('main', MAIN_LEASE_HOLDER, POLL_SEC * 4)),
     POLL_SEC * 1000,
     () => console.error('[worker] main 임차 갱신 실패 — 남은 main-only 작업을 건너뜁니다'),
   ) : null;
@@ -1712,7 +1715,7 @@ async function main() {
   for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig as any, async () => {
     if (stopping) return; stopping = true;
     console.log('[worker] 종료 신호 수신 — heartbeat stopped 기록 후 종료');
-    try { await heartbeat(WORKER_ID, 'stopped', 'shutdown', errorCount, tickCount); await releaseLock('main', WORKER_ID); } catch {}
+    try { await heartbeat(WORKER_ID, 'stopped', 'shutdown', errorCount, tickCount); await releaseLock('main', MAIN_LEASE_HOLDER); } catch {}
     process.exit(0);
   });
   while (!stopping) {
