@@ -9,7 +9,7 @@
 import { test, eq, assert } from '../../test/harness';
 import {
   autoMergeGate, gateComment, AUTO_MERGE_LABEL, SELF_CHECK_NAME, REQUIRED_CHECKS,
-  reviewFactsFromGraphql, completeCheckRunsPage,
+  reviewFactsFromGraphql, completeCheckRunsPage, completeCommitStatusesPage,
   type PrFacts,
 } from './autoMergeGate';
 
@@ -339,6 +339,45 @@ export function runAutoMergeGateTests() {
     eq(completeCheckRunsPage({ check_runs: [] }), null);
     eq(completeCheckRunsPage({ total_count: 1, check_runs: [] }), null);
     eq(completeCheckRunsPage({ total_count: 1, check_runs: {} }), null);
+  });
+
+  console.log('[자동 머지 — commit status API 실패/페이지 누락은 UNKNOWN이다]');
+
+  test('★ commit status 31건 중 첫 30건만 성공이면 병합 증거가 아니다', () => {
+    const statuses = Array.from({ length: 30 }, (_, i) => ({ context: 'check-' + i, state: 'success' }));
+    eq(completeCommitStatusesPage({ total_count: 31, statuses }), null);
+  });
+
+  test('★ commit status API 오류와 깨진 응답을 성공 0건으로 해석하지 않는다', () => {
+    eq(completeCommitStatusesPage(null), null);
+    eq(completeCommitStatusesPage({ statuses: [] }), null);
+    eq(completeCommitStatusesPage({ total_count: 1, statuses: [] }), null);
+    eq(completeCommitStatusesPage({ total_count: 0, statuses: {} }), null);
+  });
+
+  test('status 0건을 완전하게 확인한 경우는 정상 입력이다', () => {
+    const v = completeCommitStatusesPage({ total_count: 0, statuses: [] });
+    eq(v?.length, 0);
+  });
+
+  test('실패 상태가 포함된 완전한 status 응답은 실패를 그대로 전달한다', () => {
+    const statuses = completeCommitStatusesPage({ total_count: 2, statuses: [
+      { context: 'external', state: 'success' },
+      { context: 'required-external', state: 'failure' },
+    ] });
+    eq(statuses?.length, 2);
+    eq(autoMergeGate(good({ statuses: statuses ?? [] })).code, 'CHECKS_FAILED');
+  });
+
+  test('status 필드가 깨지거나 알 수 없는 상태면 UNKNOWN이다', () => {
+    for (const statuses of [
+      [{ context: 'foo', state: 'mystery' }],
+      [{ context: '', state: 'success' }],
+      [{ context: 'foo' }],
+      [null],
+    ]) {
+      eq(completeCommitStatusesPage({ total_count: 1, statuses }), null);
+    }
   });
 
   console.log('[자동 머지 — 강제 경로가 없다]');
