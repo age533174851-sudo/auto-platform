@@ -136,8 +136,13 @@ export function completeCheckRunsPage(payload: any): CheckLike[] | null {
   const total = payload?.total_count;
   if (!Array.isArray(rows) || !Number.isSafeInteger(total)
       || total < 0 || rows.length !== total) return null;
+  // GitHub check-run 응답에 head_sha가 없으면 최신 커밋의 검증이라고
+  // 주장할 수 없다. 특히 필수 verify는 GitHub Actions App에서 발행한
+  // 검사여야 한다 — 다른 App이 같은 이름의 success를 만들어도 무효.
   if (rows.some((c: any) => !c || typeof c.name !== 'string'
-      || typeof c.status !== 'string')) return null;
+      || typeof c.status !== 'string'
+      || typeof c.head_sha !== 'string' || c.head_sha.trim().length === 0
+      || (REQUIRED_CHECKS.includes(c.name) && c.app?.slug !== 'github-actions'))) return null;
   return rows.map((c: any) => ({
     name: c.name,
     status: c.status,
@@ -294,7 +299,8 @@ export function autoMergeGate(pr: PrFacts): GateVerdict {
   const self = pr.checks.length - others.length;
   if (self > 0) d.push(`자동 머지 판정 자신의 검사 ${self}건은 세지 않았습니다`);
 
-  const mine = others.filter(c => !c.headSha || c.headSha === pr.headSha);
+  // 출처 없는 검사는 최신 head의 증거가 아니다. 누락된 SHA를 통과시키지 않는다.
+  const mine = others.filter(c => c.headSha === pr.headSha);
   const stale = others.length - mine.length;
   if (mine.length === 0 && pr.statuses.length === 0) {
     return {
