@@ -410,6 +410,14 @@ const CHORE_PHRASES = [
   }
 }
 
+// #398: CI must exercise the active kill-switch job uniqueness contract.
+// This is a static SQL check + FakeDB race model, not a PostgreSQL replay.
+try {
+  await import('./check-killswitch-active-job-unique.mjs');
+} catch (e) {
+  err('킬스위치 활성 잡 유일성 검사 실패: ' + String(e?.stack ?? e));
+}
+
 if (bad === 0) {
   console.log(`마이그레이션 배선 확인: 파일 ${built.rows.length}개 · 자동 적용 ${built.rows.length - manual.length}개 · `
     + `자동 대상 아님 ${manual.length}개 · 구파일 ${Object.keys(LEGACY).length}개`);
