@@ -420,7 +420,7 @@ export function runMigrationPlanTests() {
     // 말할 수는 없다.** 그래서 자동 적용에서 뺀다.
     // (실제 파일 검사는 scripts/check-migrations.mjs가 CI에서 한다)
     const c = classifyMigration(`
-      CREATE TABLE IF NOT EXISTS t (id INT);
+      CREATE TABLE t (id INT);
       ALTER TABLE t ALTER COLUMN id SET DEFAULT 0;
       ALTER TABLE t ALTER COLUMN id SET NOT NULL;
       GRANT SELECT ON t TO authenticated;
