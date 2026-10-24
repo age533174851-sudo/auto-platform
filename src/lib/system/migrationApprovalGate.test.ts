@@ -140,6 +140,46 @@ export function runMigrationApprovalGateTests() {
     eq(classifyMigration('DROP INDEX IF EXISTS i; CREATE UNIQUE INDEX i ON jobs (a);').risk, 'ADDITIVE');
   });
 
+  // ── SQL의 IF NOT EXISTS / DROP 재생성은 기존 데이터 안전 증거가 아니다 ──
+  test('★ IF NOT EXISTS 표는 이미 존재할 수 있어 UNIQUE 자동 적용 금지', () => {
+    const sql = 'CREATE TABLE IF NOT EXISTS jobs (id int, a int); '
+      + 'CREATE UNIQUE INDEX IF NOT EXISTS jobs_a_unique ON jobs (a);';
+    eq(tablesCreatedIn(sql).has('jobs'), false,
+      'IF NOT EXISTS는 실제 CREATE 성공 증거가 아닙니다');
+    eq(classifyMigration(sql).risk, 'DATA_DEPENDENT');
+    eq(classifyMigration(sql).autoApply, false);
+  });
+
+  test('★ IF NOT EXISTS 뒤의 CHECK 및 NOT NULL도 기존 표 제약이다', () => {
+    for (const sql of [
+      'CREATE TABLE IF NOT EXISTS jobs (a int); ALTER TABLE jobs ADD CONSTRAINT jobs_a_chk CHECK (a > 0);',
+      'CREATE TABLE IF NOT EXISTS jobs (a int); ALTER TABLE jobs ALTER COLUMN a SET NOT NULL;',
+    ]) {
+      eq(classifyMigration(sql).risk, 'DATA_DEPENDENT', sql);
+      eq(classifyMigration(sql).autoApply, false);
+    }
+  });
+
+  test('★ DROP INDEX 후 같은 이름으로 더 엄격한 UNIQUE를 재생성해도 승인 필요', () => {
+    const sql = 'DROP INDEX IF EXISTS jobs_a_unique; '
+      + 'CREATE UNIQUE INDEX jobs_a_unique ON jobs (a) WHERE status = 1;';
+    eq(classifyMigration(sql).risk, 'DATA_DEPENDENT');
+    eq(classifyMigration(sql).autoApply, false);
+  });
+
+  test('★ DROP CONSTRAINT 후 같은 이름의 CHECK 정의 변경도 승인 필요', () => {
+    const sql = 'ALTER TABLE jobs DROP CONSTRAINT IF EXISTS jobs_a_chk; '
+      + 'ALTER TABLE jobs ADD CONSTRAINT jobs_a_chk CHECK (a > 100);';
+    eq(classifyMigration(sql).risk, 'DATA_DEPENDENT');
+    eq(classifyMigration(sql).autoApply, false);
+  });
+
+  test('실제 CREATE TABLE이 앞에 있는 신규 표의 UNIQUE는 여전히 자동 가능', () => {
+    const sql = 'CREATE TABLE new_jobs (a int); CREATE UNIQUE INDEX i ON new_jobs (a);';
+    eq(tablesCreatedIn(sql).has('new_jobs'), true);
+    eq(classifyMigration(sql).risk, 'ADDITIVE');
+  });
+
   // ── ③ 계획이 실제로 막는가 (승인 우회) ─────────────────────────
   const files = [
     { name: '096_prev.sql', id: 96, sql: 'create table if not exists t96 (id uuid);' },
