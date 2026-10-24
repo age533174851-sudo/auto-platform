@@ -75,6 +75,50 @@ export interface CheckLike {
 }
 
 /** commit status API(Vercel 등이 쓴다) */
+/**
+ * GitHub GraphQL reviewThreads(first:100)는 첫 페이지만 준다.
+ * 다음 페이지가 있으면 뒤에 미해결 스레드가 있을 수 있으므로 UNKNOWN.
+ * reviews.totalCount는 전체 변경 요청 수다.
+ */
+export function reviewFactsFromGraphql(payload: any): {
+  unresolvedThreads: number | null;
+  changesRequested: number | null;
+} {
+  const unknown = { unresolvedThreads: null, changesRequested: null };
+  const pr = payload?.data?.repository?.pullRequest;
+  const threads = pr?.reviewThreads;
+  const nodes = threads?.nodes;
+  const count = pr?.reviews?.totalCount;
+  if (!Array.isArray(nodes) || threads?.pageInfo?.hasNextPage !== false
+      || !Number.isSafeInteger(count) || count < 0) return unknown;
+  if (nodes.some((t: any) => typeof t?.isResolved !== 'boolean'
+      || typeof t?.isOutdated !== 'boolean')) return unknown;
+  return {
+    unresolvedThreads: nodes.filter((t: any) => !t.isResolved && !t.isOutdated).length,
+    changesRequested: count,
+  };
+}
+
+/**
+ * GET /commits/{sha}/check-runs?per_page=100의 첫 페이지만 읽었을 때
+ * total_count가 더 크면 뒤에 실패 체크가 있을 수 있다.
+ * 완전한 증거만 판정기로 넘기고, 불완전하면 null(UNKNOWN)로 막는다.
+ */
+export function completeCheckRunsPage(payload: any): CheckLike[] | null {
+  const rows = payload?.check_runs;
+  const total = payload?.total_count;
+  if (!Array.isArray(rows) || !Number.isSafeInteger(total)
+      || total < 0 || rows.length !== total) return null;
+  if (rows.some((c: any) => !c || typeof c.name !== 'string'
+      || typeof c.status !== 'string')) return null;
+  return rows.map((c: any) => ({
+    name: c.name,
+    status: c.status,
+    conclusion: c.conclusion ?? null,
+    headSha: c.head_sha ?? null,
+  }));
+}
+
 export interface StatusLike {
   context: string;
   /** 'success' | 'pending' | 'failure' | 'error' */
