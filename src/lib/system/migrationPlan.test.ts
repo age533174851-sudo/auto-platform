@@ -55,13 +55,13 @@ export function runMigrationPlanTests() {
     eq(c.risk, 'ADDITIVE');
   });
 
-  test('인덱스를 지웠다 다시 만드는 것은 자동 적용한다 (055가 실제로 그랬다)', () => {
+  test('DROP 뒤 같은 이름의 UNIQUE 재생성은 기존 데이터에 달려 있어 승인 필요', () => {
     const c = classifyMigration(`
       DROP INDEX IF EXISTS smoke_runs_active_idx;
       CREATE UNIQUE INDEX smoke_runs_active_idx ON smoke_runs (user_id) WHERE status = 'RUNNING';
     `);
-    eq(c.risk, 'ADDITIVE');
-    eq(c.autoApply, true);
+    eq(c.risk, 'DATA_DEPENDENT');
+    eq(c.autoApply, false);
   });
 
   // ── 2. 지우기는 정지 ──
@@ -228,8 +228,8 @@ export function runMigrationPlanTests() {
 
   // ── 8. 실제 저장소 파일로 확인 ──
 
-  test('056(장부 표)은 자동 적용 대상이다 — 표를 더하기만 한다', () => {
-    // 실제 056의 뼈대. 이 파일이 자동 적용 대상이 아니면 자동화의 의미가 없다.
+  test('056처럼 IF NOT EXISTS 뒤에 UNIQUE를 만들면 신규 환경도 승인 필요', () => {
+    // IF NOT EXISTS는 기존 표가 없다는 증거가 아니다. 적용 완료 이력은 별도 관리한다.
     const c = classifyMigration(`
       CREATE TABLE IF NOT EXISTS ledger_events (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -243,8 +243,8 @@ export function runMigrationPlanTests() {
       EXCEPTION WHEN duplicate_object THEN NULL;
       END $$;
     `);
-    eq(c.risk, 'ADDITIVE');
-    eq(c.autoApply, true);
+    eq(c.risk, 'DATA_DEPENDENT');
+    eq(c.autoApply, false);
   });
 
   // ── 9. 적용 뒤 검증 대상 ──
@@ -391,12 +391,13 @@ export function runMigrationPlanTests() {
     eq(c.risk, 'DESTRUCTIVE');
   });
 
-  test('제약을 지웠다 다시 거는 것은 자동 적용한다 (034가 실제로 그랬다)', () => {
+  test('DROP CONSTRAINT 뒤 재생성은 제약 정의가 달라질 수 있어 승인 필요', () => {
     const c = classifyMigration(`
       ALTER TABLE autotrade_schedules DROP CONSTRAINT IF EXISTS autotrade_sizing_chk;
       ALTER TABLE autotrade_schedules ADD CONSTRAINT autotrade_sizing_chk CHECK (margin_pct > 0);
     `);
-    eq(c.risk, 'ADDITIVE');
+    eq(c.risk, 'DATA_DEPENDENT');
+    eq(c.autoApply, false);
   });
 
   test('확장 설치와 트리거 재생성은 자동 적용한다', () => {
