@@ -220,6 +220,27 @@ for (const [file, fn, label] of [
   notes.push('084가 고친 표-한정 참조가 086에도 전부 남아 있다');
 }
 
+// 기존 isMain 게이트와 main 임차 갱신(#400)의 동등한 fail-closed 호출만 인정한다.
+// 주석 속 호출을 배선으로 세지 않으며, true 상수·역조건으로 관문을 우회할 수 없다.
+function challengeSweepWired(worker) {
+  const code = worker.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, '');
+  return /\bawait\s+pollChallengeSweep\s*\(\s*isMain\s*\)\s*;/.test(code)
+    || /\bawait\s+pollChallengeSweep\s*\(\s*\(\s*await\s+mainLease\?\.allowed\(\)\s*\)\s*===\s*true\s*\)\s*;/.test(code);
+}
+
+// 검사기 자체 회귀: 안전한 두 배선은 허용, 삭제·우회·주석 위장은 거절.
+for (const [label, source, expected] of [
+  ['기존 main 게이트', 'await pollChallengeSweep(isMain);', true],
+  ['임차 갱신 게이트', 'await pollChallengeSweep((await mainLease?.allowed()) === true);', true],
+  ['호출 삭제', '', false],
+  ['강제 true', 'await pollChallengeSweep(true);', false],
+  ['게이트 역전', 'await pollChallengeSweep((await mainLease?.allowed()) !== true);', false],
+  ['줄 주석 위장', '// await pollChallengeSweep(isMain);', false],
+  ['블록 주석 위장', '/* await pollChallengeSweep((await mainLease?.allowed()) === true); */', false],
+]) {
+  if (challengeSweepWired(source) !== expected) fail(`챌린지 스윕 검사기 자체 회귀: ${label}`);
+}
+
 // ── ⑧ 새 상태와 스윕이 실제로 배선됐는가 ──
 {
   const store = read(STORE) ?? '';
@@ -241,7 +262,7 @@ for (const [file, fn, label] of [
     fail(`${ROUTE}이 기존 청산 경로를 쓰지 않습니다`);
   }
   const worker = read(WORKER) ?? '';
-  if (!/pollChallengeSweep\s*\(\s*isMain\s*\)/.test(worker)) {
+  if (!challengeSweepWired(worker)) {
     fail(`${WORKER}의 tick이 pollChallengeSweep을 부르지 않습니다`
       + ' — 만들어 놓고 배선을 안 한 상태입니다');
   }
