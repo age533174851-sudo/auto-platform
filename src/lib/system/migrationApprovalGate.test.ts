@@ -180,6 +180,32 @@ export function runMigrationApprovalGateTests() {
     eq(classifyMigration(sql).risk, 'ADDITIVE');
   });
 
+  // ── 기존 표에 추가하는 NOT NULL 칸도 운영 데이터에 의존한다 ──
+  test('★ 기존 표에 ADD COLUMN NOT NULL을 적용할 때 승인 없이 자동 적용하지 않는다', () => {
+    for (const sql of [
+      'ALTER TABLE jobs ADD COLUMN owner_id uuid NOT NULL;',
+      'ALTER TABLE public.jobs ADD COLUMN IF NOT EXISTS owner_id uuid NOT NULL;',
+      'ALTER TABLE jobs ADD COLUMN owner_id uuid NOT NULL DEFAULT gen_random_uuid();',
+      'CREATE TABLE IF NOT EXISTS jobs (id uuid); ALTER TABLE jobs ADD COLUMN owner_id uuid NOT NULL;',
+    ]) {
+      const c = classifyMigration(sql);
+      eq(c.risk, 'DATA_DEPENDENT', sql);
+      eq(c.autoApply, false, sql);
+    }
+  });
+
+  test('★ DO 내부 ADD COLUMN NOT NULL도 기존 표에 대한 승인 대상이다', () => {
+    const sql = 'DO $do$ BEGIN ALTER TABLE jobs ADD COLUMN owner_id uuid NOT NULL; END; $do$;';
+    const c = classifyMigration(sql);
+    eq(c.risk, 'DATA_DEPENDENT', sql);
+    eq(c.autoApply, false);
+  });
+
+  test('같은 파일에서 확실히 만든 새 표의 NOT NULL 칸은 기존대로 자동 가능', () => {
+    const sql = 'CREATE TABLE new_jobs (id uuid); ALTER TABLE new_jobs ADD COLUMN owner_id uuid NOT NULL;';
+    eq(classifyMigration(sql).risk, 'ADDITIVE');
+  });
+
   // ── DO 블록 내부 제약도 운영 DB의 기존 데이터에 달린다 ──
   test('★ DO 안의 UNIQUE 인덱스도 운영 DB 자동 적용 금지', () => {
     const sql = 'DO $do$ BEGIN CREATE UNIQUE INDEX jobs_a_unique ON public.jobs (a); END; $do$;';

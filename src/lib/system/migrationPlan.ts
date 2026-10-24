@@ -74,6 +74,10 @@ const DATA_DEPENDENT_PATTERNS: Array<{ re: RegExp; what: string; nameAt: number 
     what: 'CHECK·FK 등', nameAt: 2 },
   { re: /\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?([A-Za-z0-9_."]+)[\s\S]*?\bSET\s+NOT\s+NULL\b/i,
     what: 'NOT NULL', nameAt: 0 },
+  // 기존 표의 새 NOT NULL 칸도 기존 행/기본값/후속 쓰기에 영향을 준다.
+  // 새 표라면 createdHere로 예외 처리한다. DO 내부는 createdHere가 비어 있다.
+  { re: /\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?([A-Za-z0-9_."]+)\s+ADD\s+(?:COLUMN\s+)?(?:IF\s+NOT\s+EXISTS\s+)?[A-Za-z0-9_."]+\s+[\s\S]*?\bNOT\s+NULL\b/i,
+    what: 'NOT NULL 신규 칸', nameAt: 0 },
 ];
 
 /**
