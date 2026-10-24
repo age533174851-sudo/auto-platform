@@ -48,11 +48,13 @@ export class MainLeaseKeeper {
   refresh(): Promise<boolean> {
     if (!this.active) return Promise.resolve(false);
     if (this.pending) return this.pending;
+    // acquireLock computes expires_at before its DB round trip. A slow ACK is stale.
+    const startedAt = this.now();
     const attempt = Promise.resolve().then(this.renew).then(
       (ok) => {
         if (!this.active) return false;
-        if (ok !== true) { this.lose(); return false; }
-        this.checkedAt = this.now();
+        if (ok !== true || this.now() - startedAt >= this.everyMs) { this.lose(); return false; }
+        this.checkedAt = startedAt;
         return true;
       },
       () => { this.lose(); return false; },
