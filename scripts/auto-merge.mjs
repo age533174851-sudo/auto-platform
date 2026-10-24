@@ -261,7 +261,7 @@ async function main() {
     if (completeStatuses === null) {
       console.log(`#${pr.number} commit status 증거 불완전 — 병합 보류 (HTTP ${statuses.status})`);
       await upsertComment(pr.number,
-        `<!-- traigo-auto-merge -->\\n⏸ **자동 머지 판정** · \\`${headSha.slice(0, 7)}\\`\\n\\n`
+        `<!-- traigo-auto-merge -->\n⏸ **자동 머지 판정** · ${headSha.slice(0, 7)}\n\n`
         + 'GitHub commit status 목록이 실패했거나 일부만 조회됐습니다. '
         + '전체 상태를 확인하기 전에는 병합하지 않습니다.');
       continue;
