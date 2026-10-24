@@ -88,13 +88,13 @@ const DATA_DEPENDENT_PATTERNS: Array<{ re: RegExp; what: string; nameAt: number 
  */
 export function objectsDroppedIn(sql: string): Set<string> {
   const out = new Set<string>();
-  const res = [
-    /\bDROP\s+INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+EXISTS\s+)?([A-Za-z0-9_."]+)/gi,
-    /\bDROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?([A-Za-z0-9_."]+)/gi,
-  ];
-  for (const re of res) {
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(String(sql))) !== null) out.add(bareTable(m[1]));
+  // 설명·문자열 속 DROP은 실행된 증거가 아니다. 실제 SQL 문장만 읽는다.
+  for (const piece of splitStatements(sql).pieces) {
+    const st = piece.code.replace(/\s+/g, ' ').trim();
+    const idx = /^DROP\s+INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+EXISTS\s+)?([A-Za-z0-9_."]+)/i.exec(st);
+    const constraint = /^ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?[A-Za-z0-9_."]+\s+DROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?([A-Za-z0-9_."]+)/i.exec(st);
+    if (idx) out.add(bareTable(idx[1]));
+    if (constraint) out.add(bareTable(constraint[1]));
   }
   return out;
 }
@@ -106,11 +106,13 @@ function bareTable(raw: string): string {
 
 /** 이 SQL이 **직접 만드는** 표 이름들. 그 표는 비어 있다. */
 export function tablesCreatedIn(sql: string): Set<string> {
-  // `matchAll`을 쓰지 않는다 — `loadPlan()`이 이 파일을 es2019로 컴파일한다.
   const out = new Set<string>();
-  const re = /\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z0-9_."]+)/gi;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(String(sql))) !== null) out.add(bareTable(m[1]));
+  // raw SQL을 정규식으로 검색하면 주석·COMMENT ON 문자열도 CREATE로 오인한다.
+  for (const piece of splitStatements(sql).pieces) {
+    const st = piece.code.replace(/\s+/g, ' ').trim();
+    const m = /^CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z0-9_."]+)/i.exec(st);
+    if (m) out.add(bareTable(m[1]));
+  }
   return out;
 }
 
@@ -475,11 +477,10 @@ export function classifyMigration(sql: string): MigrationClass {
   const danger: string[] = [];
   const unknown: string[] = [];
   const dataDependent: string[] = [];
-  // 이 파일이 **직접 만드는** 표는 비어 있다 — 거기 거는 제약은 실패할
-  // 기존 줄이 없다. 파일 전체에서 한 번 모은다(제약이 CREATE TABLE보다
-  // 뒤에 오든 앞에 오든 같은 파일이면 같은 배포에서 함께 돈다).
-  const createdHere = tablesCreatedIn(sql);
-  const droppedHere = objectsDroppedIn(sql);
+  // 실제로 앞에서 실행된 CREATE/DROP만 증거다. 뒤에 나오는 문장이나
+  // 주석·문자열은 앞의 UNIQUE/CONSTRAINT를 안전하게 만들지 않는다.
+  const createdHere = new Set<string>();
+  const droppedHere = new Set<string>();
   for (const piece of statements) {
     const st = piece.code.replace(/\s+/g, ' ').trim();
 
@@ -507,7 +508,11 @@ export function classifyMigration(sql: string): MigrationClass {
     // ADDITIVE_PATTERNS에도 걸리므로, 순서가 뒤면 그대로 통과한다.
     const dd = dataDependentReason(st, createdHere, droppedHere);
     if (dd) { dataDependent.push(dd); continue; }
-    if (ADDITIVE_PATTERNS.some(re => re.test(st))) continue;
+    if (ADDITIVE_PATTERNS.some(re => re.test(st))) {
+      for (const name of tablesCreatedIn(st)) createdHere.add(name);
+      for (const name of objectsDroppedIn(st)) droppedHere.add(name);
+      continue;
+    }
     unknown.push(st.slice(0, 60));
   }
 
