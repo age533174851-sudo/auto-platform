@@ -640,9 +640,9 @@ export function runMigrationPlanTests() {
     eq(classifyMigration(sql).risk, 'UNKNOWN');
   });
 
-  test('★ 096은 환경 identity 교체이고 자동 적용 대상이다', () => {
-    // 이 파일은 preflight에서 RAISE로 멈추고 **데이터를 고치지 않는다.**
-    // DROP CONSTRAINT는 이 저장소에서 이미 ADDITIVE로 선언돼 있다.
+  test('★ 096은 DO 내부 기존 표 UNIQUE 교체이므로 승인 대상이다', () => {
+    // preflight RAISE와 DROP 자체는 데이터를 고치지 않지만, DO 안에서
+    // 기존 exchange_connections 표에 새 UNIQUE를 걸어 기존 줄과 충돌할 수 있다.
     //
     // 매니페스트는 `npm run gen:migrations`가 파일에서 만들고 CI가 파일과
     // 대조한다(check:migrations). 그래서 여기서 매니페스트를 보는 것은
@@ -650,7 +650,7 @@ export function runMigrationPlanTests() {
     const e = MIGRATION_MANIFEST.find(m => m.id === 96);
     if (!e) throw new Error('096이 매니페스트에 없습니다');
     eq(e.name, '096_exchange_connections_environment_identity.sql');
-    eq(e.risk, 'ADDITIVE');
+    eq(e.risk, 'DATA_DEPENDENT');
     eq(e.checksum, '55008df74e066859');
   });
 
