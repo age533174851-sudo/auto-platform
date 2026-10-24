@@ -26,7 +26,12 @@ import {
   futuresFindOrderByClientId, unknownResultVerdict, reconcileDecision,
   UNSUPPORTED_EXCHANGE, EXCHANGE_MISMATCH, type ExecTarget,
 } from '../../src/lib/exchanges/futuresExec';
-import { futuresCancelAll, futuresCloseAll } from '../../src/lib/exchanges/futuresAdapter';
+import {
+  futuresCancelAll, futuresCloseAll, futuresOpenOrdersAll, futuresCancelOrder,
+} from '../../src/lib/exchanges/futuresAdapter';
+// 킬스위치 취소 범위 판정의 **정본**. 워커가 따로 세지 않는다 —
+// 같은 판단이 두 곳에 있으면 언젠가 갈린다.
+import { planKillCancelOnly } from '../../src/lib/risk/killClosePlan';
 import { evaluateIfDue } from '../../src/lib/autotrade/evaluationRunner';
 import { selectDueSchedules, shouldPollNow, POLL_INTERVAL_MS } from '../../src/lib/autotrade/schedulePoll';
 import { exitMonitorPlan, exitMonitorOutcome, EXIT_MONITOR_INTERVAL_MS } from '../../src/lib/engine/exitMonitorSchedule';
@@ -230,8 +235,54 @@ async function runAction(
     case 'KILL_SWITCH_EXECUTE': {
       const actionMode = (p.actionMode || 'BC').toUpperCase();
       const wantClose = actionMode.includes('D');
-      // 1) Cancel All (Close 선행)
-      const c = await futuresCancelAll(t.exchange, key, secret, testnet);
+      // 1) 취소 — **계좌 전체 취소를 쓰지 않는다**
+      //
+      // 예전에는 `futuresCancelAll`이었다. 그것은 심볼마다
+      // `DELETE /fapi/v1/allOpenOrders`를 보내 **그 심볼의 모든 미체결**을
+      // 지운다 — 같은 연결을 쓰는 다른 전략의 손절까지 함께 날아간다.
+      // 그 전략은 자기 손절이 살아 있다고 믿고 아무것도 다시 걸지 않는다.
+      //
+      // 기본 모드가 'BC'(닫지 않음)라는 점이 이것을 가장 나쁘게 만든다:
+      // 보호주문만 지우고 포지션은 그대로 둔다. 저장소 첫 절대 규칙이
+      // "Cancel All 금지 — 다른 전략의 보호주문을 지우지 않는다"인 이유다.
+      //
+      // 웹 경로(`executeKillActions`)는 이미 소유한 번호만 지우도록
+      // 고쳐져 있었다(`// **이 번호들만.** 계좌 전체 취소를 쓰지 않는다`).
+      // **워커만 안 고쳐져 있었다** — 같은 판단이 두 곳에 있었던 것이다.
+      //
+      // 판정을 여기서 새로 쓰지 않는다. `planKillCancelOnly`가 정본이고,
+      // 그것이 "열린 포지션이 없는 심볼의 대기 주문만" 고른다. 포지션을
+      // 못 읽으면 **아무것도 취소하지 않는다**(BLOCKED_POSITIONS_UNREAD).
+      const kcPositions = await futuresListPositions(t)
+        .then(r => (r?.ok === true && Array.isArray(r.positions)
+          ? { ok: true, rows: r.positions.map((x: any) => ({
+              symbol: x?.symbol ?? null, amount: x?.amount ?? null,
+              // ★ `amount`는 절댓값이다. 방향은 `side` 칸을 그대로 넘긴다.
+              side: (x?.side === 'SHORT' ? 'SHORT'
+                : x?.side === 'LONG' ? 'LONG' : null) as 'LONG' | 'SHORT' | null })) }
+          : { ok: false, rows: null }))
+        .catch(() => ({ ok: false, rows: null }));
+      const kcOrders = await futuresOpenOrdersAll(t.exchange, key, secret, testnet)
+        .then(r => (r?.ok === true && r.orders != null
+          ? { ok: true, rows: r.orders }
+          : { ok: false, rows: null }))
+        .catch(() => ({ ok: false, rows: null }));
+      const kcPlan = planKillCancelOnly({ positions: kcPositions, openOrders: kcOrders });
+      let cancelled = 0;
+      let cancelOk = true;
+      for (const id of kcPlan.cancelIds) {
+        const sym = kcOrders.rows?.find(o => String(o?.id ?? '') === id)?.symbol ?? null;
+        const r = await futuresCancelOrder(t.exchange, key, secret, testnet,
+          { symbol: sym, orderId: id }).catch(() => null);
+        if (r?.success === true) cancelled += 1; else cancelOk = false;
+      }
+      const c = {
+        // 판정이 막았으면 성공이 아니다 — 못 지운 것을 지웠다고 적지 않는다.
+        success: cancelOk && !kcPlan.code.startsWith('BLOCKED_'),
+        count: cancelled, code: kcPlan.code, message: kcPlan.reason,
+        retainedProtective: kcPlan.retainedProtective,
+        unidentifiedOrders: kcPlan.unidentifiedOrders,
+      };
       // 2) Close All (D)
       let close: any = null;
       if (wantClose) close = await futuresCloseAll(t.exchange, key, secret, testnet, 5);
