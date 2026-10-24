@@ -7,6 +7,7 @@
 // 파일은 **통과하는 경로가 하나뿐**이라는 것을 값으로 못 박는다.
 
 import { test, eq, assert } from '../../test/harness';
+import { readFileSync } from 'node:fs';
 import {
   autoMergeGate, gateComment, AUTO_MERGE_LABEL, SELF_CHECK_NAME, REQUIRED_CHECKS,
   reviewFactsFromGraphql, completeCheckRunsPage, completeCommitStatusesPage,
@@ -399,6 +400,18 @@ export function runAutoMergeGateTests() {
       ],
     }));
     eq(v.merge, false, '필수 검사 중 skipped를 성공으로 덮었다');
+  });
+
+  console.log('[자동 머지 — 열린 PR 전체 페이지 수집]');
+
+  test('★ 열린 PR이 100건을 넘으면 다음 페이지까지 읽어야 한다', () => {
+    // 실제 GitHub 응답: 2026-10-25 기준 1페이지 100건 + 2페이지 5건.
+    // 첫 페이지만 읽으면 오래된 PR에 auto-merge 라벨이 생겨도 영원히 누락된다.
+    const script = readFileSync('scripts/auto-merge.mjs', 'utf8');
+    assert(script.includes('appendOpenPrPage('),
+      'PR 목록을 페이지별로 누적·검증하는 함수가 호출되지 않는다');
+    assert(script.includes('page=${page}'),
+      'PR 목록 API가 page를 바꾸지 않아 101번째 이후를 읽지 않는다');
   });
 
   console.log('[자동 머지 — 강제 경로가 없다]');
