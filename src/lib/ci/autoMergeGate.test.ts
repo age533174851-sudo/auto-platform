@@ -9,7 +9,7 @@
 import { test, eq, assert } from '../../test/harness';
 import {
   autoMergeGate, gateComment, AUTO_MERGE_LABEL, SELF_CHECK_NAME, REQUIRED_CHECKS,
-  reviewFactsFromGraphql, completeCheckRunsPage, completeCommitStatusesPage,
+  reviewFactsFromGraphql, completeCheckRunsPage, completeCommitStatusesPage, appendOpenPrPage,
   type PrFacts,
 } from './autoMergeGate';
 
@@ -399,6 +399,57 @@ export function runAutoMergeGateTests() {
       ],
     }));
     eq(v.merge, false, '필수 검사 중 skipped를 성공으로 덮었다');
+  });
+
+  console.log('[자동 머지 — 열린 PR 전체 페이지 수집]');
+
+  test('★ 열린 PR 105건이면 첫 100건 이후 5건도 누적한다', () => {
+    const page1 = Array.from({ length: 100 }, (_, i) => ({ number: 415 - i, labels: [] }));
+    const first = appendOpenPrPage([], page1);
+    eq(first?.prs.length, 100);
+    eq(first?.hasMore, true, '100건에서 조회를 멈췄다');
+    const second = appendOpenPrPage(first?.prs ?? [], [
+      { number: 179, labels: [{ name: 'auto-merge' }] },
+      { number: 178, labels: [] }, { number: 177, labels: [] },
+      { number: 176, labels: [] }, { number: 175, labels: [] },
+    ]);
+    eq(second?.prs.length, 105);
+    eq(second?.hasMore, false);
+    eq(second?.prs[100]?.number, 179);
+    eq(second?.prs[100]?.labels[0]?.name, 'auto-merge');
+  });
+
+  test('★ 2페이지가 깨지면 1페이지 100건만으로 진행하지 않는다', () => {
+    const first = appendOpenPrPage([], Array.from({ length: 100 },
+      (_, i) => ({ number: 415 - i, labels: [] })));
+    eq(first?.hasMore, true);
+    eq(appendOpenPrPage(first?.prs ?? [], { message: 'API error' }), null);
+  });
+
+  test('★ 페이지 사이 PR 번호 중복은 조회 일관성이 깨진 것으로 막는다', () => {
+    const first = appendOpenPrPage([], Array.from({ length: 100 },
+      (_, i) => ({ number: 415 - i, labels: [] })));
+    eq(appendOpenPrPage(first?.prs ?? [], [{ number: 415, labels: [] }]), null);
+  });
+
+  test('★ 100건 딱 맞으면 빈 다음 페이지를 읽고 완료한다', () => {
+    const first = appendOpenPrPage([], Array.from({ length: 100 },
+      (_, i) => ({ number: 415 - i, labels: [] })));
+    eq(first?.hasMore, true);
+    const second = appendOpenPrPage(first?.prs ?? [], []);
+    eq(second?.prs.length, 100);
+    eq(second?.hasMore, false);
+  });
+
+  test('★ 잘못된 PR 번호·라벨·페이지 크기는 UNKNOWN이다', () => {
+    for (const row of [
+      { number: 0, labels: [] },
+      { number: 5, labels: 'auto-merge' },
+      { number: 6, labels: [null] },
+      { number: '7', labels: [] },
+    ]) eq(appendOpenPrPage([], [row]), null);
+    eq(appendOpenPrPage([], Array.from({ length: 101 },
+      (_, i) => ({ number: i + 1, labels: [] }))), null);
   });
 
   console.log('[자동 머지 — 강제 경로가 없다]');
