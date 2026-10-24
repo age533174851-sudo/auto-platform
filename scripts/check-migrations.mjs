@@ -45,6 +45,18 @@ if (have !== want) {
   if (have) {
     const hn = (have.match(/name: '/g) || []).length;
     console.error(`   현재 ${hn}개 기록 · 실제 ${built.rows.length}개`);
+    // 파일 수가 같아도 위험도가 바뀌면 승인/자동 적용 경계가 달라진다.
+    // "낡았다"만 적으면 어떤 파일이 바뀌었는지 알 수 없어 재검증이 느려진다.
+    const recordedRisks = new Map(
+      [...have.matchAll(/\{ name: '([^']+)', id: \d+, risk: '([^']+)'/g)]
+        .map((m) => [m[1], m[2]]),
+    );
+    for (const row of built.rows) {
+      const prev = recordedRisks.get(row.name);
+      if (prev && prev !== row.risk) {
+        console.error(`   위험도 변경: ${row.name} ${prev} → ${row.risk}`);
+      }
+    }
   }
 }
 

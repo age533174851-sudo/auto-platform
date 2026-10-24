@@ -2130,8 +2130,8 @@ const M = [
   ['MIG-D5 선언 모양 검사를 전부 통과로 만듦', P.mplan,
     s => s.replace('  return DECLARATION.test(st);', '  return true;'), 'RED'],
 
-  ['MIG-D6 096을 매니페스트에서 UNKNOWN으로 되돌림', P.manifest,
-    s => s.replace("'096_exchange_connections_environment_identity.sql', id: 96, risk: 'ADDITIVE'",
+  ['MIG-D6 096의 DO 제약 승인 판정을 UNKNOWN으로 훼손', P.manifest,
+    s => s.replace("'096_exchange_connections_environment_identity.sql', id: 96, risk: 'DATA_DEPENDENT'",
       "'096_exchange_connections_environment_identity.sql', id: 96, risk: 'UNKNOWN'"), 'RED'],
 
   ['MIG-L5 rename이라면서 090의 칸 이름을 바꿈', P.mig90,

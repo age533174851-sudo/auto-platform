@@ -403,6 +403,7 @@ function isDeclaration(st: string): boolean {
 function classifyDoBody(body: string): { risk: MigrationRisk; reasons: string[] } {
   const danger: string[] = [];
   const unknown: string[] = [];
+  const dataDependent: string[] = [];
 
   const scan = splitStatements(body);
   if (scan.errors.length > 0) {
@@ -427,6 +428,10 @@ function classifyDoBody(body: string): { risk: MigrationRisk; reasons: string[] 
 
     const hit = DESTRUCTIVE_PATTERNS.filter(d => d.re.test(st));
     if (hit.length > 0) { danger.push(...hit.map(h => `DO 블록 안에서 ${h.why}`)); continue; }
+    // DO는 조건문/반복문을 포함한다. 앞선 CREATE TABLE이 실제로 실행됐는지
+    // 정적으로 보장할 수 없으므로, DO 안의 기존 표 제약은 보수적으로 승인 대기.
+    const dd = dataDependentReason(st, new Set<string>());
+    if (dd) { dataDependent.push(`DO 블록 안에서 ${dd}`); continue; }
     if (ADDITIVE_PATTERNS.some(re => re.test(st))) continue;
     if (CONTROL_FLOW.test(st) || ASSIGNMENT.test(st)) continue;
     // **DECLARE 구역 안에서만** 선언 모양을 인정한다. 구역 밖에서는 그대로 UNKNOWN이다.
@@ -437,6 +442,7 @@ function classifyDoBody(body: string): { risk: MigrationRisk; reasons: string[] 
 
   if (danger.length) return { risk: 'DESTRUCTIVE', reasons: Array.from(new Set(danger)) };
   if (unknown.length) return { risk: 'UNKNOWN', reasons: Array.from(new Set(unknown)) };
+  if (dataDependent.length) return { risk: 'DATA_DEPENDENT', reasons: Array.from(new Set(dataDependent)) };
   return { risk: 'ADDITIVE', reasons: [] };
 }
 
@@ -487,6 +493,7 @@ export function classifyMigration(sql: string): MigrationClass {
         const inner = classifyDoBody(d.body);
         if (inner.risk === 'DESTRUCTIVE') danger.push(...inner.reasons);
         else if (inner.risk === 'UNKNOWN') unknown.push(...inner.reasons);
+        else if (inner.risk === 'DATA_DEPENDENT') dataDependent.push(...inner.reasons);
       }
       continue;
     }

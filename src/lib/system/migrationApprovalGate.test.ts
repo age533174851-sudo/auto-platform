@@ -180,6 +180,39 @@ export function runMigrationApprovalGateTests() {
     eq(classifyMigration(sql).risk, 'ADDITIVE');
   });
 
+  // ── DO 블록 내부 제약도 운영 DB의 기존 데이터에 달린다 ──
+  test('★ DO 안의 UNIQUE 인덱스도 운영 DB 자동 적용 금지', () => {
+    const sql = 'DO $do$ BEGIN CREATE UNIQUE INDEX jobs_a_unique ON public.jobs (a); END; $do$;';
+    const c = classifyMigration(sql);
+    eq(c.risk, 'DATA_DEPENDENT', 'DO 내부 UNIQUE가 ADDITIVE로 통과했습니다');
+    eq(c.autoApply, false);
+  });
+
+  test('★ DO 안의 CHECK·NOT NULL도 운영 DB 자동 적용 금지', () => {
+    for (const sql of [
+      'DO $do$ BEGIN ALTER TABLE jobs ADD CONSTRAINT jobs_a_chk CHECK (a > 0); END; $do$;',
+      'DO $do$ BEGIN ALTER TABLE jobs ALTER COLUMN a SET NOT NULL; END; $do$;',
+    ]) {
+      const c = classifyMigration(sql);
+      eq(c.risk, 'DATA_DEPENDENT', sql);
+      eq(c.autoApply, false);
+    }
+  });
+
+  test('★ DO 내부 기존 표 제약은 마이그레이션 계획에서도 차단', () => {
+    const name = '099_do_unique.sql';
+    const sql = 'DO $do$ BEGIN CREATE UNIQUE INDEX jobs_a_unique ON jobs (a); END; $do$;';
+    eq(classifyMigration(sql).risk, 'DATA_DEPENDENT', 'DO 제약은 반드시 DATA_DEPENDENT여야 합니다');
+    const plan = migrationPlanOf({ files: [{ name, id: 99, sql }], applied: [] });
+    eq(plan.code, 'NEEDS_APPROVAL');
+    eq(plan.autoApply.includes(name), false);
+    assert(plan.blocked.some(b => b.name === name), 'DO 내부 제약이 blocked에 없습니다');
+  });
+
+  test('DO 내부 일반 인덱스는 기존 ADDITIVE 판정을 유지한다', () => {
+    eq(classifyMigration('DO $do$ BEGIN CREATE INDEX jobs_a_idx ON jobs (a); END; $do$;').risk, 'ADDITIVE');
+  });
+
   // ── ③ 계획이 실제로 막는가 (승인 우회) ─────────────────────────
   const files = [
     { name: '096_prev.sql', id: 96, sql: 'create table if not exists t96 (id uuid);' },
