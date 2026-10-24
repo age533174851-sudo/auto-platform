@@ -105,6 +105,12 @@ jobs:
       - name: 예약 청산 결과 계약 (18종 + 실행기 배선)
         run: node scripts/scheduled-exit-verdict.mjs --self-test
 
+      # 감시의 200 응답도 ORDER_FAILED/SKIP을 포함할 수 있다. 녹색 오인 차단.
+      - name: 현물 감시 결과 계약 (22종 + 실행기 배선)
+        run: |
+          node scripts/watch-tick-verdict.mjs --self-test
+          node scripts/watch-tick-verdict.mjs --check-wiring
+
       # ── 워커 빌드 ──
       #
       # 워커는 루트 tsconfig 밖에 있다. 그래서 `npx tsc --noEmit`도,
