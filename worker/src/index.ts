@@ -1558,7 +1558,10 @@ async function tick() {
   // ★ job 처리는 락과 무관하게 항상 실행 (PENDING→PROCESSING atomic claim이 중복 방지)
   await processPendingJobs();
   // main 임차를 증명하지 못하면 standby. 긴 tick 중에는 TTL/4마다 갱신한다.
-  const isMain = await mainLockGranted(() => acquireLock('main', WORKER_ID, POLL_SEC * 4));
+  const mainAcquireStartedAt = Date.now();
+  const mainAcquired = await mainLockGranted(() => acquireLock('main', WORKER_ID, POLL_SEC * 4));
+  // A delayed ACK may arrive after the DB lease's effective lifetime has elapsed.
+  const isMain = mainAcquired && Date.now() - mainAcquireStartedAt < POLL_SEC * 1000;
   const mainLease = isMain ? new MainLeaseKeeper(
     () => mainLockGranted(() => acquireLock('main', WORKER_ID, POLL_SEC * 4)),
     POLL_SEC * 1000,
