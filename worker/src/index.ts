@@ -16,6 +16,7 @@
 //
 // 모르는 거래소는 UNSUPPORTED_EXCHANGE로 막는다. binance로 떨어뜨리지 않는다.
 import { sb, acquireLock, releaseLock, heartbeat, noteStartupResult, noteScheduler } from './supabase';
+import { mainLockGranted } from '../../src/lib/runtime/mainLockGate';
 import { decryptSecret } from './crypto';
 import { redisAvailable, lockNxEx, unlock } from './redis';
 import { alert } from './telegram';
@@ -1557,8 +1558,7 @@ async function tick() {
   // ★ job 처리는 락과 무관하게 항상 실행 (PENDING→PROCESSING atomic claim이 중복 방지)
   await processPendingJobs();
   // 모니터(Ghost Sync/킬스위치 job 보장)는 main 락으로 중복 방지 — 락 인프라 없으면 단일 워커로 간주해 진행
-  let isMain = true;
-  try { isMain = await acquireLock('main', WORKER_ID, POLL_SEC * 4); } catch { isMain = true; }
+  const isMain = await mainLockGranted(() => acquireLock('main', WORKER_ID, POLL_SEC * 4));
   // **예약은 main 락을 쥔 워커만 본다.** 그 사실을 heartbeat에 같이
   // 적어야, 밖에서 예비 워커의 줄을 보고 "안 돈다"고 잘못 읽지 않는다.
   noteScheduler({ isMain });
