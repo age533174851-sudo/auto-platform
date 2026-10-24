@@ -56,8 +56,13 @@ const MUTATIONS = [
       + "  if (blockedBefore.length > 0) {", "  if (false) {\n    const blockedBefore = [];"],
   },
   {
-    name: 'DESTRUCTIVE 한정 제거 — UNKNOWN도 이름만 보고 통과한다',
-    cut: ["  if (entry.risk !== 'DESTRUCTIVE') {", '  if (false) {'],
+    name: '위험도 한정 제거 — UNKNOWN도 이름만 보고 통과한다',
+    cut: ['  if (!APPROVABLE_RISKS.includes(entry.risk)) {', '  if (false) {'],
+  },
+  {
+    name: 'DATA_DEPENDENT를 자동 적용으로 되돌림 — 기존 표 제약이 승인 없이 간다',
+    cut: ["const APPROVABLE_RISKS = ['DESTRUCTIVE', 'DATA_DEPENDENT'];",
+          "const APPROVABLE_RISKS = ['DESTRUCTIVE', 'DATA_DEPENDENT', 'ADDITIVE', 'UNKNOWN'];"],
   },
   {
     name: '막혀 있는지 확인 제거 — 안전한 파일도 승인 경로로 들어온다',
