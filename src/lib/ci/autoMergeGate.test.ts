@@ -380,6 +380,27 @@ export function runAutoMergeGateTests() {
     }
   });
 
+  console.log('[자동 머지 — 필수 verify는 반드시 성공해야 한다]');
+
+  test('★ 필수 verify가 skipped 또는 neutral이면 병합하지 않는다', () => {
+    for (const conclusion of ['skipped', 'neutral']) {
+      const v = autoMergeGate(good({
+        checks: [{ name: 'verify', status: 'completed', conclusion, headSha: 'abc1234def5678' }],
+      }));
+      eq(v.merge, false, `필수 verify ${conclusion}가 병합을 허용했다`);
+    }
+  });
+
+  test('★ 같은 이름의 verify 중 하나라도 skipped이면 성공 하나로 덮지 않는다', () => {
+    const v = autoMergeGate(good({
+      checks: [
+        { name: 'verify', status: 'completed', conclusion: 'success', headSha: 'abc1234def5678' },
+        { name: 'verify', status: 'completed', conclusion: 'skipped', headSha: 'abc1234def5678' },
+      ],
+    }));
+    eq(v.merge, false, '필수 검사 중 skipped를 성공으로 덮었다');
+  });
+
   console.log('[자동 머지 — 강제 경로가 없다]');
 
   test('어떤 입력으로도 실패한 검사를 통과시킬 수 없다', () => {
