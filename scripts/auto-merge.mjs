@@ -207,6 +207,7 @@ async function main() {
   const {
     autoMergeGate, gateComment, AUTO_MERGE_LABEL, SELF_CHECK_NAME, REQUIRED_CHECKS,
     reviewFactsFromGraphql, completeCheckRunsPage, completeCommitStatusesPage,
+    appendOpenPrPage,
   } =
     await import(`file://${join(outDir, 'autoMergeGate.js')}`);
   const {
@@ -219,12 +220,26 @@ async function main() {
 
   const only = process.env.PR_NUMBER ? Number(process.env.PR_NUMBER) : null;
 
-  const listed = await api(`/repos/${REPO}/pulls?state=open&per_page=100`);
-  if (!listed.ok) {
-    console.error('PR 목록을 읽지 못했습니다:', listed.status);
-    process.exit(1);
+  // 첫 100개만 보면 오래된 auto-merge 라벨 PR은 판정 대상에서 사라진다.
+  // 전 페이지를 확인하기 전에는 단 한 건도 병합하지 않는다.
+  // 조회 실패·중복·깨진 페이지·과도한 페이지 수는 전체 판정을 중단한다.
+  let allPrs = [];
+  let complete = false;
+  for (let page = 1; page <= 100; page++) {
+    const listed = await api(`/repos/${REPO}/pulls?state=open&per_page=100&page=${page}`);
+    if (!listed.ok) {
+      throw new Error(`PR 목록 ${page}페이지 조회 실패 (HTTP ${listed.status}) — 병합 보류`);
+    }
+    const accumulated = appendOpenPrPage(allPrs, listed.body);
+    if (accumulated === null) {
+      throw new Error(`PR 목록 ${page}페이지 불완전·중복·형식 오류 — 병합 보류`);
+    }
+    allPrs = accumulated.prs;
+    if (!accumulated.hasMore) { complete = true; break; }
   }
-  const prs = listed.body.filter(p => (only == null || p.number === only));
+  if (!complete) throw new Error('PR 목록 100페이지 한도 초과 — 병합 보류');
+  const prs = allPrs.filter(p => (only == null || p.number === only));
+  console.log(`열린 PR ${allPrs.length}건 전체 조회 · 판정 대상 ${prs.length}건`);
 
   let merged = 0;
   for (const brief of prs) {
