@@ -235,6 +235,7 @@ import { runConvictionTests } from './src/lib/risk/conviction.test';
 import { runSleeveLedgerTests } from './src/lib/strategies/sleeveLedger.test';
 import { runOrderIntentTests } from './src/lib/engine/orderIntent.test';
 import { runProtectionRepairTests } from './src/lib/engine/protectionRepair.test';
+import { runExact100xChainTests } from './src/test/integration/exact100xChainIntegration.test';
 import { runPriceBasisTests } from './src/lib/markets/priceBasis.test';
 import { runContextSwitchTests } from './src/lib/terminal/contextSwitch.test';
 import { runMobileSheetTests } from './src/lib/ui/mobileSheet.test';
@@ -410,6 +411,7 @@ runMigrationStatusTests(); runWalletTruthTests(); runSmokePlanTests(); runSmokeR
   await runOrderPathIntegrationTests();
   await runReconcileIntegrationTests();
   await runSpotIntegrationTests();
+  await runExact100xChainTests();
   await runCloseIntegrationTests();
   await runTransitionIntegrationTests();
   await runCoinMRouteIntegrationTests();
