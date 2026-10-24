@@ -16,7 +16,7 @@
 //
 // 모르는 거래소는 UNSUPPORTED_EXCHANGE로 막는다. binance로 떨어뜨리지 않는다.
 import { sb, acquireLock, releaseLock, heartbeat, noteStartupResult, noteScheduler } from './supabase';
-import { mainLockGranted } from '../../src/lib/runtime/mainLockGate';
+import { mainLockGranted, MainLeaseKeeper } from '../../src/lib/runtime/mainLockGate';
 import { decryptSecret } from './crypto';
 import { redisAvailable, lockNxEx, unlock } from './redis';
 import { alert } from './telegram';
@@ -1557,8 +1557,18 @@ async function tick() {
   if (tickCount === 1 || tickCount % 20 === 0) console.log(`[worker] tick #${tickCount} (errors=${errorCount})`);
   // ★ job 처리는 락과 무관하게 항상 실행 (PENDING→PROCESSING atomic claim이 중복 방지)
   await processPendingJobs();
-  // 모니터(Ghost Sync/킬스위치 job 보장)는 main 락으로 중복 방지 — 락 인프라 없으면 단일 워커로 간주해 진행
-  const isMain = await mainLockGranted(() => acquireLock('main', WORKER_ID, POLL_SEC * 4));
+  // main 임차를 증명하지 못하면 standby. 긴 tick 중에는 TTL/4마다 갱신한다.
+  const mainAcquireStartedAt = Date.now();
+  const mainAcquired = await mainLockGranted(() => acquireLock('main', WORKER_ID, POLL_SEC * 4));
+  // A delayed ACK may arrive after the DB lease's effective lifetime has elapsed.
+  const isMain = mainAcquired && Date.now() - mainAcquireStartedAt < POLL_SEC * 1000;
+  const mainLease = isMain ? new MainLeaseKeeper(
+    () => mainLockGranted(() => acquireLock('main', WORKER_ID, POLL_SEC * 4)),
+    POLL_SEC * 1000,
+    () => console.error('[worker] main 임차 갱신 실패 — 남은 main-only 작업을 건너뜁니다'),
+  ) : null;
+  mainLease?.start();
+  try {
   // **예약은 main 락을 쥔 워커만 본다.** 그 사실을 heartbeat에 같이
   // 적어야, 밖에서 예비 워커의 줄을 보고 "안 돈다"고 잘못 읽지 않는다.
   noteScheduler({ isMain });
@@ -1577,11 +1587,11 @@ async function tick() {
   // `isMain` 게이트는 **그대로 둔다.** 전량청산 잡을 두 워커가 동시에
   // 만드는 쪽이 늦는 쪽보다 나쁘다 — 중복 방지는 여기서도 판정기가 보지만,
   // 두 워커가 같은 순간에 "없다"를 읽는 경쟁까지 막지는 못한다.
-  if (isMain) await pollKillSwitchRecovery();
-  if (isMain) await monitorConnections();
+  if (await mainLease?.allowed()) await pollKillSwitchRecovery();
+  if (await mainLease?.allowed()) await monitorConnections();
   // 예약 평가도 main 락을 쥔 워커만 한다. 여러 워커가 동시에 보면 선점
   // 경쟁만 늘어난다 — 선점은 마지막 방어선이지 첫 방어선이 아니다.
-  if (isMain) await pollSchedules();
+  if (await mainLease?.allowed()) await pollSchedules();
   // **스모크 테스트 청산은 락과 무관하게 항상 본다.**
   // 여는 것과 닫는 것은 다르다 — main 락을 못 쥔 워커라고 열린 포지션을
   // 안 닫으면, 락 인프라가 흔들리는 동안 100배 포지션이 남는다.
@@ -1602,20 +1612,24 @@ async function tick() {
   // 깨운다. 맞춰야 할 비밀이 하나 사라진다.
   //
   // 같은 포지션에 손절 이동이 두 번 나가지 않게 main 락을 쥔 워커만 부른다.
-  await pollExitMonitor(isMain);
+  await pollExitMonitor((await mainLease?.allowed()) === true);
   // **수수료·펀딩을 모아야 "번 것"을 말할 수 있다.**
   // main 락을 쥔 워커만 한다 — 같은 구간을 두 번 읽을 이유가 없다.
   // **"이 시각에 팔겠다"는 약속을 지킬 실행기.**
   // GitHub 예약은 중앙값 50분이라 유예 30분을 넘기는 구간이 대부분이었다.
   // **모의 포지션의 손절·익절.** 브라우저가 보던 것을 서버가 본다.
-  await pollPaperExit(isMain);
-  await pollScheduledExit(isMain);
+  await pollPaperExit((await mainLease?.allowed()) === true);
+  await pollScheduledExit((await mainLease?.allowed()) === true);
   // **챌린지 생명주기.** 시작·만료·마감을 미는 유일한 실행자다.
-  await pollChallengeSweep(isMain);
-  await pollLedgerSync(isMain);
+  await pollChallengeSweep((await mainLease?.allowed()) === true);
+  await pollLedgerSync((await mainLease?.allowed()) === true);
   // **자산 곡선은 사람이 앱을 열 때가 아니라 15분마다 남는다.**
   // 예전에는 GET이 찍어서, 밤사이 자산 변화가 통째로 비어 있었다.
-  await pollEquitySnapshot(isMain);
+  await pollEquitySnapshot((await mainLease?.allowed()) === true);
+  } finally {
+    // 타이머는 main-only 긴 await 동안만 동작한다. 다음 tick으로 누출하지 않는다.
+    mainLease?.stop();
+  }
 }
 
 async function startupChecks() {
