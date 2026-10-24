@@ -60,17 +60,32 @@ export const SELF_CHECK_NAME = 'auto-merge-gate';
  */
 export const REQUIRED_CHECKS = ['verify'];
 
-/** RED baseline: 기존 첫 페이지 단독 조회를 모사한다. GREEN에서 완전한 페이지 누적으로 교체한다. */
+/**
+ * 열린 PR 목록은 REST에서 페이지당 최대 100개다.
+ * 앞 페이지만으로 병합하면 101번째 이후의 auto-merge 라벨을 놓친다.
+ * 페이지가 깨지거나 겹치면 누적 결과 전체를 UNKNOWN으로 취급한다.
+ */
 export interface OpenPrBrief {
   number: number;
   labels: Array<{ name: string }>;
 }
+
 export function appendOpenPrPage(prior: OpenPrBrief[], payload: unknown):
   { prs: OpenPrBrief[]; hasMore: boolean } | null {
-  if (!Array.isArray(payload)) return null;
-  return { prs: [...prior, ...(payload as OpenPrBrief[])], hasMore: false };
+  const pageSize = 100;
+  if (!Array.isArray(payload) || payload.length > pageSize) return null;
+  const seen = new Set<number>();
+  const combined: OpenPrBrief[] = [];
+  for (const p of [...prior, ...payload]) {
+    if (!p || !Number.isSafeInteger(p.number) || p.number <= 0
+        || !Array.isArray(p.labels)
+        || p.labels.some((label: any) => !label || typeof label.name !== 'string')
+        || seen.has(p.number)) return null;
+    seen.add(p.number);
+    combined.push(p);
+  }
+  return { prs: combined, hasMore: payload.length === pageSize };
 }
-
 
 export type CheckConclusion =
   | 'success' | 'neutral' | 'skipped'
