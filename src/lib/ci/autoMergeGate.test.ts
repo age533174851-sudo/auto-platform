@@ -383,6 +383,14 @@ export function runAutoMergeGateTests() {
 
   console.log('[자동 머지 — 필수 CI 출처와 커밋 증거]');
 
+  test('★ gate에 직접 들어온 headSha 누락 verify도 최신 검사가 아니다', () => {
+    const v = autoMergeGate(good({ checks: [
+      { name: 'verify', status: 'completed', conclusion: 'success' },
+    ] }));
+    eq(v.merge, false);
+    eq(v.code, 'REQUIRED_CHECK_MISSING');
+  });
+
   test('★ 다른 GitHub App이 만든 verify 성공은 필수 CI 통과 증거가 아니다', () => {
     eq(completeCheckRunsPage({ total_count: 1, check_runs: [
       { name: 'verify', status: 'completed', conclusion: 'success',
