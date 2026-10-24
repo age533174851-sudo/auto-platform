@@ -328,7 +328,8 @@ export function runAutoMergeGateTests() {
 
   test('검사 페이지가 완전하면 정상 성공 증거를 사용한다', () => {
     const checks = completeCheckRunsPage({ total_count: 1, check_runs: [
-      { name: 'verify', status: 'completed', conclusion: 'success', head_sha: 'abc1234def5678' },
+      { name: 'verify', status: 'completed', conclusion: 'success',
+        head_sha: 'abc1234def5678', app: { slug: 'github-actions' } },
     ] });
     eq(checks?.length, 1);
     eq(checks?.[0].headSha, 'abc1234def5678');
@@ -378,6 +379,42 @@ export function runAutoMergeGateTests() {
     ]) {
       eq(completeCommitStatusesPage({ total_count: 1, statuses }), null);
     }
+  });
+
+  console.log('[자동 머지 — 필수 CI 출처와 커밋 증거]');
+
+  test('★ 다른 GitHub App이 만든 verify 성공은 필수 CI 통과 증거가 아니다', () => {
+    eq(completeCheckRunsPage({ total_count: 1, check_runs: [
+      { name: 'verify', status: 'completed', conclusion: 'success',
+        head_sha: 'abc1234def5678', app: { slug: 'third-party' } },
+    ] }), null);
+  });
+
+  test('★ 필수 verify의 GitHub App 출처가 없으면 통과 증거가 아니다', () => {
+    eq(completeCheckRunsPage({ total_count: 1, check_runs: [
+      { name: 'verify', status: 'completed', conclusion: 'success',
+        head_sha: 'abc1234def5678' },
+    ] }), null);
+  });
+
+  test('★ head_sha가 없거나 빈 검사 결과는 최신 커밋 증거가 아니다', () => {
+    for (const head_sha of [undefined, null, '']) {
+      eq(completeCheckRunsPage({ total_count: 1, check_runs: [
+        { name: 'verify', status: 'completed', conclusion: 'success',
+          head_sha, app: { slug: 'github-actions' } },
+      ] }), null);
+    }
+  });
+
+  test('GitHub Actions verify와 외부 선택 검사 성공은 정상 통과한다', () => {
+    const checks = completeCheckRunsPage({ total_count: 2, check_runs: [
+      { name: 'verify', status: 'completed', conclusion: 'success',
+        head_sha: 'abc1234def5678', app: { slug: 'github-actions' } },
+      { name: 'Vercel Preview Comments', status: 'completed', conclusion: 'success',
+        head_sha: 'abc1234def5678', app: { slug: 'vercel' } },
+    ] });
+    eq(checks?.length, 2);
+    eq(autoMergeGate(good({ checks: checks ?? [] })).code, 'OK');
   });
 
   console.log('[자동 머지 — 필수 verify는 반드시 성공해야 한다]');
