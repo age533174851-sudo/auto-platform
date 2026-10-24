@@ -90,6 +90,56 @@ export function runMigrationApprovalGateTests() {
     }
   });
 
+  // ── SQL provenance: 설명·문자열·미래 문장은 실행된 증거가 아니다 ──
+  test('주석 속 CREATE TABLE은 기존 표를 새 표로 만들지 않는다', () => {
+    const sql = '-- CREATE TABLE public.jobs (id uuid);\n'
+      + 'CREATE UNIQUE INDEX ix_jobs_a ON public.jobs (a);';
+    eq(tablesCreatedIn(sql).has('jobs'), false);
+    eq(classifyMigration(sql).risk, 'DATA_DEPENDENT');
+    eq(classifyMigration(sql).autoApply, false);
+  });
+
+  test('블록 주석 속 CREATE TABLE도 새 표 증거가 아니다', () => {
+    const sql = '/* CREATE TABLE jobs (id uuid); */\n'
+      + 'CREATE UNIQUE INDEX ix_jobs_a ON jobs (a);';
+    eq(classifyMigration(sql).risk, 'DATA_DEPENDENT');
+  });
+
+  test('COMMENT ON 문자열 속 CREATE TABLE도 새 표 증거가 아니다', () => {
+    const sql = "COMMENT ON TABLE jobs IS 'CREATE TABLE jobs (id uuid)';\n"
+      + 'CREATE UNIQUE INDEX ix_jobs_a ON jobs (a);';
+    eq(classifyMigration(sql).risk, 'DATA_DEPENDENT');
+  });
+
+  test('주석 속 DROP INDEX는 실제로 지운 제약이 아니다', () => {
+    const sql = '-- DROP INDEX IF EXISTS ix_jobs_a;\n'
+      + 'CREATE UNIQUE INDEX ix_jobs_a ON jobs (a);';
+    eq(classifyMigration(sql).risk, 'DATA_DEPENDENT');
+  });
+
+  test('블록 주석 속 DROP CONSTRAINT도 실제로 지운 제약이 아니다', () => {
+    const sql = '/* ALTER TABLE jobs DROP CONSTRAINT ix_jobs_a; */\n'
+      + 'ALTER TABLE jobs ADD CONSTRAINT ix_jobs_a CHECK (a > 0);';
+    eq(classifyMigration(sql).risk, 'DATA_DEPENDENT');
+  });
+
+  test('뒤에 나오는 DROP INDEX는 앞의 UNIQUE 인덱스를 안전하게 만들지 않는다', () => {
+    const sql = 'CREATE UNIQUE INDEX ix_jobs_a ON jobs (a);\n'
+      + 'DROP INDEX IF EXISTS ix_jobs_a;';
+    eq(classifyMigration(sql).risk, 'DATA_DEPENDENT');
+  });
+
+  test('뒤에 나오는 CREATE TABLE은 앞의 UNIQUE 인덱스를 안전하게 만들지 않는다', () => {
+    const sql = 'CREATE UNIQUE INDEX ix_jobs_a ON jobs (a);\n'
+      + 'CREATE TABLE jobs (id uuid);';
+    eq(classifyMigration(sql).risk, 'DATA_DEPENDENT');
+  });
+
+  test('실제 앞선 CREATE TABLE과 DROP INDEX는 기존 계약을 유지한다', () => {
+    eq(classifyMigration('CREATE TABLE new_jobs (a int); CREATE UNIQUE INDEX i ON new_jobs (a);').risk, 'ADDITIVE');
+    eq(classifyMigration('DROP INDEX IF EXISTS i; CREATE UNIQUE INDEX i ON jobs (a);').risk, 'ADDITIVE');
+  });
+
   // ── ③ 계획이 실제로 막는가 (승인 우회) ─────────────────────────
   const files = [
     { name: '096_prev.sql', id: 96, sql: 'create table if not exists t96 (id uuid);' },
