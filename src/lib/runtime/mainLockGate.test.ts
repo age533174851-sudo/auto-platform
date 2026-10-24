@@ -73,6 +73,22 @@ export function runMainLockGateTests() {
       guard.stop();
     }
   });
+  test('TTL 갱신 ACK가 너무 늦으면 true여도 낡은 권한으로 취급', async () => {
+    let now = 0, lost = 0;
+    let release: (ok: boolean) => void = () => {};
+    const guard = new MainLeaseKeeper(
+      () => new Promise<boolean>((resolve) => { release = resolve; }),
+      3000, () => { lost++; }, () => now,
+    );
+    const pending = guard.refresh();
+    await Promise.resolve();
+    now = 3001;
+    release(true);
+    eq(await pending, false);
+    eq(await guard.allowed(), false);
+    eq(lost, 1);
+    guard.stop();
+  });
   test('tick 종료 후 늦게 도착한 갱신 결과는 권한을 되살리지 못한다', async () => {
     let release: (ok: boolean) => void = () => {};
     const guard = new MainLeaseKeeper(() => new Promise<boolean>((resolve) => { release = resolve; }), 3000);
