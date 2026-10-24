@@ -9,6 +9,7 @@
 import { test, eq, assert } from '../../test/harness';
 import {
   autoMergeGate, gateComment, AUTO_MERGE_LABEL, SELF_CHECK_NAME, REQUIRED_CHECKS,
+  reviewFactsFromGraphql, completeCheckRunsPage,
   type PrFacts,
 } from './autoMergeGate';
 
@@ -288,6 +289,56 @@ export function runAutoMergeGateTests() {
   test('리뷰 상태를 못 읽었으면 안 합친다', () => {
     eq(autoMergeGate(good({ unresolvedThreads: null })).code, 'REVIEW_UNKNOWN');
     eq(autoMergeGate(good({ changesRequested: null })).code, 'REVIEW_UNKNOWN');
+  });
+
+  console.log('[자동 머지 — GitHub API 페이지 누락은 UNKNOWN이다]');
+
+  test('리뷰 스레드 100개 뒤에 미해결 스레드가 있으면 0개로 단정하지 않는다', () => {
+    const v = reviewFactsFromGraphql({ data: { repository: { pullRequest: {
+      reviewThreads: { nodes: Array.from({ length: 100 }, () => ({ isResolved: true, isOutdated: false })), pageInfo: { hasNextPage: true } },
+      reviews: { totalCount: 0 },
+    } } } });
+    eq(v.unresolvedThreads, null);
+    eq(autoMergeGate(good({ unresolvedThreads: v.unresolvedThreads })).code, 'REVIEW_UNKNOWN');
+  });
+
+  test('리뷰 스레드 마지막 페이지는 정상 집계하고 변경 요청 전체 수를 보존한다', () => {
+    const v = reviewFactsFromGraphql({ data: { repository: { pullRequest: {
+      reviewThreads: { nodes: [{ isResolved: false, isOutdated: false }, { isResolved: false, isOutdated: true }], pageInfo: { hasNextPage: false } },
+      reviews: { totalCount: 3 },
+    } } } });
+    eq(v.unresolvedThreads, 1);
+    eq(v.changesRequested, 3);
+  });
+
+  test('리뷰 페이지 정보가 없거나 잘못됐으면 통과시키지 않는다', () => {
+    for (const pageInfo of [undefined, {}, { hasNextPage: null }]) {
+      const v = reviewFactsFromGraphql({ data: { repository: { pullRequest: {
+        reviewThreads: { nodes: [], pageInfo }, reviews: { totalCount: 0 },
+      } } } });
+      eq(v.unresolvedThreads, null);
+    }
+  });
+
+  test('검사 101건 중 첫 100건만 성공이면 전체 성공으로 단정하지 않는다', () => {
+    const checks = Array.from({ length: 100 }, () => ({ name: 'verify', status: 'completed', conclusion: 'success', head_sha: 'abc1234def5678' }));
+    eq(completeCheckRunsPage({ total_count: 101, check_runs: checks }), null);
+    eq(autoMergeGate(good({ checks: completeCheckRunsPage({ total_count: 101, check_runs: checks }) ?? [] })).code, 'REQUIRED_CHECK_MISSING');
+  });
+
+  test('검사 페이지가 완전하면 정상 성공 증거를 사용한다', () => {
+    const checks = completeCheckRunsPage({ total_count: 1, check_runs: [
+      { name: 'verify', status: 'completed', conclusion: 'success', head_sha: 'abc1234def5678' },
+    ] });
+    eq(checks?.length, 1);
+    eq(checks?.[0].headSha, 'abc1234def5678');
+    eq(autoMergeGate(good({ checks: checks ?? [] })).code, 'OK');
+  });
+
+  test('검사 total_count를 못 읽거나 모양이 깨지면 UNKNOWN이다', () => {
+    eq(completeCheckRunsPage({ check_runs: [] }), null);
+    eq(completeCheckRunsPage({ total_count: 1, check_runs: [] }), null);
+    eq(completeCheckRunsPage({ total_count: 1, check_runs: {} }), null);
   });
 
   console.log('[자동 머지 — 강제 경로가 없다]');
