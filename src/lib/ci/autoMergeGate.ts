@@ -60,6 +60,18 @@ export const SELF_CHECK_NAME = 'auto-merge-gate';
  */
 export const REQUIRED_CHECKS = ['verify'];
 
+/** RED baseline: 기존 첫 페이지 단독 조회를 모사한다. GREEN에서 완전한 페이지 누적으로 교체한다. */
+export interface OpenPrBrief {
+  number: number;
+  labels: Array<{ name: string }>;
+}
+export function appendOpenPrPage(prior: OpenPrBrief[], payload: unknown):
+  { prs: OpenPrBrief[]; hasMore: boolean } | null {
+  if (!Array.isArray(payload)) return null;
+  return { prs: [...prior, ...(payload as OpenPrBrief[])], hasMore: false };
+}
+
+
 export type CheckConclusion =
   | 'success' | 'neutral' | 'skipped'
   | 'failure' | 'cancelled' | 'timed_out' | 'action_required' | 'stale'
