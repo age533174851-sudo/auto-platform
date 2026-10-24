@@ -61,6 +61,9 @@ if (!/if \(!APPROVABLE_RISKS\.includes\(entry\.risk\)\)/.test(runnerCode)) {
 const { classifyMigration } = await loadPlan();
 for (const [sql, want] of [
   ['CREATE UNIQUE INDEX i ON public.jobs (a)', 'DATA_DEPENDENT'],
+  ['ALTER TABLE jobs ADD COLUMN owner_id uuid NOT NULL', 'DATA_DEPENDENT'],
+  ['ALTER TABLE jobs ADD COLUMN IF NOT EXISTS owner_id uuid NOT NULL DEFAULT gen_random_uuid()', 'DATA_DEPENDENT'],
+  ['DO $do$ BEGIN ALTER TABLE jobs ADD COLUMN owner_id uuid NOT NULL; END; $do$;', 'DATA_DEPENDENT'],
   ['CREATE TABLE IF NOT EXISTS jobs (a int); CREATE UNIQUE INDEX i ON jobs (a)', 'DATA_DEPENDENT'],
   ['CREATE TABLE IF NOT EXISTS jobs (a int); ALTER TABLE jobs ADD CONSTRAINT c CHECK (a > 0)', 'DATA_DEPENDENT'],
   ['DROP INDEX IF EXISTS i; CREATE UNIQUE INDEX i ON jobs (a)', 'DATA_DEPENDENT'],
