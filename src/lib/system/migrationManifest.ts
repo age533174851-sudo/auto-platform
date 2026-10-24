@@ -8,10 +8,13 @@
 // schema_migrations 표와 비교해서 무엇이 남았는지 화면에 적는다.
 // CI(scripts/check-migrations.mjs)가 이 파일이 낡았으면 실패시킨다.
 
+import type { MigrationRisk } from './migrationPlan';
+
 export interface ManifestEntry {
   name: string;
   id: number;
-  risk: 'ADDITIVE' | 'DESTRUCTIVE' | 'UNKNOWN';
+  /** 분류기와 **같은 타입**을 쓴다 — 여기 목록을 따로 적으면 갈라진다 */
+  risk: MigrationRisk;
   /** 파일 내용의 sha256 앞 16자 — 적용된 뒤 파일이 바뀌었는지 본다 */
   checksum: string;
 }
@@ -68,7 +71,7 @@ export const MIGRATION_MANIFEST: ManifestEntry[] = [
   { name: '050_schedule_strategy.sql', id: 50, risk: 'UNKNOWN', checksum: 'af576f09705c6eeb' },
   { name: '051_strategy_cycles.sql', id: 51, risk: 'ADDITIVE', checksum: '14ea5ebc80da6109' },
   { name: '052_smoke_tests.sql', id: 52, risk: 'ADDITIVE', checksum: 'fbecd22200630fd5' },
-  { name: '053_smoke_runs.sql', id: 53, risk: 'ADDITIVE', checksum: '4f3611260e0199e5' },
+  { name: '053_smoke_runs.sql', id: 53, risk: 'DATA_DEPENDENT', checksum: '4f3611260e0199e5' },
   { name: '054_worker_version.sql', id: 54, risk: 'ADDITIVE', checksum: 'f3bf8284689191f8' },
   { name: '055_smoke_cancel.sql', id: 55, risk: 'ADDITIVE', checksum: '00694ca473e93cf3' },
   { name: '056_ledger_events.sql', id: 56, risk: 'ADDITIVE', checksum: 'bb5fda192a7a30db' },
@@ -79,7 +82,7 @@ export const MIGRATION_MANIFEST: ManifestEntry[] = [
   { name: '061_self_heal.sql', id: 61, risk: 'ADDITIVE', checksum: 'b28f327cd9b64365' },
   { name: '062_ledger_ingest.sql', id: 62, risk: 'ADDITIVE', checksum: 'f6c2f9d88cf3dc2d' },
   { name: '063_exchange_connections_drift.sql', id: 63, risk: 'ADDITIVE', checksum: 'a9e14194c32aa716' },
-  { name: '064_equity_snapshot_bucket.sql', id: 64, risk: 'ADDITIVE', checksum: 'a54fe96523879777' },
+  { name: '064_equity_snapshot_bucket.sql', id: 64, risk: 'DATA_DEPENDENT', checksum: 'a54fe96523879777' },
   { name: '066_worker_project_ref.sql', id: 66, risk: 'ADDITIVE', checksum: 'a65992a340fba36c' },
   { name: '067_kill_switch_effective_mode.sql', id: 67, risk: 'ADDITIVE', checksum: '03b63727a34c35fb' },
   { name: '068_ladder_trade_connection.sql', id: 68, risk: 'ADDITIVE', checksum: '10432ab0fcf111c7' },
@@ -111,7 +114,7 @@ export const MIGRATION_MANIFEST: ManifestEntry[] = [
   { name: '094_exact100x_exit_escape_observations.sql', id: 94, risk: 'ADDITIVE', checksum: 'b492969adeab1281' },
   { name: '095_exact100x_observation_acl_hardening.sql', id: 95, risk: 'ADDITIVE', checksum: '32710ae3272dcc57' },
   { name: '096_exchange_connections_environment_identity.sql', id: 96, risk: 'ADDITIVE', checksum: '55008df74e066859' },
-  { name: '097_jobs_killswitch_active_unique.sql', id: 97, risk: 'ADDITIVE', checksum: '12d00a5b9ce103d4' },
+  { name: '097_jobs_killswitch_active_unique.sql', id: 97, risk: 'DATA_DEPENDENT', checksum: '12d00a5b9ce103d4' },
 ];
 
 /** 코드가 요구하는 마이그레이션 파일 이름 (번호 순) */

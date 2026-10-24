@@ -26,7 +26,7 @@
 // 판단을 못 한 문장을 '아마 괜찮겠지'로 넘기면, 그 한 번이 데이터를
 // 지운다.
 
-export type MigrationRisk = 'ADDITIVE' | 'DESTRUCTIVE' | 'UNKNOWN';
+export type MigrationRisk = 'ADDITIVE' | 'DESTRUCTIVE' | 'DATA_DEPENDENT' | 'UNKNOWN';
 
 export interface MigrationFile {
   /** 파일 이름 (`056_ledger_events.sql`) */
@@ -42,6 +42,102 @@ export interface MigrationClass {
   reasons: string[];
   /** 자동으로 적용해도 되는가 */
   autoApply: boolean;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// **더하는 것인데 실패할 수 있는 것** — 데이터에 달린 제약
+// ─────────────────────────────────────────────────────────────────────
+//
+// ADDITIVE는 "자동으로 적용해도 되는 것"이라는 뜻이다. 그런데 **이미
+// 줄이 들어 있는 표**에 제약을 걸면 그 뜻이 깨진다:
+//
+//   · 기존 줄이 제약을 어기면 **마이그레이션이 실패한다** — 무엇도
+//     지우지 않지만, 운영 배포가 그 자리에서 멈춘다
+//   · 성공해도 **그때부터 쓰기가 거부된다.** 더한 것이 아니라 막은 것이다
+//
+// 실제로 그랬다. #404의 `097_jobs_killswitch_active_unique.sql`은 머리말에
+// "SAFETY: Do not apply to any operating DB without separate user approval"
+// 라고 **스스로 적어 두었는데**, 분류기는 ADDITIVE로 읽었고 그러면
+// `apply-migrations.mjs`가 main push마다 **승인 없이 적용한다.**
+// 파일이 요구한 것과 파이프라인이 하는 일이 어긋나 있었다.
+//
+// 같은 파일에서 **만든** 표에 거는 제약은 다르다. 그 표는 비어 있으므로
+// 실패할 기존 줄이 없다. 그래서 "이 파일이 만들지 않은 표"만 가른다.
+//
+// DESTRUCTIVE로 적지 않는다 — 지우는 것이 아니다. 지우지 않는데
+// DESTRUCTIVE라고 적으면 다음 사람이 그 이름을 믿지 않게 된다.
+const DATA_DEPENDENT_PATTERNS: Array<{ re: RegExp; what: string; nameAt: number }> = [
+  // 잡는 그룹: 1 = 제약/인덱스 이름(있으면), 2 = 대상 표
+  { re: /\bCREATE\s+UNIQUE\s+INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z0-9_."]+)[\s\S]*?\sON\s+([A-Za-z0-9_."]+)/i,
+    what: '고유 인덱스', nameAt: 1 },
+  { re: /\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?([A-Za-z0-9_."]+)[\s\S]*?\bADD\s+CONSTRAINT\s+([A-Za-z0-9_."]+)/i,
+    what: 'CHECK·FK 등', nameAt: 2 },
+  { re: /\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?([A-Za-z0-9_."]+)[\s\S]*?\bSET\s+NOT\s+NULL\b/i,
+    what: 'NOT NULL', nameAt: 0 },
+];
+
+/**
+ * 이 SQL이 **먼저 지우는** 인덱스·제약 이름들.
+ *
+ * 같은 이름을 지웠다 다시 만드는 것은 **이미 있던 제약을 고쳐 다는 것**
+ * 이다. 그 제약이 이미 걸려 있었으므로 기존 줄은 이미 그것을 만족한다 —
+ * 다시 만들어도 데이터 때문에 실패하지 않는다.
+ *
+ * 055(`smoke_runs_active_idx`)와 034(`autotrade_sizing_chk`)가 실제로
+ * 그 모양이었고, 그래서 자동 적용 대상으로 남아야 한다.
+ */
+export function objectsDroppedIn(sql: string): Set<string> {
+  const out = new Set<string>();
+  const res = [
+    /\bDROP\s+INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+EXISTS\s+)?([A-Za-z0-9_."]+)/gi,
+    /\bDROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?([A-Za-z0-9_."]+)/gi,
+  ];
+  for (const re of res) {
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(String(sql))) !== null) out.add(bareTable(m[1]));
+  }
+  return out;
+}
+
+/** `"public"."jobs"` · `public.jobs` · `jobs` → `jobs` */
+function bareTable(raw: string): string {
+  return String(raw).replace(/"/g, '').replace(/^[A-Za-z0-9_]+\./, '').toLowerCase();
+}
+
+/** 이 SQL이 **직접 만드는** 표 이름들. 그 표는 비어 있다. */
+export function tablesCreatedIn(sql: string): Set<string> {
+  // `matchAll`을 쓰지 않는다 — `loadPlan()`이 이 파일을 es2019로 컴파일한다.
+  const out = new Set<string>();
+  const re = /\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z0-9_."]+)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(String(sql))) !== null) out.add(bareTable(m[1]));
+  return out;
+}
+
+/**
+ * 이 문장이 **이미 있던 표**에 제약을 거는가.
+ *
+ * 건다면 그 표의 기존 줄에 따라 성공할 수도 실패할 수도 있다 —
+ * 자동으로 적용할 수 없다.
+ */
+export function dataDependentReason(
+  statement: string,
+  createdHere: Set<string>,
+  droppedHere: Set<string> = new Set(),
+): string | null {
+  for (const { re, what, nameAt } of DATA_DEPENDENT_PATTERNS) {
+    const m = re.exec(statement);
+    if (!m) continue;
+    // 표는 항상 "이름이 아닌 쪽"이다.
+    const table = bareTable(m[nameAt === 1 ? 2 : 1] ?? '');
+    if (!table || createdHere.has(table)) continue;   // 이 파일이 만든 표 = 비어 있다
+    // 같은 이름을 먼저 지웠으면 **이미 걸려 있던 제약**을 고쳐 다는 것이다.
+    const objName = nameAt > 0 ? bareTable(m[nameAt] ?? '') : '';
+    if (objName && droppedHere.has(objName)) continue;
+    return `이미 있는 표 \`${table}\`에 ${what} 제약을 겁니다 — 기존 줄에 따라 실패할 수 있고, `
+      + '성공하면 그때부터 쓰기가 거부됩니다. 적용 전에 사람이 데이터를 봐야 합니다';
+  }
+  return null;
 }
 
 /**
@@ -378,6 +474,12 @@ export function classifyMigration(sql: string): MigrationClass {
   // 앞 문장의 DELETE를 안전해 보이게 만든다.
   const danger: string[] = [];
   const unknown: string[] = [];
+  const dataDependent: string[] = [];
+  // 이 파일이 **직접 만드는** 표는 비어 있다 — 거기 거는 제약은 실패할
+  // 기존 줄이 없다. 파일 전체에서 한 번 모은다(제약이 CREATE TABLE보다
+  // 뒤에 오든 앞에 오든 같은 파일이면 같은 배포에서 함께 돈다).
+  const createdHere = tablesCreatedIn(sql);
+  const droppedHere = objectsDroppedIn(sql);
   for (const piece of statements) {
     const st = piece.code.replace(/\s+/g, ' ').trim();
 
@@ -400,6 +502,11 @@ export function classifyMigration(sql: string): MigrationClass {
     // 아니라 나중에 불릴 때 도는 것이고, 그 판단은 이 파일의 몫이 아니다.
     const hit = DESTRUCTIVE_PATTERNS.filter(d => d.re.test(st));
     if (hit.length > 0) { danger.push(...hit.map(h => h.why)); continue; }
+    // **더하는 모양이어도 기존 표에 제약을 걸면 자동이 아니다.**
+    // ADDITIVE 판정보다 **먼저** 본다 — `CREATE UNIQUE INDEX`는 아래
+    // ADDITIVE_PATTERNS에도 걸리므로, 순서가 뒤면 그대로 통과한다.
+    const dd = dataDependentReason(st, createdHere, droppedHere);
+    if (dd) { dataDependent.push(dd); continue; }
     if (ADDITIVE_PATTERNS.some(re => re.test(st))) continue;
     unknown.push(st.slice(0, 60));
   }
@@ -413,6 +520,11 @@ export function classifyMigration(sql: string): MigrationClass {
       risk: 'UNKNOWN', autoApply: false,
       reasons: [`알아보지 못한 문장이 ${uniq.length}개 있습니다: ${uniq.slice(0, 3).join(' / ')}`],
     };
+  }
+  // DESTRUCTIVE·UNKNOWN 다음이다. 지우는 것도, 모르는 것도 아니지만
+  // **데이터에 달려 있어** 자동으로는 못 간다.
+  if (dataDependent.length > 0) {
+    return { risk: 'DATA_DEPENDENT', reasons: Array.from(new Set(dataDependent)), autoApply: false };
   }
   return { risk: 'ADDITIVE', reasons: ['표·칸·인덱스·정책을 더하기만 합니다'], autoApply: true };
 }

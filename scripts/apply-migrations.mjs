@@ -410,12 +410,20 @@ const approved = (() => {
     finish('APPROVAL_NOT_BLOCKED', `${APPROVAL.name}은 승인이 필요한 파일이 아닙니다`, 1);
   }
 
-  // **DESTRUCTIVE만이다.** UNKNOWN은 "모르는 문장"이라 사람이 이름만 보고
-  // 승인할 수 있는 종류가 아니다 — 그건 먼저 분류를 정해야 한다.
-  if (entry.risk !== 'DESTRUCTIVE') {
-    say(`::error::${APPROVAL.name}의 위험도가 ${entry.risk}입니다 — 이 경로는 DESTRUCTIVE만 통과시킵니다`);
+  // **DESTRUCTIVE와 DATA_DEPENDENT만이다.**
+  //
+  // UNKNOWN은 "모르는 문장"이라 사람이 이름만 보고 승인할 수 있는 종류가
+  // 아니다 — 그건 먼저 분류를 정해야 한다.
+  //
+  // DATA_DEPENDENT는 지우지는 않지만 **기존 줄에 제약을 거는** 것이다.
+  // 기존 줄이 어기면 적용이 실패하고, 성공하면 그때부터 쓰기가 거부된다.
+  // 무엇이 일어날지는 알지만 **그 DB의 데이터를 봐야** 결정할 수 있으므로,
+  // DESTRUCTIVE와 같은 승인 경로를 쓴다.
+  const APPROVABLE_RISKS = ['DESTRUCTIVE', 'DATA_DEPENDENT'];
+  if (!APPROVABLE_RISKS.includes(entry.risk)) {
+    say(`::error::${APPROVAL.name}의 위험도가 ${entry.risk}입니다 — 이 경로는 ${APPROVABLE_RISKS.join(' · ')}만 통과시킵니다`);
     say('UNKNOWN은 무슨 일이 일어나는지 아직 아무도 모르는 상태라, 이름만 보고 승인할 수 없습니다.');
-    finish('APPROVAL_RISK_MISMATCH', `${APPROVAL.name}은 DESTRUCTIVE가 아닙니다 (${entry.risk})`, 1);
+    finish('APPROVAL_RISK_MISMATCH', `${APPROVAL.name}은 ${APPROVABLE_RISKS.join('·')}가 아닙니다 (${entry.risk})`, 1);
   }
 
   // **순서를 건너뛰지 않는다.**

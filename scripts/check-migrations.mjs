@@ -410,6 +410,14 @@ const CHORE_PHRASES = [
   }
 }
 
+// 승인 없이 운영 DB에 적용되는 길이 다시 열리지 않았는가.
+// (ci.yml을 건드리지 않고 여기서 부른다 — #404가 같은 방식을 썼다)
+try {
+  await import('./check-migration-approval-gate.mjs');
+} catch (e) {
+  err('마이그레이션 승인 관문 검사 실패: ' + String(e?.stack ?? e));
+}
+
 // #398: CI must exercise the active kill-switch job uniqueness contract.
 // This is a static SQL check + FakeDB race model, not a PostgreSQL replay.
 try {
