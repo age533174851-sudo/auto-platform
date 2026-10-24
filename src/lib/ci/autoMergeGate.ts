@@ -139,10 +139,12 @@ export function completeCheckRunsPage(payload: any): CheckLike[] | null {
   // GitHub check-run 응답에 head_sha가 없으면 최신 커밋의 검증이라고
   // 주장할 수 없다. 특히 필수 verify는 GitHub Actions App에서 발행한
   // 검사여야 한다 — 다른 App이 같은 이름의 success를 만들어도 무효.
+  // 자기 검사도 이름만 보고 무시하므로 외부 App의 동명 실패 검사를 숨기지 않는다.
   if (rows.some((c: any) => !c || typeof c.name !== 'string'
       || typeof c.status !== 'string'
       || typeof c.head_sha !== 'string' || c.head_sha.trim().length === 0
-      || (REQUIRED_CHECKS.includes(c.name) && c.app?.slug !== 'github-actions'))) return null;
+      || ((REQUIRED_CHECKS.includes(c.name) || c.name === SELF_CHECK_NAME)
+          && c.app?.slug !== 'github-actions'))) return null;
   return rows.map((c: any) => ({
     name: c.name,
     status: c.status,

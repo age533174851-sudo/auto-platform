@@ -425,6 +425,34 @@ export function runAutoMergeGateTests() {
     eq(autoMergeGate(good({ checks: checks ?? [] })).code, 'OK');
   });
 
+  test('★ 외부 앱의 auto-merge-gate 실패 검사는 자기 검사로 숨기지 않는다', () => {
+    const checks = completeCheckRunsPage({ total_count: 2, check_runs: [
+      { name: 'verify', status: 'completed', conclusion: 'success',
+        head_sha: 'abc1234def5678', app: { slug: 'github-actions' } },
+      { name: SELF_CHECK_NAME, status: 'completed', conclusion: 'failure',
+        head_sha: 'abc1234def5678', app: { slug: 'third-party' } },
+    ] });
+    eq(checks, null, '외부 앱이 같은 이름으로 만든 실패 검사가 무시됐다');
+  });
+
+  test('★ auto-merge-gate 검사 앱 출처를 모르면 전체 증거를 보류한다', () => {
+    eq(completeCheckRunsPage({ total_count: 1, check_runs: [
+      { name: SELF_CHECK_NAME, status: 'completed', conclusion: 'failure',
+        head_sha: 'abc1234def5678' },
+    ] }), null);
+  });
+
+  test('정상 GitHub Actions 자기 검사 진행 중에는 자기 자신을 기다리지 않는다', () => {
+    const checks = completeCheckRunsPage({ total_count: 2, check_runs: [
+      { name: 'verify', status: 'completed', conclusion: 'success',
+        head_sha: 'abc1234def5678', app: { slug: 'github-actions' } },
+      { name: SELF_CHECK_NAME, status: 'in_progress', conclusion: null,
+        head_sha: 'abc1234def5678', app: { slug: 'github-actions' } },
+    ] });
+    eq(checks?.length, 2);
+    eq(autoMergeGate(good({ checks: checks ?? [] })).code, 'OK');
+  });
+
   console.log('[자동 머지 — 필수 verify는 반드시 성공해야 한다]');
 
   test('★ 필수 verify가 skipped 또는 neutral이면 병합하지 않는다', () => {
