@@ -43,7 +43,7 @@ function loadGate() {
   const tsc = join('node_modules', 'typescript', 'bin', 'tsc');
   if (!existsSync(tsc)) throw new Error('typescript를 찾지 못했습니다 — npm ci 먼저');
   execFileSync(process.execPath, [
-    tsc, 'src/lib/ci/autoMergeGate.ts', 'src/lib/ci/deployDispatch.ts',
+    tsc, 'src/lib/ci/autoMergeGate.ts', 'src/lib/ci/autoMergeRevalidate.ts', 'src/lib/ci/deployDispatch.ts',
     'src/lib/ci/autoRebase.ts',
     '--outDir', dir, '--module', 'commonjs', '--target', 'es2019',
     '--skipLibCheck', '--esModuleInterop',
@@ -210,6 +210,8 @@ async function main() {
     appendOpenPrPage,
   } =
     await import(`file://${join(outDir, 'autoMergeGate.js')}`);
+  const { attemptMergeAfterRecheck } =
+    await import(`file://${join(outDir, 'autoMergeRevalidate.js')}`);
   const {
     deployDispatchPlan, deployDispatchRequest, dispatchResultNote,
     migrateDispatchPlan, migrateDispatchRequest, migrateResultNote,
@@ -304,15 +306,24 @@ async function main() {
 
     if (!v.merge) continue;
 
-    const r = await api(`/repos/${REPO}/pulls/${pr.number}/merge`, {
-      method: 'PUT',
-      body: JSON.stringify({
-        merge_method: 'squash',
-        // **이 SHA일 때만 합친다.** 판정과 머지 사이에 새 커밋이 들어오면
-        // GitHub이 409로 거절한다 — 검사 안 된 코드가 들어가는 것을 막는다.
-        sha: headSha,
-      }),
+    // Re-read PR and base tip after the comment, immediately before PUT.
+    // This narrows TOCTOU; GitHub's sha condition protects HEAD, not base.
+    const attempt = await attemptMergeAfterRecheck(api, {
+      repo: REPO,
+      number: pr.number,
+      headSha,
+      baseSha: pr.base.sha,
+      baseRef: pr.base.ref,
+      mergeableState: pr.mergeable_state || 'unknown',
     });
+    if (!attempt.attempted) {
+      console.log(`#${pr.number} 머지 보류 — PUT 직전 재검증: ${attempt.reason}`);
+      await upsertComment(pr.number,
+        `<!-- traigo-auto-merge -->\n⏸ **자동 머지 보류** · \`${headSha.slice(0, 7)}\`\n\n`
+        + `PUT 직전 PR/base 상태 재확인 실패: ${attempt.reason}. 다음 실행에서 재평가합니다.`);
+      continue;
+    }
+    const r = attempt.response;
     if (r.ok) {
       merged++;
       console.log(`#${pr.number} 합쳤습니다`);
