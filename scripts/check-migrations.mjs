@@ -410,6 +410,14 @@ const CHORE_PHRASES = [
   }
 }
 
+// runtime_* 세 표가 다시 브라우저 키에 열리지 않았는가.
+// (ci.yml을 건드리지 않고 여기서 부른다 — #404가 같은 방식을 썼다)
+try {
+  await import('./check-runtime-rls.mjs');
+} catch (e) {
+  err('runtime_* 잠금 검사 실패: ' + String(e?.stack ?? e));
+}
+
 if (bad === 0) {
   console.log(`마이그레이션 배선 확인: 파일 ${built.rows.length}개 · 자동 적용 ${built.rows.length - manual.length}개 · `
     + `자동 대상 아님 ${manual.length}개 · 구파일 ${Object.keys(LEGACY).length}개`);
