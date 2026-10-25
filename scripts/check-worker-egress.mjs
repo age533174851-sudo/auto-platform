@@ -313,6 +313,36 @@ if (!src.includes("EXCHANGE_CONNECTION_COLUMNS")) {
   }
 }
 
+// ── ⑪ 402가 **나기 전** 사다리가 한가한 경로에 걸려 있는가 ──
+//
+// `quotaGate`는 402가 난 뒤에 반응한다. 그 시점에는 자동매매·청산 감시가
+// 이미 끊긴 뒤다(2026-10-23 `exceed_egress_quota`). 70·85·95% 사다리는
+// 그 앞에 선다.
+//
+// **보호 경로에는 걸지 않는다** — 위 ⑤가 그 선을 이미 센다. 사다리는
+// `routineDbAllowed()` 안에만 있어야 한다.
+{
+  const gate = bodyOf(src, 'routineDbAllowed') || src.slice(src.indexOf('function routineDbAllowed'), src.indexOf('function routineDbAllowed') + 1800);
+  if (!/usageAllows\s*\(/.test(gate)) {
+    err('한가한 조회 관문에 사용량 사다리가 없습니다 — 402가 난 뒤에야 반응하면 '
+      + '그때는 이미 자동매매·청산 감시가 끊긴 뒤입니다');
+  }
+  if (!/shouldSendUsageAlert\s*\(/.test(gate)) {
+    err('사용량 단계가 올라도 알리지 않습니다 — 70·85·95%를 지나는 것을 사람이 봐야 합니다');
+  }
+  if (!src.includes("from '../../src/lib/supabase/usageBudget'")) {
+    err('사용량 판정을 공유 정본에서 가져오지 않습니다 — 사본을 두면 한쪽만 고쳐집니다');
+  }
+  // 보호 경로에 사다리를 걸면 안 된다
+  for (const fn of PROTECTION) {
+    const b = bodyOf(src, fn) || '';
+    if (/usageAllows\s*\(/.test(b)) {
+      err(`${fn}에 사용량 사다리가 걸렸습니다 — 아끼려고 **포지션 보호**를 멈추면 `
+        + '아낀 것보다 큰 것을 잃습니다');
+    }
+  }
+}
+
 if (bad === 0) {
   console.log('✅ 워커 전송량 — 매 틱 전체 칸 조회 0 · 주기 제한 3곳 · 한도 차단기 배선됨 · '
     + '포지션 보호 경로는 차단기 뒤에 없음');
