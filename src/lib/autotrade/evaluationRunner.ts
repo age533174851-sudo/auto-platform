@@ -309,6 +309,9 @@ export async function evaluateIfDue(
     // 워커(`schedulePoll`)와 **같은 값을 같은 판정에 넘긴다.** 한쪽만
     // 넘기면 어느 실행기가 깨웠느냐에 따라 창이 열리고 닫힌다.
     strategyId: (row as any).strategy_id,
+    // 워커(`schedulePoll`)와 **같은 값을 같은 판정에** 넘긴다.
+    profileId: row.execution_profile_id,
+    presetId: row.execution_preset_id,
   });
 
   // 연결이 없는 것은 **그 사실을 예약 줄에 남긴다.** 조용히 건너뛰면

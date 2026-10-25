@@ -72,6 +72,8 @@ export interface PollRow {
   last_run_at?: any;
   interval_min?: any;
   strategy_id?: any;
+  execution_profile_id?: any;
+  execution_preset_id?: any;
   [k: string]: any;
 }
 
@@ -124,6 +126,10 @@ export function selectDueSchedules(rows: PollRow[], nowMs: number): PollSelectio
       // **창을 가진 전략은 창으로도 깨운다.** 이 값을 빼먹으면 워커
       // 경로만 창을 모르게 되고, 주 실행기가 바로 이쪽이다.
       strategyId: row?.strategy_id,
+      // 09:00 강제 진입 창은 Exact100X 계약에서만 열린다. 이 두 값을
+      // 빼먹으면 워커 경로만 그 창을 모르고, 주 실행기가 이쪽이다.
+      profileId: row?.execution_profile_id,
+      presetId: row?.execution_preset_id,
     });
     if (v.due) { due.push({ row, verdict: v }); continue; }
 

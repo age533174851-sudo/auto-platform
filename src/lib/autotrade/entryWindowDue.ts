@@ -39,6 +39,10 @@
 import {
   kstMinuteOfDay, WINDOW_START_KST, WINDOW_END_KST, LATE_GRACE_MIN,
 } from '../strategies/originalV1';
+import {
+  FORCED_ENTRY_START_KST, FORCED_ENTRY_WINDOW_MIN,
+  FORCED_ENTRY_PROFILE_ID, FORCED_ENTRY_PRESET_ID,
+} from '../strategies/dailyForcedEntry';
 
 export interface EntryWindow {
   /** 창 시작 (KST 자정부터의 분) */
@@ -73,15 +77,46 @@ export interface WindowDueVerdict {
  * **표를 여기 한 곳에만 둔다.** 창 값이 두 곳에 있으면 한쪽만 고쳐지고,
  * 그때 틀어지는 것은 "어느 시각에 주문이 나가는가"다.
  */
-export function entryWindowOf(strategyId: any): EntryWindow | null {
-  if (String(strategyId ?? '') !== 'my-original-v1') return null;
-  // 값 자체는 전략 정본(`originalV1.ts`)이 가진다. 여기서 숫자를 다시
-  // 적으면 창을 옮길 때 두 곳을 고쳐야 한다.
-  return {
-    startMin: WINDOW_START_KST.hh * 60 + WINDOW_START_KST.mm,
-    endMin: WINDOW_END_KST.hh * 60 + WINDOW_END_KST.mm,
-    graceMin: LATE_GRACE_MIN,
-  };
+export function entryWindowOf(
+  strategyId: any,
+  /** 예약 줄의 실행 계약. 계약으로만 열리는 창이 있다 */
+  contract?: { profileId?: any; presetId?: any },
+): EntryWindow | null {
+  const id = String(strategyId ?? '');
+
+  // 값 자체는 각 전략 정본이 가진다. 여기서 숫자를 다시 적으면 창을
+  // 옮길 때 두 곳을 고쳐야 하고, 그때 한쪽만 고쳐진다.
+  if (id === 'my-original-v1') {
+    return {
+      startMin: WINDOW_START_KST.hh * 60 + WINDOW_START_KST.mm,
+      endMin: WINDOW_END_KST.hh * 60 + WINDOW_END_KST.mm,
+      graceMin: LATE_GRACE_MIN,
+    };
+  }
+
+  // ── 09:00 강제 진입 (Exact100X) ──
+  //
+  // **전략 id만으로 열지 않는다.** `scalp`은 일반 전략이고, 09:00 강제
+  // 진입은 Exact100X 계약을 실은 예약에서만 일어난다
+  // (`dailyForcedEntry.ts`의 `forcedEntryVerdict`가 그렇게 판단한다).
+  // 여기서 모든 scalp 예약을 깨우면, 강제 진입과 무관한 예약이 하루 한 번
+  // 더 평가되고 **그때 신호가 있으면 들어간다.** 깨우는 조건을 라우트의
+  // 판단 조건보다 넓게 두지 않는다.
+  if (id === 'scalp') {
+    if (String(contract?.profileId ?? '') !== FORCED_ENTRY_PROFILE_ID) return null;
+    if (String(contract?.presetId ?? '') !== FORCED_ENTRY_PRESET_ID) return null;
+    const startMin = FORCED_ENTRY_START_KST.hh * 60 + FORCED_ENTRY_START_KST.mm;
+    return {
+      startMin,
+      endMin: startMin + FORCED_ENTRY_WINDOW_MIN,
+      // **이 창에는 유예가 없다.** `forcedEntryVerdict`가 창을 넘기면
+      // AFTER_WINDOW로 끝낸다 — 깨우는 쪽이 더 늦게까지 깨우면,
+      // 라우트는 매번 "창 지났습니다"만 돌려주고 평가만 낭비된다.
+      graceMin: 0,
+    };
+  }
+
+  return null;
 }
 
 const hhmm = (m: number) =>

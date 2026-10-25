@@ -93,6 +93,9 @@ export function dueCheck(i: {
   intervalMin?: any;
   /** 예약 줄의 전략. 창을 가진 전략은 창으로도 깨운다 (`entryWindowDue.ts`) */
   strategyId?: any;
+  /** 예약 줄의 실행 계약. 09:00 강제 진입 창은 Exact100X 계약에서만 열린다 */
+  profileId?: any;
+  presetId?: any;
 }): DueVerdict {
   if (i.enabled !== true) {
     return { due: false, code: 'OFF', leftMin: null, reason: '꺼져 있습니다' };
@@ -128,7 +131,8 @@ export function dueCheck(i: {
   // 왜 필요한가는 `entryWindowDue.ts` 머리말에 있다 — 간격 60분이면
   // 09:10~09:30 20분 창의 운명이 **위상 한 값**에 걸린다.
   const wv = windowDueVerdict({
-    nowMs: i.nowMs, lastRunAtMs: last, window: entryWindowOf(i.strategyId),
+    nowMs: i.nowMs, lastRunAtMs: last,
+    window: entryWindowOf(i.strategyId, { profileId: i.profileId, presetId: i.presetId }),
   });
   if (wv.due) return { due: true, code: 'WINDOW', leftMin: 0, reason: wv.reason };
 
