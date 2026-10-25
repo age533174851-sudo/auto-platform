@@ -139,12 +139,22 @@ export async function readPositionRiskWithProvenance(
   const span = monotonicSpanMs;
   const helperT0 = monotonicMs();
 
+  // 포지션 수량은 청산 완료의 최종 증거다. parseFloat('bad') || 0처럼
+  // 못 읽은 값을 0으로 바꾸면 실제 노출을 FLAT으로 오인한다.
+  const positionAmtOf = (row: any): number | null => {
+    const raw = row?.positionAmt;
+    if (typeof raw !== 'string' && typeof raw !== 'number') return null;
+    if (typeof raw === 'string' && raw.trim() === '') return null;
+    const amt = Number(raw);
+    return Number.isFinite(amt) ? amt : null;
+  };
+
   const shape = (row: any, extra?: { marginType?: string; leverage?: number | null }) => {
     const liq = parseFloat(row.liquidationPrice ?? '0');
     const lev = extra?.leverage != null ? extra.leverage : parseInt(row.leverage ?? '0', 10);
     return {
       symbol: String(row.symbol ?? sym),
-      positionAmt: parseFloat(row.positionAmt ?? '0') || 0,
+      positionAmt: positionAmtOf(row)!, // pick()에서 검증한 값만 여기에 온다
       marginType: String(extra?.marginType ?? row.marginType ?? '').toLowerCase(),
       // 0은 값이 아니라 '못 받았음'이다
       leverage: Number.isFinite(lev as any) && Number(lev) > 0 ? Number(lev) : null,
@@ -162,7 +172,13 @@ export async function readPositionRiskWithProvenance(
   // 고르고, 둘 다 0이면 첫 줄(설정값은 같다)을 쓴다.
   const pick = (data: any) => {
     const rows = Array.isArray(data) ? data : [data];
-    return rows.find((r: any) => parseFloat(r?.positionAmt ?? '0') !== 0) ?? rows[0];
+    // 심볼이 다른 0을 요청 심볼의 종료 증거로 사용하지 않는다.
+    const mine = rows.filter((r: any) => String(r?.symbol ?? '').toUpperCase() === sym);
+    if (!mine.length) return null;
+    // 헤지 계좌에서는 LONG/SHORT 어느 한쪽이라도 수량을 못 읽으면
+    // 다른 쪽 0으로 전량 종료를 확정할 수 없다.
+    if (mine.some((r: any) => positionAmtOf(r) === null)) return null;
+    return mine.find((r: any) => positionAmtOf(r) !== 0) ?? mine[0];
   };
 
   let v2Err = '';
@@ -189,6 +205,7 @@ export async function readPositionRiskWithProvenance(
         },
       };
     }
+    v2Err = row ? 'v2 마진 모드 누락' : 'v2 수량/심볼 누락 또는 비정상';
   } catch (e: any) { v2Err = String(e?.message || e); }
 
   // v3 + 계정 조회. v3에는 marginType·leverage가 없다.
@@ -204,7 +221,7 @@ export async function readPositionRiskWithProvenance(
     const v3T1 = monotonicMs();
     const row = pick(raw3);
     if (!row) {
-      return { risk: null, error: `포지션 정보가 비어 있습니다 (v2: ${v2Err || '없음'})`,
+      return { risk: null, error: `포지션 수량/심볼을 확인할 수 없습니다 (v2: ${v2Err || '없음'})`,
         provenance: { ...prov } };
     }
     const p3: PositionRiskProvenance = {
