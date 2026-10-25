@@ -187,4 +187,78 @@ export function runPositionRiskProvenanceTests() {
     // 주입 없이 부를 수 없다 = 스스로 조회하지 않는다.
     eq(src.readPositionRiskWithProvenance.length >= 2, true);
   });
+  // ══════════════════════════════════════════════════════════
+  // 청산 확인 안전성 — 잘못된 positionAmt를 포지션 0으로 읽으면
+  // 아직 열린 포지션을 "전량 종료"로 보고할 수 있다.
+  // ══════════════════════════════════════════════════════════
+  test('★ 비정상 수량은 0 포지션이 아니다 — v2/v3 모두 깨지면 UNKNOWN', async () => {
+    for (const bad of ['NaN', 'Infinity', '-Infinity', '0.01abc', '', ' ']) {
+      const r = await readPositionRiskWithProvenance('BTCUSDT',
+        async (path) => path.includes('/v2/')
+          ? [{ ...ROW, positionAmt: bad }]
+          : path.includes('/v3/positionRisk')
+            ? [{ ...ROW3, positionAmt: bad }]
+            : ACCT, clock());
+      eq(r.risk, null, `잘못된 수량 "${bad}"을 포지션 0으로 오인했다`);
+      assert(!!r.error, `잘못된 수량 "${bad}"의 오류 근거가 없다`);
+      eq(r.provenance.positionRiskSource, null,
+        '수량 검증 실패를 성공한 포지션 관측으로 적었다');
+    }
+  });
+
+  test('★ positionAmt 누락/null도 빈 포지션으로 추측하지 않는다', async () => {
+    for (const bad of [undefined, null]) {
+      const r = await readPositionRiskWithProvenance('BTCUSDT',
+        async (path) => path.includes('/v2/')
+          ? [{ ...ROW, positionAmt: bad }]
+          : path.includes('/v3/positionRisk')
+            ? [{ ...ROW3, positionAmt: bad }]
+            : ACCT, clock());
+      eq(r.risk, null, '수량이 없는데 포지션 0으로 확정했다');
+      assert(!!r.error, '누락된 수량의 오류 근거가 없다');
+    }
+  });
+
+  test('★ v2 수량이 깨져도 정상 v3는 별도 관측으로 복구한다', async () => {
+    const calls: string[] = [];
+    const r = await readPositionRiskWithProvenance('BTCUSDT',
+      async (path) => {
+        calls.push(path);
+        if (path === '/fapi/v2/positionRisk') return [{ ...ROW, positionAmt: 'bad' }];
+        if (path === '/fapi/v3/positionRisk') return [{ ...ROW3, positionAmt: '-0.004' }];
+        return ACCT;
+      }, clock());
+    eq(r.provenance.positionRiskSource, 'V3');
+    eq(r.risk?.positionAmt, -0.004, 'v2의 깨진 수량이 v3 정상 수량을 덮었다');
+    eq(calls.join(','), '/fapi/v2/positionRisk,/fapi/v3/positionRisk,/fapi/v3/account');
+  });
+
+  test('★ 실제 0은 0으로 유지한다 — 청산 완료 판정을 막지 않는다', async () => {
+    for (const zero of ['0', '0.000', 0]) {
+      const r = await readPositionRiskWithProvenance('BTCUSDT',
+        async () => [{ ...ROW, positionAmt: zero }], clock());
+      eq(r.provenance.positionRiskSource, 'V2');
+      eq(r.risk?.positionAmt, 0);
+      eq(r.error, null);
+    }
+  });
+
+  test('★ 다른 심볼의 0은 BTCUSDT 청산 완료 증거가 아니다', async () => {
+    const r = await readPositionRiskWithProvenance('BTCUSDT',
+      async (path) => path.includes('account') ? ACCT
+        : [{ ...ROW, symbol: 'ETHUSDT', positionAmt: '0' }], clock());
+    eq(r.risk, null, 'ETHUSDT의 0을 BTCUSDT의 0으로 읽었다');
+    assert(!!r.error, '요청 심볼 불일치의 오류 근거가 없다');
+  });
+
+  test('★ 헤지 모드 한쪽 수량이 깨지면 다른 쪽 0으로 덮지 않는다', async () => {
+    const rows = [
+      { ...ROW, positionAmt: '0', positionSide: 'LONG' },
+      { ...ROW, positionAmt: 'invalid', positionSide: 'SHORT' },
+    ];
+    const r = await readPositionRiskWithProvenance('BTCUSDT',
+      async (path) => path.includes('account') ? ACCT : rows, clock());
+    eq(r.risk, null, '헤지 모드 SHORT 수량이 깨졌는데 LONG 0으로 청산 완료를 확정했다');
+  });
+
 }
