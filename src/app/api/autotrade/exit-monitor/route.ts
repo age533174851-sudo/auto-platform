@@ -861,6 +861,10 @@ async function runLifecycleSweep(
     // ★ **일반 생명주기 결과와 섞지 않는다.** 섞으면 "트레일링이 돌았다"와
     //   "전용 종료 권한이 닫았다"가 한 숫자가 되어 무엇이 돌았는지 모른다.
     authority: { candidates: 0, acted: 0, failed: 0, extended: 0, results: [] as any[] },
+    // ★ **청산 의도가 기록으로 남았는가.** 주문을 보냈는데 기록이
+    //   없으면 재시작이 그 주문을 멱등 키로 찾을 수 없다. 조용히
+    //   넘기면 다음 회차가 그 사실을 모른다.
+    exitDurability: [] as any[],
     escape: { recorded: 0, recordFailed: 0, notEligible: 0 },
     // ★ **측정만 한다.** `acted` 칸이 없다 — 셀 행동이 없다.
     postEntryRisk: { measured: 0, unusable: 0, samples: [] as any[],
@@ -1043,6 +1047,9 @@ async function runLifecycleSweep(
         }
 
         let prepared: any = null;
+        // ②에서 정해지고 ④가 읽는다. 전송 허가와 기록 내구성을 함께 든다.
+        let sendGate: { maySend: boolean; code: string; reason: string;
+          durable: boolean; alert: boolean } | null = null;
         const r = await runExitAuthority(
           {
             positionIdentity: {
@@ -1075,6 +1082,75 @@ async function runLifecycleSweep(
                   reason: 'TIME_EXIT', quantity: observedQty,
                 }));
               prepared = p0.prepared;
+
+              // ── 전송 허가와 선점을 **여기서** 끝낸다 ──
+              //
+              //   ★ `revalidateFence()`와 `sendClose()` 사이에는 await를
+              //     끼우지 않는다(`exitAuthorityRun` 253줄의 불변식,
+              //     `criticalWindowElapsedMs`가 그 창을 잰다).
+              //
+              //     처음에 이 작업을 `sendClose` 안에 뒀다가 그 창에
+              //     **DB 조회 + 거래소 HTTP 왕복 + DB INSERT 셋**을
+              //     집어넣었다. 울타리가 막으려던 경합을 그만큼 넓힌
+              //     것이다. 독립 감사가 그것을 잡았고, 그래서 전부
+              //     울타리 앞으로 옮겼다.
+              //
+              //   준비가 READY가 아니면 보낼 것이 없으므로 묻지 않는다.
+              sendGate = null;
+              if (p0.code === 'READY' && p0.prepared) {
+                const { recordExitIntent, findExitIntent, findOtherPendingExitForSeat,
+                  judgeExitSendPermission } =
+                  await import('@/lib/engine/exitIntentStore');
+                const cid = String((p0.prepared as any)?.clientOrderId ?? '').trim();
+                // Quantity changes after PARTIAL fill, so clientOrderId
+                // changes. A new key cannot prove that an earlier close in
+                // the SAME owned connection/symbol has finished. Before
+                // claiming a new key, search other unresolved reduceOnly
+                // intents in the ledger. Missing DB evidence blocks only
+                // this AUTOMATIC send; no cancellation or venue write here.
+                const seat = await findOtherPendingExitForSeat(sb as any, {
+                  userId: c.userId, connectionId: c.connectionId,
+                  exchange: String(c.exchange), mode: c.mode,
+                  symbol: c.symbol, clientOrderId: cid,
+                });
+                if (!seat.mayProceedToExistingOrderGate) {
+                  sendGate = { maySend: false, code: seat.code,
+                    reason: seat.reason, durable: false, alert: true };
+                } else {
+                const prior = await findExitIntent(sb as any, cid);
+                // 첫 전송이 확실하면 거래소를 괴롭히지 않는다.
+                const venueLookup = prior.recordFound === false ? null
+                  : await ops.findCloseByClientId(venue, c.symbol, cid)
+                      .catch(() => ({ ok: false, found: false }));
+                const perm = judgeExitSendPermission({
+                  prior: { ...prior, venueLookup, sendCount: undefined } });
+                if (!perm.maySend) {
+                  sendGate = { maySend: false, code: perm.code, reason: perm.reason,
+                    durable: prior.recordFound === true, alert: perm.code === 'BLOCKED_PRIOR_UNKNOWN' };
+                } else {
+                  // **선점한다.** UNIQUE 위반이 나면 다른 실행자가 같은
+                  // 의도를 먼저 잡은 것이고, 그때는 보내지 않는다.
+                  const wrote = await recordExitIntent(sb as any, {
+                    clientOrderId: cid,
+                    connectionId: c.connectionId,
+                    exchange: String(c.exchange),
+                    mode: c.mode,
+                    symbol: c.symbol,
+                    orderSide: (p0.prepared as any)?.orderSide === 'BUY' ? 'BUY' : 'SELL',
+                    quantity: Number((p0.prepared as any)?.quantity ?? 0),
+                    userId: c.userId,
+                  }, 'AUTOMATIC');
+                  sendGate = { maySend: wrote.maySend, code: wrote.code,
+                    reason: wrote.reason, durable: wrote.durable,
+                    alert: wrote.code === 'ALREADY_EXISTS' };
+                }
+                } // same-seat read guard
+                if (!sendGate.maySend) {
+                  out.exitDurability.push({ symbol: c.symbol, code: 'SEND_DEFERRED',
+                    alertOperator: sendGate.alert, intent: sendGate.code,
+                    reason: sendGate.reason });
+                }
+              }
               return { code: p0.code, prepared: p0.prepared as any, message: p0.message };
             },
             // ③-a 보유 연장 증거 — **권한이 청산을 승인한 뒤, 재검증 앞**
@@ -1100,7 +1176,32 @@ async function runLifecycleSweep(
             // ③ 쓰기 직전 재검증 — 아래 전송과의 사이에 await가 없다
             revalidateFence: mayMutate,
             // ④ 전송 — 읽지 않는다
-            sendClose: () => ops.sendSymbolClose(venue, prepared),
+            //
+            // ★ **보내기 전에 보낸다는 사실을 남긴다.**
+            //
+            //   진입 경로는 `live_orders`에 `INTENT` 행을 먼저 쓰지만
+            //   청산 경로에는 그것이 없었다 — `clientOrderId`가 요청
+            //   메모리에만 있었다. 멱등 키는 지금 관측한 노출에서
+            //   나오므로 **부분 체결 뒤에는 키가 바뀌고**, 앞서 보낸
+            //   주문을 그 키로 더 이상 찾을 수 없다.
+            //
+            //   기록 실패는 **청산을 막지 않는다.** 못 썼다고 포지션에서
+            //   빠져나갈 길을 막으면 못 여는 불편이 아니라 못 닫는
+            //   사고가 된다. 그래서 기록하지 못한 사실만 따로 적는다.
+            // ④ 전송 — 읽지 않는다. **이 앞에 await가 없다.**
+            //
+            //   허가·선점은 ②에서 이미 끝났다. 여기서 DB나 거래소를
+            //   건드리면 울타리 재검증과 전송 사이가 벌어진다.
+            sendClose: async () => {
+              if (sendGate && !sendGate.maySend) {
+                // **보내지 않았다**를 그대로 돌려준다. 실패로 적으면
+                // 다음 회차가 재시도 대상으로 읽는다.
+                return { attempted: false, ok: false, error: sendGate.reason,
+                  ambiguous: false, reportedAvgPrice: null,
+                  exchangeOrderId: null, executedQty: null };
+              }
+              return ops.sendSymbolClose(venue, prepared);
+            },
             // ⑤ 재조회
             readAfter: () => ops.readOpenPosition(venue, c.symbol)
               .then((x: any) => ({ ok: x.ok === true, found: x.found === true })),
