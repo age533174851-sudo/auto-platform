@@ -102,6 +102,29 @@ export function claimDecision(i: {
   return { code: 'NOTHING', row: null, reason: '실행할 요청이 없습니다' };
 }
 
+// ── 실제 DB UPDATE의 원자적 선점 조건 ──
+//
+// claimDecision은 *읽은 시점*의 판정이다. 두 실행기가 같은 PENDING을
+// 읽으면 둘 다 CLAIM을 낼 수 있다. 그러므로 UPDATE도 현재 상태를
+// 다시 확인해야 한다. 단순 status IN ('PENDING','CLAIMED')은 둘 다
+// CLAIMED로 덮어써서 같은 DEPLOY/RECOVER를 두 번 실행하게 한다.
+//
+// 이 SQL은 ops-runner.mjs의 UPDATE WHERE 안에서 DB가 평가한다.
+// PENDING만 새로 선점하고, CLAIMED는 임차 TTL이 지난 경우에만 회수한다.
+// 승인·명령·요청 TTL도 *쓰기 시점*에 다시 확인한다.
+export function claimUpdateGuardSql(): string {
+  const claimSeconds = CLAIM_TTL_MS / 1000;
+  const requestSeconds = REQUEST_TTL_MS / 1000;
+  return `(
+    status = 'PENDING'
+    OR (status = 'CLAIMED'
+      AND (claimed_at IS NULL OR claimed_at <= now() - INTERVAL '${claimSeconds} seconds'))
+  )
+  AND requested_at >= now() - INTERVAL '${requestSeconds} seconds'
+  AND command IN ('DEPLOY', 'RECOVER', 'APPROVE_LIVE_SMALL')
+  AND (command <> 'APPROVE_LIVE_SMALL' OR approved IS TRUE)`;
+}
+
 // ── 실행 결과 ──
 
 export interface StepOutcome {
