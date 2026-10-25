@@ -53,6 +53,7 @@ export async function runSmokeStartRouteTests() {
   const serverPath = require.resolve('../../lib/supabase/server');
   const adminPath = require.resolve('../../lib/supabase/admin');
   const routePath = require.resolve('../../app/api/autotrade/smoke-test/route');
+  const evidenceRoutePath = require.resolve('../../app/api/autotrade/smoke-test/legacy-evidence/route');
 
   /**
    * 라우트를 가짜 DB에 붙여 **새로** 불러온다.
@@ -60,7 +61,7 @@ export async function runSmokeStartRouteTests() {
    * `admin`도 캐시에서 지운다 — 그쪽이 `server`를 다시 내보내므로
    * `server`만 바꿔 두면 옛 바인딩이 그대로 남는다.
    */
-  function loadRoute(db: FakeDb, jwtUser: string | null) {
+  function loadRoute(db: FakeDb, jwtUser: string | null, actualRoutePath = routePath) {
     const prevServer = require.cache[serverPath];
     const prevAdmin = require.cache[adminPath];
     require.cache[serverPath] = {
@@ -72,13 +73,13 @@ export async function runSmokeStartRouteTests() {
       },
     } as any;
     delete require.cache[adminPath];
-    delete require.cache[routePath];
-    const mod = require(routePath);
+    delete require.cache[actualRoutePath];
+    const mod = require(actualRoutePath);
     return {
       POST: mod.POST as (r: any) => Promise<any>,
       GET: mod.GET as (r: any) => Promise<any>,
       restore: () => {
-        delete require.cache[routePath];
+        delete require.cache[actualRoutePath];
         delete require.cache[adminPath];
         if (prevServer) require.cache[serverPath] = prevServer; else delete require.cache[serverPath];
         if (prevAdmin) require.cache[adminPath] = prevAdmin;
@@ -123,6 +124,65 @@ export async function runSmokeStartRouteTests() {
   /** 주문을 낼 수 있는 쓰기가 하나도 없는가 */
   const noLedgerWrites = (db: FakeDb) =>
     db.writes.filter(w => w.table === 'smoke_runs' || w.table === 'smoke_tests');
+
+  // ── 새 레거시 증거 조회 라우트: 실제 HTTP 핸들러의 음성 시험 ──
+  // These stop BEFORE any Binance API GET. Fake DB and JWT; NO venue calls.
+  const uuidLegacy = '11111111-1111-4111-8111-111111111111';
+  const legacyReq = (id: string, token = 'simulated') =>
+    req({ testId: id }, token === 'absent' ? {} : { authorization: 'Bearer fake.jwt' });
+
+  test('⑥ 레거시 증거 조회는 비인증 요청을 401로 거부하고 DB를 읽지 않는다', async () => {
+    const db = new FakeDb();
+    const r = loadRoute(db, null, evidenceRoutePath);
+    try {
+      const res = await r.POST(legacyReq(uuidLegacy, 'absent'));
+      eq(res.status, 401);
+      const json = await res.json(); eq(json.code, 'AUTH_REQUIRED');
+      eq(db.writes.length, 0);
+    } finally { r.restore(); }
+  });
+
+  test('⑥ 레거시 증거 조회는 잘못된 UUID를 DB/거래소 호출 전에 거부한다', async () => {
+    const db = new FakeDb();
+    const r = loadRoute(db, 'u-1', evidenceRoutePath);
+    try {
+      const res = await r.POST(legacyReq('invalid'));
+      eq(res.status, 400);
+      const json = await res.json(); eq(json.code, 'BAD_TEST_ID');
+      eq(db.writes.length, 0);
+    } finally { r.restore(); }
+  });
+
+  test('⑥ 타인의 레거시 회차는 service-role에서도 보이지 않아야 한다', async () => {
+    const db = new FakeDb();
+    db.seed('smoke_tests', [{
+      id: uuidLegacy, user_id: 'other-person', connection_id: 'c-testnet',
+      symbol: 'BTCUSDT', state: 'UNKNOWN', mode: 'TESTNET',
+      steps: { POSITION_ZERO: { state: 'PASS' } },
+    }]);
+    const r = loadRoute(db, 'u-1', evidenceRoutePath);
+    try {
+      const res = await r.POST(legacyReq(uuidLegacy));
+      eq(res.status, 404);
+      const json = await res.json(); eq(json.code, 'NOT_FOUND');
+      eq(db.writes.length, 0);
+    } finally { r.restore(); }
+  });
+
+  test('⑥ 이미 종료된 정상 회차를 레거시 UNKNOWN 재검증 대상으로 취급하지 않는다', async () => {
+    const db = new FakeDb();
+    db.seed('smoke_tests', [{
+      id: uuidLegacy, user_id: 'u-1', connection_id: 'c-testnet',
+      symbol: 'BTCUSDT', state: 'PASS', mode: 'TESTNET', steps: {},
+    }]);
+    const r = loadRoute(db, 'u-1', evidenceRoutePath);
+    try {
+      const res = await r.POST(legacyReq(uuidLegacy));
+      eq(res.status, 409);
+      const json = await res.json(); eq(json.code, 'NOT_LEGACY_TESTNET_UNKNOWN');
+      eq(db.writes.length, 0);
+    } finally { r.restore(); }
+  });
 
   // ── ① 인증 우회가 없는가 ──
 

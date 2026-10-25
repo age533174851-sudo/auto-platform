@@ -79,6 +79,16 @@ export async function getFuturesBalance(key: string, secret: string, testnet = t
   } catch (e: any) { return { success: false, message: e.message || '잔고 조회 실패' }; }
 }
 
+/**
+ * A syntactically successful HTTP response still needs the expected array
+ * shape before it can prove no open positions or open orders. An object,
+ * null, or other malformed response is UNKNOWN, NEVER an empty account.
+ */
+export function requireBinanceVenueRows(data: unknown, errorCode: string): any[] {
+  if (!Array.isArray(data)) throw new Error(errorCode);
+  return data;
+}
+
 export interface FuturesPosition {
   symbol: string; side: 'LONG' | 'SHORT' | 'FLAT'; amount: number;
   entryPrice: number; markPrice: number; unrealizedPnl: number; leverage: number; liquidationPrice: number;
@@ -89,7 +99,9 @@ export interface FuturesPosition {
 export async function getFuturesPositions(key: string, secret: string, testnet = true) {
   try {
     const data = await fapiSigned('GET', '/fapi/v2/positionRisk', key, secret, testnet);
-    const positions: FuturesPosition[] = (Array.isArray(data) ? data : [])
+    // A 200 response with malformed JSON/object is not an empty account.
+    // Fail closed so openPositionOf cannot return found:false from a bad read.
+    const positions: FuturesPosition[] = requireBinanceVenueRows(data, 'INVALID_POSITION_RISK_SHAPE')
       .filter((p: any) => parseFloat(p.positionAmt) !== 0)
       .map((p: any) => {
         const amt = parseFloat(p.positionAmt);
@@ -1450,7 +1462,8 @@ export async function getFuturesOpenOrders(key: string, secret: string, testnet 
     const params: Record<string, string | number> = {};
     if (symbol) params.symbol = symbol.toUpperCase().replace('/', '');
     const data = await fapiSigned('GET', '/fapi/v1/openOrders', key, secret, testnet, params);
-    const orders: FuturesOpenOrder[] = (Array.isArray(data) ? data : []).map((o: any) => ({
+    // Unknown response shape is a failed venue read, NEVER zero open orders.
+    const orders: FuturesOpenOrder[] = requireBinanceVenueRows(data, 'INVALID_OPEN_ORDERS_SHAPE').map((o: any) => ({
       orderId: o.orderId, symbol: o.symbol, type: o.type, side: o.side,
       stopPrice: parseFloat(o.stopPrice || '0'),
       closePosition: !!o.closePosition, reduceOnly: !!o.reduceOnly,
@@ -1464,6 +1477,30 @@ export async function getFuturesOpenOrders(key: string, secret: string, testnet 
     }));
     return { success: true, orders };
   } catch (e: any) { return { success: false, message: e.message || '미체결 조회 실패', orders: [] as FuturesOpenOrder[] }; }
+}
+
+/**
+ * Binance USD-M conditional TP/SL/trailing orders migrated to the
+ * SEPARATE Algo Service order book. A successful regular openOrders read
+ * DOES NOT establish zero conditional orders. This function is READ-ONLY.
+ *
+ * Official docs: GET /fapi/v1/openAlgoOrders (signed; symbol optional).
+ * Missing/unsupported endpoint, permission error, malformed 200 payload
+ * must return success:false, never an empty successful account.
+ */
+export async function getFuturesOpenAlgoOrders(
+  key: string, secret: string, testnet = true, symbol?: string,
+): Promise<{ success: boolean; orders: any[]; message?: string }> {
+  try {
+    const params: Record<string, string | number> = { algoType: 'CONDITIONAL' };
+    if (symbol) params.symbol = symbol.toUpperCase().replace('/', '');
+    const data = await fapiSigned('GET', '/fapi/v1/openAlgoOrders', key, secret, testnet, params);
+    const orders = requireBinanceVenueRows(data, 'INVALID_OPEN_ALGO_ORDERS_SHAPE');
+    return { success: true, orders };
+  } catch (e: any) {
+    return { success: false, orders: [],
+      message: String(e?.message || 'Algo openOrders read failed') };
+  }
 }
 
 /**
