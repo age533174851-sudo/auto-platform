@@ -45,6 +45,18 @@ if (have !== want) {
   if (have) {
     const hn = (have.match(/name: '/g) || []).length;
     console.error(`   현재 ${hn}개 기록 · 실제 ${built.rows.length}개`);
+    // 파일 수가 같아도 위험도가 바뀌면 승인/자동 적용 경계가 달라진다.
+    // "낡았다"만 적으면 어떤 파일이 바뀌었는지 알 수 없어 재검증이 느려진다.
+    const recordedRisks = new Map(
+      [...have.matchAll(/\{ name: '([^']+)', id: \d+, risk: '([^']+)'/g)]
+        .map((m) => [m[1], m[2]]),
+    );
+    for (const row of built.rows) {
+      const prev = recordedRisks.get(row.name);
+      if (prev && prev !== row.risk) {
+        console.error(`   위험도 변경: ${row.name} ${prev} → ${row.risk}`);
+      }
+    }
   }
 }
 
@@ -408,6 +420,22 @@ const CHORE_PHRASES = [
       }
     }
   }
+}
+
+// 승인 없이 운영 DB에 적용되는 길이 다시 열리지 않았는가.
+// (ci.yml을 건드리지 않고 여기서 부른다 — #404가 같은 방식을 썼다)
+try {
+  await import('./check-migration-approval-gate.mjs');
+} catch (e) {
+  err('마이그레이션 승인 관문 검사 실패: ' + String(e?.stack ?? e));
+}
+
+// #398: CI must exercise the active kill-switch job uniqueness contract.
+// This is a static SQL check + FakeDB race model, not a PostgreSQL replay.
+try {
+  await import('./check-killswitch-active-job-unique.mjs');
+} catch (e) {
+  err('킬스위치 활성 잡 유일성 검사 실패: ' + String(e?.stack ?? e));
 }
 
 if (bad === 0) {

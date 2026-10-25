@@ -57,8 +57,22 @@ const store = code(read(STORE));
   if (!/Number\(r\?\.updated\) === 1/.test(lease)) {
     err(`${LEASE}가 갱신된 줄 수를 확인하지 않습니다 — 0줄 갱신이 성공으로 읽힙니다`);
   }
-  if (!/code: 'RACE_LOST', granted: false/.test(lease)) {
-    err(`${LEASE}가 경합에서 졌을 때 실행 권한을 내려놓지 않습니다`);
+  // DB 오류(WRITE_FAILED)와 정상 CAS 경합 패배(RACE_LOST)는 다르지만,
+  // 두 경우 모두 실행 권한과 fence를 내려놓아야 한다. 고정 객체 리터럴
+  // 한 가지 모양만 요구하면 조건부 표현식으로 바꿨을 때 CI가 거짓 RED가 된다.
+  // 실패 분기 자체와 반환 객체의 필드를 함께 검사한다.
+  const loss = lease.match(
+    /if\s*\(!ok\)\s*\{\s*return\s*\{\s*code:\s*writeFailed\s*\?\s*'WRITE_FAILED'\s*:\s*'RACE_LOST',([\s\S]*?)\}\s*;\s*\}/
+  );
+  if (!loss || !/\bgranted\s*:\s*false\b/.test(loss[1])
+    || !/\bmyFence\s*:\s*null\b/.test(loss[1])) {
+    err(`${LEASE}가 경합/DB 오류 시 실행 권한 또는 fence를 내려놓지 않습니다`);
+  }
+  // 실제 DB 오류·예외를 경쟁 패배로 덮어쓰지 않는가.
+  if (!/writeFailed\s*=\s*!ok\s*&&\s*!duplicate/.test(lease)
+    || !/writeFailed\s*=\s*!!r\?\.error/.test(lease)
+    || !/catch\s*\([^)]*\)\s*\{\s*ok\s*=\s*false;\s*writeFailed\s*=\s*true/.test(lease)) {
+    err(`${LEASE}가 DB 쓰기 실패를 정상 경합 패배와 구분하지 않습니다`);
   }
   // 라우트가 그 정본을 쓰고, 실제 쿼리에도 조건이 걸려 있는가
   if (!/acquireExitLease\(/.test(route)) {

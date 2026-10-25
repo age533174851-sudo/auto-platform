@@ -43,7 +43,7 @@ function loadGate() {
   const tsc = join('node_modules', 'typescript', 'bin', 'tsc');
   if (!existsSync(tsc)) throw new Error('typescript를 찾지 못했습니다 — npm ci 먼저');
   execFileSync(process.execPath, [
-    tsc, 'src/lib/ci/autoMergeGate.ts', 'src/lib/ci/deployDispatch.ts',
+    tsc, 'src/lib/ci/autoMergeGate.ts', 'src/lib/ci/autoMergeRevalidate.ts', 'src/lib/ci/deployDispatch.ts',
     'src/lib/ci/autoRebase.ts',
     '--outDir', dir, '--module', 'commonjs', '--target', 'es2019',
     '--skipLibCheck', '--esModuleInterop',
@@ -138,24 +138,15 @@ async function graphql(query, variables) {
 /**
  * 리뷰 상태. **못 읽으면 null이다** — 0으로 두면 미해결 리뷰를 무시하고 합친다.
  */
-async function reviewFacts(number) {
+async function reviewFacts(number, parseFacts) {
   const q = `query($o:String!,$n:String!,$p:Int!){
     repository(owner:$o,name:$n){ pullRequest(number:$p){
-      reviewThreads(first:100){ nodes { isResolved isOutdated } }
+      reviewThreads(first:100){ nodes { isResolved isOutdated } pageInfo { hasNextPage } }
       reviews(first:100, states:CHANGES_REQUESTED){ totalCount }
     }}}`;
   const r = await graphql(q, { o: OWNER, n: NAME, p: number });
   if (!r.ok) return { unresolvedThreads: null, changesRequested: null };
-  const pr = r.body?.data?.repository?.pullRequest;
-  const nodes = pr?.reviewThreads?.nodes;
-  if (!Array.isArray(nodes) || pr?.reviews?.totalCount == null) {
-    return { unresolvedThreads: null, changesRequested: null };
-  }
-  return {
-    // outdated된 스레드는 이미 그 코드가 사라진 것이라 세지 않는다.
-    unresolvedThreads: nodes.filter(t => !t.isResolved && !t.isOutdated).length,
-    changesRequested: pr.reviews.totalCount,
-  };
+  return parseFacts(r.body);
 }
 
 /**
@@ -213,8 +204,14 @@ async function upsertComment(number, body) {
 
 async function main() {
   const outDir = loadGate();
-  const { autoMergeGate, gateComment, AUTO_MERGE_LABEL, SELF_CHECK_NAME, REQUIRED_CHECKS } =
+  const {
+    autoMergeGate, gateComment, AUTO_MERGE_LABEL, SELF_CHECK_NAME, REQUIRED_CHECKS,
+    reviewFactsFromGraphql, completeCheckRunsPage, completeCommitStatusesPage,
+    appendOpenPrPage,
+  } =
     await import(`file://${join(outDir, 'autoMergeGate.js')}`);
+  const { attemptMergeAfterRecheck } =
+    await import(`file://${join(outDir, 'autoMergeRevalidate.js')}`);
   const {
     deployDispatchPlan, deployDispatchRequest, dispatchResultNote,
     migrateDispatchPlan, migrateDispatchRequest, migrateResultNote,
@@ -225,12 +222,26 @@ async function main() {
 
   const only = process.env.PR_NUMBER ? Number(process.env.PR_NUMBER) : null;
 
-  const listed = await api(`/repos/${REPO}/pulls?state=open&per_page=100`);
-  if (!listed.ok) {
-    console.error('PR 목록을 읽지 못했습니다:', listed.status);
-    process.exit(1);
+  // 첫 100개만 보면 오래된 auto-merge 라벨 PR은 판정 대상에서 사라진다.
+  // 전 페이지를 확인하기 전에는 단 한 건도 병합하지 않는다.
+  // 조회 실패·중복·깨진 페이지·과도한 페이지 수는 전체 판정을 중단한다.
+  let allPrs = [];
+  let complete = false;
+  for (let page = 1; page <= 100; page++) {
+    const listed = await api(`/repos/${REPO}/pulls?state=open&per_page=100&page=${page}`);
+    if (!listed.ok) {
+      throw new Error(`PR 목록 ${page}페이지 조회 실패 (HTTP ${listed.status}) — 병합 보류`);
+    }
+    const accumulated = appendOpenPrPage(allPrs, listed.body);
+    if (accumulated === null) {
+      throw new Error(`PR 목록 ${page}페이지 불완전·중복·형식 오류 — 병합 보류`);
+    }
+    allPrs = accumulated.prs;
+    if (!accumulated.hasMore) { complete = true; break; }
   }
-  const prs = listed.body.filter(p => (only == null || p.number === only));
+  if (!complete) throw new Error('PR 목록 100페이지 한도 초과 — 병합 보류');
+  const prs = allPrs.filter(p => (only == null || p.number === only));
+  console.log(`열린 PR ${allPrs.length}건 전체 조회 · 판정 대상 ${prs.length}건`);
 
   let merged = 0;
   for (const brief of prs) {
@@ -250,9 +261,28 @@ async function main() {
     const [runs, statuses, review, contains] = await Promise.all([
       api(`/repos/${REPO}/commits/${headSha}/check-runs?per_page=100`),
       api(`/repos/${REPO}/commits/${headSha}/status`),
-      reviewFacts(pr.number),
+      reviewFacts(pr.number, reviewFactsFromGraphql),
       headContainsBase(pr.base.sha, headSha),
     ]);
+
+    // GitHub REST는 첫 100개 검사만 준다. total_count가 더 크면
+    // 숨은 실패가 있을 수 있으므로 판정기에 UNKNOWN(빈 목록)을 전달한다.
+    const completeChecks = runs.ok ? completeCheckRunsPage(runs.body) : null;
+    if (completeChecks === null) {
+      console.log(`#${pr.number} 검사 목록 불완전 — total_count와 첫 페이지를 확인하지 못했습니다`);
+    }
+
+    // Commit statuses also paginate (default 30). A failed or truncated read
+    // must not silently become [] while the check-runs happen to be green.
+    const completeStatuses = statuses.ok ? completeCommitStatusesPage(statuses.body) : null;
+    if (completeStatuses === null) {
+      console.log(`#${pr.number} commit status 증거 불완전 — 병합 보류 (HTTP ${statuses.status})`);
+      await upsertComment(pr.number,
+        `<!-- traigo-auto-merge -->\n⏸ **자동 머지 판정** · ${headSha.slice(0, 7)}\n\n`
+        + 'GitHub commit status 목록이 실패했거나 일부만 조회됐습니다. '
+        + '전체 상태를 확인하기 전에는 병합하지 않습니다.');
+      continue;
+    }
 
     const facts = {
       number: pr.number,
@@ -264,19 +294,11 @@ async function main() {
       headContainsBase: contains,
       mergeable: pr.mergeable,
       mergeableState: pr.mergeable_state || 'unknown',
-      checks: (runs.ok ? (runs.body.check_runs || []) : []).map(c => ({
-        name: c.name, status: c.status, conclusion: c.conclusion, headSha: c.head_sha,
-      })),
-      statuses: (statuses.ok ? (statuses.body.statuses || []) : []).map(s => ({
-        context: s.context, state: s.state,
-      })),
+      checks: completeChecks ?? [],
+      statuses: completeStatuses,
       unresolvedThreads: review.unresolvedThreads,
       changesRequested: review.changesRequested,
     };
-
-    // 검사 목록을 못 읽었으면 **빈 배열로 두지 않는다** — 그러면
-    // '검사가 없다'가 되어 CHECKS_MISSING으로 막힌다. 그게 맞는 결과다.
-    if (!runs.ok) facts.checks = [];
 
     const v = autoMergeGate(facts);
     console.log(`#${pr.number} ${v.merge ? 'MERGE' : v.code} — ${v.reason}`);
@@ -284,15 +306,24 @@ async function main() {
 
     if (!v.merge) continue;
 
-    const r = await api(`/repos/${REPO}/pulls/${pr.number}/merge`, {
-      method: 'PUT',
-      body: JSON.stringify({
-        merge_method: 'squash',
-        // **이 SHA일 때만 합친다.** 판정과 머지 사이에 새 커밋이 들어오면
-        // GitHub이 409로 거절한다 — 검사 안 된 코드가 들어가는 것을 막는다.
-        sha: headSha,
-      }),
+    // Re-read PR and base tip after the comment, immediately before PUT.
+    // This narrows TOCTOU; GitHub's sha condition protects HEAD, not base.
+    const attempt = await attemptMergeAfterRecheck(api, {
+      repo: REPO,
+      number: pr.number,
+      headSha,
+      baseSha: pr.base.sha,
+      baseRef: pr.base.ref,
+      mergeableState: pr.mergeable_state || 'unknown',
     });
+    if (!attempt.attempted) {
+      console.log(`#${pr.number} 머지 보류 — PUT 직전 재검증: ${attempt.reason}`);
+      await upsertComment(pr.number,
+        `<!-- traigo-auto-merge -->\n⏸ **자동 머지 보류** · \`${headSha.slice(0, 7)}\`\n\n`
+        + `PUT 직전 PR/base 상태 재확인 실패: ${attempt.reason}. 다음 실행에서 재평가합니다.`);
+      continue;
+    }
+    const r = attempt.response;
     if (r.ok) {
       merged++;
       console.log(`#${pr.number} 합쳤습니다`);

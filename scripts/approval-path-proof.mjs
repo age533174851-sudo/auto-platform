@@ -33,6 +33,7 @@
 //   050 UNKNOWN
 //   081 UNKNOWN
 //   082 DESTRUCTIVE  ← 앞에 막힌 것이 있으므로 순서를 건너뛸 수 없다
+//   083 DATA_DEPENDENT ← 운영에서는 반드시 승인 대상. 재생 증명에서는 전용 DB에만 별도로 재생
 //   085 DESTRUCTIVE
 //   >085 non-ADDITIVE ← manifest에서 동적으로 발견 (현재 096 UNKNOWN)
 //
@@ -252,6 +253,7 @@ ok('본 DB 지문 기록 (증명 전)', BEFORE);
 
 const files = readMigrationFiles();
 const manifest = await buildManifest();
+const earlyManual = manifest.rows.filter(r => r.id > 81 && r.id < 85 && r.risk !== 'ADDITIVE');
 const lateManual = manifest.rows.filter(r => r.id > 85 && r.risk !== 'ADDITIVE');
 const lateAdditive = manifest.rows.filter(r => r.id > 85 && r.risk === 'ADDITIVE');
 const rowCount = () => psql(`SELECT count(*) FROM schema_migrations`);
@@ -279,7 +281,7 @@ const REJECT = [
   ['목록에 없는 이름은 거부',
    '999_no_such_migration.sql', 'APPROVAL_UNKNOWN_FILE'],
   ['이미 적용된 것을 승인하면 거부',
-   '011_ai_usage.sql', 'APPROVAL_ALREADY_APPLIED'],
+   '001_kill_switch_bootstrap.sql', 'APPROVAL_ALREADY_APPLIED'],
   ['막히지 않은 안전한 파일 승인은 거부',
    '023_ai_predictions.sql', 'APPROVAL_NOT_BLOCKED'],
 ];
@@ -339,9 +341,15 @@ function seedApplied(upTo) {
 seedApplied(81);
 {
   const r = runner(['--check']);
-  const expectedBlocked = 2 + lateManual.length;
-  want('082·085와 뒤의 수동 마이그레이션만 막혀 있다',
+  // 082·083처럼 초기에 수동 승인 대상으로 바뀐 파일도 누락 없이 센다.
+  // 숫자를 임의로 낮추거나 운영 분류기를 ADDITIVE로 바꾸지 않는다.
+  const expectedBlocked = earlyManual.length + 1 + lateManual.length; // +1 = 085
+  want('082·083·085와 뒤의 수동 마이그레이션이 막혀 있다',
     String(expectedBlocked), String((r.out.match(/⛔/g) || []).length));
+  for (const m of earlyManual) {
+    want(`  085 앞의 수동 마이그레이션이 실제로 막힌다: ${m.name}`,
+      'true', String(r.out.includes(`⛔ ${m.name}`)));
+  }
   for (const m of lateManual) {
     want(`  뒤의 수동 마이그레이션이 실제로 막힌다: ${m.name}`,
       'true', String(r.out.includes(`⛔ ${m.name}`)));
@@ -357,6 +365,45 @@ seedApplied(81);
   want('  승인 흔적이 applied_by에 남았다', 'true',
     String(psql(`SELECT applied_by FROM schema_migrations WHERE filename='082_paper_rpc_account_id.sql'`)
       .startsWith('approved:')));
+}
+
+// ══════════════ 격리된 재생 단계: 운영 자동 승인과 철저히 분리 ══════════════
+//
+// 운영 러너가 083을 DATA_DEPENDENT로 차단하는 것을 먼저 확인한다.
+// 재생 전용 DB의 스키마 상태를 만드는 작업은 본 스크립트의 psqlFile만 한다.
+// 절대로 apply-migrations.mjs의 분류·autoApply·승인 조건을 느슨하게 하지 않는다.
+// 이 fixture는 PROOF_DB_URL 로컬 검사 + TEMP_URL 별도 DB 위에서만 실행된다.
+console.log('\n── 3B단계: 083 운영 자동 승인 차단 / 격리 DB 재생 분리 ──');
+{
+  want('  083 분류는 운영에서 DATA_DEPENDENT',
+    'DATA_DEPENDENT',
+    manifest.rows.find(m => m.name === '083_paper_challenge_core.sql')?.risk ?? 'MISSING');
+  const beforeReplay = runner(['--apply']);
+  want('  083 앞에서 자동 적용이 중단된다', 'NEEDS_APPROVAL', beforeReplay.verdict);
+  want('  운영 러너가 083을 승인 필요로 표시한다',
+    'true', String(beforeReplay.out.includes('⛔ 083_paper_challenge_core.sql')));
+  wantNoRow('  083이 승인 없이 적용되지 않았다', '083_paper_challenge_core.sql');
+
+  const file = files.find(f => f.name === '083_paper_challenge_core.sql');
+  if (!file) {
+    bad('격리 재생용 083 원본 파일', '파일 존재', '파일 없음');
+  } else {
+    const replayed = psqlFile('supabase/migrations/083_paper_challenge_core.sql');
+    want('  원본 083 SQL은 격리된 재생 DB에서만 실행됐다', 'true', String(replayed));
+    if (replayed) {
+      // 여기부터의 기록은 *운영 승인 결과가 아닌* 테스트 DB 준비 상태다.
+      // 앞쪽 001~081을 재생한 seedApplied와 같은 원칙이며 승인 흔적을 만들지 않는다.
+      psql(`INSERT INTO schema_migrations (filename, checksum, applied_by, status, verified, verify_detail)
+            VALUES ('083_paper_challenge_core.sql', '${checksumOf(file.sql)}',
+                    'proof-replay-only', 'APPLIED', true,
+                    'isolated test DB replay fixture; NOT production auto-approval')
+            ON CONFLICT (filename) DO NOTHING`);
+      want('  083 재생 픽스처 기록', 'APPLIED', statusOf('083_paper_challenge_core.sql'));
+      want('  083 재생은 승인된 것으로 기록되지 않는다', '0',
+        psql(`SELECT count(*) FROM schema_migrations
+              WHERE filename='083_paper_challenge_core.sql' AND applied_by LIKE 'approved:%'`));
+    }
+  }
 }
 
 // ══════════════ 4단계: 마지막 하나를 승인한다 ══════════════

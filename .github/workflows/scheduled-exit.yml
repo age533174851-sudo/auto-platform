@@ -55,6 +55,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
       # **설정이 없으면 조용히 성공하지 않는다.**
       #
       # 비밀값이 안 걸려 있는데 워크플로가 초록으로 끝나면, 예약 청산이
@@ -124,8 +129,6 @@ jobs:
             echo "::error::예약 청산 실행이 HTTP $code 로 끝났습니다"
             exit 1
           fi
-          # ok:false 를 성공으로 세지 않는다.
-          if grep -q '"ok"[[:space:]]*:[[:space:]]*false' /tmp/out.json; then
-            echo "::error::앱이 ok:false 로 답했습니다 — 위 본문을 보세요"
-            exit 1
-          fi
+          # HTTP 200이어도 예약별 failed/claim_failed/stale이면 청산 성공이 아니다.
+          # 응답을 판정만 한다. 실패한 청산을 자동 재전송하지 않는다.
+          node scripts/scheduled-exit-verdict.mjs "$code" /tmp/out.json

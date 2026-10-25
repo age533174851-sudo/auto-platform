@@ -38,6 +38,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - name: 트레일링·예약 감시
         env:
           BASE:   ${{ secrets.EXIT_MONITOR_URL }}
@@ -80,3 +84,6 @@ jobs:
             echo "감시 호출 실패 (HTTP ${code})"
             exit 1
           fi
+          # HTTP 200에도 개별 주문 실패나 시세 미수신(SKIP)이 들어갈 수 있다.
+          # 관측 실패를 기록할 뿐, 이 워크플로에서 주문을 재전송하지 않는다.
+          node scripts/watch-tick-verdict.mjs "$code" "$body"

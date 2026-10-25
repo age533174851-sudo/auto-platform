@@ -16,6 +16,8 @@
 //
 // 모르는 거래소는 UNSUPPORTED_EXCHANGE로 막는다. binance로 떨어뜨리지 않는다.
 import { sb, acquireLock, releaseLock, heartbeat, noteStartupResult, noteScheduler } from './supabase';
+import { mainLockGranted, MainLeaseKeeper, mainLeaseHolder } from '../../src/lib/runtime/mainLockGate';
+import { randomUUID } from 'node:crypto';
 import { decryptSecret } from './crypto';
 import { redisAvailable, lockNxEx, unlock } from './redis';
 import { alert } from './telegram';
@@ -29,6 +31,19 @@ import {
 import { futuresCancelAll, futuresCloseAll } from '../../src/lib/exchanges/futuresAdapter';
 import { evaluateIfDue } from '../../src/lib/autotrade/evaluationRunner';
 import { selectDueSchedules, shouldPollNow, POLL_INTERVAL_MS } from '../../src/lib/autotrade/schedulePoll';
+// **한도에 걸린 DB에 재시도를 퍼붓지 않는다.** 판정은 웹과 같은 파일이다.
+import {
+  noteResult as noteQuotaResult, quotaGate, breakerLine,
+  OPEN_BREAKER, type BreakerState,
+} from '../../src/lib/supabase/quotaBreaker';
+import {
+  EXCHANGE_CONNECTION_COLUMNS, connectionReadVerdict, credentialColumnsPresent,
+  connectionReadRetryPlan,
+} from '../../src/lib/supabase/exchangeConnectionRead';
+import { killSwitchRecoveryVerdict } from '../../src/lib/engine/killSwitchRecovery';
+import { claimableFilter, claimOutcome } from '../../src/lib/supabase/jobClaimWindow';
+import { persistOwnedJob } from '../../src/lib/supabase/jobOwnedWrite';
+import { staleRecoveryPlan } from '../../src/lib/engine/staleJobRecovery';
 import { exitMonitorPlan, exitMonitorOutcome, EXIT_MONITOR_INTERVAL_MS } from '../../src/lib/engine/exitMonitorSchedule';
 import { wakeCadenceHeaders } from '../../src/lib/engine/exitMonitorWake';
 
@@ -83,7 +98,52 @@ const WORKER_ID =
   || process.env.CLOUD_RUN_EXECUTION     // Cloud Run
   || process.env.HOSTNAME                // 컨테이너 일반
   || `worker-local-${Math.random().toString(36).slice(2, 8)}`;
+// WORKER_ID stays stable for job recovery; main lock holder is per process incarnation.
+const MAIN_LEASE_HOLDER = mainLeaseHolder(WORKER_ID, randomUUID());
 const POLL_SEC = Math.max(1, Math.min(15, parseInt(process.env.WORKER_POLL_SEC || '3', 10)));
+
+// ── DB 사용량 차단기 ────────────────────────────────────────────
+//
+// Supabase Free Plan의 Egress가 한도를 넘으면 402가 돌아온다. 그 상태에서
+// 3초마다 같은 조회를 다시 보내면 **그 재시도 자체가 다시 전송량**이 된다.
+// 한가한 조회만 쉬게 하고, **포지션을 지키는 조회는 그대로 보낸다.**
+let dbBreaker: BreakerState = { ...OPEN_BREAKER };
+let breakerNotedAt = 0;
+
+/** 조회 결과를 차단기에 반영한다. 한도 오류일 때만 닫힌다 */
+function noteDb(outcome: { error?: any } | null | undefined): void {
+  const before = dbBreaker.blockedUntilMs;
+  dbBreaker = noteQuotaResult(dbBreaker, outcome, Date.now());
+  // 상태가 **바뀔 때만** 적는다. 매 틱 찍으면 로그가 그 줄로 덮인다.
+  if (dbBreaker.blockedUntilMs !== before) {
+    console.warn(`[db] ${breakerLine(dbBreaker, Date.now())}`);
+    breakerNotedAt = Date.now();
+  }
+}
+
+/** 지금 한가한 조회를 보내도 되는가 */
+function routineDbAllowed(): boolean {
+  const g = quotaGate(dbBreaker, 'ROUTINE', Date.now());
+  if (!g.allowed && Date.now() - breakerNotedAt > 300_000) {
+    breakerNotedAt = Date.now();
+    console.warn(`[db] ${g.reason}`);
+  }
+  return g.allowed;
+}
+
+/**
+ * heartbeat 주기.
+ *
+ * 3초마다 적을 이유가 없다 — 죽었다고 보는 문턱은 180초다(`WORKER_STALE_MS`).
+ * 15초면 12배 여유가 남고, 쓰기 횟수는 5분의 1이 된다. 오류·종료 때는
+ * 이 간격과 무관하게 **즉시** 적는다.
+ */
+const HEARTBEAT_MIN_GAP_MS = Number(process.env.WORKER_HEARTBEAT_MS || 15_000);
+let lastHeartbeatMs = 0;
+
+/** 낡은 잡 회수 검사 주기. 유예가 120초라 60초에 한 번이면 충분하다 */
+const STALE_SCAN_MS = 60_000;
+let lastStaleScanMs = 0;
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 let errorCount = 0;
@@ -106,9 +166,33 @@ async function releaseActionLock(name: string): Promise<void> {
   await releaseLock(name, WORKER_ID);
 }
 
-async function getConnection(connId: string): Promise<any | null> {
-  const { data } = await sb().from('exchange_connections').select('*').eq('id', connId).maybeSingle();
-  return data || null;
+/**
+ * 연결 한 건을 읽는다.
+ *
+ * **쓰는 칸만 읽는다** — `select('*')`는 암호문과 쓰지 않는 칸까지 끌어오고,
+ * 이 조회는 3초마다 돈다. 칸 목록은 정본 하나(`EXCHANGE_CONNECTION_COLUMNS`)에
+ * 있다. 손으로 적으면 읽는 자리끼리 갈라진다 — 실제로 갈라졌었다.
+ *
+ * **못 읽은 것을 "없다"로 돌려주지 않는다.** 예전에는 `data || null`이라
+ * 조회 실패와 연결 없음이 같은 값이었고, 부르는 쪽은 그걸 "연결 없음"으로
+ * 적어 잡을 영구 종료했다.
+ */
+async function getConnection(connId: string) {
+  const res = await sb().from('exchange_connections')
+    .select(EXCHANGE_CONNECTION_COLUMNS)
+    .eq('id', connId).maybeSingle();
+  noteDb({ error: (res as any).error });
+  const v = connectionReadVerdict(res as any);
+  if (v.code === 'FOUND') {
+    // 칸이 빠진 채로 왔으면 자격증명이 없는 것처럼 보인다. 값이 빈 것과
+    // 칸이 안 실려 온 것은 다르다 — 후자는 우리 잘못이고, 모르는 것이다.
+    const cols = credentialColumnsPresent(v.conn);
+    if (!cols.ok) {
+      return { code: 'READ_FAILED' as const, conn: null,
+        reason: `연결 자격증명 칸이 실려 오지 않았습니다 (${cols.missing.join(', ')})` };
+    }
+  }
+  return v;
 }
 function connCreds(conn: any): { key: string; secret: string; testnet: boolean } {
   return { key: conn.api_key || '', secret: decryptSecret(conn.api_secret_enc || conn.encrypted_secret || ''), testnet: conn.is_testnet === true };
@@ -275,38 +359,87 @@ async function processPendingJobs() {
   //   2) 해당 잡을 쥔 워커의 heartbeat가 끊겼을 것
   // 살아 있는 워커의 잡은 아무리 느려도 회수하지 않는다.
   const STALE_GRACE_MS = 120_000;
+  // **3초마다 훑지 않는다.** 회수 조건은 "만료 + 유예 120초 경과"라
+  // 60초에 한 번 봐도 늦지 않는다. 3초 주기로 두면 같은 스캔이 하루
+  // 28,800번 나가고, 그 대부분은 돌려줄 줄이 없는 빈 조회다.
+  if (Date.now() - lastStaleScanMs >= STALE_SCAN_MS) {
+  lastStaleScanMs = Date.now();
   try {
     const cutoff = new Date(Date.now() - STALE_GRACE_MS).toISOString();
-    const { data: stale } = await sb().from('jobs')
+    const staleRes = await sb().from('jobs')
       .select('id, locked_by, locked_until')
       .eq('status', 'PROCESSING').lt('locked_until', cutoff).limit(20);
+    noteDb({ error: (staleRes as any).error });
 
-    if (Array.isArray(stale) && stale.length) {
-      // 최근 살아 있는 워커 목록
-      const aliveSince = new Date(Date.now() - 90_000).toISOString();
-      const { data: beats } = await sb().from('worker_heartbeat')
-        .select('worker_id, last_seen, status').gt('last_seen', aliveSince);
-      const alive = new Set(
-        (Array.isArray(beats) ? beats : [])
-          .filter((b: any) => b.status !== 'stopped')
-          .map((b: any) => String(b.worker_id)),
-      );
+    // **근거를 못 읽으면 되돌리지 않는다.**
+    //
+    // 되돌리는 것은 "이 잡은 임자가 없다"는 주장이고, 그 주장의 근거가
+    // heartbeat다. 예전에는 `const { data: beats } = …`로 오류를 버려서,
+    // 조회가 실패하면 살아 있는 워커 목록이 **빈 집합**이 됐다 — 즉 모든
+    // 워커가 죽은 것으로 읽혔다. 살아 있는 워커가 처리 중인 잡이 통째로
+    // PENDING으로 돌아가고, 다른 워커가 집으면 주문·청산이 중복된다.
+    const aliveSince = new Date(Date.now() - 90_000).toISOString();
+    // stale이 0건이면 heartbeat를 볼 이유가 없다 — 조회도 아낀다.
+    const needBeats = Array.isArray((staleRes as any).data) && (staleRes as any).data.length > 0;
+    const beatsRes = needBeats
+      ? await sb().from('worker_heartbeat')
+          .select('worker_id, last_seen, status').gt('last_seen', aliveSince)
+      : { data: [] as any[], error: null };
+    if (needBeats) noteDb({ error: (beatsRes as any).error });
 
-      for (const j of stale as any[]) {
-        if (j.locked_by && alive.has(String(j.locked_by))) {
-          console.warn(`[jobs] ${String(j.id).slice(0, 8)} 만료됐지만 보유 워커 ${j.locked_by}가 살아 있어 회수하지 않음`);
-          continue;
-        }
-        await sb().from('jobs')
-          .update({ status: 'PENDING', locked_by: null, updated_at: new Date().toISOString() })
-          .eq('id', j.id).eq('status', 'PROCESSING').eq('locked_by', j.locked_by);
-        console.warn(`[jobs] ${String(j.id).slice(0, 8)} stale 회수 (보유 워커 ${j.locked_by || '?'} heartbeat 없음)`);
+    const plan = staleRecoveryPlan({ stale: staleRes as any, beats: beatsRes as any });
+    if (plan.code === 'HEARTBEAT_UNREADABLE' || plan.code === 'STALE_UNREADABLE') {
+      // 조용히 멈추지 않는다 — 회수가 멈춘 사실이 어디엔가 남아야 한다.
+      await alert('system', 'warning', 'stale 잡 회수를 멈췄습니다',
+        { 사유: plan.reason }, `stale_halt:${plan.code}`);
+    }
+    for (const j of plan.skipped) {
+      console.warn(`[jobs] ${String(j.id).slice(0, 8)} 만료됐지만 보유 워커 ${j.locked_by}가 살아 있어 회수하지 않음`);
+    }
+    for (const j of plan.recover) {
+      // **조회 이후 바뀐 잡은 덮어쓰지 않는다.** 읽을 때 본 `locked_by`와
+      // `locked_until`을 조건에 함께 건다 — 그 사이 다른 워커가 집었거나
+      // 잠금이 갱신됐으면 0건이 갱신되고 그게 맞다.
+      //
+      // `locked_by`가 비어 있으면 `eq`로는 NULL 줄에 맞지 않는다(PostgREST는
+      // `is.null`을 요구한다). 예전 코드는 그래서 임자 없는 잡을 영원히
+      // 회수하지 못했다.
+      let q = sb().from('jobs')
+        .update({ status: 'PENDING', locked_by: null, updated_at: new Date().toISOString() })
+        .eq('id', j.id).eq('status', 'PROCESSING');
+      q = j.locked_by ? q.eq('locked_by', String(j.locked_by)) : q.is('locked_by', null);
+      if (j.locked_until) q = q.eq('locked_until', String(j.locked_until));
+      const { error: upErr } = await q;
+      noteDb({ error: upErr });
+      if (upErr) {
+        console.warn(`[jobs] ${String(j.id).slice(0, 8)} stale 회수 실패: ${upErr.message}`);
+        continue;
       }
+      console.warn(`[jobs] ${String(j.id).slice(0, 8)} stale 회수 (보유 워커 ${j.locked_by || '?'} heartbeat 없음)`);
     }
   } catch { /* 회수 실패는 다음 주기에 다시 시도한다 */ }
+  }
 
-  const { data: jobs, error: qErr } = await sb().from('jobs').select('*').eq('status', 'PENDING')
+  // **`select('*')`를 쓰지 않는다.** `result` 칸에는 거래소 응답이 통째로
+  // 들어 있어 PENDING 줄을 읽을 때도 같이 끌려온다. 3초마다 도는 조회라
+  // 그 한 칸이 한 달치 전송량에서 가장 큰 덩어리가 된다.
+  const { data: jobs, error: qErr } = await sb().from('jobs')
+    // 한 줄 문자열이어야 한다 — 이어 붙이면 타입 추론이 끊겨 행 타입이 무너진다.
+    .select('id, action, status, attempts, max_attempts, priority, user_id, connection_id, exchange, mode, symbol, side, quantity, percent, payload, created_at')
+    .eq('status', 'PENDING')
+    // **거르고 나서 자른다.** 이 조건이 `limit` 앞에 없으면, backoff 중인
+    // 우선순위 0짜리 잡 10개가 같은 우선순위의 새 `KILL_SWITCH_EXECUTE`를
+    // 11번째로 밀어내고 — DB가 앞의 10개만 돌려주므로 그 킬스위치는
+    // **조회조차 되지 않는다.** 폴러는 멀쩡히 도는데 보호 작업만 굶는다.
+    //
+    // `locked_until`은 이미 있는 칸이고 이미 같은 뜻으로 쓰이고 있었다
+    // (`runAction` 실패 재시도가 PENDING과 함께 now+5초를 적는다).
+    // 다만 조회가 안 봐서 **그 5초도 여태 지켜지지 않았다.** 같이 고쳐진다.
+    .or(claimableFilter(new Date().toISOString()))
     .order('priority', { ascending: true }).order('created_at', { ascending: true }).limit(10);
+  // **잡 조회는 건너뛰지 않는다** — 청산·보호 작업이 이 줄로 들어온다.
+  // 다만 한도 오류라는 사실은 차단기에 적어, 한가한 조회 쪽이 쉬게 한다.
+  noteDb({ error: qErr });
   if (qErr) { console.error('[jobs] ❌ PENDING 조회 실패:', qErr.message, '— jobs 테이블/RLS/service_role 키 확인'); return; }
   console.log(`[jobs] pending count=${jobs?.length ?? 0}`);
   if (!jobs || jobs.length === 0) return;
@@ -322,11 +455,43 @@ async function processPendingJobs() {
     if (!gotJob) { await releaseActionLock(actionLockKey); continue; }
 
     try {
-      // claim (race-safe): PENDING → PROCESSING 한 워커만 성공
-      const { data: claimed } = await sb().from('jobs')
+      // ── claim: 조회에서 본 것이 **집는 순간에도 그대로인가** ──
+      //
+      // 예전에는 `.eq('status', 'PENDING')`만 봤다. 조회에 `claimableFilter`를
+      // 걸어도 그것만으로는 원자적이지 않다:
+      //
+      //   ① A가 due한 잡을 읽는다 (attempts=0, locked_until=NULL)
+      //   ② A가 락 대기 등으로 지연된다
+      //   ③ B가 집어 실행하고 실패 → status=PENDING, attempts=1,
+      //      locked_until=now+60초로 **재시도 대기**를 적고 락을 놓는다
+      //   ④ A가 ①의 스냅샷으로 UPDATE — status가 다시 PENDING이라 통과
+      //
+      // backoff가 끝나기 전에 집히고, `attempts`가 0+1=1로 덮여 B의 증가가
+      // 사라진다. 상태만 보는 조건은 PENDING→PROCESSING→PENDING(ABA)을
+      // 구분하지 못한다.
+      //
+      // 그래서 조회에서 본 값을 조건에 같이 건다. `attempts`는 집을 때마다
+      // **오르기만 하므로** ABA를 구분하는 표식이 된다. 그 사이 무엇이든
+      // 바뀌었으면 0행이 갱신되고, 그게 맞다.
+      let claimQ = sb().from('jobs')
         .update({ status: 'PROCESSING', locked_by: WORKER_ID, locked_until: new Date(Date.now() + 60000).toISOString(), attempts: (job.attempts || 0) + 1, updated_at: new Date().toISOString() })
-        .eq('id', job.id).eq('status', 'PENDING').select();
-      if (!claimed || claimed.length === 0) continue;  // 다른 워커가 가져감
+        .eq('id', job.id).eq('status', 'PENDING')
+        .or(claimableFilter(new Date().toISOString()));
+      claimQ = job.attempts == null
+        ? claimQ.is('attempts', null)
+        : claimQ.eq('attempts', Number(job.attempts));
+      const claimRes = await claimQ.select();
+      noteDb({ error: (claimRes as any).error });
+      const claim = claimOutcome(claimRes as any);
+      if (claim.code === 'CLAIM_FAILED') {
+        // **0행과 오류는 다르다.** 예전에는 DB 오류가 "다른 워커가 가져감"
+        // 으로 조용히 넘어갔다. 경쟁에서 진 것과 DB가 흔들린 것은 사람이
+        // 봐야 하는 정도가 다르다.
+        await alert('system', 'warning', '잡 claim에 실패했습니다',
+          { Action: job.action, Symbol: job.symbol || '-', 사유: claim.reason }, `claim_fail:${job.id}`);
+        continue;
+      }
+      if (claim.code === 'LOST') continue;  // 다른 워커가 가져갔거나 다시 대기로 바뀌었다
       console.log(`[worker] Processing job ${job.id.slice(0,8)} ${job.action} ${job.symbol || ''} (attempt ${(job.attempts||0)+1}/${job.max_attempts||5})`);
 
       // ── 만료된 주문은 실행하지 않는다 ──
@@ -356,8 +521,47 @@ async function processPendingJobs() {
         }
       }
 
-      const conn = await getConnection(job.connection_id);
-      if (!conn) { await finalize(job, false, null, '연결 없음'); continue; }
+      const read = await getConnection(job.connection_id);
+      if (read.code === 'READ_FAILED') {
+        // **잡을 "연결 없음"으로 끝내지 않는다.** 연결이 없는 것이 아니라
+        // 못 읽은 것이다. `finalize(..., false, ...)`는 FAILED로 영구 종료라,
+        // 여기서 적으면 청산·킬스위치 잡이 틀린 사유로 죽는다.
+        //
+        // **그렇다고 그냥 PENDING으로 되돌리지도 않는다.** `max_attempts`
+        // 비교는 아래 runAction 실패 경로에만 있어서 이 분기에는 상한이
+        // 걸리지 않는다. 되돌리기만 하면 3초마다 claim → 되돌림이 반복되고,
+        // 한도(402) 때문에 난 실패라면 아끼려던 전송량을 오히려 늘린다.
+        //
+        // 그래서 상한과 간격을 **정본에서** 받는다. 사다리는 한도 차단기와
+        // 같은 것이다 — 재시도 간격을 두 군데 적지 않는다.
+        // claim에서 이미 올린 값과 같은 수를 쓴다.
+        const tried = (job.attempts || 0) + 1;
+        const plan = connectionReadRetryPlan({
+          attempts: tried, maxAttempts: job.max_attempts, reason: read.reason,
+        });
+        if (plan.action === 'GIVE_UP') {
+          await finalize(job, false, null, plan.reason);
+          await alert('system', 'critical', '연결을 끝내 읽지 못해 잡을 종료했습니다',
+            { Action: job.action, Symbol: job.symbol || '-', 사유: plan.reason },
+            `conn_read_giveup:${job.id}`);
+          continue;
+        }
+        // **다음에 볼 시각을 행에 적는다.** 프로세스 메모리에 적으면
+        // 재시작하면 비고 다른 인스턴스에는 안 보인다 — 되돌린 잡을
+        // 새 인스턴스가 즉시 다시 집어서, 쉬게 하려던 것이 오히려
+        // 재시도를 늘린다. 조회가 이 칸을 보고 거른다.
+        await writeClaimedJob(job, {
+          status: 'PENDING', locked_by: null,
+          locked_until: new Date(Date.now() + plan.waitMs).toISOString(),
+          error: plan.reason, updated_at: new Date().toISOString(),
+        }, 'connection-read-retry');
+        await alert('system', 'warning', '연결을 읽지 못해 잡을 보류했습니다',
+          { Action: job.action, Symbol: job.symbol || '-', 사유: plan.reason },
+          `conn_read:${job.connection_id}`);
+        continue;
+      }
+      const conn = read.conn;
+      if (read.code === 'NOT_FOUND' || !conn) { await finalize(job, false, null, '연결 없음'); continue; }
       if (conn.has_withdrawal === true) { await finalize(job, false, null, '출금권한 키 거부'); continue; }
 
       const attempts = (job.attempts || 0) + 1;
@@ -398,7 +602,7 @@ async function processPendingJobs() {
 
         const willRetry = attempts < (job.max_attempts || 5);
         if (willRetry) {
-          await sb().from('jobs').update({ status: 'PENDING', error: res.error || '실패', result: res.result || null, locked_by: null, locked_until: new Date(Date.now() + 5000).toISOString(), updated_at: new Date().toISOString() }).eq('id', job.id);
+          await writeClaimedJob(job, { status: 'PENDING', error: res.error || '실패', result: res.result || null, locked_by: null, locked_until: new Date(Date.now() + 5000).toISOString(), updated_at: new Date().toISOString() }, 'action-retry');
         } else {
           await finalize(job, false, res.result, res.error || '최대 재시도 초과');
           if (job.mode === 'LIVE') await alert('system', 'warning', `Job 최종 실패: ${job.action}`, { Symbol: job.symbol || '-', Error: res.error || '?' }, `job_fail:${job.id}`);
@@ -411,11 +615,43 @@ async function processPendingJobs() {
   }
 }
 
+// Every post-claim write is a single conditional UPDATE. A stale worker cannot
+// finalize or requeue another worker's attempt; DB failure is never an ACK.
+async function writeClaimedJob(job: any, changes: Record<string, unknown>, phase: string) {
+  const outcome = await persistOwnedJob({
+    writeIfOwned: async ({ id, owner, attempts, changes: fields }) => {
+      const response = await sb().from('jobs').update(fields)
+        .eq('id', id).eq('status', 'PROCESSING')
+        .eq('locked_by', owner).eq('attempts', attempts)
+        .select('id');
+      noteDb({ error: (response as any).error });
+      return response;
+    },
+  }, {
+    id: String(job.id), owner: WORKER_ID,
+    // The SELECT snapshot precedes claim; the successful claim increments once.
+    attempts: (job.attempts || 0) + 1, changes,
+  });
+  if (outcome.code !== 'SAVED') {
+    // A successful exchange call may already have happened. Do NOT send it again.
+    // Even if Telegram fails (e.g. quota), retain an explicit worker error.
+    console.error(`[jobs] ${phase} ${outcome.code} id=${String(job.id).slice(0, 8)}: ${outcome.reason} — 거래소 결과 대조 필요, 자동 재주문 금지`);
+    try {
+      await alert('system', 'critical', '잡 상태 저장 확인 실패 — 거래소 대조 필요',
+        { Job: String(job.id).slice(0, 8), Action: job.action, Phase: phase,
+          Code: outcome.code, Reason: outcome.reason }, `job_write:${job.id}:${phase}`);
+    } catch (e: any) {
+      console.error('[jobs] 상태 저장 실패 알림도 실패:', e?.message || e);
+    }
+  }
+  return outcome;
+}
+
 async function finalize(job: any, ok: boolean, result: any, error: string | null) {
-  await sb().from('jobs').update({
+  return writeClaimedJob(job, {
     status: ok ? 'COMPLETED' : 'FAILED', result: result || null, error,
     completed_at: new Date().toISOString(), updated_at: new Date().toISOString(), locked_by: null,
-  }).eq('id', job.id);
+  }, 'finalize');
 }
 
 // ── 모니터: Ghost Sync(읽기) + 킬스위치 active면 job 보장 ──────────
@@ -424,12 +660,53 @@ async function finalize(job: any, ok: boolean, result: any, error: string | null
 // 예전에는 그랬다. 그래서 Gate 연결은 Ghost Sync도 안 돌고, 킬스위치가
 // active여도 워커가 job을 만들어 주지 않았다 — 웹이 job 만드는 데 실패하면
 // 아무도 안 만든다. **자가복구가 있다고 믿는 쪽이 없는 것보다 나쁘다.**
+/**
+ * Ghost Sync 주기.
+ *
+ * **3초마다 돌 이유가 없었다.** 이 감시는 연결 목록을 통째로 읽고
+ * (암호화된 시크릿 칸까지), 연결마다 킬스위치 상태와 잡을 또 읽는다.
+ * 연결이 N개면 한 바퀴에 1+2N번이고, 3초 주기면 하루 28,800바퀴다 —
+ * 한 달치 전송량에서 가장 큰 덩어리가 여기였다.
+ *
+ * 60초로 줄여도 하는 일은 같다. 킬스위치 잡은 Vercel이 즉시 만들고
+ * 이 자리는 **그게 실패했을 때의 자가복구**다. 그래서 끄지는 않는다.
+ */
+const MONITOR_CONNECTIONS_MS = Number(process.env.WORKER_MONITOR_MS || 60_000);
+let lastMonitorMs = 0;
+
 async function monitorConnections() {
-  const { data: conns } = await sb().from('exchange_connections')
-    .select('*').in('exchange_id', SUPPORTED_EXCHANGE_IDS);
+  if (Date.now() - lastMonitorMs < MONITOR_CONNECTIONS_MS) return;
+  lastMonitorMs = Date.now();
+  // **`select('*')`를 쓰지 않는다.** 쓰지 않는 칸까지 끌어온다.
+  //
+  // 칸 목록은 `getConnection()`과 **같은 정본**을 쓴다. 한때 여기만
+  // `encrypted_secret`이 빠져 있었고, 그래서 그 칸에만 비밀이 든 구 버전
+  // 연결은 `connCreds`가 빈 비밀을 돌려줘 바로 아래 `continue`에 걸렸다 —
+  // Ghost Sync도 **킬스위치 자가복구**도 그 연결에서만 조용히 멈췄다.
+  const { data: conns, error: connErr } = await sb().from('exchange_connections')
+    .select(EXCHANGE_CONNECTION_COLUMNS)
+    .in('exchange_id', SUPPORTED_EXCHANGE_IDS);
+  noteDb({ error: connErr });
+  if (connErr) {
+    // **못 읽은 것을 "연결이 없다"로 넘기지 않는다.** 여기서 조용히
+    // 돌아가면 Ghost Sync와 킬스위치 자가복구가 멈춘 사실이 아무 데도
+    // 남지 않는다. 60초 뒤 다시 보되, 멈췄다는 것은 적는다.
+    await alert('system', 'warning', '연결 목록을 읽지 못해 감시를 건너뜁니다',
+      { 사유: String((connErr as any)?.message ?? connErr) }, 'conn_list_read');
+    return;
+  }
   if (!conns) return;
   for (const conn of (conns as any[])) {
     if (conn.has_withdrawal === true) continue;
+    // 칸이 빠진 채로 왔으면 자격증명 없는 연결로 보인다. 그건 연결의
+    // 문제가 아니라 우리가 안 읽은 것이다 — 조용히 건너뛰지 않는다.
+    const cols = credentialColumnsPresent(conn);
+    if (!cols.ok) {
+      await alert('system', 'warning', '연결 자격증명 칸이 실려 오지 않았습니다',
+        { Connection: String(conn.id).slice(0, 8), 빠진칸: cols.missing.join(', ') },
+        `conn_cols:${conn.id}`);
+      continue;
+    }
 
     const resolved = resolveExecExchange(conn.exchange_id);
     if (!resolved.exchange) continue;   // 여기 오면 안 되지만, 오면 건드리지 않는다
@@ -460,24 +737,118 @@ async function monitorConnections() {
     }
     prevPos[conn.id] = symset;
 
-    // 킬스위치 active면 KILL_SWITCH_EXECUTE job 보장 (Vercel이 못 만들었어도 자가복구)
-    const { data: ks } = await sb().from('kill_switch_state').select('active, action_mode').eq('connection_id', conn.id).maybeSingle();
-    if (ks && ks.active) {
-      const { data: existing } = await sb().from('jobs').select('id')
-        .eq('connection_id', conn.id).eq('action', 'KILL_SWITCH_EXECUTE').in('status', ['PENDING', 'PROCESSING']).limit(1);
-      if (!existing || existing.length === 0) {
-        await sb().from('jobs').insert({
-          user_id: conn.user_id, connection_id: conn.id,
-          // **연결의 거래소를 그대로 적는다.** 예전에는 'binance'가 박혀
-          // 있었다. Gate 연결에 그 잡이 붙으면 jobExchangeCheck가 막는다 —
-          // 즉 킬스위치가 영원히 실행되지 않는다.
-          exchange: String(conn.exchange_id),
-          mode, action: 'KILL_SWITCH_EXECUTE',
-          payload: { actionMode: ks.action_mode || 'BC' },
-          status: 'PENDING', priority: 0, max_attempts: 10,
-          created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
-        });
+    // 킬스위치 자가복구는 **여기 없다.** `pollKillSwitchRecovery()`로
+    // 옮겼다 — 아래 함수 주석에 이유를 적었다.
+  }
+}
+
+/**
+ * 킬스위치 자가복구 — **Ghost Sync와 분리되어 있다.**
+ *
+ * 왜 떼어냈나
+ * ───────────
+ * 예전에는 `monitorConnections()` 안, 거래소 포지션 조회 **뒤**에 있었다.
+ * 그래서 `futuresListPositions`가 실패하면 `continue`에 걸려 **킬스위치가
+ * 켜져 있어도 복구 잡이 만들어지지 않았다.** 거래소가 흔들릴 때는 정확히
+ * 킬스위치가 필요한 때다.
+ *
+ * Ghost Sync 주기(60초)도 같이 쓰고 있었다. 그건 관측이고 이건 보호다 —
+ * 관측을 아끼려고 늘린 주기에 보호가 끌려가면 안 된다.
+ *
+ * 왜 이 모양이 **더 싼가**
+ * ────────────────────────
+ * 예전에는 연결마다 `kill_switch_state` 1회 + `jobs` 1회였다(1+2N).
+ * 지금은 `kill_switch_state`를 **켜진 것만** 한 번 읽는다. 평소에는 0줄이고
+ * 거기서 끝난다. 켜진 것이 있을 때만 그 연결들만 더 읽는다.
+ *
+ * 즉 매 틱 도는데도 예전 60초 주기보다 전송량이 적다. 보호를 빠르게 하는
+ * 것과 아끼는 것이 여기서는 같은 방향이다.
+ */
+const KILL_SWITCH_SCAN_MS = Number(process.env.WORKER_KILLSWITCH_SCAN_MS || 10_000);
+let lastKsScanMs = 0;
+
+async function pollKillSwitchRecovery() {
+  if (Date.now() - lastKsScanMs < KILL_SWITCH_SCAN_MS) return;
+  lastKsScanMs = Date.now();
+
+  // **켜진 것만** 읽는다. 평소에는 0줄이다.
+  const ksRes = await sb().from('kill_switch_state')
+    .select('connection_id, active, action_mode').eq('active', true).limit(50);
+  noteDb({ error: (ksRes as any).error });
+  if ((ksRes as any).error) {
+    // 못 읽은 것을 "꺼져 있다"로 넘기지 않는다.
+    await alert('system', 'warning', '킬스위치 상태를 읽지 못해 자가복구를 건너뜁니다',
+      { 사유: String((ksRes as any).error?.message ?? (ksRes as any).error) }, 'ks_state_read');
+    return;
+  }
+  const actives = Array.isArray((ksRes as any).data) ? (ksRes as any).data as any[] : [];
+  if (actives.length === 0) return;
+
+  const ids = actives.map((r) => String(r.connection_id)).filter(Boolean);
+  if (ids.length === 0) return;
+
+  // 살아 있는 KILL_SWITCH_EXECUTE 잡 (한 번에)
+  const jobsRes = await sb().from('jobs').select('id, connection_id')
+    .in('connection_id', ids).eq('action', 'KILL_SWITCH_EXECUTE')
+    .in('status', ['PENDING', 'PROCESSING']).limit(200);
+  noteDb({ error: (jobsRes as any).error });
+
+  // 잡을 만들려면 연결의 user_id·exchange_id·is_testnet이 필요하다.
+  const connRes = await sb().from('exchange_connections')
+    .select(EXCHANGE_CONNECTION_COLUMNS).in('id', ids);
+  noteDb({ error: (connRes as any).error });
+  const connById = new Map<string, any>();
+  if (Array.isArray((connRes as any).data)) {
+    for (const c of (connRes as any).data as any[]) connById.set(String(c.id), c);
+  }
+
+  for (const row of actives) {
+    const cid = String(row.connection_id);
+    const mine = Array.isArray((jobsRes as any).data)
+      ? ((jobsRes as any).data as any[]).filter((j) => String(j.connection_id) === cid)
+      : null;
+    const verdict = killSwitchRecoveryVerdict({
+      state: { data: row, error: null },
+      // 목록 조회가 실패했으면 **그 오류를 그대로 넘긴다** — 여기서
+      // 빈 배열로 바꾸면 중복 잡이 생긴다.
+      existing: (jobsRes as any).error
+        ? { data: null, error: (jobsRes as any).error }
+        : { data: mine, error: null },
+    });
+
+    if (!verdict.create) {
+      if (verdict.code === 'JOBS_UNREADABLE' || verdict.code === 'STATE_UNREADABLE') {
+        await alert('system', 'warning', '킬스위치 자가복구를 건너뛰었습니다',
+          { Connection: cid.slice(0, 8), 사유: verdict.reason }, `ks_skip:${cid}`);
       }
+      continue;
+    }
+
+    const conn = connById.get(cid);
+    if (!conn) {
+      // 연결을 못 읽었으면 거래소·모드를 모른다. 추측해서 적지 않는다.
+      await alert('system', 'warning', '킬스위치가 켜졌는데 연결을 읽지 못했습니다',
+        { Connection: cid.slice(0, 8), 사유: String((connRes as any).error?.message ?? '연결 행 없음') },
+        `ks_conn:${cid}`);
+      continue;
+    }
+
+    const { error: insErr } = await sb().from('jobs').insert({
+      user_id: conn.user_id, connection_id: cid,
+      // **연결의 거래소를 그대로 적는다.** 예전에는 'binance'가 박혀
+      // 있었다. Gate 연결에 그 잡이 붙으면 jobExchangeCheck가 막는다 —
+      // 즉 킬스위치가 영원히 실행되지 않는다.
+      exchange: String(conn.exchange_id),
+      mode: conn.is_testnet === true ? 'TESTNET' : 'LIVE',
+      action: 'KILL_SWITCH_EXECUTE',
+      payload: { actionMode: verdict.actionMode || 'BC' },
+      status: 'PENDING', priority: 0, max_attempts: 10,
+      created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+    });
+    noteDb({ error: insErr });
+    if (insErr) {
+      await alert('system', 'critical', '킬스위치 자가복구 잡을 만들지 못했습니다',
+        { Connection: cid.slice(0, 8), 사유: String(insErr.message ?? insErr) }, `ks_insert:${cid}`);
     }
   }
 }
@@ -505,6 +876,9 @@ let lastPollMs: number | null = null;
 let pollCount = 0;
 let evalCount = 0;
 async function pollSchedules(): Promise<void> {
+  // **한도에 막혔으면 새 진입을 찾지 않는다.** 적지 못할 주문을 내는 것은
+  // 아끼는 것보다 위험하다. 이미 열린 포지션을 닫는 쪽은 아래에서 계속 돈다.
+  if (!routineDbAllowed()) return;
   if (!APP_URL || !APP_ADMIN_SECRET) {
     // **한 번만 크게 말한다.** 매 tick 찍으면 로그가 덮여서 안 읽힌다.
     if (!pollWarned) {
@@ -956,6 +1330,7 @@ let lastChallengeSweepMs: number | null = null;
 let challengeSweepWarned = false;
 
 async function pollChallengeSweep(isMain: boolean): Promise<void> {
+  if (!routineDbAllowed()) return;           // 챌린지 생명주기는 포지션 보호가 아니다
   const plan = exitMonitorPlan({
     lastRunMs: lastChallengeSweepMs, nowMs: Date.now(),
     intervalMs: CHALLENGE_SWEEP_MS, isMain,
@@ -1076,6 +1451,7 @@ const LEDGER_SYNC_MS = Number(process.env.LEDGER_SYNC_INTERVAL_MS || 15 * 60_000
 let lastLedgerSyncMs: number | null = null;
 
 async function pollLedgerSync(isMain: boolean): Promise<void> {
+  if (!routineDbAllowed()) return;           // 수수료 집계는 급하지 않다
   if (!isMain) return;                       // 같은 구간을 두 번 읽지 않는다
   if (!APP_URL || !APP_ADMIN_SECRET) return; // 위에서 이미 한 번 경고했다
   const now = Date.now();
@@ -1138,6 +1514,7 @@ const EQUITY_SNAPSHOT_MS = Number(process.env.EQUITY_SNAPSHOT_INTERVAL_MS || 15 
 let lastEquitySnapshotMs: number | null = null;
 
 async function pollEquitySnapshot(isMain: boolean): Promise<void> {
+  if (!routineDbAllowed()) return;           // 자산 곡선 한 점은 급하지 않다
   if (!isMain) return;                       // 같은 칸을 두 번 부를 이유가 없다
   if (!APP_URL || !APP_ADMIN_SECRET) return; // 위에서 이미 한 번 경고했다
   const now = Date.now();
@@ -1183,17 +1560,41 @@ async function tick() {
   if (tickCount === 1 || tickCount % 20 === 0) console.log(`[worker] tick #${tickCount} (errors=${errorCount})`);
   // ★ job 처리는 락과 무관하게 항상 실행 (PENDING→PROCESSING atomic claim이 중복 방지)
   await processPendingJobs();
-  // 모니터(Ghost Sync/킬스위치 job 보장)는 main 락으로 중복 방지 — 락 인프라 없으면 단일 워커로 간주해 진행
-  let isMain = true;
-  try { isMain = await acquireLock('main', WORKER_ID, POLL_SEC * 4); } catch { isMain = true; }
+  // main 임차를 증명하지 못하면 standby. 긴 tick 중에는 TTL/4마다 갱신한다.
+  const mainAcquireStartedAt = Date.now();
+  const mainAcquired = await mainLockGranted(() => acquireLock('main', MAIN_LEASE_HOLDER, POLL_SEC * 4));
+  // A delayed ACK may arrive after the DB lease's effective lifetime has elapsed.
+  const isMain = mainAcquired && Date.now() - mainAcquireStartedAt < POLL_SEC * 1000;
+  const mainLease = isMain ? new MainLeaseKeeper(
+    () => mainLockGranted(() => acquireLock('main', MAIN_LEASE_HOLDER, POLL_SEC * 4)),
+    POLL_SEC * 1000,
+    () => console.error('[worker] main 임차 갱신 실패 — 남은 main-only 작업을 건너뜁니다'),
+  ) : null;
+  mainLease?.start();
+  try {
   // **예약은 main 락을 쥔 워커만 본다.** 그 사실을 heartbeat에 같이
   // 적어야, 밖에서 예비 워커의 줄을 보고 "안 돈다"고 잘못 읽지 않는다.
   noteScheduler({ isMain });
-  await heartbeat(WORKER_ID, errorCount > 5 ? 'degraded' : 'running', isMain ? 'jobs+monitor' : 'jobs(standby monitor)', errorCount, tickCount);
-  if (isMain) await monitorConnections();
+  // **매 틱 적지 않는다.** 죽었다고 보는 문턱은 180초다 — 15초면 충분하고
+  // 쓰기는 5분의 1이 된다. 오류·종료 경로는 이 간격을 보지 않는다.
+  if (Date.now() - lastHeartbeatMs >= HEARTBEAT_MIN_GAP_MS) {
+    lastHeartbeatMs = Date.now();
+    await heartbeat(WORKER_ID, errorCount > 5 ? 'degraded' : 'running', isMain ? 'jobs+monitor' : 'jobs(standby monitor)', errorCount, tickCount);
+  }
+  // **자가복구를 Ghost Sync보다 먼저, 따로 돌린다.**
+  //
+  // 예전에는 `monitorConnections()` 안에 있어서 거래소 포지션 조회가
+  // 실패하면 같이 멈췄고, Ghost Sync의 60초 주기에 끌려갔다. 관측이
+  // 흔들린다고 보호가 멈추면 안 된다.
+  //
+  // `isMain` 게이트는 **그대로 둔다.** 전량청산 잡을 두 워커가 동시에
+  // 만드는 쪽이 늦는 쪽보다 나쁘다 — 중복 방지는 여기서도 판정기가 보지만,
+  // 두 워커가 같은 순간에 "없다"를 읽는 경쟁까지 막지는 못한다.
+  if (await mainLease?.allowed()) await pollKillSwitchRecovery();
+  if (await mainLease?.allowed()) await monitorConnections();
   // 예약 평가도 main 락을 쥔 워커만 한다. 여러 워커가 동시에 보면 선점
   // 경쟁만 늘어난다 — 선점은 마지막 방어선이지 첫 방어선이 아니다.
-  if (isMain) await pollSchedules();
+  if (await mainLease?.allowed()) await pollSchedules();
   // **스모크 테스트 청산은 락과 무관하게 항상 본다.**
   // 여는 것과 닫는 것은 다르다 — main 락을 못 쥔 워커라고 열린 포지션을
   // 안 닫으면, 락 인프라가 흔들리는 동안 100배 포지션이 남는다.
@@ -1214,20 +1615,24 @@ async function tick() {
   // 깨운다. 맞춰야 할 비밀이 하나 사라진다.
   //
   // 같은 포지션에 손절 이동이 두 번 나가지 않게 main 락을 쥔 워커만 부른다.
-  await pollExitMonitor(isMain);
+  await pollExitMonitor((await mainLease?.allowed()) === true);
   // **수수료·펀딩을 모아야 "번 것"을 말할 수 있다.**
   // main 락을 쥔 워커만 한다 — 같은 구간을 두 번 읽을 이유가 없다.
   // **"이 시각에 팔겠다"는 약속을 지킬 실행기.**
   // GitHub 예약은 중앙값 50분이라 유예 30분을 넘기는 구간이 대부분이었다.
   // **모의 포지션의 손절·익절.** 브라우저가 보던 것을 서버가 본다.
-  await pollPaperExit(isMain);
-  await pollScheduledExit(isMain);
+  await pollPaperExit((await mainLease?.allowed()) === true);
+  await pollScheduledExit((await mainLease?.allowed()) === true);
   // **챌린지 생명주기.** 시작·만료·마감을 미는 유일한 실행자다.
-  await pollChallengeSweep(isMain);
-  await pollLedgerSync(isMain);
+  await pollChallengeSweep((await mainLease?.allowed()) === true);
+  await pollLedgerSync((await mainLease?.allowed()) === true);
   // **자산 곡선은 사람이 앱을 열 때가 아니라 15분마다 남는다.**
   // 예전에는 GET이 찍어서, 밤사이 자산 변화가 통째로 비어 있었다.
-  await pollEquitySnapshot(isMain);
+  await pollEquitySnapshot((await mainLease?.allowed()) === true);
+  } finally {
+    // 타이머는 main-only 긴 await 동안만 동작한다. 다음 tick으로 누출하지 않는다.
+    mainLease?.stop();
+  }
 }
 
 async function startupChecks() {
@@ -1310,7 +1715,7 @@ async function main() {
   for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig as any, async () => {
     if (stopping) return; stopping = true;
     console.log('[worker] 종료 신호 수신 — heartbeat stopped 기록 후 종료');
-    try { await heartbeat(WORKER_ID, 'stopped', 'shutdown', errorCount, tickCount); await releaseLock('main', WORKER_ID); } catch {}
+    try { await heartbeat(WORKER_ID, 'stopped', 'shutdown', errorCount, tickCount); await releaseLock('main', MAIN_LEASE_HOLDER); } catch {}
     process.exit(0);
   });
   while (!stopping) {
