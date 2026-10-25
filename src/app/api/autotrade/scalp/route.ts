@@ -231,8 +231,58 @@ export async function POST(req: NextRequest) {
   }
 
   // ── 진입 자리인가 ──
-  const scalp = scalpSignal(bars, cfg);
+  let scalp = scalpSignal(bars, cfg);
   const timeframeInfo = { intervalMin, interval, ...verdict };
+
+  // ── 09:00 KST 강제 진입 (Exact100X TESTNET 전용) ──
+  //
+  // 신호가 나지 않는 날에도 **하루 한 번은 시도한다.** 지금까지는
+  // 돌파·거래량·비용 세 필터를 통과해야만 주문이 만들어졌고, 그래서
+  // 진입이 한 번도 나지 않았다.
+  //
+  // 여기서 건너뛰는 것은 **그 재량 필터 셋뿐**이다. 아래의 위험 관문
+  // (dormantGate · riskManager · 청산가 · 기존 포지션/미결 주문 ·
+  // 보호주문 · killSwitch · 수량 양자화)은 **전부 그대로 지난다.**
+  // 크기도 같은 ATR 수치로 계산한다 — 강제 진입만 다른 크기로 나가면
+  // 그 숫자의 뜻이 둘로 갈린다.
+  let forced: any = null;
+  if (!scalp.signal) {
+    const { forcedEntryVerdict, forcedEntrySignal, forcedWindowStartMs } =
+      await import('@/lib/strategies/dailyForcedEntry');
+    const forcedNowMs = Date.now();
+
+    // 오늘 창에서 이미 냈는가. **못 읽으면 null이다** — 0건으로 접으면
+    // 같은 창에서 두 번 진입한다. 판정기가 null을 받으면 막는다.
+    let ordersTodayInWindow: number | null = null;
+    const sinceMs = forcedWindowStartMs(forcedNowMs);
+    if (sinceMs != null && body.connectionId && userId) {
+      const { count, error } = await (sb as any).from('live_orders')
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', userId)
+        .eq('connection_id', body.connectionId)
+        .eq('symbol', symbol)
+        .eq('mode', 'TESTNET')
+        .eq('reduce_only', false)
+        .gte('created_at', new Date(sinceMs).toISOString());
+      ordersTodayInWindow = error || count == null ? null : count;
+    }
+
+    forced = forcedEntryVerdict({
+      nowMs: forcedNowMs,
+      mode: opMode,
+      profileId: epContract?.profileId,
+      presetId: epContract?.presetId,
+      ordersTodayInWindow,
+    });
+    if (forced.due) {
+      scalp = forcedEntrySignal(bars, cfg);
+      if (!scalp.signal) {
+        // ATR을 못 읽었다. **강제라고 해서 모르는 크기로 내지 않는다.**
+        forced = { ...forced, due: false, code: 'SIZING_UNKNOWN', reason: scalp.reason };
+      }
+    }
+  }
+
   if (!scalp.signal) {
     const { diagnoseScalpSignal } = await import('@/lib/strategies/scalpSignalDiagnosis');
     const diagnosis = diagnoseScalpSignal(scalp);
@@ -241,6 +291,10 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       ok: true, executed: false, symbol, mode: opMode,
       signal: null, reason: scalp.reason, reasonCode: diagnosis.code, timeframe: timeframeInfo,
+      // **왜 강제 진입도 안 했는지**가 여기 남아야 한다. 없으면
+      // "신호가 없었다"와 "창 밖이었다"와 "이미 냈다"가 구분되지 않는다.
+      forcedEntry: forced == null ? null
+        : { due: forced.due, code: forced.code, tradingDay: forced.tradingDay, reason: forced.reason },
     }, { headers: { 'Cache-Control': 'no-store' } });
   }
 
@@ -285,6 +339,10 @@ export async function POST(req: NextRequest) {
       stopPct: scalp.signal.stopPct, targetPct: scalp.signal.targetPct,
       notes: scalp.signal.notes,
     },
+    // **이 진입이 신호에서 왔는지 09:00 강제에서 왔는지**를 값으로 남긴다.
+    // 사람이 notes 문장을 읽어 되짚게 하면 문장이 바뀔 때 조용히 틀린다.
+    forcedEntry: forced == null ? null
+      : { due: forced.due, code: forced.code, tradingDay: forced.tradingDay, reason: forced.reason },
     // 계좌를 어디서 읽었는지와 못 읽은 것들. **이게 없으면 폴백 $10,000으로
     // 계산된 결과를 실계좌 결과로 읽게 된다.**
     account: { source: ctx.source, equity: ctx.config.accountEquity, warnings: ctx.warnings },
@@ -1053,15 +1111,47 @@ export async function POST(req: NextRequest) {
   //
   // 새 경로를 만들지 않는다 — 웹훅이 쓰는 applyVetoToSignal을 그대로 쓴다.
   // 규칙을 두 벌 두면 한쪽만 고쳐진다.
+  // **왜 변동성 기준선이 없었는지**가 응답에 남아야 한다. 없으면
+  // "캘린더 때문인지 일봉 때문인지"를 매번 처음부터 추적하게 된다.
+  let dailyEvidence: any = null;
   try {
     const { applyVetoToSignal } = await import('@/lib/engine/tradingPipeline');
+    // Veto는 분봉이 아닌, 같은 TESTNET 선물 시장의 완성된 일봉으로 ATR 기준을 만든다.
+    // 조회 실패/표본 부족은 빈 배열로 전달해 기존 fail-closed 관문을 유지한다.
+    const { fetchVenueBars } = await import('@/lib/markets/venueBars');
+    const daily = await fetchVenueBars({
+      exchange: barExchange, symbol, interval: '1d', limit: 60,
+      testnet: barTestnet,
+    });
+    // **일봉이 맞는지 시각으로 확인한 뒤에만 기준선으로 쓴다.**
+    //
+    // `computeAtrBaseline`은 숫자 배열 세 개만 받는다 — 시각이 없어서
+    // 그 배열이 일봉인지·연속인지·오늘 것인지 알 수 없다. 확인하지 않고
+    // 넘기면 다른 주기의 봉이나 멈춘 피드로도 관문이 **통과**한다
+    // (가짜 거래소로 재현됨: 20일 지난 1시간봉이 통과했다).
+    //
+    // 아니면 배열을 넘기지 않는다. 그러면 기준선이 안 만들어지고
+    // 기존 fail-closed 관문(`VOLATILITY_DATA_MISSING`)이 100배를 막는다.
+    const { dailyBarEvidence } = await import('@/lib/markets/dailyBarEvidence');
+    const dailyEv = dailyBarEvidence({ bars: daily.bars, nowMs: Date.now() });
+    const dailyBars = dailyEv.bars;
+    dailyEvidence = {
+      ok: dailyEv.ok, code: dailyEv.code, sampleCount: dailyEv.sampleCount,
+      ageDays: dailyEv.ageDays == null ? null : Number(dailyEv.ageDays.toFixed(2)),
+      reason: dailyEv.reason,
+    };
+    // **응답 뼈대에 실어 둔다.** 이 아래의 모든 응답이 `...base`를 펼치므로,
+    // 어디서 끝나든 "일봉 증거가 무엇이었나"가 같이 나간다. 한 군데에만
+    // 붙이면 다른 경로로 끝난 회차에서는 그 값이 사라진다.
+    (base as any).dailyEvidence = dailyEvidence;
     const veto = await applyVetoToSignal(sb, {
+      dailyHighs: dailyBars?.highs,
+      dailyLows: dailyBars?.lows,
+      dailyCloses: dailyBars?.closes,
       side: plan.side === 'SHORT' ? 'SHORT' : 'LONG',
       symbol,
       leverage: plan.leverage ?? 1,
-      // 변동성 기준선은 일봉이 필요하다. 단타는 분봉만 갖고 있으므로
-      // **넘기지 않는다** — 분봉으로 계산한 값을 일봉 기준선 자리에
-      // 넣으면 비교 대상이 달라져 언제나 '평소보다 크다'가 된다.
+      // ATR 비교는 일봉으로만 한다. 분봉을 기준선으로 대체하지 않는다.
       currentVolume: bars?.volumes?.[bars.volumes.length - 1],
       avgVolume: bars?.volumes?.length
         ? bars.volumes.reduce((a: number, b: number) => a + b, 0) / bars.volumes.length
