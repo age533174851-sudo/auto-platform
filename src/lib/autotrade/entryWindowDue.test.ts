@@ -139,6 +139,79 @@ export function runEntryWindowDueTests() {
     eq(v.code, 'NO_CONNECTION');
   });
 
+  // ── 경계 전수: 09:00 · 09:09 · 09:10 · 09:30 · 09:31 ──
+  //
+  // **09:00은 이 전략의 창이 아니다.** `my-original-v1`의 창은 09:10에
+  // 열린다(`originalV1.ts`의 WINDOW_START_KST). "매일 09:00 매수"는
+  // 별도 Draft #386의 Exact100X/scalp 경로(`dailyForcedEntry.ts`,
+  // FORCED_ENTRY_START_KST = 09:00)이고 **이 파일과 다른 전략이다.**
+  //
+  // 둘을 섞어 "9시 매수가 된다"고 적지 않기 위해 경계를 하나씩 못 박는다.
+  // 전략 상수는 **건드리지 않는다** — 09:00을 이 전략의 창으로 만드는 것은
+  // 진입 정책 변경이고, 별도 승인 없이 할 일이 아니다.
+
+  const atKst = (hh: number, mm: number) =>
+    windowDueVerdict({ nowMs: kst(hh, mm), lastRunAtMs: kst(7, 0), window: W });
+
+  test('★★★ 09:00 KST — my-original-v1의 창이 아니다 (창은 09:10)', () => {
+    const v = atKst(9, 0);
+    eq(v.code, 'OUTSIDE');
+    eq(v.due, false);
+  });
+
+  test('09:09 KST — 창 1분 전, 아직 아니다', () => {
+    const v = atKst(9, 9);
+    eq(v.code, 'OUTSIDE');
+    eq(v.due, false);
+  });
+
+  test('★ 09:10 KST — 창 시작 경계는 포함이다', () => {
+    const v = atKst(9, 10);
+    eq(v.code, 'WINDOW_OPEN');
+    eq(v.due, true);
+    assert(!v.reason.includes('분 전에 닫혔'), v.reason);
+  });
+
+  test('★ 09:30 KST — 창 끝 경계도 포함이고 늦지 않았다', () => {
+    const v = atKst(9, 30);
+    eq(v.code, 'WINDOW_OPEN');
+    eq(v.due, true);
+    assert(!v.reason.includes('분 전에 닫혔'), v.reason);
+  });
+
+  test('★ 09:31 KST — 창은 닫혔고 유예 1분째다', () => {
+    const v = atKst(9, 31);
+    eq(v.code, 'WINDOW_OPEN');
+    eq(v.due, true);
+    assert(v.reason.includes('1분 전에 닫혔'), v.reason);
+  });
+
+  test('10:00 KST — 유예 마지막 분은 아직 포함이다', () => {
+    const v = atKst(10, 0);
+    eq(v.code, 'WINDOW_OPEN');
+    eq(v.due, true);
+  });
+
+  // 같은 경계를 **배선된 판정**으로도 본다. 순수 함수만 맞고 배선이
+  // 틀리면 운영에서는 여전히 창을 놓친다.
+  const bAt = (hh: number, mm: number) => dueCheck({
+    enabled: true, connectionId: 'c1', intervalMin: 60,
+    nowMs: kst(hh, mm), lastRunAtMs: kst(7, 0), strategyId: 'my-original-v1',
+  } as any);
+
+  test('★★ 배선 경계 — 09:00은 WINDOW로 깨우지 않는다', () => {
+    const v = bAt(9, 0);
+    assert(v.code !== 'WINDOW', `09:00에 WINDOW로 깨웠다: ${v.code}`);
+  });
+
+  test('★★ 배선 경계 — 09:10부터 09:31까지는 WINDOW로 깨운다', () => {
+    for (const [hh, mm] of [[9, 10], [9, 20], [9, 30], [9, 31]] as const) {
+      const v = bAt(hh, mm);
+      eq(v.code, 'WINDOW');
+      eq(v.due, true);
+    }
+  });
+
   // ── 못 읽은 것을 0으로 적지 않는다 ───────────────
   console.log('[예약 읽기 — 못 읽은 것은 0건이 아니다]');
 
