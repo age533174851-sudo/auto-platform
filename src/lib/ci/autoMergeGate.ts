@@ -60,6 +60,33 @@ export const SELF_CHECK_NAME = 'auto-merge-gate';
  */
 export const REQUIRED_CHECKS = ['verify'];
 
+/**
+ * 열린 PR 목록은 REST에서 페이지당 최대 100개다.
+ * 앞 페이지만으로 병합하면 101번째 이후의 auto-merge 라벨을 놓친다.
+ * 페이지가 깨지거나 겹치면 누적 결과 전체를 UNKNOWN으로 취급한다.
+ */
+export interface OpenPrBrief {
+  number: number;
+  labels: Array<{ name: string }>;
+}
+
+export function appendOpenPrPage(prior: OpenPrBrief[], payload: unknown):
+  { prs: OpenPrBrief[]; hasMore: boolean } | null {
+  const pageSize = 100;
+  if (!Array.isArray(payload) || payload.length > pageSize) return null;
+  const seen = new Set<number>();
+  const combined: OpenPrBrief[] = [];
+  for (const p of [...prior, ...payload]) {
+    if (!p || !Number.isSafeInteger(p.number) || p.number <= 0
+        || !Array.isArray(p.labels)
+        || p.labels.some((label: any) => !label || typeof label.name !== 'string')
+        || seen.has(p.number)) return null;
+    seen.add(p.number);
+    combined.push(p);
+  }
+  return { prs: combined, hasMore: payload.length === pageSize };
+}
+
 export type CheckConclusion =
   | 'success' | 'neutral' | 'skipped'
   | 'failure' | 'cancelled' | 'timed_out' | 'action_required' | 'stale'
@@ -75,10 +102,77 @@ export interface CheckLike {
 }
 
 /** commit status API(Vercel 등이 쓴다) */
+/**
+ * GitHub GraphQL reviewThreads(first:100)는 첫 페이지만 준다.
+ * 다음 페이지가 있으면 뒤에 미해결 스레드가 있을 수 있으므로 UNKNOWN.
+ * reviews.totalCount는 전체 변경 요청 수다.
+ */
+export function reviewFactsFromGraphql(payload: any): {
+  unresolvedThreads: number | null;
+  changesRequested: number | null;
+} {
+  const unknown = { unresolvedThreads: null, changesRequested: null };
+  const pr = payload?.data?.repository?.pullRequest;
+  const threads = pr?.reviewThreads;
+  const nodes = threads?.nodes;
+  const count = pr?.reviews?.totalCount;
+  if (!Array.isArray(nodes) || threads?.pageInfo?.hasNextPage !== false
+      || !Number.isSafeInteger(count) || count < 0) return unknown;
+  if (nodes.some((t: any) => typeof t?.isResolved !== 'boolean'
+      || typeof t?.isOutdated !== 'boolean')) return unknown;
+  return {
+    unresolvedThreads: nodes.filter((t: any) => !t.isResolved && !t.isOutdated).length,
+    changesRequested: count,
+  };
+}
+
+/**
+ * GET /commits/{sha}/check-runs?per_page=100의 첫 페이지만 읽었을 때
+ * total_count가 더 크면 뒤에 실패 체크가 있을 수 있다.
+ * 완전한 증거만 판정기로 넘기고, 불완전하면 null(UNKNOWN)로 막는다.
+ */
+export function completeCheckRunsPage(payload: any): CheckLike[] | null {
+  const rows = payload?.check_runs;
+  const total = payload?.total_count;
+  if (!Array.isArray(rows) || !Number.isSafeInteger(total)
+      || total < 0 || rows.length !== total) return null;
+  // GitHub check-run 응답에 head_sha가 없으면 최신 커밋의 검증이라고
+  // 주장할 수 없다. 특히 필수 verify는 GitHub Actions App에서 발행한
+  // 검사여야 한다 — 다른 App이 같은 이름의 success를 만들어도 무효.
+  // 자기 검사도 이름만 보고 무시하므로 외부 App의 동명 실패 검사를 숨기지 않는다.
+  if (rows.some((c: any) => !c || typeof c.name !== 'string'
+      || typeof c.status !== 'string'
+      || typeof c.head_sha !== 'string' || c.head_sha.trim().length === 0
+      || ((REQUIRED_CHECKS.includes(c.name) || c.name === SELF_CHECK_NAME)
+          && c.app?.slug !== 'github-actions'))) return null;
+  return rows.map((c: any) => ({
+    name: c.name,
+    status: c.status,
+    conclusion: c.conclusion ?? null,
+    headSha: c.head_sha ?? null,
+  }));
+}
+
 export interface StatusLike {
   context: string;
   /** 'success' | 'pending' | 'failure' | 'error' */
   state: string;
+}
+
+/**
+ * GET /commits/{sha}/status is paginated (default 30 statuses).
+ * A failed/malformed or truncated response is NOT proof that no status failed.
+ * Null means UNKNOWN and must prevent any merge attempt.
+ */
+export function completeCommitStatusesPage(payload: any): StatusLike[] | null {
+  const rows = payload?.statuses;
+  const total = payload?.total_count;
+  if (!Array.isArray(rows) || !Number.isSafeInteger(total)
+      || total < 0 || rows.length !== total) return null;
+  const states = new Set(['success', 'pending', 'failure', 'error']);
+  if (rows.some((s: any) => !s || typeof s.context !== 'string'
+      || s.context.length === 0 || !states.has(s.state))) return null;
+  return rows.map((s: any) => ({ context: s.context, state: s.state }));
 }
 
 export interface PrFacts {
@@ -207,7 +301,8 @@ export function autoMergeGate(pr: PrFacts): GateVerdict {
   const self = pr.checks.length - others.length;
   if (self > 0) d.push(`자동 머지 판정 자신의 검사 ${self}건은 세지 않았습니다`);
 
-  const mine = others.filter(c => !c.headSha || c.headSha === pr.headSha);
+  // 출처 없는 검사는 최신 head의 증거가 아니다. 누락된 SHA를 통과시키지 않는다.
+  const mine = others.filter(c => c.headSha === pr.headSha);
   const stale = others.length - mine.length;
   if (mine.length === 0 && pr.statuses.length === 0) {
     return {
@@ -234,6 +329,21 @@ export function autoMergeGate(pr: PrFacts): GateVerdict {
       merge: false, code: 'REQUIRED_CHECK_MISSING', details: d,
       reason: `이 커밋(${pr.headSha.slice(0, 7)})에서 필수 검사가 돌지 않았습니다: ${absent.join(' · ')} — `
             + '다른 검사가 초록이어도 합치지 않습니다. 워크플로를 다시 돌린 뒤에 판단합니다',
+    };
+  }
+
+  // 필수 verify는 '실행됐다'만으로 충분하지 않다. skipped/neutral은
+  // 선택적 검사에서는 허용해도, 필수 검사의 통과 증거는 success뿐이다.
+  // 같은 이름의 검사 중 하나라도 성공이 아니면 성공 1건으로 덮지 않는다.
+  const requiredNotSuccessful = mine.filter(c =>
+    REQUIRED_CHECKS.includes(c.name)
+    && c.status === 'completed' && c.conclusion !== 'success');
+  if (requiredNotSuccessful.length > 0) {
+    return {
+      merge: false, code: 'CHECKS_FAILED', details: d,
+      reason: '필수 검사가 성공하지 않았습니다: '
+        + requiredNotSuccessful.map(c => `${c.name}(${c.conclusion ?? 'null'})`).join(' · ')
+        + ' — 필수 검사는 completed + success만 허용합니다',
     };
   }
 

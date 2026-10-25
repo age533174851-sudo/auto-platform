@@ -23,7 +23,9 @@ export async function acquireLock(name: string, holder: string, ttlSec = 60): Pr
   const now = Date.now();
   const expires = new Date(now + ttlSec * 1000).toISOString();
   try {
-    const { data: cur } = await sb().from('worker_lock').select('*').eq('name', name).maybeSingle();
+    // 필요한 칸만 읽는다 — 3초마다 도는 조회다.
+    const { data: cur } = await sb().from('worker_lock')
+      .select('name, holder, expires_at').eq('name', name).maybeSingle();
     if (!cur) {
       const { error } = await sb().from('worker_lock').insert({ name, holder, expires_at: expires, acquired_at: new Date(now).toISOString() });
       return !error;

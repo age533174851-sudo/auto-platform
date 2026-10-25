@@ -105,10 +105,13 @@ export function renderManifest({ rows }) {
 // schema_migrations 표와 비교해서 무엇이 남았는지 화면에 적는다.
 // CI(scripts/check-migrations.mjs)가 이 파일이 낡았으면 실패시킨다.
 
+import type { MigrationRisk } from './migrationPlan';
+
 export interface ManifestEntry {
   name: string;
   id: number;
-  risk: 'ADDITIVE' | 'DESTRUCTIVE' | 'UNKNOWN';
+  /** 분류기와 **같은 타입**을 쓴다 — 여기 목록을 따로 적으면 갈라진다 */
+  risk: MigrationRisk;
   /** 파일 내용의 sha256 앞 16자 — 적용된 뒤 파일이 바뀌었는지 본다 */
   checksum: string;
 }

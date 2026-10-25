@@ -55,13 +55,13 @@ export function runMigrationPlanTests() {
     eq(c.risk, 'ADDITIVE');
   });
 
-  test('인덱스를 지웠다 다시 만드는 것은 자동 적용한다 (055가 실제로 그랬다)', () => {
+  test('DROP 뒤 같은 이름의 UNIQUE 재생성은 기존 데이터에 달려 있어 승인 필요', () => {
     const c = classifyMigration(`
       DROP INDEX IF EXISTS smoke_runs_active_idx;
       CREATE UNIQUE INDEX smoke_runs_active_idx ON smoke_runs (user_id) WHERE status = 'RUNNING';
     `);
-    eq(c.risk, 'ADDITIVE');
-    eq(c.autoApply, true);
+    eq(c.risk, 'DATA_DEPENDENT');
+    eq(c.autoApply, false);
   });
 
   // ── 2. 지우기는 정지 ──
@@ -228,8 +228,8 @@ export function runMigrationPlanTests() {
 
   // ── 8. 실제 저장소 파일로 확인 ──
 
-  test('056(장부 표)은 자동 적용 대상이다 — 표를 더하기만 한다', () => {
-    // 실제 056의 뼈대. 이 파일이 자동 적용 대상이 아니면 자동화의 의미가 없다.
+  test('056처럼 IF NOT EXISTS 뒤에 UNIQUE를 만들면 신규 환경도 승인 필요', () => {
+    // IF NOT EXISTS는 기존 표가 없다는 증거가 아니다. 적용 완료 이력은 별도 관리한다.
     const c = classifyMigration(`
       CREATE TABLE IF NOT EXISTS ledger_events (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -243,8 +243,8 @@ export function runMigrationPlanTests() {
       EXCEPTION WHEN duplicate_object THEN NULL;
       END $$;
     `);
-    eq(c.risk, 'ADDITIVE');
-    eq(c.autoApply, true);
+    eq(c.risk, 'DATA_DEPENDENT');
+    eq(c.autoApply, false);
   });
 
   // ── 9. 적용 뒤 검증 대상 ──
@@ -391,12 +391,13 @@ export function runMigrationPlanTests() {
     eq(c.risk, 'DESTRUCTIVE');
   });
 
-  test('제약을 지웠다 다시 거는 것은 자동 적용한다 (034가 실제로 그랬다)', () => {
+  test('DROP CONSTRAINT 뒤 재생성은 제약 정의가 달라질 수 있어 승인 필요', () => {
     const c = classifyMigration(`
       ALTER TABLE autotrade_schedules DROP CONSTRAINT IF EXISTS autotrade_sizing_chk;
       ALTER TABLE autotrade_schedules ADD CONSTRAINT autotrade_sizing_chk CHECK (margin_pct > 0);
     `);
-    eq(c.risk, 'ADDITIVE');
+    eq(c.risk, 'DATA_DEPENDENT');
+    eq(c.autoApply, false);
   });
 
   test('확장 설치와 트리거 재생성은 자동 적용한다', () => {
@@ -419,7 +420,7 @@ export function runMigrationPlanTests() {
     // 말할 수는 없다.** 그래서 자동 적용에서 뺀다.
     // (실제 파일 검사는 scripts/check-migrations.mjs가 CI에서 한다)
     const c = classifyMigration(`
-      CREATE TABLE IF NOT EXISTS t (id INT);
+      CREATE TABLE t (id INT);
       ALTER TABLE t ALTER COLUMN id SET DEFAULT 0;
       ALTER TABLE t ALTER COLUMN id SET NOT NULL;
       GRANT SELECT ON t TO authenticated;
@@ -639,9 +640,9 @@ export function runMigrationPlanTests() {
     eq(classifyMigration(sql).risk, 'UNKNOWN');
   });
 
-  test('★ 096은 환경 identity 교체이고 자동 적용 대상이다', () => {
-    // 이 파일은 preflight에서 RAISE로 멈추고 **데이터를 고치지 않는다.**
-    // DROP CONSTRAINT는 이 저장소에서 이미 ADDITIVE로 선언돼 있다.
+  test('★ 096은 DO 내부 기존 표 UNIQUE 교체이므로 승인 대상이다', () => {
+    // preflight RAISE와 DROP 자체는 데이터를 고치지 않지만, DO 안에서
+    // 기존 exchange_connections 표에 새 UNIQUE를 걸어 기존 줄과 충돌할 수 있다.
     //
     // 매니페스트는 `npm run gen:migrations`가 파일에서 만들고 CI가 파일과
     // 대조한다(check:migrations). 그래서 여기서 매니페스트를 보는 것은
@@ -649,7 +650,7 @@ export function runMigrationPlanTests() {
     const e = MIGRATION_MANIFEST.find(m => m.id === 96);
     if (!e) throw new Error('096이 매니페스트에 없습니다');
     eq(e.name, '096_exchange_connections_environment_identity.sql');
-    eq(e.risk, 'ADDITIVE');
+    eq(e.risk, 'DATA_DEPENDENT');
     eq(e.checksum, '55008df74e066859');
   });
 
