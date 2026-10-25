@@ -9,6 +9,7 @@
 import { test, eq, assert } from '../../test/harness';
 import {
   autoMergeGate, gateComment, AUTO_MERGE_LABEL, SELF_CHECK_NAME, REQUIRED_CHECKS,
+  reviewFactsFromGraphql, completeCheckRunsPage, completeCommitStatusesPage, appendOpenPrPage,
   type PrFacts,
 } from './autoMergeGate';
 
@@ -288,6 +289,240 @@ export function runAutoMergeGateTests() {
   test('리뷰 상태를 못 읽었으면 안 합친다', () => {
     eq(autoMergeGate(good({ unresolvedThreads: null })).code, 'REVIEW_UNKNOWN');
     eq(autoMergeGate(good({ changesRequested: null })).code, 'REVIEW_UNKNOWN');
+  });
+
+  console.log('[자동 머지 — GitHub API 페이지 누락은 UNKNOWN이다]');
+
+  test('리뷰 스레드 100개 뒤에 미해결 스레드가 있으면 0개로 단정하지 않는다', () => {
+    const v = reviewFactsFromGraphql({ data: { repository: { pullRequest: {
+      reviewThreads: { nodes: Array.from({ length: 100 }, () => ({ isResolved: true, isOutdated: false })), pageInfo: { hasNextPage: true } },
+      reviews: { totalCount: 0 },
+    } } } });
+    eq(v.unresolvedThreads, null);
+    eq(autoMergeGate(good({ unresolvedThreads: v.unresolvedThreads })).code, 'REVIEW_UNKNOWN');
+  });
+
+  test('리뷰 스레드 마지막 페이지는 정상 집계하고 변경 요청 전체 수를 보존한다', () => {
+    const v = reviewFactsFromGraphql({ data: { repository: { pullRequest: {
+      reviewThreads: { nodes: [{ isResolved: false, isOutdated: false }, { isResolved: false, isOutdated: true }], pageInfo: { hasNextPage: false } },
+      reviews: { totalCount: 3 },
+    } } } });
+    eq(v.unresolvedThreads, 1);
+    eq(v.changesRequested, 3);
+  });
+
+  test('리뷰 페이지 정보가 없거나 잘못됐으면 통과시키지 않는다', () => {
+    for (const pageInfo of [undefined, {}, { hasNextPage: null }]) {
+      const v = reviewFactsFromGraphql({ data: { repository: { pullRequest: {
+        reviewThreads: { nodes: [], pageInfo }, reviews: { totalCount: 0 },
+      } } } });
+      eq(v.unresolvedThreads, null);
+    }
+  });
+
+  test('검사 101건 중 첫 100건만 성공이면 전체 성공으로 단정하지 않는다', () => {
+    const checks = Array.from({ length: 100 }, () => ({ name: 'verify', status: 'completed', conclusion: 'success', head_sha: 'abc1234def5678' }));
+    eq(completeCheckRunsPage({ total_count: 101, check_runs: checks }), null);
+    eq(autoMergeGate(good({ checks: completeCheckRunsPage({ total_count: 101, check_runs: checks }) ?? [] })).code, 'REQUIRED_CHECK_MISSING');
+  });
+
+  test('검사 페이지가 완전하면 정상 성공 증거를 사용한다', () => {
+    const checks = completeCheckRunsPage({ total_count: 1, check_runs: [
+      { name: 'verify', status: 'completed', conclusion: 'success',
+        head_sha: 'abc1234def5678', app: { slug: 'github-actions' } },
+    ] });
+    eq(checks?.length, 1);
+    eq(checks?.[0].headSha, 'abc1234def5678');
+    eq(autoMergeGate(good({ checks: checks ?? [] })).code, 'OK');
+  });
+
+  test('검사 total_count를 못 읽거나 모양이 깨지면 UNKNOWN이다', () => {
+    eq(completeCheckRunsPage({ check_runs: [] }), null);
+    eq(completeCheckRunsPage({ total_count: 1, check_runs: [] }), null);
+    eq(completeCheckRunsPage({ total_count: 1, check_runs: {} }), null);
+  });
+
+  console.log('[자동 머지 — commit status API 실패/페이지 누락은 UNKNOWN이다]');
+
+  test('★ commit status 31건 중 첫 30건만 성공이면 병합 증거가 아니다', () => {
+    const statuses = Array.from({ length: 30 }, (_, i) => ({ context: 'check-' + i, state: 'success' }));
+    eq(completeCommitStatusesPage({ total_count: 31, statuses }), null);
+  });
+
+  test('★ commit status API 오류와 깨진 응답을 성공 0건으로 해석하지 않는다', () => {
+    eq(completeCommitStatusesPage(null), null);
+    eq(completeCommitStatusesPage({ statuses: [] }), null);
+    eq(completeCommitStatusesPage({ total_count: 1, statuses: [] }), null);
+    eq(completeCommitStatusesPage({ total_count: 0, statuses: {} }), null);
+  });
+
+  test('status 0건을 완전하게 확인한 경우는 정상 입력이다', () => {
+    const v = completeCommitStatusesPage({ total_count: 0, statuses: [] });
+    eq(v?.length, 0);
+  });
+
+  test('실패 상태가 포함된 완전한 status 응답은 실패를 그대로 전달한다', () => {
+    const statuses = completeCommitStatusesPage({ total_count: 2, statuses: [
+      { context: 'external', state: 'success' },
+      { context: 'required-external', state: 'failure' },
+    ] });
+    eq(statuses?.length, 2);
+    eq(autoMergeGate(good({ statuses: statuses ?? [] })).code, 'CHECKS_FAILED');
+  });
+
+  test('status 필드가 깨지거나 알 수 없는 상태면 UNKNOWN이다', () => {
+    for (const statuses of [
+      [{ context: 'foo', state: 'mystery' }],
+      [{ context: '', state: 'success' }],
+      [{ context: 'foo' }],
+      [null],
+    ]) {
+      eq(completeCommitStatusesPage({ total_count: 1, statuses }), null);
+    }
+  });
+
+  console.log('[자동 머지 — 필수 CI 출처와 커밋 증거]');
+
+  test('★ gate에 직접 들어온 headSha 누락 verify도 최신 검사가 아니다', () => {
+    const v = autoMergeGate(good({ checks: [
+      { name: 'verify', status: 'completed', conclusion: 'success' },
+    ] }));
+    eq(v.merge, false);
+    eq(v.code, 'REQUIRED_CHECK_MISSING');
+  });
+
+  test('★ 다른 GitHub App이 만든 verify 성공은 필수 CI 통과 증거가 아니다', () => {
+    eq(completeCheckRunsPage({ total_count: 1, check_runs: [
+      { name: 'verify', status: 'completed', conclusion: 'success',
+        head_sha: 'abc1234def5678', app: { slug: 'third-party' } },
+    ] }), null);
+  });
+
+  test('★ 필수 verify의 GitHub App 출처가 없으면 통과 증거가 아니다', () => {
+    eq(completeCheckRunsPage({ total_count: 1, check_runs: [
+      { name: 'verify', status: 'completed', conclusion: 'success',
+        head_sha: 'abc1234def5678' },
+    ] }), null);
+  });
+
+  test('★ head_sha가 없거나 빈 검사 결과는 최신 커밋 증거가 아니다', () => {
+    for (const head_sha of [undefined, null, '']) {
+      eq(completeCheckRunsPage({ total_count: 1, check_runs: [
+        { name: 'verify', status: 'completed', conclusion: 'success',
+          head_sha, app: { slug: 'github-actions' } },
+      ] }), null);
+    }
+  });
+
+  test('GitHub Actions verify와 외부 선택 검사 성공은 정상 통과한다', () => {
+    const checks = completeCheckRunsPage({ total_count: 2, check_runs: [
+      { name: 'verify', status: 'completed', conclusion: 'success',
+        head_sha: 'abc1234def5678', app: { slug: 'github-actions' } },
+      { name: 'Vercel Preview Comments', status: 'completed', conclusion: 'success',
+        head_sha: 'abc1234def5678', app: { slug: 'vercel' } },
+    ] });
+    eq(checks?.length, 2);
+    eq(autoMergeGate(good({ checks: checks ?? [] })).code, 'OK');
+  });
+
+  test('★ 외부 앱의 auto-merge-gate 실패 검사는 자기 검사로 숨기지 않는다', () => {
+    const checks = completeCheckRunsPage({ total_count: 2, check_runs: [
+      { name: 'verify', status: 'completed', conclusion: 'success',
+        head_sha: 'abc1234def5678', app: { slug: 'github-actions' } },
+      { name: SELF_CHECK_NAME, status: 'completed', conclusion: 'failure',
+        head_sha: 'abc1234def5678', app: { slug: 'third-party' } },
+    ] });
+    eq(checks, null, '외부 앱이 같은 이름으로 만든 실패 검사가 무시됐다');
+  });
+
+  test('★ auto-merge-gate 검사 앱 출처를 모르면 전체 증거를 보류한다', () => {
+    eq(completeCheckRunsPage({ total_count: 1, check_runs: [
+      { name: SELF_CHECK_NAME, status: 'completed', conclusion: 'failure',
+        head_sha: 'abc1234def5678' },
+    ] }), null);
+  });
+
+  test('정상 GitHub Actions 자기 검사 진행 중에는 자기 자신을 기다리지 않는다', () => {
+    const checks = completeCheckRunsPage({ total_count: 2, check_runs: [
+      { name: 'verify', status: 'completed', conclusion: 'success',
+        head_sha: 'abc1234def5678', app: { slug: 'github-actions' } },
+      { name: SELF_CHECK_NAME, status: 'in_progress', conclusion: null,
+        head_sha: 'abc1234def5678', app: { slug: 'github-actions' } },
+    ] });
+    eq(checks?.length, 2);
+    eq(autoMergeGate(good({ checks: checks ?? [] })).code, 'OK');
+  });
+
+  console.log('[자동 머지 — 필수 verify는 반드시 성공해야 한다]');
+
+  test('★ 필수 verify가 skipped 또는 neutral이면 병합하지 않는다', () => {
+    for (const conclusion of ['skipped', 'neutral']) {
+      const v = autoMergeGate(good({
+        checks: [{ name: 'verify', status: 'completed', conclusion, headSha: 'abc1234def5678' }],
+      }));
+      eq(v.merge, false, `필수 verify ${conclusion}가 병합을 허용했다`);
+    }
+  });
+
+  test('★ 같은 이름의 verify 중 하나라도 skipped이면 성공 하나로 덮지 않는다', () => {
+    const v = autoMergeGate(good({
+      checks: [
+        { name: 'verify', status: 'completed', conclusion: 'success', headSha: 'abc1234def5678' },
+        { name: 'verify', status: 'completed', conclusion: 'skipped', headSha: 'abc1234def5678' },
+      ],
+    }));
+    eq(v.merge, false, '필수 검사 중 skipped를 성공으로 덮었다');
+  });
+
+  console.log('[자동 머지 — 열린 PR 전체 페이지 수집]');
+
+  test('★ 열린 PR 105건이면 첫 100건 이후 5건도 누적한다', () => {
+    const page1 = Array.from({ length: 100 }, (_, i) => ({ number: 415 - i, labels: [] }));
+    const first = appendOpenPrPage([], page1);
+    eq(first?.prs.length, 100);
+    eq(first?.hasMore, true, '100건에서 조회를 멈췄다');
+    const second = appendOpenPrPage(first?.prs ?? [], [
+      { number: 179, labels: [{ name: 'auto-merge' }] },
+      { number: 178, labels: [] }, { number: 177, labels: [] },
+      { number: 176, labels: [] }, { number: 175, labels: [] },
+    ]);
+    eq(second?.prs.length, 105);
+    eq(second?.hasMore, false);
+    eq(second?.prs[100]?.number, 179);
+    eq(second?.prs[100]?.labels[0]?.name, 'auto-merge');
+  });
+
+  test('★ 2페이지가 깨지면 1페이지 100건만으로 진행하지 않는다', () => {
+    const first = appendOpenPrPage([], Array.from({ length: 100 },
+      (_, i) => ({ number: 415 - i, labels: [] })));
+    eq(first?.hasMore, true);
+    eq(appendOpenPrPage(first?.prs ?? [], { message: 'API error' }), null);
+  });
+
+  test('★ 페이지 사이 PR 번호 중복은 조회 일관성이 깨진 것으로 막는다', () => {
+    const first = appendOpenPrPage([], Array.from({ length: 100 },
+      (_, i) => ({ number: 415 - i, labels: [] })));
+    eq(appendOpenPrPage(first?.prs ?? [], [{ number: 415, labels: [] }]), null);
+  });
+
+  test('★ 100건 딱 맞으면 빈 다음 페이지를 읽고 완료한다', () => {
+    const first = appendOpenPrPage([], Array.from({ length: 100 },
+      (_, i) => ({ number: 415 - i, labels: [] })));
+    eq(first?.hasMore, true);
+    const second = appendOpenPrPage(first?.prs ?? [], []);
+    eq(second?.prs.length, 100);
+    eq(second?.hasMore, false);
+  });
+
+  test('★ 잘못된 PR 번호·라벨·페이지 크기는 UNKNOWN이다', () => {
+    for (const row of [
+      { number: 0, labels: [] },
+      { number: 5, labels: 'auto-merge' },
+      { number: 6, labels: [null] },
+      { number: '7', labels: [] },
+    ]) eq(appendOpenPrPage([], [row]), null);
+    eq(appendOpenPrPage([], Array.from({ length: 101 },
+      (_, i) => ({ number: i + 1, labels: [] }))), null);
   });
 
   console.log('[자동 머지 — 강제 경로가 없다]');
