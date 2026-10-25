@@ -164,6 +164,8 @@ export interface WriteLog {
 export interface FakeDbOptions {
   /** 이 테이블의 update를 실패시킨다 (DB 기록 실패 재현) */
   failUpdatesOn?: string;
+  /** 018 이전 스키마처럼 복구 칼럼만 없게 만든다 */
+  failLegacyColumnsOn?: string;
   /** 이 테이블의 insert를 실패시킨다. '23505'면 유니크 충돌 */
   failInsertCode?: { table: string; code: string };
   /** select를 실패시킨다 */
@@ -206,6 +208,13 @@ export class FakeDb {
 
     const flushUpdate = () => {
       if (!pending || pending.kind !== 'update') return { error: null };
+      if (db.opts.failLegacyColumnsOn === table) {
+        const missing = Object.keys(pending.patch).find(k =>
+          ['pos_qty_before', 'resolve_attempts', 'last_resolve_at', 'needs_attention'].includes(k));
+        if (missing) return { error: {
+          code: 'PGRST204', message: `Could not find the '${missing}' column of '${table}' in the schema cache`,
+        } };
+      }
       if (db.opts.failUpdatesOn === table) {
         // 거래소는 받았는데 장부에 못 적는 상황이다.
         return { error: { message: `DB 쓰기 실패 (${table})`, code: 'XX000' } };
