@@ -385,6 +385,45 @@ export async function runReconcileIntegrationTests() {
     });
   }
 
+  // ══════════ P1: 거래소 확인 뒤 DB 쓰기 실패를 resolved 성공으로 숨기지 않는다 ══════════
+  {
+    const db = new FakeDb({ failUpdatesOn: 'live_orders' }).seed('live_orders', [pendingRow()]);
+    const venue = baseVenue()
+      .on(BN_ORDER, { json: bnOrder({
+        status: 'FILLED', executedQty: '0.010', avgPrice: '95000',
+      }) }, 'GET');
+    const r = await scenario(venue, () => reconcile(db));
+
+    test('★ 대조 DB 쓰기 실패는 resolved=0 · stillUnknown=1이고 ACKED를 보존한다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq((r as any).checked, 1);
+      eq((r as any).resolved, 0, 'DB 기록 실패인데 해결됐다고 집계했다');
+      eq((r as any).stillUnknown, 1, '기록 실패가 미확정으로 드러나지 않았다');
+      eq(db.row('live_orders', { id: 'ord-1' })?.status, 'ACKED', '실패한 쓰기가 상태를 바꿨다');
+      eq(db.writes.length, 0, '실패한 DB 쓰기가 성공한 것으로 기록됐다');
+      eq(venue.orderSends().length, 0, '대조 중 거래소에 새 주문을 보냈다');
+    });
+  }
+
+  // ══════════ 018 이전 스키마 호환: 없는 복구 칼럼만 제거하고 재시도 ══════════
+  {
+    const db = new FakeDb({ failLegacyColumnsOn: 'live_orders' })
+      .seed('live_orders', [pendingRow()]);
+    const venue = baseVenue()
+      .on(BN_ORDER, { json: bnOrder({
+        status: 'FILLED', executedQty: '0.010', avgPrice: '95000',
+      }) }, 'GET');
+    const r = await scenario(venue, () => reconcile(db));
+
+    test('★ 018 이전 복구 칼럼 부재는 기존 상태 칼럼 기록으로 복구한다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq((r as any).resolved, 1, '구형 스키마 호환 재시도가 실패했다');
+      eq(db.row('live_orders', { id: 'ord-1' })?.status, 'FILLED');
+      eq(db.writes.filter(w => w.table === 'live_orders' && w.kind === 'update').length, 1);
+      eq(venue.orderSends().length, 0);
+    });
+  }
+
   // ══════════ ⑤ 주문 미발견 + 유예 경과 → RECONCILED ══════════
   {
     const db = new FakeDb().seed('live_orders', [pendingRow({ status: 'ACKED' })]);
