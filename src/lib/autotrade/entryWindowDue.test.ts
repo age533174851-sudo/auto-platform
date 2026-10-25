@@ -129,6 +129,19 @@ export function runEntryWindowDueTests() {
     assert(v.code === 'WAITING', v.code);
   });
 
+  test('★★ 배선: 95초 뒤 같은 창을 다시 평가하지 않는다', () => {
+    // MIN_GAP(1분)은 이미 지났지만 60분 간격은 아직 지나지 않았다.
+    // 창 시작을 현재 초로 역산하면 WINDOW가 다시 열리던 경로다.
+    const v = dueCheck({
+      ...base,
+      nowMs: kst(9, 11) + 45_000,
+      lastRunAtMs: kst(9, 10) + 10_000,
+      strategyId: 'my-original-v1',
+    } as any);
+    eq(v.due, false);
+    eq(v.code, 'WAITING');
+  });
+
   test('★★ 중복 방지(MIN_GAP 1분)가 창 판정보다 먼저다', () => {
     const v = dueCheck({
       ...base, nowMs: kst(9, 15), lastRunAtMs: kst(9, 15) - 20_000,
