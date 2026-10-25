@@ -95,6 +95,15 @@ export function runDailyForcedEntryTests() {
     }
   });
 
+  test('★★ 09:00 이후 초·밀리초 지터가 주문 조회 시작을 밀지 않는다 (중복 진입 방지)', () => {
+    // 기존 구현은 09:01:45에 09:00:45를 반환한다.
+    // 09:00:10에 이미 낸 주문이 조회 범위에서 사라져 ordersTodayInWindow=0이 될 수 있다.
+    const start = AT(0, 0);
+    for (const at of [AT(0, 0) + 45_123, AT(0, 1) + 45_123, AT(0, 29) + 59_999]) {
+      eq(forcedWindowStartMs(at), start, new Date(at).toISOString());
+    }
+  });
+
   test('창 시작 시각(ms)은 그날 09:00 KST다', () => {
     const at = AT(0, 17);
     eq(forcedWindowStartMs(at), AT(0, 0));
