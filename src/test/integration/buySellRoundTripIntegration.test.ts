@@ -354,7 +354,7 @@ export async function runBuySellRoundTripTests() {
       // fixture가 무조건 0을 반환하면 이 시험이 RED가 되어야 한다.
       const partial = {
         ...prep.prepared,
-        inner: { ...prep.prepared.inner, quantity: QTY / 2 },
+        inner: { ...(prep.prepared.inner as Record<string, unknown>), quantity: QTY / 2 },
       };
       const sent = await sendSymbolClose(creds(), partial);
       const after = await readOpenPosition(creds(), 'BTCUSDT');
