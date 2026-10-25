@@ -29,6 +29,7 @@ import {
 import { futuresCancelAll, futuresCloseAll } from '../../src/lib/exchanges/futuresAdapter';
 import { evaluateIfDue } from '../../src/lib/autotrade/evaluationRunner';
 import { selectDueSchedules, shouldPollNow, POLL_INTERVAL_MS } from '../../src/lib/autotrade/schedulePoll';
+import { loadEnabledSchedulePages } from '../../src/lib/autotrade/schedulePages';
 import { exitMonitorPlan, exitMonitorOutcome, EXIT_MONITOR_INTERVAL_MS } from '../../src/lib/engine/exitMonitorSchedule';
 import { wakeCadenceHeaders } from '../../src/lib/engine/exitMonitorWake';
 
@@ -537,14 +538,20 @@ async function pollSchedules(): Promise<void> {
     // 069가 아직인 DB에서는 그 칸이 없어 조회가 실패한다 — 그때는
     // **예약 평가를 멈추지 않고** 칸 없이 다시 읽는다. 취소 여부는
     // `evaluateIfDue`의 선점이 DB에서 다시 확인한다.
-    let { data, error } = await sb().from('autotrade_schedules')
-      .select('*').eq('enabled', true).is('cancelled_at', null).limit(100);
-    if (error && /cancelled_at|column|schema cache/i.test(String(error.message))) {
-      ({ data, error } = await sb().from('autotrade_schedules')
-        .select('*').eq('enabled', true).limit(100));
-    }
-    if (error) throw new Error(error.message);
-    rows = Array.isArray(data) ? data : [];
+    // 고유 ID 정렬 + inclusive range로 전체 페이지를 읽는다.
+    // 100개만 읽으면 뒤쪽 예약은 매 회차 빠진다. 중간 페이지 실패 시에는
+    // 부분 목록으로 평가하지 않고 아래 catch에서 오류를 기록한다.
+    rows = await loadEnabledSchedulePages<any>(async (from, to) => {
+      let { data, error } = await sb().from('autotrade_schedules')
+        .select('*').eq('enabled', true).is('cancelled_at', null)
+        .order('id', { ascending: true }).range(from, to);
+      if (error && /cancelled_at|column|schema cache/i.test(String(error.message))) {
+        ({ data, error } = await sb().from('autotrade_schedules')
+          .select('*').eq('enabled', true)
+          .order('id', { ascending: true }).range(from, to));
+      }
+      return { data, error };
+    });
   } catch (e: any) {
     // **'못 읽었다'를 '없다'로 읽지 않는다.** 조용히 넘기면 예약이 하나도
     // 없는 것과 구분이 안 된다.
