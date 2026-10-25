@@ -105,7 +105,7 @@ async function upsertComment(number, body) {
 
 async function main() {
   const dir = loadJudge();
-  const { rebaseVerdict, rebaseComment } = await import(`file://${join(dir, 'autoRebase.js')}`);
+  const { rebaseVerdict, rebaseComment, rebasePrePushVerdict } = await import(`file://${join(dir, 'autoRebase.js')}`);
 
   const repoInfo = await api(`/repos/${REPO}`);
   if (!repoInfo.ok) { console.error('저장소 정보를 읽지 못했습니다'); process.exit(1); }
@@ -183,6 +183,39 @@ async function main() {
     console.log(`#${brief.number} ${v.action} — ${v.reason}`);
 
     if (v.action === 'REBASE' && newSha) {
+      // 목록 조회 후 git rebase를 수행하는 동안 라벨·Draft·base·main이
+      // 바뀔 수 있다. force-with-lease는 HEAD 변경만 보호하므로 별도
+      // 최신 조회가 필요하다. 실패·불완전한 응답은 모두 push 금지.
+      const [freshPr, freshMain] = await Promise.all([
+        api(`/repos/${REPO}/pulls/${brief.number}`),
+        api(`/repos/${REPO}/branches/${encodeURIComponent(DEFAULT_BRANCH)}`),
+      ]);
+      const p = freshPr.ok && freshPr.body?.state === 'open'
+        && freshPr.body?.merged_at == null
+        && typeof freshPr.body?.draft === 'boolean'
+        && Array.isArray(freshPr.body?.labels)
+        ? freshPr.body : null;
+      const latest = p ? {
+        number: p.number, draft: p.draft,
+        labels: p.labels.map(l => l.name),
+        fromFork: p.head?.repo?.full_name !== REPO,
+        headRef: p.head?.ref ?? '', headSha: p.head?.sha ?? '',
+        baseRef: p.base?.ref ?? '', behindBy, cleanRebase,
+      } : null;
+      const safety = rebasePrePushVerdict({
+        initial: {
+          number: brief.number, draft: !!brief.draft, labels, fromFork,
+          headRef, headSha, baseRef: brief.base?.ref ?? '', behindBy, cleanRebase,
+        },
+        latest, expectedBaseSha: baseSha,
+        latestBaseSha: freshMain.ok ? (freshMain.body?.commit?.sha ?? null) : null,
+        defaultBranch: DEFAULT_BRANCH,
+      });
+      if (!safety.allow) {
+        blocked++;
+        console.log(`#${brief.number} 재배치 push 보류 — ${safety.reason}`);
+        continue;
+      }
       // **force-with-lease.** 판정하는 사이에 누가 새 커밋을 올렸으면
       // 그것을 지우지 않고 실패한다 — 다음 회차에 다시 판정한다.
       const pushed = gitTry(['push', remote,
