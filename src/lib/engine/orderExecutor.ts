@@ -1922,11 +1922,16 @@ export async function reconcilePendingOrders(
   if (creds.userId) q = q.eq('user_id', creds.userId);
   if (creds.connectionId) q = q.eq('connection_id', creds.connectionId);
 
-  const { data: pending } = await q
+  const { data: pending, error: pendingError } = await q
     .order('created_at', { ascending: true })
     .limit(50);
 
-  if (!Array.isArray(pending) || !pending.length) return out;
+  // 조회 실패와 실제 미확정 주문 0건은 다르다. 실패를 빈 성공으로 반환하면
+  // 호출자가 "대조 완료"로 기록하고, 살아 있는 주문은 계속 방치된다.
+  if (pendingError || !Array.isArray(pending)) {
+    throw new Error(`미확정 주문 장부 조회 실패: ${pendingError?.message || '목록 응답이 배열이 아닙니다'}`);
+  }
+  if (pending.length === 0) return out;
 
   const { resolveUnknown, resolveAcked, shouldEscalate } = await import('./unknownResolver');
 

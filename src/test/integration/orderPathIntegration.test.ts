@@ -287,6 +287,35 @@ async function reconcile(db: FakeDb, exchange: 'binance' | 'gate' = 'binance') {
 export async function runReconcileIntegrationTests() {
   console.log('[통합 — 대조 경로 (실제 reconcilePendingOrders)]');
 
+  // ══════════ P1: 장부 읽기 실패를 "대조할 주문 없음"으로 숨기지 않는다 ══════════
+  {
+    const db = new FakeDb({ failSelectsOn: 'live_orders' }).seed('live_orders', [pendingRow()]);
+    const venue = baseVenue();
+    const r = await scenario(venue, () => reconcile(db));
+
+    test('★ 미확정 주문 SELECT 실패는 대조 0건 성공이 아니라 오류다 (FakeDb)', () => {
+      assert(r instanceof Error, 'DB 조회 실패가 checked=0, resolved=0 성공으로 숨겨졌다');
+      assert(r.message.includes('미확정 주문 장부 조회 실패'), r.message);
+      eq(db.row('live_orders', { id: 'ord-1' })?.status, 'ACKED', '미확정 주문을 바꿨다');
+      eq(db.writes.length, 0, '읽기 실패 뒤 DB에 썼다');
+      eq(venue.calls.length, 0, 'DB 읽기도 실패했는데 거래소에 요청했다');
+    });
+  }
+
+  {
+    const db = new FakeDb(); // 실제로 비어 있는 장부는 정상적인 0건이다.
+    const venue = baseVenue();
+    const r = await scenario(venue, () => reconcile(db));
+
+    test('★ 정상적인 빈 장부는 오류 없이 대조 0건이다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq((r as any).checked, 0);
+      eq((r as any).resolved, 0);
+      eq(venue.calls.length, 0);
+      eq(db.writes.length, 0);
+    });
+  }
+
   // ══════════ ① 부분 체결 후 취소 — 수량 보존 ══════════
   {
     const db = new FakeDb().seed('live_orders', [pendingRow()]);
