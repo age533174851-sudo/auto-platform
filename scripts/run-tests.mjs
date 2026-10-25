@@ -160,6 +160,7 @@ import {
   runPrecisionIntegrationTests,
   runPrecisionMatrixTests,
 } from './src/test/integration/orderPathIntegration.test';
+import { runBuySellRoundTripTests } from './src/test/integration/buySellRoundTripIntegration.test';
 import { runSmokeStartRouteTests } from './src/test/integration/smokeStartRouteIntegration.test';
 import { runHoldExtensionIntegrationTests } from './src/test/integration/holdExtensionIntegration.test';
 import { runFailureRecoveryTests } from './src/lib/engine/failureRecovery.test';
@@ -408,6 +409,7 @@ runMigrationStatusTests(); runWalletTruthTests(); runSmokePlanTests(); runSmokeR
   //   가짜 거래소**에 묻게 된다. 실제로 그 일이 났고 "거래소 호출이
   //   하나도 없다"로 보였다. 그래서 전부 끝난 뒤에 돌린다.
   await runOrderPathIntegrationTests();
+  await runBuySellRoundTripTests();
   await runReconcileIntegrationTests();
   await runSpotIntegrationTests();
   await runCloseIntegrationTests();
