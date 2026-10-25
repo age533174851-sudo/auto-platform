@@ -96,7 +96,19 @@ function stage() {
      */
     sellFills() {
       venue.onParams(BN_ORDER, 'POST', { reduceOnly: 'true' },
-        { json: () => { amt = 0; return fill(7002, QTY, EXIT); } });
+        { json: () => {
+          // 거래소 모의 체결은 실제 전송된 수량만큼만 노출을 줄인다.
+          // 이전 fixture는 수량에 상관없이 amt=0으로 만들어
+          // 잘못된 부분 청산도 완전 청산 GREEN으로 통과시킬 수 있었다.
+          const sent = venue.orderSends().slice(-1)[0];
+          const qty = Number(sent?.params.quantity);
+          if (sent?.params.side !== 'SELL' || !Number.isFinite(qty)
+            || qty <= 0 || qty > amt) {
+            return { code: -2022, msg: 'ReduceOnly Order is rejected.' };
+          }
+          amt = Number((amt - qty).toFixed(9));
+          return fill(7002, qty, EXIT, qty);
+        } });
       return api;
     },
     /** 매수 체결 (reduce-only가 아닌 POST) */
@@ -208,6 +220,8 @@ export async function runBuySellRoundTripTests() {
       const last = sends[sends.length - 1].params;
       eq(last.reduceOnly, 'true', `reduceOnly가 없다: ${JSON.stringify(last)}`);
       eq(last.side, 'SELL', `매도 방향이 아니다: ${JSON.stringify(last)}`);
+      eq(Number(last.quantity), QTY,
+        '실제 거래소에 전송한 청산 수량이 관측 포지션과 다르다');
     });
 
     test('★ ① 매도가 체결됐다고 거래소가 답한다', () => {
@@ -323,6 +337,42 @@ export async function runBuySellRoundTripTests() {
     test('★ ⑥ 이미 flat이면 ALREADY_FLAT이고 주문을 보내지 않는다 (실패가 아니다)', () => {
       eq((out as any).code, 'ALREADY_FLAT');
       eq(s.venue.orderSends().length, 0);
+    });
+  }
+
+  // ══════════ ⑦ 부분 청산 응답을 완전 청산으로 오판하지 않는다 ══════════
+  {
+    const db = new FakeDb();
+    const s = stage().wirePositions().sellFills().buyFills();
+    const out = await scenario(s.venue, async () => {
+      await buy(db, { clientOrderId: 'RT-PARTIAL-EXIT' });
+      const prep = await prepareSymbolClose(creds(), 'BTCUSDT', 'LONG');
+      if (prep.code !== 'READY' || !prep.prepared) {
+        throw new Error(`부분 청산 준비 실패: ${prep.code}`);
+      }
+      // 전송층에서 수량이 절반으로 바뀐 상황을 의도적으로 주입한다.
+      // fixture가 무조건 0을 반환하면 이 시험이 RED가 되어야 한다.
+      const partial = {
+        ...prep.prepared,
+        inner: { ...(prep.prepared.inner as Record<string, unknown>), quantity: QTY / 2 },
+      };
+      const sent = await sendSymbolClose(creds(), partial);
+      const after = await readOpenPosition(creds(), 'BTCUSDT');
+      return { sent, after };
+    });
+    const o = out as any;
+
+    test('★★ ⑦ 부분 청산 모의 응답은 전송 수량만 체결한다', () => {
+      assert(!(out instanceof Error), `부분 청산 경로 오류: ${o?.message}`);
+      eq(o.sent.ok, true);
+      eq(Number(s.venue.orderSends().slice(-1)[0].params.quantity), QTY / 2);
+      eq(Number(o.sent.executedQty), QTY / 2);
+    });
+
+    test('★★★ ⑦ 부분 청산 후 남은 노출을 0으로 위장하지 않는다', () => {
+      eq(s.openQty(), QTY / 2);
+      eq(o.after.ok, true);
+      eq(Number(o.after.qty), QTY / 2);
     });
   }
 }
