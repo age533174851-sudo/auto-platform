@@ -76,7 +76,7 @@ export interface PollRow {
 }
 
 export type PollSkipCode =
-  /** 실전 예약 — 이 루프는 건드리지 않는다 */
+  /** TESTNET 이외의 모든 예약 — 이 루프는 건드리지 않는다 */
   | 'NOT_TESTNET'
   /** 꺼져 있다 · 간격이 안 됐다 · 방금 돌았다 · 연결이 없다 */
   | 'OFF' | 'WAITING' | 'TOO_SOON' | 'NO_CONNECTION';
@@ -108,11 +108,13 @@ export function selectDueSchedules(rows: PollRow[], nowMs: number): PollSelectio
     const id = String(row?.id ?? '');
     const symbol = String(row?.symbol ?? '');
 
-    // **실전은 이 루프가 보지 않는다.** 먼저 거른다 — 뒤에서 걸러도
-    // 되지만, 앞에 두면 "이 루프는 실전을 만지지 않는다"가 코드에서 바로 읽힌다.
-    if (isLiveMode(row?.mode)) {
+    // **명시적인 TESTNET만** 이 Worker가 평가한다. LIVE만 제외하면
+    // PAPER·MOCK·빈 값·미래 모드도 여기로 들어와 envOfMode에서 TESTNET으로
+    // 재해석될 수 있다. 알 수 없는 모드는 추측하지 않고 차단한다.
+    // 이 분기는 dueCheck·선점·거래소 호출보다 앞에 있어야 한다.
+    if (row?.mode !== 'TESTNET') {
       skipped.push({ id, symbol, code: 'NOT_TESTNET',
-        reason: `실전 예약(${row?.mode})은 이 루프가 평가하지 않습니다` });
+        reason: `TESTNET 외 예약(${String(row?.mode ?? 'UNKNOWN')})은 이 Worker가 평가하지 않습니다` });
       continue;
     }
 
