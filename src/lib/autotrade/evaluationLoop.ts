@@ -33,6 +33,7 @@
 import type { EvaluationOutcome } from '../strategies/runStrategy';
 import type { DecisionVerdict } from '../ui/autoOverview';
 import { intervalMinOf, RUNNER_INTERVAL_MIN } from './nextRun';
+import { entryWindowOf, windowDueVerdict } from './entryWindowDue';
 
 /** null·빈 문자열·boolean은 숫자가 아니다. **0으로 눕히지 않는다** */
 const num = (v: any): number | null => {
@@ -63,7 +64,9 @@ export type DueCode =
   /** 간격이 아직 안 됐다 */
   | 'WAITING'
   /** 방금 돌았다 — 중복 호출 */
-  | 'TOO_SOON';
+  | 'TOO_SOON'
+  /** 전략의 진입 창이 열렸다 — **간격 위상과 무관하게** 오늘 한 번 깨운다 */
+  | 'WINDOW';
 
 export interface DueVerdict {
   due: boolean;
@@ -88,6 +91,8 @@ export function dueCheck(i: {
   connectionId?: any;
   lastRunAtMs?: any;
   intervalMin?: any;
+  /** 예약 줄의 전략. 창을 가진 전략은 창으로도 깨운다 (`entryWindowDue.ts`) */
+  strategyId?: any;
 }): DueVerdict {
   if (i.enabled !== true) {
     return { due: false, code: 'OFF', leftMin: null, reason: '꺼져 있습니다' };
@@ -113,6 +118,19 @@ export function dueCheck(i: {
     return { due: false, code: 'TOO_SOON', leftMin: 0,
       reason: `${Math.max(0, Math.round(since / 1000))}초 전에 평가했습니다 — 중복 실행을 막습니다` };
   }
+
+  // ── 창을 가진 전략은 창으로도 깨운다 ──
+  //
+  // **더하기만 한다.** 아래 간격 판정이 막던 것을 열지 않고, 창이 열린
+  // 날 하루 한 번을 더한다. 중복 방지(MIN_GAP)는 바로 위에서 이미
+  // 걸렸고, 하루 1회는 전략 라우트가, 동시 평가는 선점(CAS)이 계속 막는다.
+  //
+  // 왜 필요한가는 `entryWindowDue.ts` 머리말에 있다 — 간격 60분이면
+  // 09:10~09:30 20분 창의 운명이 **위상 한 값**에 걸린다.
+  const wv = windowDueVerdict({
+    nowMs: i.nowMs, lastRunAtMs: last, window: entryWindowOf(i.strategyId),
+  });
+  if (wv.due) return { due: true, code: 'WINDOW', leftMin: 0, reason: wv.reason };
 
   const gapMs = interval * 60_000;
   if (since >= gapMs) {
