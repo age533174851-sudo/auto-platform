@@ -264,14 +264,26 @@ const RECOVERY_COLS = ['pos_qty_before', 'resolve_attempts', 'last_resolve_at', 
 async function updateOrderRow(sb: any, id: string, patch: Record<string, any>): Promise<void> {
   const { error } = await sb.from('live_orders').update(patch).eq('id', id);
   if (!error) return;
+  // 일반 DB 장애/권한 오류를 018 이전 스키마로 오인하면 대조가
+  // resolved++를 올리고도 장부에는 ACKED가 남는다.
+  const missingRecoveryColumn = ['42703', 'PGRST204'].includes(String(error.code ?? ''))
+    && RECOVERY_COLS.some(col => String(error.message ?? '').includes(col));
+  if (!missingRecoveryColumn) {
+    throw new Error(`주문 장부 갱신 실패: ${error.message || error.code || '원인 불명'}`);
+  }
   const legacy: Record<string, any> = {};
   let stripped = false;
   for (const [k, v] of Object.entries(patch)) {
     if (RECOVERY_COLS.includes(k)) { stripped = true; continue; }
     legacy[k] = v;
   }
-  if (!stripped || Object.keys(legacy).length === 0) return;
-  await sb.from('live_orders').update(legacy).eq('id', id);
+  if (!stripped || Object.keys(legacy).length === 0) {
+    throw new Error('주문 장부 갱신 실패: 호환 재시도할 기존 칼럼이 없습니다');
+  }
+  const { error: retryError } = await sb.from('live_orders').update(legacy).eq('id', id);
+  if (retryError) {
+    throw new Error(`주문 장부 호환 재시도 실패: ${retryError.message || retryError.code || '원인 불명'}`);
+  }
 }
 
 // 수량 정밀도 보정 — 거래소는 정해진 소수점만 받는다
