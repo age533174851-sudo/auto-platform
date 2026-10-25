@@ -37,6 +37,9 @@ import {
   OPEN_BREAKER, type BreakerState,
 } from '../../src/lib/supabase/quotaBreaker';
 import {
+  usageVerdict, shouldSendUsageAlert, usageAllows, type UsageTier,
+} from '../../src/lib/supabase/usageBudget';
+import {
   EXCHANGE_CONNECTION_COLUMNS, connectionReadVerdict, credentialColumnsPresent,
   connectionReadRetryPlan,
 } from '../../src/lib/supabase/exchangeConnectionRead';
@@ -122,13 +125,44 @@ function noteDb(outcome: { error?: any } | null | undefined): void {
 }
 
 /** 지금 한가한 조회를 보내도 되는가 */
+/**
+ * 이번 주기 사용량. **운영자가 넣어 준 값만 믿는다.**
+ *
+ * 비워 두면 `UNKNOWN`이고, UNKNOWN은 한가한 조회를 막지 않는다 — 모른다고
+ * 멈추면 모를 때마다 멈춘다. 그 경우에도 402가 나면 `quotaGate`가 잡는다.
+ * 즉 이 사다리는 **차단기 앞에 놓인 조기 경보**이지 대체재가 아니다.
+ */
+function usageNow() {
+  return usageVerdict({
+    used: process.env.SUPABASE_USAGE_USED ?? null,
+    included: process.env.SUPABASE_USAGE_INCLUDED ?? null,
+  });
+}
+let lastUsageTier: UsageTier | null = null;
+
 function routineDbAllowed(): boolean {
+  // ① 이미 402가 난 뒤 — 반응형 차단기
   const g = quotaGate(dbBreaker, 'ROUTINE', Date.now());
   if (!g.allowed && Date.now() - breakerNotedAt > 300_000) {
     breakerNotedAt = Date.now();
     console.warn(`[db] ${g.reason}`);
   }
-  return g.allowed;
+  if (!g.allowed) return false;
+
+  // ② 402가 나기 전 — 70·85·95% 사다리
+  //
+  // **보호 경로는 여기 오지 않는다.** 이 함수를 부르는 곳은 한가한
+  // 조회뿐이고, `check-worker-egress.mjs`가 그 선을 센다.
+  const u = usageNow();
+  if (shouldSendUsageAlert(lastUsageTier, u)) {
+    lastUsageTier = u.tier;
+    // 경고다. **결제를 막는 것이 아니다.**
+    void alert('system', u.tier === 'EXCEEDED' || u.tier === 'CRITICAL' ? 'critical' : 'warning',
+      `Supabase 사용량 ${u.tier}`, { 사유: u.reason }, `usage:${u.tier}`);
+  } else if (!u.shouldAlert) {
+    lastUsageTier = u.tier;
+  }
+  return usageAllows(u, 'ROUTINE');
 }
 
 /**
