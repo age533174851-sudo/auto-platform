@@ -40,7 +40,7 @@
 import { readFileSync, existsSync } from 'fs';
 
 /** 지금 상태를 주장하는 문서. 과거를 적는 changelog(PROGRESS.md)는 대상이 아니다 */
-const FILES = ['FULL_COMPLETION_STATUS.md'];
+const FILES = ['FULL_COMPLETION_STATUS.md', 'README.md'];
 
 /** 살아 있는 사실을 주는 곳. 실패 메시지에 그대로 보여 준다 */
 const LIVE = [
@@ -81,6 +81,40 @@ const CLAIMS = [
 const MEASURED = /실측|실제로 확인해/;
 const HAS_DATE = /20\d{2}[-.\/]\d{1,2}[-.\/]\d{1,2}/;
 
+/**
+ * **안전에 관한 거짓 주장.**
+ *
+ * README에 이렇게 적혀 있었다:
+ *
+ *   ✗  실제 자금이 사용되지 않습니다
+ *   ✗  실제 거래가 실행되지 않습니다
+ *   TRAIGO · 모의투자 전용 · 실제 거래 불가
+ *
+ * 사실이 아니다. `my-original-v1`은 `executeOrder`로 거래소에 실제
+ * 주문을 낸다 — 방향 판정도, 손절·익절도, 보호주문 부착도 들어와 있다.
+ *
+ * 낡은 버전 숫자와는 종류가 다르다. 이 문장을 읽은 사람은
+ * **"돈 안 나가는 앱"이라고 믿고 코드를 고친다.** 그리고 그 믿음은
+ * 100배 주문이 나가는 경로를 만질 때 정확히 반대로 작동한다.
+ *
+ * 같은 모양을 하루에 세 번 잡았다 — `my-original-v1` 주석, 상태판의
+ * "Fly Worker alive", 그리고 이것.
+ */
+const SAFETY_LIES = [
+  { re: /실제\s*거래(?:가|는)?\s*(?:실행되지\s*않|불가|안\s*됩)/,
+    why: '서버 워커가 거래소에 실제 주문을 냅니다 (현재 TESTNET 고정)' },
+  { re: /실제\s*자금(?:이|은)?\s*(?:사용되지\s*않|들어가지\s*않)/,
+    why: '실전 승격 절차가 코드에 있습니다 — "없다"가 아니라 "아직 안 켰다"입니다' },
+  { re: /모의투자\s*전용/,
+    why: '모의(paper) 경로와 실제 주문 경로가 둘 다 있습니다' },
+  // **부정을 부정으로 잡지 않는다.** "청산되지 않는다고 약속할 수 없다"는
+  // 정직한 문장이고, 막아야 하는 것은 그 반대 — 약속하는 쪽이다.
+  // 검사가 정직한 문장을 막으면 사람들은 검사를 끈다.
+  { re: /(?:절대\s*청산|청산\s*걱정\s*없|청산\s*안\s*당합|청산되지\s*않습니다)/,
+    disclaimed: /약속할\s*수\s*없|보장할\s*수\s*없|장담할\s*수\s*없/,
+    why: '청산되지 않는다고 약속할 수 없습니다' },
+];
+
 const problems = [];
 let scanned = 0;
 
@@ -102,6 +136,12 @@ for (const f of FILES) {
     for (const c of CLAIMS) {
       if (c.re.test(line)) problems.push({ f, n, what: '런타임 상태 단정', why: c.why, line });
     }
+    for (const sl of SAFETY_LIES) {
+      if (!sl.re.test(line)) continue;
+      // 같은 줄에서 이미 부정하고 있으면 주장이 아니다.
+      if (sl.disclaimed && sl.disclaimed.test(line)) continue;
+      problems.push({ f, n, what: '사실과 다른 안전 주장', why: sl.why, line });
+    }
     if (MEASURED.test(line) && !HAS_DATE.test(line)) {
       problems.push({ f, n, what: '언제 쟀는지 없는 실측 주장',
         why: '언제 잰 값인지 없으면 지금 값으로 읽힙니다 — 날짜를 같이 적으십시오', line });
@@ -119,6 +159,8 @@ if (problems.length > 0) {
   console.error('왜 막는가');
   console.error('  이 문장들은 적힐 때는 참이었습니다. 그게 핵심입니다 —');
   console.error('  검증할 수 없는 형태로 참을 적어 두면 거짓이 되는 순간을 아무도 모릅니다.');
+  console.error('  안전 주장은 더 나쁩니다: 읽는 사람이 "돈 안 나가는 앱"이라고 믿고');
+  console.error('  100배 주문이 나가는 경로를 고칩니다.');
   console.error('\n런타임 사실은 살아 있는 곳에만 둡니다');
   for (const l of LIVE) console.error(`  ${l}`);
   console.error('\n문서에는 무엇을 왜 고쳤는지를 적으십시오 — 그건 늙지 않습니다.');

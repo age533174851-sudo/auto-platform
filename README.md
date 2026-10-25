@@ -13,12 +13,12 @@
 
 **Toss + Bloomberg + TradingView + AI Hedge Fund**
 
-[![Next.js](https://img.shields.io/badge/Next.js-14.2.5-black?logo=next.js)](https://nextjs.org)
+[![Next.js](https://img.shields.io/badge/Next.js-14.2-black?logo=next.js)](https://nextjs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-blue?logo=typescript)](https://typescriptlang.org)
 [![Supabase](https://img.shields.io/badge/Supabase-Auth+DB-green?logo=supabase)](https://supabase.com)
 [![PWA](https://img.shields.io/badge/PWA-Installable-purple)](https://web.dev/pwa)
 
-> **⚠️ 모의투자 전용 — 실제 자금 사용 없음 · 수익 보장 없음**
+> **⚠️ 실제 거래소에 주문이 나갑니다 (현재 TESTNET) · 실전(LIVE) 미활성 · 수익 보장 없음**
 
 </div>
 
@@ -35,7 +35,7 @@ TRAIGO는 개인 투자자를 위한 **AI 기반 헤지펀드 운영 시스템**
 - **WUNDER 자동매매** Pine Script 통합 · WunderTrading 웹훅
 - **Supabase Auth** 이메일/비밀번호 · 역할 시스템 · 초대 코드
 - **PWA 지원** iOS / Android / macOS 홈 화면 설치
-- **완전 무료** — 모의투자 전용, 실제 거래 불가
+- **실제 주문 실행** — 서버(워커)가 거래소에 주문을 냅니다. 현재는 TESTNET 고정이고, 실전(LIVE)은 승격 절차를 거치기 전까지 켜지지 않습니다
 
 ---
 
@@ -404,20 +404,39 @@ bitcoin  → BTC    planet labs → PL   nvidia   → NVDA
 
 ## ⚠️ 안전 고지
 
+**이 문서는 한때 주문이 거래소로 나가지 않는다고 적고 있었다. 사실이 아니었다.**
+
+`my-original-v1` 전략은 `executeOrder`로 **거래소에 주문을 낸다.** 방향 판정도,
+손절·익절도, 보호주문 부착도 전부 들어와 있다. 그 문장을 그대로 둔 것이 위험한 이유는
+읽는 사람이 "돈 안 나가는 앱"이라고 믿고 코드를 고치기 때문이다 —
+**코드보다 문서가 먼저 거짓말한다.**
+
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  🎮  이 플랫폼은 교육용 모의투자 시뮬레이터입니다              │
+│  ⚠️  이 플랫폼은 실제 거래소에 주문을 냅니다                    │
 │                                                                 │
-│  ✗  실제 자금이 사용되지 않습니다                              │
-│  ✗  실제 거래가 실행되지 않습니다                              │
+│  ✓  현재 자동매매는 TESTNET 고정입니다                          │
+│      (my-original-v1은 mode: 'TESTNET'으로 하드코딩)            │
+│  ✓  실전(LIVE)은 TESTNET 검증이 끝나기 전까지 켜지지 않습니다   │
+│  ✓  실제 자금 투입은 명시적 승인 명령이 있어야 합니다           │
+│  ✓  브라우저는 자동 주문을 내지 않습니다 — 서버 워커만 냅니다   │
+│                                                                 │
 │  ✗  투자 수익을 보장하지 않습니다                              │
 │  ✗  AI 분석은 투자 조언이 아닙니다                             │
+│  ✗  청산되지 않는다고 약속할 수 없습니다                        │
 │                                                                 │
 │  ✓  모든 투자 결정은 사용자 본인의 책임입니다                  │
-│  ✓  실제 투자 전 전문가 상담을 권장합니다                      │
 │  ✓  과거 시뮬레이션 성과가 미래를 보장하지 않습니다            │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+**지금 무엇이 실제로 도는지는 이 문서가 아니라 살아 있는 곳에서 읽는다:**
+
+| 무엇 | 어디 |
+|---|---|
+| 배포 SHA와 일치 여부 | `/api/system/deployment` |
+| 워커 생존 · 지문 · 청산 감시 | `/api/system/runtime-health` |
+| 마이그레이션 적용 상태 | `/api/system/migrations` |
 
 ---
 
@@ -598,7 +617,7 @@ public/sw.js        234줄     Service Worker
 
 <div align="center">
 
-**TRAIGO** · 모의투자 전용 · 실제 거래 불가 · 수익 보장 없음
+**TRAIGO** · 실제 주문 실행 (현재 TESTNET) · 실전 미활성 · 수익 보장 없음
 
 Made with ❤️ for the Korean investing community
 
