@@ -294,7 +294,9 @@ export async function runReconcileIntegrationTests() {
     const r = await scenario(venue, () => reconcile(db));
 
     test('★ 미확정 주문 SELECT 실패는 대조 0건 성공이 아니라 오류다 (FakeDb)', () => {
-      assert(r instanceof Error, 'DB 조회 실패가 checked=0, resolved=0 성공으로 숨겨졌다');
+      if (!(r instanceof Error)) {
+        throw new Error('DB 조회 실패가 checked=0, resolved=0 성공으로 숨겨졌다');
+      }
       assert(r.message.includes('미확정 주문 장부 조회 실패'), r.message);
       eq(db.row('live_orders', { id: 'ord-1' })?.status, 'ACKED', '미확정 주문을 바꿨다');
       eq(db.writes.length, 0, '읽기 실패 뒤 DB에 썼다');
