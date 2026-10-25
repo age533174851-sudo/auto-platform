@@ -56,6 +56,28 @@ export function runEntryWindowDueTests() {
     eq(v.due, false);
   });
 
+  test('★★ 초 단위 차이로 오늘 창을 다시 열지 않는다 (09:10:10 → 09:11:45)', () => {
+    // 과거 계산은 nowMs의 :45초를 창 시작에 보존하여 09:10:45로 오판했다.
+    // 09:10:10에 이미 평가했어도 WINDOW_OPEN이 다시 나오는 회귀를 잡는다.
+    const v = windowDueVerdict({
+      nowMs: kst(9, 11) + 45_000,
+      lastRunAtMs: kst(9, 10) + 10_000,
+      window: W,
+    });
+    eq(v.code, 'WINDOW_DONE');
+    eq(v.due, false);
+  });
+
+  test('초 단위 경계: 창 전 09:09:59 평가는 오늘 창 평가로 세지 않는다', () => {
+    const v = windowDueVerdict({
+      nowMs: kst(9, 11) + 45_000,
+      lastRunAtMs: kst(9, 9) + 59_000,
+      window: W,
+    });
+    eq(v.code, 'WINDOW_OPEN');
+    eq(v.due, true);
+  });
+
   test('창 전(09:09)은 창 밖이다 — 간격 관문이 판단한다', () => {
     const v = windowDueVerdict({ nowMs: kst(9, 9), lastRunAtMs: kst(8, 42), window: W });
     eq(v.code, 'OUTSIDE');
@@ -105,6 +127,19 @@ export function runEntryWindowDueTests() {
     } as any);
     eq(v.due, false);
     assert(v.code === 'WAITING', v.code);
+  });
+
+  test('★★ 배선: 95초 뒤 같은 창을 다시 평가하지 않는다', () => {
+    // MIN_GAP(1분)은 이미 지났지만 60분 간격은 아직 지나지 않았다.
+    // 창 시작을 현재 초로 역산하면 WINDOW가 다시 열리던 경로다.
+    const v = dueCheck({
+      ...base,
+      nowMs: kst(9, 11) + 45_000,
+      lastRunAtMs: kst(9, 10) + 10_000,
+      strategyId: 'my-original-v1',
+    } as any);
+    eq(v.due, false);
+    eq(v.code, 'WAITING');
   });
 
   test('★★ 중복 방지(MIN_GAP 1분)가 창 판정보다 먼저다', () => {
