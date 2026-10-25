@@ -116,7 +116,12 @@ export function windowDueVerdict(i: {
 
   // 창이 열려 있다. 오늘 창 시작 시각을 **지금에서 역산한다** — nowMin이
   // startMin 이상인 것이 위에서 보장되므로 같은 한국 날짜 안이다.
-  const windowStartMs = i.nowMs - (nowMin - w.startMin) * 60_000;
+  // nowMs는 초·밀리초를 포함하지만 nowMin은 분 단위다.
+  // 현재 초를 그대로 역산하면 09:11:45에서 창 시작을 09:10:45로
+  // 잘못 계산해, 09:10:10에 이미 평가한 예약을 다시 깨울 수 있다.
+  // KST(UTC+9)는 분 경계가 UTC와 같으므로 먼저 정각 분으로 내린다.
+  const nowMinuteStartMs = Math.floor(i.nowMs / 60_000) * 60_000;
+  const windowStartMs = nowMinuteStartMs - (nowMin - w.startMin) * 60_000;
 
   if (i.lastRunAtMs != null && i.lastRunAtMs >= windowStartMs) {
     return { due: false, code: 'WINDOW_DONE',
