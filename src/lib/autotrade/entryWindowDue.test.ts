@@ -56,6 +56,28 @@ export function runEntryWindowDueTests() {
     eq(v.due, false);
   });
 
+  test('★★ 초 단위 차이로 오늘 창을 다시 열지 않는다 (09:10:10 → 09:11:45)', () => {
+    // 과거 계산은 nowMs의 :45초를 창 시작에 보존하여 09:10:45로 오판했다.
+    // 09:10:10에 이미 평가했어도 WINDOW_OPEN이 다시 나오는 회귀를 잡는다.
+    const v = windowDueVerdict({
+      nowMs: kst(9, 11) + 45_000,
+      lastRunAtMs: kst(9, 10) + 10_000,
+      window: W,
+    });
+    eq(v.code, 'WINDOW_DONE');
+    eq(v.due, false);
+  });
+
+  test('초 단위 경계: 창 전 09:09:59 평가는 오늘 창 평가로 세지 않는다', () => {
+    const v = windowDueVerdict({
+      nowMs: kst(9, 11) + 45_000,
+      lastRunAtMs: kst(9, 9) + 59_000,
+      window: W,
+    });
+    eq(v.code, 'WINDOW_OPEN');
+    eq(v.due, true);
+  });
+
   test('창 전(09:09)은 창 밖이다 — 간격 관문이 판단한다', () => {
     const v = windowDueVerdict({ nowMs: kst(9, 9), lastRunAtMs: kst(8, 42), window: W });
     eq(v.code, 'OUTSIDE');
