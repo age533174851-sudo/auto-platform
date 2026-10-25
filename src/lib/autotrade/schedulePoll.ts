@@ -121,6 +121,9 @@ export function selectDueSchedules(rows: PollRow[], nowMs: number): PollSelectio
     const v = dueCheck({
       nowMs, enabled: row?.enabled, connectionId: row?.connection_id ?? '',
       lastRunAtMs: row?.last_run_at, intervalMin: row?.interval_min,
+      // **창을 가진 전략은 창으로도 깨운다.** 이 값을 빼먹으면 워커
+      // 경로만 창을 모르게 되고, 주 실행기가 바로 이쪽이다.
+      strategyId: row?.strategy_id,
     });
     if (v.due) { due.push({ row, verdict: v }); continue; }
 
