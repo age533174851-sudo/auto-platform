@@ -1,0 +1,319 @@
+# 자동매매가 **왜 진입하지 않는가** — 읽기 전용 운영 조회
+#
+# 무엇을 답하는가
+# ───────────────
+# 2026-10-20 실측에서 이렇게 나왔다:
+#
+#   · Exact100X 예약(MAX_LEV_100X / EXACT_100X / v2 / scalp / TESTNET)
+#     **2건이 켜져 있고 실제로 돌았다**
+#   · 그런데 `live_orders`의 Exact100X 주문은 **0건**이다
+#   · 그래서 관측 표(위험·탈출)도 0건이다 — 관측할 포지션이 없었던 것이다
+#
+# 즉 막힌 자리는 "감시"도 "관측 저장"도 아니고 **진입**이다. 그 사유는
+# 예약 줄의 `last_result`·`last_decision`에 이미 적혀 있는데, 기존 감사는
+# 그 내용을 일부러 출력하지 않는다(개수만 센다). 그래서 사람이 화면을
+# 열어 읽어야 했다 — 이 저장소가 없애려는 바로 그 수동 절차다.
+#
+# 함께 보는 두 가지
+# ─────────────────
+#   · **미확정 주문이 복구 경로에 닿는가** — `connection_id`가 없는 줄은
+#     `recoverUnresolvedOrders`가 연결을 고를 때 떨어져 나가 영영 확정되지
+#     않는다. 그리고 미확정이 하나라도 남으면 체크리스트의
+#     `UNRESOLVED_ORDERS`가 다음 진입을 막는다(`pendingReconcile` 머리말에
+#     적힌 그 고장이다). 운영에는 UNKNOWN 32건이 8월부터 남아 있다.
+#   · **5분 주기 청산 감시가 실제로 도는가** — HTTP 200을 받았다는 사실과
+#     회차가 돌았다는 사실은 다르다. `exit_monitor_runs`가 정본이다.
+#
+# 권한·안전은 `audit-production-exact100x-testnet-readiness`와 **같다**:
+# 소유자만 · 확인 문구 · `BEGIN TRANSACTION READ ONLY` · 접속 문자열 가림 ·
+# 키/시크릿 칸은 고르지도 않는다. 새 비밀정보를 늘리지 않는다.
+#
+# 값이 아니라 **사유**를 출력한다. `last_result`는 시스템이 쓴 짧은 판정
+# 문구이고 160자로 자른다.
+name: audit-production-autotrade-blockers
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/audit-production-autotrade-blockers.yml'
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: '읽기 전용 운영 감사를 실행하려면 READ-ONLY-AUDIT 를 그대로 입력하세요'
+        required: true
+        default: ''
+
+concurrency:
+  group: audit-production-autotrade-blockers
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: 자동매매 진입 차단 사유 조회 (읽기 전용)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+
+    steps:
+      # ── 수동 실행이면 누가·무엇을 확인하고 넘긴다 ──
+      #
+      #   `push`로 돈 경우에는 이 단계가 아무것도 하지 않는다.
+      #   **실패하면 DB 접속 단계로 가지 않는다.**
+      - name: 수동 실행 관문 (소유자 · 확인 문구)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          ACTOR: ${{ github.actor }}
+          OWNER: ${{ github.repository_owner }}
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          set -euo pipefail
+          if [ "${ACTOR}" != "${OWNER}" ]; then
+            echo "::error::저장소 소유자만 이 감사를 수동 실행할 수 있습니다"
+            exit 1
+          fi
+          if [ "${CONFIRM}" != "READ-ONLY-AUDIT" ]; then
+            echo "::error::확인 문구가 일치하지 않습니다 — READ-ONLY-AUDIT 를 그대로 입력하세요"
+            exit 1
+          fi
+          echo "수동 실행 승인 (소유자 확인 · 확인 문구 일치)"
+
+      - name: DB 접속 정보 확인
+        run: |
+          if [ -z "${SUPABASE_DB_URL}" ]; then
+            echo "::error::SUPABASE_DB_URL secret이 없습니다 — 상태를 확인할 수 없습니다"
+            echo "값은 GitHub Secrets에만 있습니다. 이 로그에는 출력하지 않습니다."
+            exit 1
+          fi
+          echo "SUPABASE_DB_URL 존재 확인 (값은 출력하지 않습니다)"
+
+      - name: 상태 조회 (BEGIN TRANSACTION READ ONLY)
+        run: |
+          set -o pipefail
+
+          cat > /tmp/audit.sql <<'SQL'
+          \set ON_ERROR_STOP on
+
+          BEGIN TRANSACTION READ ONLY;
+          SET LOCAL statement_timeout = '20s';
+          SET LOCAL lock_timeout = '3s';
+
+          \echo '=== 0. READ ONLY 증명 ==='
+          SELECT 'READ_ONLY=' || current_setting('transaction_read_only') AS assertion;
+
+          \echo ''
+          \echo '=== 0b. 칸이 실제로 있는가 (없는 칸의 NULL을 "값 없음"으로 읽지 않기 위해) ==='
+          SELECT c.tbl AS table_name, c.col,
+                 (EXISTS (SELECT 1 FROM information_schema.columns ic
+                           WHERE ic.table_schema='public' AND ic.table_name=c.tbl
+                             AND ic.column_name=c.col)) AS present
+            FROM (VALUES
+                   ('autotrade_schedules','last_result'),
+                   ('autotrade_schedules','last_decision'),
+                   ('autotrade_schedules','last_run_at'),
+                   ('autotrade_schedules','connection_id'),
+                   ('live_orders','connection_id'),
+                   ('exit_monitor_runs','started_at'),
+                   ('exit_monitor_runs','finished_at'),
+                   ('exit_monitor_runs','status'),
+                   ('exit_monitor_runs','errors')
+                 ) AS c(tbl,col)
+           ORDER BY c.tbl, c.col;
+
+          \echo ''
+          \echo '=== 1. 켜진 예약의 마지막 판정 — **분류만** 출력한다 ==='
+          -- ★ 자유 문구를 찍지 않는다. `last_result`에 무엇이 들어 있든
+          --   로그로 새지 않게, **코드에 선언된 이름이 들어 있는가**만
+          --   boolean으로 센다. 사용자 id·연결 id·종목·수량은 고르지 않는다.
+          --
+          --   항목 이름은 `preTradeChecklist`의 `resultFor(...)` 첫 인자와
+          --   같은 문자열이다 — 거기 없는 이름을 여기서 만들지 않는다.
+          SELECT enabled,
+                 mode,
+                 (execution_profile_id IS NOT NULL) AS has_contract,
+                 last_run_at,
+                 (last_result IS NULL OR length(last_result::text) = 0) AS result_empty,
+                 (last_result::text ~* '(신호|signal)')             AS mentions_signal,
+                 (last_result::text ~* 'UNRESOLVED_ORDERS|미확정')   AS mentions_unresolved,
+                 (last_result::text ~* 'STATE_RECONCILE|불일치')     AS mentions_reconcile,
+                 (last_result::text ~* 'MARGIN_SUFFICIENT|증거금')   AS mentions_margin,
+                 (last_result::text ~* 'SUBACCOUNT_LIMIT')          AS mentions_subaccount,
+                 (last_result::text ~* 'REGIME_FILTER|국면')         AS mentions_regime,
+                 (last_result::text ~* 'KILL_SWITCH|킬스위치')        AS mentions_kill,
+                 (last_result::text ~* 'DAILY_LOSS|손실')            AS mentions_daily_loss,
+                 (last_result::text ~* 'MODE|모드')                  AS mentions_mode,
+                 (last_result::text ~* 'STOP_ATTACHED|손절')         AS mentions_stop,
+                 (last_result::text ~* 'BLOCKED|차단|막')            AS looks_blocked,
+                 (last_result::text ~* 'FAILED|실패|오류')            AS looks_failed,
+                 (last_result::text ~* 'ENTERED|진입')               AS looks_entered
+            FROM public.autotrade_schedules
+           WHERE enabled
+           ORDER BY last_run_at DESC NULLS LAST;
+
+          \echo ''
+          \echo '=== 2. 진입 관문과 **같은 범위**로 센 미확정 주문 ==='
+          -- ★ 전체 UNKNOWN 수를 세면 안 된다. 체크리스트가 보는 범위는
+          --   `reconcileCheck.gatherAndReconcile`이 정한다:
+          --
+          --     .eq('user_id', userId).eq('status','UNKNOWN')
+          --     + connectionId가 있으면 .eq('connection_id', connectionId)
+          --     + .order(created_at desc).limit(20)
+          --
+          --   `scalp` 라우트는 연결 id를 넘긴다. 그러므로 **그 연결의**
+          --   UNKNOWN만 진입을 막는다. 다른 연결·다른 사용자의 UNKNOWN은
+          --   이 관문과 무관하다 — 전체 수로 판단하면 과대평가다.
+          SELECT count(*)                       AS unknown_in_gate_scope,
+                 least(count(*), 20)            AS checklist_would_see,
+                 (count(*) > 0)                 AS would_block_entry,
+                 min(o.created_at)              AS oldest,
+                 max(o.created_at)              AS newest
+            FROM public.live_orders o
+           WHERE o.status = 'UNKNOWN'
+             AND EXISTS (
+                   SELECT 1 FROM public.autotrade_schedules s
+                    WHERE s.enabled
+                      AND s.user_id = o.user_id
+                      AND s.connection_id = o.connection_id);
+
+          \echo ''
+          \echo '=== 2b. 범위 밖 UNKNOWN은 따로 센다 (섞지 않는다) ==='
+          SELECT count(*) AS unknown_outside_gate_scope,
+                 count(*) FILTER (WHERE o.connection_id IS NULL) AS without_connection,
+                 min(o.created_at) AS oldest, max(o.created_at) AS newest
+            FROM public.live_orders o
+           WHERE o.status = 'UNKNOWN'
+             AND NOT EXISTS (
+                   SELECT 1 FROM public.autotrade_schedules s
+                    WHERE s.enabled
+                      AND s.user_id = o.user_id
+                      AND s.connection_id = o.connection_id);
+
+          \echo ''
+          \echo '=== 2c. 복구 경로가 닿는가 — 연결 id 유무만 (id는 찍지 않는다) ==='
+          SELECT status,
+                 (connection_id IS NOT NULL) AS has_connection,
+                 count(*) AS rows,
+                 min(created_at) AS oldest, max(created_at) AS newest
+            FROM public.live_orders
+           WHERE status IN ('UNKNOWN','ACKED','SENT','INTENT')
+           GROUP BY status, (connection_id IS NOT NULL)
+           ORDER BY status;
+
+          \echo ''
+          \echo '=== 3. 청산 감시 — 돌았는가와 성공했는가를 **가른다** ==='
+          -- ★ HTTP 200과 회차 성공은 다르고, 회차가 열린 것과 끝난 것도
+          --   다르다. `finished_at`이 비어 있으면 돌다 죽은 것이다.
+          SELECT count(*)                                              AS runs_24h,
+                 count(*) FILTER (WHERE finished_at IS NOT NULL)        AS finished,
+                 count(*) FILTER (WHERE finished_at IS NULL)            AS open_or_died,
+                 count(*) FILTER (WHERE upper(coalesce(status::text,'')) = 'OK')     AS ok_runs,
+                 count(*) FILTER (WHERE upper(coalesce(status::text,'')) = 'FAILED') AS failed_runs,
+                 count(*) FILTER (WHERE upper(coalesce(status::text,'')) NOT IN ('OK','FAILED')) AS other_status,
+                 count(*) FILTER (WHERE coalesce(errors::text,'') <> '') AS with_errors
+            FROM public.exit_monitor_runs
+           WHERE started_at > now() - interval '24 hours';
+
+          \echo ''
+          \echo '=== 3b. 최근 간격 — 5분 주기가 실제로 유지되는가 ==='
+          SELECT count(*) FILTER (WHERE started_at > now() - interval '1 hour')  AS runs_1h,
+                 count(*) FILTER (WHERE started_at > now() - interval '3 hours') AS runs_3h,
+                 max(started_at)                                                  AS newest_run,
+                 round(extract(epoch FROM (now() - max(started_at))) / 60)        AS minutes_since_newest
+            FROM public.exit_monitor_runs;
+
+          \echo ''
+          \echo '=== 4. 판정 ==='
+          SELECT (SELECT count(*) FROM public.autotrade_schedules WHERE enabled)                 AS enabled_schedules,
+                 (SELECT max(last_run_at) FROM public.autotrade_schedules WHERE enabled)         AS newest_schedule_run,
+                 (SELECT count(*) FROM public.live_orders o
+                   WHERE o.status='UNKNOWN' AND EXISTS (
+                     SELECT 1 FROM public.autotrade_schedules s
+                      WHERE s.enabled AND s.user_id=o.user_id AND s.connection_id=o.connection_id)) AS unknown_in_gate_scope,
+                 (SELECT count(*) FROM public.live_orders WHERE status='UNKNOWN')                AS unknown_total,
+                 (SELECT count(*) FROM public.exit_monitor_runs
+                   WHERE started_at > now() - interval '1 hour')                                 AS exit_runs_1h,
+                 (SELECT count(*) FROM public.exit_monitor_runs
+                   WHERE started_at > now() - interval '24 hours'
+                     AND upper(coalesce(status::text,'')) = 'OK')                                AS exit_ok_24h;
+
+          COMMIT;
+          SQL
+
+          # ── 가려야 할 조각을 접속 문자열에서 뽑는다. 어디에도 출력하지 않는다 ──
+          _u="${SUPABASE_DB_URL}"
+          _creds="${_u#*://}"; _creds="${_creds%%@*}"
+          _hostpart="${_u#*@}"; _hostpart="${_hostpart%%/*}"; _hostpart="${_hostpart%%\?*}"
+          _host="${_hostpart%%:*}"
+
+          rc=0
+          out=$(psql "${SUPABASE_DB_URL}" -X -v ON_ERROR_STOP=1 -f /tmp/audit.sql 2>&1) || rc=$?
+
+          scrubbed="${out}"
+          scrubbed="${scrubbed//"${_u}"/<접속 문자열 가림>}"
+          if [ -n "${_creds}" ] && [ "${_creds}" != "${_u}" ]; then
+            scrubbed="${scrubbed//"${_creds}"/<접속 정보 가림>}"
+          fi
+          if [ -n "${_host}" ] && [ "${_host}" != "${_u}" ]; then
+            scrubbed="${scrubbed//"${_host}"/<host 가림>}"
+          fi
+          printf '%s\n' "${scrubbed}" | sed -E \
+            -e 's#postgres(ql)?://[^[:space:]]*#<접속 문자열 가림>#g' \
+            -e 's#(host|hostaddr|password|user)=[^[:space:]]*#\1=<가림>#g'
+
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::조회에 실패했습니다 — '확인하지 못함'을 '없음'으로 적지 않습니다 (psql 종료코드 ${rc})"
+            exit "${rc}"
+          fi
+
+          if ! printf '%s' "${out}" | grep -q 'READ_ONLY=on'; then
+            echo "::error::읽기 전용 트랜잭션이 아니었습니다 — BEGIN TRANSACTION READ ONLY가 빠졌거나 무효화됐습니다"
+            exit 1
+          fi
+          echo "읽기 전용 트랜잭션 확인 (READ_ONLY=on)"
+
+      - name: 다음 단계 안내
+        if: success()
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'MD'
+          ## 자동매매 진입 차단 사유 조회 완료
+
+          ### 읽는 순서
+
+          1. `=== 1 ===`의 `mentions_*` — 켜진 예약의 마지막 판정에 **어느
+             관문 이름이 들어 있는가**. `mentions_signal`만 참이면 신호가
+             나지 않은 것이고, `mentions_unresolved`가 참이면 미확정 주문이
+             막은 것이다.
+          2. `=== 2 ===`의 `would_block_entry` — **진입 관문과 같은 범위**로
+             센 결과다. `unknown_total`(2c·4)과 다르면 그 차이는 다른
+             연결·다른 사용자의 줄이고 **이 관문과 무관하다.**
+          3. `=== 3 ===` — `runs_24h`와 `ok_runs`는 다른 숫자다. `open_or_died`가
+             크면 회차가 돌다 죽고 있다.
+
+          | 로그에서 본 것 | 뜻 |
+          |---|---|
+          | `mentions_signal` 참 · 나머지 거짓 | 진입 조건 미충족 — 고칠 것이 없다 |
+          | `mentions_unresolved` 참 + `would_block_entry` 참 | 미확정 주문이 막았다 |
+          | `mentions_unresolved` 참 + `would_block_entry` **거짓** | 관문 범위와 기록이 어긋난다 — 코드 결함이다 |
+          | `unknown_in_gate_scope = 0` 인데 `unknown_total > 0` | 그 32건은 **이 진입을 막지 않는다** |
+          | `without_connection > 0` | 복구 경로가 그 줄에 닿지 못한다 |
+          | `runs_1h = 0` | 5분 주기 감시가 멈춰 있다 |
+          | `ok_runs = 0` 인데 `runs_24h > 0` | 회차는 도는데 **성공한 회차가 없다** |
+
+          ### 이 조회가 출력하지 않는 것
+
+          자유 문구(`last_result` 원문) · 사용자 id · 연결 id · 종목 ·
+          수량 · 잔고 · 키/시크릿. 1번 절은 **코드에 선언된 관문 이름이
+          들어 있는가**만 boolean으로 센다 — 무엇이 적혀 있든 로그로
+          새지 않는다.
+
+          거래소 인증이 실제로 되는지, 지금 포지션이 열려 있는지는 답하지
+          않는다. 둘 다 복호화한 키가 필요하고 이 워크플로는 그 키를
+          받지 않는다.
+
+          이 워크플로는 읽기만 합니다. 스키마와 데이터를 바꾸지 않았습니다.
+          MD
