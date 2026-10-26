@@ -280,6 +280,44 @@ export function runQuantizeTests() {
     eq(r.quantity, 3);
   });
 
+  // GitHub Actions run 38863536007: BTCUSDT 20 USDT × 10배,
+  // 기준가 82046.2에서 나온 원수량이 Binance -1111로 거절됐다.
+  test('스모크 BTCUSDT 시장가 수량은 거래소 단위로 내린다', () => {
+    const ref = 82046.2;
+    const requested = (20 * 10) / ref;
+    const filters: SymbolFilters = {
+      limitQty: { stepSize: 0.001, minQty: 0.001 },
+      marketQty: { stepSize: 0, minQty: 0, maxQty: 1000 },
+      tickSize: 0.1, minNotional: 100,
+    };
+    const q = quantizeOrder(requested, null, filters, {
+      orderType: 'MARKET', reduceOnly: false, marketReferencePrice: ref,
+    });
+    eq(q.ok, true);
+    eq(q.quantity, 0.002);
+    eq(q.changed, true);
+    assert((q.quantity as number) <= requested, '증거금보다 수량이 커졌습니다');
+  });
+
+  test('스모크 신규 진입은 거래소 규격 미상일 때 fail closed', () => {
+    const q = quantizeOrder(0.002437, null, null, {
+      orderType: 'MARKET', marketReferencePrice: 82046.2,
+    });
+    eq(q.ok, false);
+    eq(q.code, 'FILTERS_UNKNOWN');
+    eq(q.quantity, null);
+  });
+
+  test('스모크 신규 진입은 내림 후 최소 명목가 미달이면 차단', () => {
+    const q = quantizeOrder(0.002437, null, {
+      limitQty: { stepSize: 0.001, minQty: 0.001 },
+      marketQty: { stepSize: 0, minQty: 0 },
+      tickSize: 0.1, minNotional: 200,
+    }, { orderType: 'MARKET', marketReferencePrice: 82046.2 });
+    eq(q.ok, false);
+    eq(q.code, 'BELOW_MIN_NOTIONAL');
+  });
+
   // ── 신규 진입에서 수량은 **절대 커지지 않는다** ────────────
   //
   // 화면이 `Number(qty.toFixed(3))`으로 보내고 있었다. 소수 3자리
