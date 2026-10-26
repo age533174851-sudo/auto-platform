@@ -6,7 +6,10 @@
 // 않고 "앱을 닫아도 제 시각에 나갑니다"를 적었고, 그 약속은 사실이
 // 아니었다. 여기서 그 자리를 못 박는다.
 import { test, eq, assert } from '../../test/harness';
-import { scheduledExitRunnerOf, overdueExitsOf, WORKER_FRESH_MS } from './scheduledExitRunner';
+import {
+  scheduledExitRunnerOf, overdueExitsOf, WORKER_FRESH_MS,
+  positionAmountRead, exitPortionRead, strictFinite,
+} from './scheduledExitRunner';
 import { DEFAULT_GRACE_MS } from './scheduleExit';
 
 const MIN = 60_000;
@@ -120,4 +123,142 @@ export function runScheduledExitRunnerTests() {
     assert(workerIntervalMs * 2 < DEFAULT_GRACE_MS,
       '실행 주기가 유예의 절반보다 짧아야 한 회차를 놓쳐도 유예 안에 들어온다');
   });
+
+  // ══════════════════════════════════════════════════════════════
+  // 숫자를 엄격하게 읽는가 — **못 읽은 것은 0도 전량도 아니다**
+  // ══════════════════════════════════════════════════════════════
+  //
+  // 예약 청산 라우트에 두 줄이 있었다:
+  //
+  //     const amt = Number(rr.risk.positionAmt) || 0;
+  //     const pct = row.portion_pct == null ? 100 : Number(row.portion_pct);
+  //
+  // 첫 줄은 `'NaN'`·`''`·`'abc'`를 **0**으로 바꾼다. 그러면 바로 아래
+  // `amt === 0` 분기가 예약을 `no_position`으로 닫는다 — 포지션은 열려
+  // 있는데 예약이 사라져서 **그 청산이 영원히 나가지 않는다.**
+  //
+  // 둘째 줄은 `'NaN'`을 NaN으로 만들고, Gate 분기의 `pct < 100`이
+  // NaN 때문에 **false**가 되어 부분청산 차단을 지나간다 —
+  // `closePositionGateFutures`는 **전량 종료**다.
+  //
+  // 둘 다 "확인하지 못한 것을 통과로 적는" 모양이고, 하필 **못 닫는
+  // 쪽**과 **너무 많이 닫는 쪽**으로 갈라진다.
+
+  // ── 정상 0 ──
+  //
+  // 0 자체는 문제가 아니다. **읽었고 0인 것**은 "닫을 것이 없다"다.
+  test('★ 포지션 수량이 정말 0이면 flat이고 실패가 아니다', () => {
+    for (const raw of [0, '0', '0.0', '-0', '0e0']) {
+      const r = positionAmountRead(raw);
+      eq(r.ok, true, `읽었고 0인데 실패로 적었다: ${JSON.stringify(raw)}`);
+      eq(r.flat, true, `0인데 flat이 아니다: ${JSON.stringify(raw)}`);
+      eq(r.amount, 0);
+      eq(r.side, null, '0에는 방향이 없다');
+    }
+  });
+
+  // ── LONG / SHORT ──
+  test('★ 부호로 LONG·SHORT를 가르고 수량을 그대로 들고 나온다', () => {
+    const long = positionAmountRead('0.010');
+    eq(long.ok, true); eq(long.flat, false);
+    eq(long.side, 'LONG'); eq(long.amount, 0.01);
+
+    const short = positionAmountRead('-0.010');
+    eq(short.ok, true); eq(short.flat, false);
+    eq(short.side, 'SHORT'); eq(short.amount, -0.01);
+
+    // 숫자 타입으로 와도 같다
+    eq(positionAmountRead(2.5).side, 'LONG');
+    eq(positionAmountRead(-2.5).side, 'SHORT');
+  });
+
+  // ── 손상된 포지션 응답 ──
+  //
+  // **이 줄들이 전에는 전부 `flat: true`로 끝났다.**
+  test('★ 손상된 포지션 수량은 실패다 — 0으로 읽지 않는다', () => {
+    for (const raw of [
+      'NaN', 'Infinity', '-Infinity', '', '   ', 'abc', '1.2.3', '0x10',
+      NaN, Infinity, -Infinity, true, false, [], {}, [0], '--1', '+-1',
+    ] as unknown[]) {
+      const r = positionAmountRead(raw);
+      eq(r.ok, false, `손상된 값을 읽었다고 적었다: ${JSON.stringify(raw)}`);
+      eq(r.flat, false, `손상된 값을 "포지션 없음"으로 읽었다: ${JSON.stringify(raw)}`);
+      eq(r.amount, null, `손상된 값에 수량을 붙였다: ${JSON.stringify(raw)}`);
+      eq(r.side, null);
+      eq(r.code, 'UNREADABLE');
+    }
+  });
+
+  test('★ 값이 아예 없으면 MISSING이고 flat이 아니다', () => {
+    for (const raw of [null, undefined]) {
+      const r = positionAmountRead(raw);
+      eq(r.ok, false); eq(r.code, 'MISSING');
+      eq(r.flat, false, '없는 것을 "포지션 0"으로 읽지 않는다');
+    }
+  });
+
+  // ── 유효한 부분 청산 ──
+  test('★ 유효한 부분 청산 비율은 그대로 통과하고 full이 아니다', () => {
+    for (const [raw, want] of [
+      [25, 25], ['25', 25], ['33.5', 33.5], [0.5, 0.5], ['99.999', 99.999],
+    ] as Array<[unknown, number]>) {
+      const r = exitPortionRead(raw);
+      eq(r.ok, true, `유효한 비율을 막았다: ${JSON.stringify(raw)}`);
+      eq(r.pct, want);
+      eq(r.full, false, `부분 청산을 전량으로 읽었다: ${JSON.stringify(raw)}`);
+    }
+  });
+
+  test('★ 100은 전량이고, 비율을 안 정했으면(null) 전량이다 (기존 계약)', () => {
+    for (const raw of [100, '100', '100.0']) {
+      const r = exitPortionRead(raw);
+      eq(r.ok, true); eq(r.pct, 100); eq(r.full, true);
+    }
+    for (const raw of [null, undefined]) {
+      const r = exitPortionRead(raw);
+      eq(r.ok, true, '정하지 않은 것은 깨진 것이 아니다');
+      eq(r.pct, 100); eq(r.full, true);
+    }
+  });
+
+  // ── 손상된 비율 ──
+  //
+  // **`full`이 true가 되면 Gate에서 전량 청산이 나간다.**
+  // 그래서 여기서 `full: false`를 같이 못 박는다.
+  test('★ 손상된 청산 비율은 실패다 — 전량으로 읽지 않는다', () => {
+    for (const raw of [
+      'NaN', 'Infinity', '', '   ', 'abc', NaN, Infinity, -Infinity,
+      true, [], {}, '50%', '1/2',
+    ] as unknown[]) {
+      const r = exitPortionRead(raw);
+      eq(r.ok, false, `손상된 비율을 읽었다고 적었다: ${JSON.stringify(raw)}`);
+      eq(r.full, false, `손상된 비율을 전량으로 읽었다 — Gate에서 전량 청산이 나간다: ${JSON.stringify(raw)}`);
+      eq(r.pct, null);
+      eq(r.code, 'UNREADABLE');
+    }
+  });
+
+  test('★ 범위를 벗어난 비율은 OUT_OF_RANGE이고 전량이 아니다', () => {
+    for (const raw of [0, '0', -1, '-25', 100.1, '101', 1000]) {
+      const r = exitPortionRead(raw);
+      eq(r.ok, false, `쓸 수 없는 비율을 통과시켰다: ${JSON.stringify(raw)}`);
+      eq(r.code, 'OUT_OF_RANGE');
+      eq(r.full, false, `범위를 벗어난 값을 전량으로 읽었다: ${JSON.stringify(raw)}`);
+      eq(r.pct, null);
+    }
+  });
+
+  // ── 바탕 파서 ──
+  //
+  // `Number()`를 그대로 쓰면 `''`→0 · `[]`→0 · `true`→1이 된다.
+  // 거래소 응답이 비어서 온 것을 "0개 보유"로 읽는 길이 그 변환이다.
+  test('★ strictFinite는 Number()가 0·1로 바꾸던 값들을 null로 돌린다', () => {
+    for (const raw of ['', '  ', [], true, false, {}, null, undefined, 'NaN', 'Infinity']) {
+      eq(strictFinite(raw), null, `추측했다: ${JSON.stringify(raw)}`);
+    }
+    eq(strictFinite('1e-7'), 1e-7, '지수 표기는 거래소가 실제로 보낸다');
+    eq(strictFinite(' -0.5 '), -0.5, '앞뒤 공백은 떼고 읽는다');
+    eq(strictFinite('.5'), 0.5);
+  });
+
 }
