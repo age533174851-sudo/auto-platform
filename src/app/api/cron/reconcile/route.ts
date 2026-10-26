@@ -48,7 +48,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { timingSafeEqual } from 'crypto';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import {
-  pendingTargets, skipReason, summarizeOutcomes,
+  pendingTargets, skipReason, summarizeOutcomes, connectionLookupOutcome,
   RECONCILE_TARGET_STATUSES, DEFAULT_GRACE_MS, DEFAULT_MAX_CONNECTIONS,
   type ReconcileOutcome,
 } from '@/lib/engine/pendingReconcile';
@@ -132,10 +132,23 @@ export async function GET(req: NextRequest) {
 
     const outcomes: ReconcileOutcome[] = [];
     for (const t of targets) {
-      const { data: conn } = await sb.from('exchange_connections')
-        .select('id, user_id, exchange_id, api_key, api_secret_enc, has_withdrawal, is_testnet')
-        .eq('id', t.connectionId)
-        .maybeSingle();
+      // Supabase는 조회 실패를 throw 대신 { data: null, error }로 돌려준다.
+      // 실패를 '연결 없음'으로 건너뛰면 UNKNOWN/ACKED 대조가 거짓 성공이 된다.
+      let conn: any;
+      try {
+        const lookup = await sb.from('exchange_connections')
+          .select('id, user_id, exchange_id, api_key, api_secret_enc, has_withdrawal, is_testnet')
+          .eq('id', t.connectionId)
+          .maybeSingle();
+        const failed = connectionLookupOutcome(t.connectionId, lookup);
+        if (failed) { outcomes.push(failed); continue; }
+        conn = lookup.data;
+      } catch {
+        // 한 연결의 DB 오류가 다른 연결의 대조까지 막지 않도록 격리한다.
+        const failed = connectionLookupOutcome(t.connectionId, null);
+        if (failed) outcomes.push(failed);
+        continue;
+      }
 
       const skip = skipReason(conn);
       if (skip) { outcomes.push({ connectionId: t.connectionId, ok: true, skipped: skip }); continue; }
