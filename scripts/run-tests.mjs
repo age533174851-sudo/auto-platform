@@ -163,6 +163,7 @@ import {
 } from './src/test/integration/orderPathIntegration.test';
 import { runSmokeStartRouteTests } from './src/test/integration/smokeStartRouteIntegration.test';
 import { runForcedEntryRouteTests } from './src/test/integration/forcedEntryRouteIntegration.test';
+import { runBuySellRoundTripTests } from './src/test/integration/buySellRoundTripIntegration.test';
 import { runHoldExtensionIntegrationTests } from './src/test/integration/holdExtensionIntegration.test';
 import { runFailureRecoveryTests } from './src/lib/engine/failureRecovery.test';
 import { runMarketTypeTests } from './src/lib/markets/marketType.test';
@@ -427,6 +428,7 @@ runSmokeRunTests(); runCancelRunTests(); runExitPolicyTests(); runRunRequestTest
   await runPrecisionMatrixTests();
   await runSmokeStartRouteTests();
   await runForcedEntryRouteTests();
+  await runBuySellRoundTripTests();
   await runHoldExtensionIntegrationTests();
   await runKillCloseIntegrationTests();
   await flushAsync();
