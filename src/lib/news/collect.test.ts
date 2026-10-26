@@ -7,7 +7,7 @@
 //  3. 중복을 걷을 때 본문 있는 판본을 제목만 있는 판본이 덮는 것
 //  4. 원문 링크가 없는 기사를 저장해 확인할 수 없는 목록을 만드는 것
 import { test, assert, eq } from '../../test/harness';
-import { toIso, normalizeArticle, dedupe, collectFrom, onlyNew } from './collect';
+import { toIso, normalizeArticle, dedupe, collectFrom, onlyNew, hasSuccessfulProviderResponse } from './collect';
 
 const ok = {
   title: 'Bitcoin ETF inflows hit record',
@@ -147,6 +147,31 @@ export function runCollectTests() {
     eq(r.unique.length, 0);
     eq(r.removed, 0);
     eq(r.skipped, 0);
+  });
+
+  console.log('[뉴스 수집 — 공급자 장애와 정상 0건 구분]');
+
+  test('모든 설정된 공급자가 실패하면 0건 성공으로 취급하지 않는다', () => {
+    eq(hasSuccessfulProviderResponse([
+      { provider: 'finnhub', items: null },
+      { provider: 'newsapi', items: null },
+    ]), false);
+    eq(hasSuccessfulProviderResponse([]), false);
+  });
+
+  test('공급자가 정상적으로 빈 배열을 주면 정상 0건으로 인정한다', () => {
+    eq(hasSuccessfulProviderResponse([{ provider: 'finnhub', items: [] }]), true);
+  });
+
+  test('일부 공급자가 실패해도 한 곳이 정상 응답하면 부분 성공이다', () => {
+    eq(hasSuccessfulProviderResponse([
+      { provider: 'finnhub', items: null },
+      { provider: 'fmp', items: [] },
+    ]), true);
+    eq(hasSuccessfulProviderResponse([
+      { provider: 'finnhub', items: null },
+      { provider: 'newsapi', items: [ok] },
+    ]), true);
   });
 
   console.log('[뉴스 수집 — 이미 저장된 것 거르기]');
