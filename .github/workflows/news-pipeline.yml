@@ -181,13 +181,6 @@ jobs:
           code="${out%% *}"
           final="${out#* }"
           echo "HTTP ${code} · ${final}"
-          cat "$body"
-          echo
-
-          # 정리가 실패해도 워크플로를 실패로 만들지 않는다. 지울 게 없거나
-          # 상한에 걸린 것은 정상이고, 그때마다 빨간 표시가 뜨면 진짜 고장을
-          # 놓친다. 응답은 위에 그대로 남는다.
-          if [ "$code" = "401" ] || [ "$code" = "503" ]; then
-            echo "정리 크론 설정 문제 — 위 응답을 확인하세요."
-            exit 1
-          fi
+          # 원문 DB 오류/응답은 로그에 출력하지 않는다. 판정기는 안전한 코드만 출력.
+          # HTTP 200 + ok:true여도 표별 개수 조회/삭제 실패는 정리 완료가 아니다.
+          node scripts/news-pipeline-verdict.mjs cleanup "$code" "$body"
