@@ -67,6 +67,7 @@ const SEARCH_DIRS = ['src', 'scripts', 'worker/src'];
  * 약속이고, 약속이 쌓이면 이 검사는 없는 것과 같아진다.
  */
 const ALLOW = new Map([
+  // #325 restart modules are referenced by tests; this is not production wiring.
   // ── 이 검사를 처음 켰을 때 이미 끊겨 있던 것들 ──
   //
   // **이 목록은 갚아야 할 빚이다.** 여기 있는 동안 그 판정은
