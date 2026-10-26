@@ -352,6 +352,16 @@ export interface ExitAuthorityCandidate {
   symbol: string;
   side: 'LONG' | 'SHORT';
   strategyId: string | null;
+  /**
+   * 진입 주문이 적힌 장부의 운영 모드. **추측하지 않고 그 행에서 온다.**
+   *
+   * 청산 의도를 기록할 때 이 값이 필요하다 — 모드를 모른 채 적으면
+   * MOCK·TESTNET·LIVE의 장부가 섞인다. 못 읽었으면 null이고,
+   * 기록하는 쪽이 null을 다룬다.
+   */
+  mode: string | null;
+  /** 진입 주문의 소유자. 못 읽었으면 null */
+  userId: string | null;
   executionIdentity: ExecutionIdentity;
   openedAt: number;
   entryPrice: number;
@@ -588,6 +598,10 @@ export function managedCandidates(rows: OrderRowLike[] | null | undefined): {
             && identity != null && Number.isFinite(openedAt)) {
           authorityCandidates.push({
             connectionId, exchange, symbol, side, strategyId,
+            // **그 행의 값을 그대로 옮긴다.** 기본값을 주지 않는다 —
+            // 모드를 지어내면 장부가 섞인다.
+            mode: typeof (r as any)?.mode === 'string' ? (r as any).mode : null,
+            userId: typeof (r as any)?.user_id === 'string' ? (r as any).user_id : null,
             executionIdentity: identity,
             openedAt, entryPrice,
             orderId: r?.id ? String(r.id) : null,
