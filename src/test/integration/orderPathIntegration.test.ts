@@ -494,6 +494,70 @@ export async function runReconcileIntegrationTests() {
     });
   }
 
+
+  // ══════════ Issue #439: 잘못된 포지션 증거는 실패/재시도 허가가 아니다 ══════════
+  for (const [label, payload] of [
+    ['비수치 계약 수', [{ contract: 'BTC_USDT', size: 'invalid' }]],
+    ['null 계약 수', [{ contract: 'BTC_USDT', size: null }]],
+    ['무한대 계약 수', [{ contract: 'BTC_USDT', size: 'Infinity' }]],
+    ['HTTP 200 비배열 응답', { error: 'partial gateway payload' }],
+  ] as Array<[string, any]>) {
+    const db = new FakeDb().seed('live_orders', [pendingRow({ exchange: 'gate', status: 'UNKNOWN' })]);
+    const venue = new FakeVenue()
+      .on('/api/v4/futures/usdt/orders', { json: [] }, 'GET')
+      .on('/api/v4/futures/usdt/positions', { json: payload });
+    const result = await scenario(venue, () => reconcile(db, 'gate'));
+    test('★ #439 Gate ' + label + ' — 주문 미발견이어도 FAILED 확정 금지', () => {
+      assert(!(result instanceof Error), String((result as any)?.message));
+      eq(db.row('live_orders', { id: 'ord-1' })?.status, 'UNKNOWN');
+      eq((result as any).resolved, 0);
+      eq(venue.orderSends().length, 0, '대조 과정이 주문을 전송했다');
+    });
+  }
+  for (const [label, payload] of [
+    ['비수치 포지션', [{ symbol: 'BTCUSDT', positionAmt: 'NaN' }]],
+    ['HTTP 200 비배열 응답', { message: 'invalid positions list' }],
+  ] as Array<[string, any]>) {
+    const db = new FakeDb().seed('live_orders', [pendingRow({ status: 'UNKNOWN' })]);
+    const venue = baseVenue()
+      .on(BN_ORDER, { status: 400, json: { code: -2013, msg: 'Order does not exist.' } }, 'GET')
+      .on(BN_POS, { json: payload });
+    const result = await scenario(venue, () => reconcile(db));
+    test('★ #439 Binance ' + label + ' — 주문 미발견이어도 FAILED 확정 금지', () => {
+      assert(!(result instanceof Error), String((result as any)?.message));
+      eq(db.row('live_orders', { id: 'ord-1' })?.status, 'UNKNOWN');
+      eq((result as any).resolved, 0);
+      eq(venue.orderSends().length, 0);
+    });
+  }
+  {
+    const db = new FakeDb().seed('live_orders', [pendingRow({
+      exchange: 'gate', status: 'UNKNOWN', pos_qty_before: 'NaN',
+    })]);
+    const venue = new FakeVenue()
+      .on('/api/v4/futures/usdt/orders', { json: [] }, 'GET')
+      .on('/api/v4/futures/usdt/positions', { json: [] });
+    const result = await scenario(venue, () => reconcile(db, 'gate'));
+    test('★ #439 기준 pos_qty_before=NaN — 포지션 불변으로 간주해 FAILED 금지', () => {
+      assert(!(result instanceof Error), String((result as any)?.message));
+      eq(db.row('live_orders', { id: 'ord-1' })?.status, 'UNKNOWN');
+      eq((result as any).resolved, 0);
+    });
+  }
+  {
+    const db = new FakeDb().seed('live_orders', [pendingRow({ exchange: 'gate', status: 'UNKNOWN' })]);
+    const venue = new FakeVenue()
+      .on('/api/v4/futures/usdt/orders', { json: [] }, 'GET')
+      .on('/api/v4/futures/usdt/positions', { json: [] });
+    const result = await scenario(venue, () => reconcile(db, 'gate'));
+    test('★ #439 정상 빈 포지션 + 미발견 주문 — 기존 FAILED 판정을 보존', () => {
+      assert(!(result instanceof Error), String((result as any)?.message));
+      eq(db.row('live_orders', { id: 'ord-1' })?.status, 'FAILED');
+      eq((result as any).resolved, 1);
+      eq(venue.orderSends().length, 0);
+    });
+  }
+
   // ══════════ ⑥ Gate 선물 상태 어휘 ══════════
   {
     const db = new FakeDb().seed('live_orders', [
