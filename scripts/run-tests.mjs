@@ -172,6 +172,8 @@ import { runSpotStrategyTests } from './src/lib/strategies/spotStrategies.test';
 import { runSpotOrderPlanTests } from './src/lib/strategies/spotOrderPlan.test';
 import { runCombinedTests } from './src/lib/strategies/combined.test';
 import { runBinanceHostTests } from './src/lib/exchanges/binanceHosts.test';
+import { runBinanceAlgoContractTests } from './src/lib/exchanges/binanceAlgoContract.test';
+import { runBinanceAlgoReadRouteTests } from './src/test/integration/binanceAlgoReadRoute.test';
 import { runAuthErrorTests } from './src/lib/exchanges/authError.test';
 import { runErrorTextTests } from './src/lib/http/errorText.test';
 import { runAutotradeHealthTests } from './src/lib/engine/autotradeHealth.test';
@@ -379,7 +381,7 @@ import { runLoginDiagnosticTests } from './src/lib/auth/loginDiagnostic.test';
 import { summary, flushAsync } from './src/test/harness';
 console.log('════════ TRAIGO 코어 유닛 테스트 ════════');
 runPnlTests(); runBacktestTests(); runRiskManagerTests(); runExitPlanTests(); runPaperDispatchTests(); runPaperOpenAtomicTests(); runPaperEventTimeTests(); runPaperChallengeSweepTests(); runPaperCapacityTests(); runPaperExitSweepTests(); runPaperExitSweepMoreTests(); runExcursionTests(); runPositionGuardTests(); runStateReconcileTests(); runOrderLifecycleTests(); runUnknownResolverTests(); runDataQualityTests(); runOperatingModeTests();
-runEntry100xTests(); runMaxOpenPositionsGateTests(); runOrderFillFactsTests(); runLedgerFillQtyTests(); runReconcileLedgerStatusTests(); runHoldingEvidenceTests(); runFoundOrderLedgerTests(); runProvenFillTests(); runOtherVenueLedgerTests(); runCoinMFillTests(); runFailureRecoveryTests(); runCredentialExposureTests(); runMarketTypeTests(); runWalletTests(); runCoinMTests(); runCostBasisTests(); runLedgerTests(); runSpotStrategyTests(); runSpotOrderPlanTests(); runCombinedTests(); runBinanceHostTests(); runAuthErrorTests(); runErrorTextTests(); runAutotradeHealthTests(); runOverlayStackTests(); runThemeTests(); runPositionViewTests(); runDisplayTests(); runStatusTests(); runInventoryTests(); runPracticeEnvTests();
+runEntry100xTests(); runMaxOpenPositionsGateTests(); runOrderFillFactsTests(); runLedgerFillQtyTests(); runReconcileLedgerStatusTests(); runHoldingEvidenceTests(); runFoundOrderLedgerTests(); runProvenFillTests(); runOtherVenueLedgerTests(); runCoinMFillTests(); runFailureRecoveryTests(); runCredentialExposureTests(); runMarketTypeTests(); runWalletTests(); runCoinMTests(); runCostBasisTests(); runLedgerTests(); runSpotStrategyTests(); runSpotOrderPlanTests(); runCombinedTests(); runBinanceHostTests(); runBinanceAlgoContractTests(); runAuthErrorTests(); runErrorTextTests(); runAutotradeHealthTests(); runOverlayStackTests(); runThemeTests(); runPositionViewTests(); runDisplayTests(); runStatusTests(); runInventoryTests(); runPracticeEnvTests();
 runOrderViewTests(); runNewsSchemaTests(); runAnalyzeOneTests(); runCollectTests(); runEnrichPlanTests(); runConsensusTests(); runPricingTests(); runCalendarTests(); runRetentionTests(); runAdminGateTests(); runCommandTests(); runKeymapTests(); runPreTradeChecklistTests(); runReconcileEvidenceTests(); runAutoMergeGateTests(); runAutoRebaseTests();
 runDeployDispatchTests(); runExecutorHealthTests(); runManualPlanTests(); runCloseQtyTests(); runLosslessJsonTests(); runGatePlanTests();
 runFuturesExecTests(); runPromotionMapTests(); runTradeModeTests(); runPaperPlanTests(); runDailyLossTests(); runRegimeGateTests(); runTrailPlanTests(); runPaperRunnerTests(); runAllocationTests(); runStatsTests(); runRoutingTests(); runGateSpotPlanTests(); runLossStreakTests(); runTradeVetoTests(); runCalibrationTests(); runRecordPredictionTests(); runSubAccountTests(); runExitRulesTests(); runSafetyLogTests(); runFredTests(); runEventGuardTests(); runStopVerifyTests();
@@ -421,6 +423,10 @@ runMigrationStatusTests(); runWalletTruthTests(); runSmokePlanTests(); runSmokeR
   await runSmokeStartRouteTests();
   await runHoldExtensionIntegrationTests();
   await runKillCloseIntegrationTests();
+  await flushAsync();
+  // Signed-GET Algo evidence uses synthetic encryption and intercepts
+  // global fetch. Isolate AFTER all older integration stubs are restored.
+  await runBinanceAlgoReadRouteTests();
   await flushAsync();
   const s = summary();
   console.log('\\n결과: ' + s.passed + ' 통과 / ' + s.failed + ' 실패');

@@ -12,6 +12,7 @@ import {
 export type { PositionRiskProvenance, SymbolPositionRisk };
 import { parseLossless, venueIdOf } from './losslessJson';
 import { quantizeOrder, qtyGridFor, type SymbolFilters } from './quantize';
+import { queryBinanceAlgoByClientId } from './binanceAlgoContract';
 
 const FUTURES_BASE         = 'https://fapi.binance.com';
 const TESTNET_FUTURES_BASE = 'https://demo-fapi.binance.com';
@@ -62,6 +63,24 @@ async function fapiSigned(
   // (2026-08-16: 2089209928026685400 → 마지막 자릿수 반올림 → 취소 실패).
   // **거래소가 번호를 키우기 시작한 뒤에 알아채면 늦는다.**
   return parseLossless(await r.text());
+}
+
+/**
+ * TESTNET-only, individually scoped, signed READ-ONLY Algo observation.
+ *
+ * This is intentionally NOT a smoke order sender or cancel endpoint.
+ * Can only query an already known stable clientAlgoId with the verified
+ * same-owner TESTNET connection's credentials. Unknown/404/timeout cannot
+ * be interpreted as a rejected POST or permission to resend.
+ */
+export async function getFuturesAlgoByClientIdReadOnly(
+  key: string, secret: string, testnet: boolean,
+  symbol: string, clientAlgoId: string,
+) {
+  return queryBinanceAlgoByClientId({
+    environment: testnet === true ? 'TESTNET' : 'LIVE',
+    symbol, clientAlgoId,
+  }, (path, params) => fapiSigned('GET', path, key, secret, true, params));
 }
 
 export interface FuturesBalance { asset: string; balance: number; availableBalance: number; unrealizedPnl: number; }
