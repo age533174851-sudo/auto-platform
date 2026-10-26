@@ -519,7 +519,9 @@ export async function runReconcileIntegrationTests() {
     ['HTTP 200 비배열 응답', { message: 'invalid positions list' }],
   ] as Array<[string, any]>) {
     const db = new FakeDb().seed('live_orders', [pendingRow({ status: 'UNKNOWN' })]);
-    const venue = baseVenue()
+    // baseVenue에는 정상 BN_POS가 먼저 등록돼 있다. FakeVenue은 첫 규칙을
+    // 사용하므로 독립 venue에 불량 응답을 직접 등록해야 실제 RED가 재현된다.
+    const venue = new FakeVenue()
       .on(BN_ORDER, { status: 400, json: { code: -2013, msg: 'Order does not exist.' } }, 'GET')
       .on(BN_POS, { json: payload });
     const result = await scenario(venue, () => reconcile(db));
