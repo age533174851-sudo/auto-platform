@@ -66,6 +66,60 @@ export function runQuantizeTests() {
     eq(decimalsOf(0.1), 1);
   });
 
+  // ── 10의 거듭제곱이 아닌 단위 ────────────────────────────
+  //
+  //   `Math.round(-log10(step))`으로 자리수를 구하면 여기서 틀린다.
+  //   0.005는 2자리로 읽히고 0.25는 1자리로 읽힌다. 그 자리수로
+  //   `toFixed`를 하면 **내림한 값을 다시 올려** 요청보다 많은 수량,
+  //   단위의 정수배가 아닌 가격이 만들어진다.
+  test('★ 10의 거듭제곱이 아닌 단위의 자리수', () => {
+    eq(decimalsOf(0.005), 3);
+    eq(decimalsOf(0.0025), 4);
+    eq(decimalsOf(0.25), 2);
+    eq(decimalsOf(0.5), 1);
+    eq(decimalsOf(0.05), 2);
+  });
+
+  test('★ 지수 표기 단위의 자리수 (String()이 1e-7로 준다)', () => {
+    // 자리수가 부족하면 toFixed가 올려 버린다.
+    eq(decimalsOf(1e-7), 7);
+    eq(decimalsOf(5e-7), 7);
+    eq(decimalsOf(2.5e-7), 8);
+    eq(decimalsOf(1e-8), 8);
+  });
+
+  test('★ 수량을 단위로 내리면 요청량을 넘지 않고 정수배가 된다', () => {
+    const cases: Array<[number, number]> = [
+      [0.1065, 0.005], [1.5, 0.5], [2.25, 0.25], [7.5, 0.5],
+      [0.75, 0.25], [0.111, 0.0025], [1.0000005, 5e-7],
+    ];
+    for (const [qty, step] of cases) {
+      const got = floorToStep(qty, step);
+      assert(got <= qty + 1e-12,
+        `floorToStep(${qty}, ${step}) = ${got} — 요청량을 넘겼다`);
+      const units = got / step;
+      assert(Math.abs(units - Math.round(units)) < 1e-6,
+        `floorToStep(${qty}, ${step}) = ${got} — 단위의 정수배가 아니다 (거래소가 거부한다)`);
+    }
+  });
+
+  test('★ 가격을 호가 단위로 맞추면 정수배가 된다', () => {
+    // 호가 단위 0.5·0.25·0.05는 실제로 흔하다. 정수배가 아니면
+    // 주문이 거부되고, 손절·익절이면 **보호주문이 안 걸린 상태**가 된다.
+    const cases: Array<[number, number]> = [
+      [100.5, 0.5], [100.25, 0.25], [100.75, 0.25],
+      [100.05, 0.05], [27123.5, 0.5], [3.45, 0.05],
+    ];
+    for (const [price, tick] of cases) {
+      const got = roundToTick(price, tick);
+      const units = got / tick;
+      assert(Math.abs(units - Math.round(units)) < 1e-6,
+        `roundToTick(${price}, ${tick}) = ${got} — 호가 단위의 정수배가 아니다`);
+      assert(Math.abs(got - price) <= tick / 2 + 1e-12,
+        `roundToTick(${price}, ${tick}) = ${got} — 반 칸보다 멀리 움직였다`);
+    }
+  });
+
   // ── 가격 ────────────────────────────────────────────────
   test('가격은 가까운 쪽으로 반올림한다', () => {
     // 지정가는 내려도 올려도 되고, 가까운 쪽이 의도에 맞다.

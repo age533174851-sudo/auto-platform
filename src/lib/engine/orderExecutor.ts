@@ -11,6 +11,7 @@
 //   7. 실제 포지션 조회로 대조
 //
 // 응답을 못 받으면 절대 그냥 재시도하지 않는다 → UNKNOWN으로 두고 대조 후 판단.
+import { decimalsOf } from '../exchanges/quantize';
 import type { PositionPlan } from './riskManager';
 import type { ExitPlan } from './exitPlan';
 import { applyTransition, type OrderState as LifecycleState } from './orderLifecycle';
@@ -277,8 +278,7 @@ async function updateOrderRow(sb: any, id: string, patch: Record<string, any>): 
 // 수량 정밀도 보정 — 거래소는 정해진 소수점만 받는다
 export function roundQuantity(qty: number, stepSize: number): number {
   if (!stepSize || stepSize <= 0) return qty;
-  const precision = Math.max(0, Math.round(-Math.log10(stepSize)));
-  return Number((Math.floor(qty / stepSize) * stepSize).toFixed(precision));
+  return Number((Math.floor(qty / stepSize + 1e-9) * stepSize).toFixed(decimalsOf(stepSize)));
 }
 
 /**

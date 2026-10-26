@@ -520,6 +520,45 @@ export function runPositionLifecycleTests() {
     eq(roundTrigger(3000.01, 'LONG', 'STOP', 0.01).price, 3000.01);
   });
 
+  test('★ F-5b. 10의 거듭제곱이 아닌 호가 단위에서도 정수배를 낸다', () => {
+    // 왜 중요한가: 트리거 가격이 호가 단위의 정수배가 아니면 거래소가
+    // 주문을 거부한다. 거부된 보호주문은 **걸리지 않은 보호주문**이고,
+    // 포지션은 무방비로 남는다. 0.5·0.25·0.05 단위는 실제로 흔하다.
+    const ticks = [0.5, 0.25, 0.05, 0.005, 2.5];
+    const prices = [100.3, 100.5, 100.26, 27123.42, 3.47];
+    for (const tick of ticks) {
+      for (const price of prices) {
+        for (const side of ['LONG', 'SHORT'] as const) {
+          for (const kind of ['STOP', 'TAKE_PROFIT'] as const) {
+            const got = roundTrigger(price, side, kind, tick).price;
+            assert(got != null, `${price}/${tick} 에서 가격이 없다`);
+            const units = got! / tick;
+            assert(Math.abs(units - Math.round(units)) < 1e-6,
+              `roundTrigger(${price}, ${side}, ${kind}, ${tick}) = ${got}`
+              + ' — 호가 단위의 정수배가 아니다. 거래소가 거부하면 보호주문이 없는 상태가 된다');
+            // 한 칸보다 멀리 밀지 않는다 — 불리한 쪽이라도 한 틱까지다.
+            assert(Math.abs(got! - price) <= tick + 1e-9,
+              `roundTrigger(${price}, ${side}, ${kind}, ${tick}) = ${got} — 한 틱보다 멀리 밀었다`);
+          }
+        }
+      }
+    }
+  });
+
+  test('★ F-5c. 손절·익절을 미는 방향은 단위가 바뀌어도 유지된다', () => {
+    // 방향이 뒤집히면 손절이 **일찍** 터지거나 익절이 즉시 체결된다.
+    for (const tick of [0.5, 0.25, 0.05]) {
+      const lsStop = roundTrigger(100.3, 'LONG', 'STOP', tick).price!;
+      const lsTp = roundTrigger(100.3, 'LONG', 'TAKE_PROFIT', tick).price!;
+      const shStop = roundTrigger(100.3, 'SHORT', 'STOP', tick).price!;
+      const shTp = roundTrigger(100.3, 'SHORT', 'TAKE_PROFIT', tick).price!;
+      assert(lsStop <= 100.3, `LONG 손절은 아래로 (${tick}: ${lsStop})`);
+      assert(lsTp >= 100.3, `LONG 익절은 위로 (${tick}: ${lsTp})`);
+      assert(shStop >= 100.3, `SHORT 손절은 위로 (${tick}: ${shStop})`);
+      assert(shTp <= 100.3, `SHORT 익절은 아래로 (${tick}: ${shTp})`);
+    }
+  });
+
   console.log('[보호주문 되읽기 — G · H]');
 
   const priceOrder = (id: string, autoSize: string, rule: 1 | 2, price: string, text?: string) => ({
