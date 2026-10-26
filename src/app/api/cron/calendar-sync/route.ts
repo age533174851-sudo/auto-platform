@@ -24,6 +24,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { cronAuthFromRequest } from '@/lib/cron/cronAuth';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/server';
 import { collectEvents, syncCooldown } from '@/lib/calendar/normalize';
+import { calendarProviderVerdict } from '@/lib/calendar/providerHealth';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -123,13 +124,16 @@ async function runSync() {
   //
   // 시각을 지어내지 않는 이유는 fred.ts 맨 위에 적어 뒀다.
   let fredRows: Array<Record<string, any>> = [];
+  let fredResponseValid = false;
   const fredKey = process.env.FRED_API_KEY;
   if (fredKey) {
     const { pickFredEvents, fredEventsToRows, fredReleaseDatesUrl } = await import('@/lib/calendar/fred');
     const d = await fetchJson(fredReleaseDatesUrl(fredKey, from, to));
+    // 유효한 빈 release_dates는 성공. 관심 지표 0건과 공급자 실패는 다르다.
+    fredResponseValid = Array.isArray(d?.release_dates);
     const picked = pickFredEvents(d?.release_dates);
     fredRows = fredEventsToRows(picked);
-    sourceStatus.fred = d
+    sourceStatus.fred = fredResponseValid
       ? `${picked.length}건 (시각 없음 — 하루 단위 회피)`
       : '응답 없음';
   } else sourceStatus.fred = 'FRED_API_KEY 없음';
@@ -142,13 +146,25 @@ async function runSync() {
     sourceStatus.fmp = Array.isArray(d) ? `${d.length}건` : '응답 없음';
   } else sourceStatus.fmp = 'FMP_API_KEY 없음';
 
-  if (batches.length === 0 && fredRows.length === 0) {
+  const providerVerdict = calendarProviderVerdict(batches, !!fredKey, fredResponseValid);
+  if (providerVerdict === 'NO_PROVIDERS') {
     // 키가 없는 것과 일정이 없는 것은 다르다. 화면에서는 둘 다 빈 달력이다.
     return NextResponse.json({
       ok: false,
       message: '경제 캘린더 공급자 키가 없습니다. FRED_API_KEY(무료) 또는 TRADING_ECONOMICS_API_KEY / FMP_API_KEY를 넣으세요.',
       sources: sourceStatus,
     }, { status: 503 });
+  }
+
+  if (providerVerdict === 'UNAVAILABLE') {
+    // TE/FMP가 모두 null이고 FRED도 유효한 배열을 반환하지 않았다.
+    // Risk Veto의 입력이 갱신되지 않았는데 정상 빈 달력으로 기록하면 안 된다.
+    return NextResponse.json({
+      ok: false,
+      error: 'calendar_providers_unavailable',
+      message: '설정된 경제 캘린더 공급자가 모두 실패했습니다. 기존 일정의 최신성을 확인하세요.',
+      sources: sourceStatus,
+    }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
   }
 
   const collected = collectEvents(batches);
