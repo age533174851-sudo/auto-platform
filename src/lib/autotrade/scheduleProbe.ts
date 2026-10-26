@@ -44,10 +44,15 @@ export interface ScheduleProbe {
   strategyId: string;
   /** 마지막 평가 시각. **없으면 null — 0이나 빈 문자열로 적지 않는다** */
   lastRunAt: string | null;
-  /** 그 평가의 결론 (ENTERED · NO_TRADE · BLOCKED · FAILED …) */
-  lastOutcome: string | null;
-  /** 그 결론의 이유 */
-  lastReason: string | null;
+  /**
+   * 그 평가의 결론 한 줄 (`resultLineOf`가 만든 값).
+   *
+   * 예: "진입 안 함 · 정상 평가 완료 · 진입 조건 없음 · 사유코드 NO_BREAKOUT"
+   *
+   * **칸 이름은 `last_result`다.** `last_outcome`·`last_reason`은 이 표에
+   * 없는 칸이고, 그걸 읽으면 값이 있는데도 조용히 null이 된다.
+   */
+  lastResult: string | null;
   /**
    * 이 예약이 **시각 창을 가진 전략인가.** 가졌으면 "HH:MM~HH:MM KST".
    *
@@ -80,8 +85,7 @@ export function scheduleProbeOf(row: any): ScheduleProbe {
   return {
     strategyId,
     lastRunAt: text(row?.last_run_at),
-    lastOutcome: text(row?.last_outcome),
-    lastReason: text(row?.last_reason),
+    lastResult: text(row?.last_result),
     entryWindowKst: w
       ? `${hhmm(w.startMin)}~${hhmm(w.endMin)}${w.graceMin > 0 ? ` (+${w.graceMin}분 유예)` : ''}`
       : null,

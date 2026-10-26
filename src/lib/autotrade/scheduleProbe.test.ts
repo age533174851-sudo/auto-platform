@@ -22,12 +22,11 @@ export function runScheduleProbeTests() {
       execution_profile_id: FORCED_ENTRY_PROFILE_ID,
       execution_preset_id: FORCED_ENTRY_PRESET_ID,
       last_run_at: '2026-10-26T00:10:00.000Z',
-      last_outcome: 'NO_TRADE', last_reason: '조건 불충족',
+      last_result: '진입 안 함 · 사유코드 NO_BREAKOUT',
     });
     eq(p.strategyId, 'scalp');                      // 어느 전략인가
     eq(p.lastRunAt, '2026-10-26T00:10:00.000Z');    // 언제 평가했나
-    eq(p.lastOutcome, 'NO_TRADE');                  // 무엇을 결정했나
-    eq(p.lastReason, '조건 불충족');
+    eq(p.lastResult, '진입 안 함 · 사유코드 NO_BREAKOUT');  // 무엇을 결정했나
   });
 
   test('★★ Exact100X 계약이면 09:00 창이 보인다', () => {
@@ -62,17 +61,23 @@ export function runScheduleProbeTests() {
   test('★★★ 모르는 값은 null이다 — 빈 문자열·0으로 적지 않는다', () => {
     const p = scheduleProbeOf({ strategy_id: 'scalp' });
     eq(p.lastRunAt, null);
-    eq(p.lastOutcome, null);
-    eq(p.lastReason, null);
+    eq(p.lastResult, null);
   });
 
   test('공백만 있는 값도 null로 읽는다', () => {
-    const p = scheduleProbeOf({
-      strategy_id: 'scalp', last_run_at: '   ', last_outcome: '', last_reason: '  ',
-    });
+    const p = scheduleProbeOf({ strategy_id: 'scalp', last_run_at: '   ', last_result: '  ' });
     eq(p.lastRunAt, null);
-    eq(p.lastOutcome, null);
-    eq(p.lastReason, null);
+    eq(p.lastResult, null);
+  });
+
+  test('★★★ 없는 칸(last_outcome·last_reason)을 읽지 않는다 — 값이 있는데 null이 된다', () => {
+    // 이 표의 칸은 last_result다. 틀린 이름을 읽으면 "기록이 없다"처럼 보인다.
+    const p = scheduleProbeOf({
+      strategy_id: 'scalp',
+      last_result: '진입 안 함 · 사유코드 NO_BREAKOUT',
+      last_outcome: 'WRONG', last_reason: 'WRONG',
+    });
+    eq(p.lastResult, '진입 안 함 · 사유코드 NO_BREAKOUT');
   });
 
   test('★ 한 번도 안 돈 예약은 "평가 없음"이 값으로 드러난다', () => {
