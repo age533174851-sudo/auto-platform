@@ -207,5 +207,106 @@ export async function runCronAuthRouteTests(): Promise<void> {
     });
   }
 
+
+  // ══════════ ⑤ cleanup: PostgREST count 미확인은 0건이 아니다 ══════════
+  //
+  // Supabase head:true count는 number | null이다. 기존 Number(null) || 0은
+  // "세지 못함"을 "지울 것이 없음"으로 바꾸고 HTTP 200 성공으로 남겼다.
+  // 전체 건수 null도 0으로 바꿔 checkDeleteSize의 전체 삭제 관문을 우회했다.
+  // 실제 DB 대신 가짜 select/delete만 사용하며 어떤 운영 데이터도 건드리지 않는다.
+  async function cleanupCountCase(eligibleCount: unknown, totalCount: unknown) {
+    const prevSecret = process.env.CRON_SECRET;
+    const resolved = require.resolve(ROUTES[0].path);
+    const prevServer = require.cache[serverPath];
+    let deleteCalls = 0;
+    const fakeDb = {
+      from(_table: string) {
+        return {
+          select() {
+            return {
+              lt: async () => ({ error: null, count: eligibleCount }),
+              then(resolve: any, reject: any) {
+                return Promise.resolve({ error: null, count: totalCount }).then(resolve, reject);
+              },
+            };
+          },
+          delete() {
+            return { lt: async () => {
+              deleteCalls++;
+              return { error: null };
+            } };
+          },
+        };
+      },
+    };
+    process.env.CRON_SECRET = SECRET;
+    require.cache[serverPath] = {
+      id: serverPath, filename: serverPath, loaded: true,
+      exports: { getSupabaseAdmin: () => fakeDb },
+    } as any;
+    delete require.cache[resolved];
+    try {
+      const mod = require(resolved);
+      const request = req(`Bearer ${SECRET}`);
+      request.nextUrl.searchParams.set('apply', '1');
+      const res = await mod.GET(request);
+      return { status: res.status, json: await res.json(), deleteCalls };
+    } finally {
+      delete require.cache[resolved];
+      if (prevServer) require.cache[serverPath] = prevServer;
+      else delete require.cache[serverPath];
+      if (prevSecret === undefined) delete process.env.CRON_SECRET;
+      else process.env.CRON_SECRET = prevSecret;
+    }
+  }
+
+  for (const [label, count] of [
+    ['null', null], ['undefined', undefined], ['NaN', NaN],
+    ['문자열 0', '0'], ['음수', -1], ['소수', 1.5],
+  ] as Array<[string, unknown]>) {
+    const got = await cleanupCountCase(count, 10);
+    test(`⑤ cleanup eligible count ${label}: 삭제 0 · 미확인으로 보고`, () => {
+      eq(got.deleteCalls, 0, '세지 못했는데 삭제했다');
+      for (const table of got.json.tables) {
+        eq(table.eligible, null, '미확인 count를 0건으로 바꾸면 안 된다');
+        assert(table.skipped.includes('조회'), '미확인인데 지울 것 없음으로 보고했다');
+      }
+    });
+  }
+
+  for (const [label, count] of [
+    ['null', null], ['undefined', undefined], ['NaN', NaN],
+    ['문자열 0', '0'], ['음수', -1],
+  ] as Array<[string, unknown]>) {
+    const got = await cleanupCountCase(2, count);
+    test(`⑤ cleanup total count ${label}: 전체 삭제 방어 우회 금지`, () => {
+      eq(got.deleteCalls, 0, '전체 건수를 모른 채 삭제했다');
+      for (const table of got.json.tables) {
+        eq(table.total, null, '전체 건수 미확인을 0으로 바꾸면 안 된다');
+        assert(table.skipped.includes('조회'), '전체 건수 조회 실패를 드러내지 않았다');
+      }
+    });
+  }
+
+  const empty = await cleanupCountCase(0, 10);
+  test('⑤ cleanup 정상 0건: 삭제 0 · 지울 것 없음', () => {
+    eq(empty.deleteCalls, 0);
+    for (const table of empty.json.tables) {
+      eq(table.eligible, 0);
+      eq(table.skipped, '지울 것 없음');
+    }
+  });
+
+  const partial = await cleanupCountCase(2, 10);
+  test('⑤ cleanup 정상 부분 삭제: 가짜 DB만 호출 · 과잉 차단 없음', () => {
+    eq(partial.deleteCalls, 2, 'news_articles/ai_usage 두 표만 처리한다');
+    eq(partial.json.totalDeleted, 4);
+    for (const table of partial.json.tables) {
+      eq(table.eligible, 2);
+      eq(table.total, 10);
+      eq(table.deleted, 2);
+    }
+  });
+
   restoreResolve();
 }
