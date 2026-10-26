@@ -23,6 +23,7 @@ import { HOLDING_EVIDENCE_STATUSES } from '@/lib/engine/holdingEvidence';
 import { timingSafeEqual } from 'crypto';
 import { tagStrategy } from '@/lib/strategies/ledger';
 import { scheduleReadSummary } from '@/lib/autotrade/scheduleReadSummary';
+import { scheduleProbeOf } from '@/lib/autotrade/scheduleProbe';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -1207,6 +1208,11 @@ export async function GET(req: NextRequest) {
           ok: due.code !== 'NO_CONNECTION',
           skipped: due.code !== 'NO_CONNECTION',
           code: due.code, detail: due.reason,
+          // **건너뛴 회차가 가장 알기 어려웠다.** "다음 평가까지 54분"만
+          // 적혀 있으면 어느 전략인지, 마지막에 뭘 했는지, 9시 창이 있기는
+          // 한지를 전부 DB나 Fly 로그에서 찾아야 했다. 예약 줄에 이미
+          // 있는 값이므로 여기서 함께 돌려준다.
+          ...scheduleProbeOf(r),
           ...(saveError ? { saveError } : {}),
         });
         continue;
@@ -1214,6 +1220,9 @@ export async function GET(req: NextRequest) {
 
       results.push({
         symbol: r.symbol, mode: r.mode,
+        // 이 회차가 실제로 평가했으므로 기록이 정본이다. 창 표시는
+        // 건너뛴 회차와 같은 자리에서 읽히도록 함께 붙인다.
+        entryWindowKst: scheduleProbeOf(r).entryWindowKst,
         strategyId: record.strategyId,
         // **'평가했다'와 '진입했다'는 다르다.** 대부분의 평가는 진입하지
         // 않고 그건 정상이다. 둘을 같은 '성공'으로 세면 화면에 "성공 1건"이
