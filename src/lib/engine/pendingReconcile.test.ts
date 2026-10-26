@@ -8,6 +8,7 @@
 //  4. 시각이 깨진 행 하나가 영영 미확정으로 남아 자동매매를 계속 막는 것
 //  5. 대조 실패를 '확정 0건'과 같게 적는 것
 import { test, assert, eq } from '../../test/harness';
+import { scanPendingRows } from './pendingReconcileScan';
 import { ORDER_STATUSES, TERMINAL_ORDER_STATUSES } from './orderExecutor';
 import {
   RECONCILE_QUERY_STATUSES, RECONCILE_TARGET_STATUSES,
@@ -243,6 +244,90 @@ export function runPendingReconcileTests() {
   });
 
 
+
+
+  // ── Issue #453: 미확정 대상 500건 잘림 및 페이지 신뢰성 ──
+  const scanRow = (id: number, connection: string, status = 'INTENT', createdAt = ago(900_000)) =>
+    ({ id: String(id).padStart(6, '0'), connection_id: connection,
+       user_id: 'u1', status, created_at: createdAt });
+  const scanFixture = (rows: ReturnType<typeof scanRow>[]) =>
+    async (from: number, to: number) => ({ data: rows.slice(from, to + 1), error: null });
+
+  test('★ #453 500개 오래된 INTENT 뒤의 c2 UNKNOWN도 방문 대상으로 읽는다', async () => {
+    const rows = Array.from({ length: 500 }, (_, i) => scanRow(i, 'c1'));
+    rows.push(scanRow(500, 'c2', 'UNKNOWN', ago(300_000)));
+    const r = await scanPendingRows(scanFixture(rows));
+    eq(r.complete, true, '뒤 페이지를 읽지 못했다');
+    eq(r.rows.length, 501);
+    const t = pendingTargets(r.rows, { now: NOW });
+    eq(t.map(x => x.connectionId).join(','), 'c1,c2');
+    eq(t[0].count, 500);
+  });
+
+  test('★ #453 정확히 500행이면 다음 빈 페이지를 읽고 complete 증명', async () => {
+    const rows = Array.from({ length: 500 }, (_, i) => scanRow(i, 'c1'));
+    const requests: string[] = [];
+    const r = await scanPendingRows(async (from, to) => {
+      requests.push(from + ':' + to);
+      return { data: rows.slice(from, to + 1), error: null };
+    });
+    eq(r.complete, true);
+    eq(r.rows.length, 500);
+    eq(requests.length, 2);
+    eq(requests[1], '500:999');
+  });
+
+  test('★ #453 둘째 페이지 조회 실패를 빈 목록/ok true로 숨기지 않는다', async () => {
+    const rows = Array.from({ length: 500 }, (_, i) => scanRow(i, 'c1'));
+    const r = await scanPendingRows(async (from, to) =>
+      from >= 500 ? { data: null, error: { message: 'db unavailable' } }
+        : { data: rows.slice(from, to + 1), error: null });
+    eq(r.complete, false);
+    eq(r.error, 'query_failed');
+    eq(r.rows.length, 500);
+  });
+
+  test('★ #453 전체 빈 DB는 정상적인 0건이다', async () => {
+    const r = await scanPendingRows(scanFixture([]));
+    eq(r.complete, true);
+    eq(r.rows.length, 0);
+    eq(r.pages, 1);
+  });
+
+  test('★ #453 페이지 상한 초과는 대조 완료로 보고하지 않는다', async () => {
+    const rows = Array.from({ length: 501 }, (_, i) => scanRow(i, 'c1'));
+    const r = await scanPendingRows(scanFixture(rows), { pageSize: 500, maxPages: 1 });
+    eq(r.complete, false);
+    eq(r.error, 'scan_limit');
+    eq(r.rows.length, 500);
+  });
+
+  test('★ #453 같은 created_at의 경계 행도 id 순서로 모두 보존', async () => {
+    const timestamp = ago(900_000);
+    const rows = Array.from({ length: 502 }, (_, i) =>
+      scanRow(i, i < 500 ? 'c1' : 'c2', 'UNKNOWN', timestamp));
+    const r = await scanPendingRows(scanFixture(rows));
+    eq(r.complete, true);
+    eq(r.rows.length, 502);
+    eq(new Set(r.rows.map(x => x.id)).size, 502);
+    eq(r.rows[501].id, '000501');
+  });
+
+  test('★ #453 offset 드리프트로 같은 ID가 다음 페이지에 중복되면 실패', async () => {
+    const rows = Array.from({ length: 501 }, (_, i) => scanRow(i, 'c1'));
+    const r = await scanPendingRows(async (from, to) =>
+      from === 500
+        ? { data: [rows[499]], error: null }
+        : { data: rows.slice(from, to + 1), error: null });
+    eq(r.complete, false);
+    eq(r.error, 'unstable_page');
+  });
+
+  test('★ #453 비배열 페이지 응답은 정상 빈 페이지가 아니다', async () => {
+    const r = await scanPendingRows(async () => ({ data: null, error: null }));
+    eq(r.complete, false);
+    eq(r.error, 'invalid_page');
+  });
 
   test('실패는 앞줄에 적는다', () => {
     // 앞줄만 읽는 사람이 많다. 뒤에 숨기면 "대조 정상"으로 읽힌다.
