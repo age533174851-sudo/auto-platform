@@ -164,6 +164,7 @@ import {
 import { runSmokeStartRouteTests } from './src/test/integration/smokeStartRouteIntegration.test';
 import { runForcedEntryRouteTests } from './src/test/integration/forcedEntryRouteIntegration.test';
 import { runBuySellRoundTripTests } from './src/test/integration/buySellRoundTripIntegration.test';
+import { runRoundTripBothSymbolsTests } from './src/test/integration/roundTripBothSymbols.test';
 import { runHoldExtensionIntegrationTests } from './src/test/integration/holdExtensionIntegration.test';
 import { runFailureRecoveryTests } from './src/lib/engine/failureRecovery.test';
 import { runMarketTypeTests } from './src/lib/markets/marketType.test';
@@ -429,6 +430,7 @@ runSmokeRunTests(); runCancelRunTests(); runExitPolicyTests(); runRunRequestTest
   await runSmokeStartRouteTests();
   await runForcedEntryRouteTests();
   await runBuySellRoundTripTests();
+  await runRoundTripBothSymbolsTests();
   await runHoldExtensionIntegrationTests();
   await runKillCloseIntegrationTests();
   await flushAsync();
