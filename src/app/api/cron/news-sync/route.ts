@@ -14,7 +14,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { cronAuthFromRequest } from '@/lib/cron/cronAuth';
 import { getSupabaseAdmin } from '@/lib/supabase/server';
-import { collectFrom, onlyNew } from '@/lib/news/collect';
+import { collectFrom, onlyNew, hasSuccessfulProviderResponse } from '@/lib/news/collect';
 import { saveArticles, knownHashes } from '@/lib/news/store';
 
 export const dynamic = 'force-dynamic';
@@ -82,6 +82,17 @@ export async function GET(req: NextRequest) {
       message: '뉴스 공급자 키가 하나도 없습니다. FINNHUB_API_KEY / FMP_API_KEY / NEWS_API_KEY 중 하나를 넣으세요.',
       sources: sourceStatus,
     }, { status: 503 });
+  }
+
+  // 공급자 키가 있는 것과 실제 수집에 성공한 것은 다르다.
+  // 모든 API가 429/5xx/타임아웃/비정상 JSON이면 collected=0이지만
+  // 이를 정상 0건으로 저장하면 HTTP 200 · ok:true 거짓 성공이 된다.
+  // 빈 배열은 정상 응답이므로 실패로 분류하지 않는다.
+  if (!hasSuccessfulProviderResponse(batches)) {
+    return NextResponse.json({
+      ok: false, error: 'news_providers_unavailable',
+      sources: sourceStatus, collected: 0, saved: 0,
+    }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
   }
 
   const sb = getSupabaseAdmin();
