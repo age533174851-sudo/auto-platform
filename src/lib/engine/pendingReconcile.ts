@@ -77,6 +77,18 @@ export const RECONCILE_TARGET_STATUSES = [
  */
 export const DEFAULT_GRACE_MS = 90_000;
 
+/**
+ * /api/cron/reconcile의 유예 파라미터.
+ * URLSearchParams.get()의 null을 Number(null)=0으로 바꾸면,
+ * 미지정 요청에서 진행 중인 주문을 90초 앞당겨 대조하게 된다.
+ */
+export function parseReconcileGraceMs(raw: string | null): number {
+  if (raw === null || raw.trim() === '') return DEFAULT_GRACE_MS;
+  const seconds = Number(raw);
+  const ms = seconds * 1000;
+  return Number.isFinite(ms) && ms >= 0 ? ms : DEFAULT_GRACE_MS;
+}
+
 /** 한 번에 몇 개 연결까지. 서버리스 실행 시간 안에 끝나야 한다 */
 export const DEFAULT_MAX_CONNECTIONS = 20;
 
