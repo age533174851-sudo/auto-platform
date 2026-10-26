@@ -143,7 +143,7 @@ export async function GET(req: NextRequest) {
     if (outcome == null) { unpriced++; return; }
 
     try {
-      const { error } = await (sb as any).from('ai_predictions')
+      const { data, error } = await (sb as any).from('ai_predictions')
         .update({
           outcome,
           outcome_price: later,
@@ -152,8 +152,16 @@ export async function GET(req: NextRequest) {
         })
         .eq('id', r.id)
         // 경합 방지. 다른 실행이 이미 채점했으면 덮어쓰지 않는다.
-        .is('outcome', null);
+        .is('outcome', null)
+        // error=null은 UPDATE가 실제로 1행을 바꿨다는 증거가 아니다.
+        // RETURNING을 명시해 0행 경합과 확인 불가능한 응답을 구분한다.
+        .select('id');
       if (error) throw new Error(error.message);
+      if (!Array.isArray(data)) throw new Error('채점 UPDATE 반영 행 확인 불가');
+      if (data.length === 0) return; // 다른 실행이 먼저 채점함 — 실패도 성공도 아니다
+      if (data.length !== 1 || String(data[0]?.id) !== String(r.id)) {
+        throw new Error('채점 UPDATE 반영 ID 불일치');
+      }
       scored++;
     } catch { failed++; }
   };
