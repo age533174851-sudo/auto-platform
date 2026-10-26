@@ -125,8 +125,12 @@ export function resolveUnknown(input: ResolveInput): ResolveResult {
 
   // 3-c. 포지션으로 교차 확인한다.
   if (position) {
-    if (position.qtyNow === null) {
-      // 주문도 안 보이고 포지션도 못 읽었다. 증거가 반쪽이다.
+    if (position.qtyNow === null
+        || !Number.isFinite(position.qtyNow)
+        || !Number.isFinite(position.qtyBefore)) {
+      // NaN/Infinity가 들어오면 diff도 NaN이다. 이를 '변화 없음'으로 읽어
+      // FAILED(재전송 허용)로 확정하면 중복 주문이 생길 수 있다.
+      // 주문도 안 보이고 포지션도 온전하게 못 읽었다. 증거가 반쪽이다.
       return {
         state: 'UNKNOWN', resolved: false, action: 'RETRY_QUERY',
         reason: '주문이 조회되지 않지만 포지션을 읽지 못해 교차 확인을 못 했습니다',

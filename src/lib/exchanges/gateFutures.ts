@@ -146,8 +146,19 @@ export async function getPositionModeGateFutures(
 export interface GatePosition { contract: string; size: number; entry_price: string; leverage: string; unrealised_pnl: string; liq_price?: string }
 
 export async function getPositionsGateFutures(key: string, secret: string, testnet = true): Promise<GatePosition[]> {
-  const rows = await gateReq<GatePosition[]>('GET', '/api/v4/futures/usdt/positions', { key, secret, testnet });
-  return Array.isArray(rows) ? rows.filter(p => Number(p.size) !== 0) : [];
+  const rows = await gateReq<unknown>('GET', '/api/v4/futures/usdt/positions', { key, secret, testnet });
+  // HTTP 200이어도 비배열이나 깨진 size를 '포지션 0건'으로 바꾸지 않는다.
+  // 이 함수의 결과는 UNKNOWN 주문의 재전송 가능 여부를 판단하는 증거다.
+  if (!Array.isArray(rows)) throw new Error('Gate 포지션 응답이 배열이 아닙니다');
+  for (const p of rows) {
+    const raw = p?.size;
+    if (typeof p?.contract !== 'string' || !p.contract.trim()
+        || (typeof raw !== 'string' && typeof raw !== 'number')
+        || String(raw).trim() === '' || !Number.isFinite(Number(raw))) {
+      throw new Error('Gate 포지션 응답에 유효하지 않은 계약 또는 수량이 있습니다');
+    }
+  }
+  return (rows as GatePosition[]).filter(p => Number(p.size) !== 0);
 }
 
 /**
