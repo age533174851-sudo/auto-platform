@@ -82,12 +82,20 @@ export async function GET(req: NextRequest) {
       const q = await ((sb as any).from(item.table) as any)
         .select('*', { count: 'exact', head: true })
         .lt(item.column, item.cutoff);
-      if (!q.error) eligible = Number(q.count) || 0;
-      else base.skipped = `개수 조회 실패: ${q.error.message}`;
+      // Supabase exact count는 number | null이다. null/undefined/NaN을
+      // Number(...) || 0으로 바꾸면 "조회 실패"가 "지울 것 없음"이 된다.
+      if (q.error) base.skipped = `개수 조회 실패: ${q.error.message}`;
+      else if (typeof q.count === 'number' && Number.isSafeInteger(q.count) && q.count >= 0) {
+        eligible = q.count;
+      } else base.skipped = '개수 조회 결과 미확인 — 삭제하지 않습니다';
 
       const t = await ((sb as any).from(item.table) as any)
         .select('*', { count: 'exact', head: true });
-      if (!t.error) total = Number(t.count) || 0;
+      if (t.error) {
+        if (!base.skipped) base.skipped = `전체 개수 조회 실패: ${t.error.message}`;
+      } else if (typeof t.count === 'number' && Number.isSafeInteger(t.count) && t.count >= 0) {
+        total = t.count;
+      } else if (!base.skipped) base.skipped = '전체 개수 조회 결과 미확인 — 삭제하지 않습니다';
     } catch (e: any) {
       base.skipped = `조회 중 오류: ${e?.message || e}`;
     }
@@ -95,9 +103,11 @@ export async function GET(req: NextRequest) {
     base.eligible = eligible;
     base.total = total;
 
-    if (eligible == null) { results.push(base); continue; }
+    // 두 count가 모두 검증되어야 삭제 관문에 진입한다.
+    // total 미확인은 0이 아니다. 0건 eligible이어도 실패 증거를 남긴다.
+    if (eligible == null || total == null) { results.push(base); continue; }
 
-    const size = checkDeleteSize(eligible, total ?? 0);
+    const size = checkDeleteSize(eligible, total);
     if (!size.ok) {
       base.skipped = size.reason;
       results.push(base);
