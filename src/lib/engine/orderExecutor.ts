@@ -1943,8 +1943,16 @@ export async function reconcilePendingOrders(
       const bf = await import('@/lib/exchanges/binanceFutures');
       const pr: any = await bf.getFuturesPositions(creds.apiKey, creds.apiSecret, creds.testnet);
       if (pr?.success) {
+        // 일부 수량이 깨졌는데도 0으로 변환하면 주문 미발견을 FAILED로 확정한다.
+        // 한 줄이라도 불신할 수 있으면 전체 포지션 교차 확인을 보류한다.
+        const rows: unknown = pr.positions;
+        if (!Array.isArray(rows) || rows.some((p: any) =>
+          typeof p?.symbol !== 'string' || !p.symbol.trim()
+          || typeof p.amount !== 'number' || !Number.isFinite(p.amount))) {
+          throw new Error('Binance 포지션 수량 증거 불완전');
+        }
         posBySymbol = new Map(
-          (pr.positions as any[]).map((p: any) => [String(p.symbol).toUpperCase(), Number(p.amount) || 0]),
+          rows.map((p: any) => [String(p.symbol).toUpperCase(), p.amount]),
         );
       }
     } catch { posBySymbol = null; }   // null이면 교차 확인 불가로 취급된다
@@ -1954,8 +1962,14 @@ export async function reconcilePendingOrders(
     try {
       const gf = await import('@/lib/exchanges/gateFutures');
       const rows = await gf.getPositionsGateFutures(creds.apiKey, creds.apiSecret, creds.testnet);
+      if (!Array.isArray(rows) || rows.some((p: any) =>
+        typeof p?.contract !== 'string' || !p.contract.trim()
+        || (typeof p.size !== 'string' && typeof p.size !== 'number')
+        || String(p.size).trim() === '' || !Number.isFinite(Number(p.size)))) {
+        throw new Error('Gate 포지션 수량 증거 불완전');
+      }
       posBySymbol = new Map(
-        rows.map((p: any) => [String(p.contract || '').replace('_', '').toUpperCase(), Number(p.size) || 0]),
+        rows.map((p: any) => [String(p.contract).replace(/_/g, '').toUpperCase(), Number(p.size)]),
       );
     } catch { posBySymbol = null; }
   }
