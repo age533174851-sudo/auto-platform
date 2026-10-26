@@ -12,7 +12,7 @@ import { ORDER_STATUSES, TERMINAL_ORDER_STATUSES } from './orderExecutor';
 import {
   RECONCILE_QUERY_STATUSES, RECONCILE_TARGET_STATUSES,
   pendingTargets, skipReason, summarizeOutcomes, connectionLookupOutcome,
-  PENDING_STATUSES, DEFAULT_GRACE_MS,
+  PENDING_STATUSES, DEFAULT_GRACE_MS, parseReconcileGraceMs,
 } from './pendingReconcile';
 
 const NOW = 1_800_000_000_000;
@@ -68,6 +68,31 @@ export function runPendingReconcileTests() {
         { connection_id: 'c1', user_id: 'u1', status: st, created_at: new Date(0).toISOString() },
       ], { now: 600_000 });
       eq(t.length, 0);
+    }
+  });
+
+  test('★ graceSec 미지정은 0초가 아니라 기본 90초 유예다', () => {
+    eq(parseReconcileGraceMs(null), DEFAULT_GRACE_MS);
+    eq(parseReconcileGraceMs(''), DEFAULT_GRACE_MS);
+    eq(parseReconcileGraceMs('  '), DEFAULT_GRACE_MS);
+    const justSent = [{ connection_id: 'fresh', status: 'UNKNOWN', created_at: ago(5_000) }];
+    eq(pendingTargets(justSent, {
+      now: NOW, graceMs: parseReconcileGraceMs(null),
+    }).length, 0, '미지정 유예로 진행 중인 주문을 조기 대조하면 안 된다');
+  });
+
+  test('★ graceSec=0 명시만 즉시 대조를 허용한다', () => {
+    eq(parseReconcileGraceMs('0'), 0);
+    eq(parseReconcileGraceMs('90'), 90_000);
+    const justSent = [{ connection_id: 'fresh', status: 'UNKNOWN', created_at: ago(5_000) }];
+    eq(pendingTargets(justSent, {
+      now: NOW, graceMs: parseReconcileGraceMs('0'),
+    }).length, 1);
+  });
+
+  test('★ 잘못된 graceSec은 안전 기본값으로 돌아간다', () => {
+    for (const bad of ['-1', 'NaN', 'Infinity', 'not-a-number']) {
+      eq(parseReconcileGraceMs(bad), DEFAULT_GRACE_MS, bad);
     }
   });
 
