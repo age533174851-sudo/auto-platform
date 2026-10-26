@@ -266,27 +266,84 @@ export async function getGateAccountBook(
   key: string, secret: string, testnet = true,
   opts: { fromSec?: number; limit?: number } = {},
 ): Promise<{ incomeType: string; income: number; time: number }[] | null> {
+  // ── 한 쪽만 읽고 "오늘은 이게 전부"라고 하지 않는다 ──
+  //
+  // Gate 문서(`GET /futures/{settle}/account_book`):
+  //   · `limit` 기본 100 — "Maximum number of records returned in a single list"
+  //   · `offset` — "List offset, starting from 0"
+  //   · **정렬 순서는 적혀 있지 않다**
+  //
+  // 예전에는 `limit=300` 한 번뿐이었다. 301번째 줄에 큰 손실이 있으면
+  // 그 손실이 오늘 집계에서 빠지고, **한도가 헐거워진다.** 모자란 배열은
+  // null보다 나쁘다 — null은 막지만(unknown → 진입 차단) 모자란 배열은
+  // "오늘 덜 잃었다"로 통과한다.
+  //
+  // 끝을 아는 방법: 한 쪽이 `limit`보다 **짧게** 오면 그것이 목록의 끝이다.
+  // 상한까지 모든 쪽이 가득 차 있으면 다 읽지 못한 것이므로 null이다.
+  const LIMIT = opts.limit ?? 300;
+  const MAX_PAGES = 10;   // 최대 3,000건
   try {
-    const qs = [`limit=${opts.limit ?? 300}`, opts.fromSec ? `from=${opts.fromSec}` : '']
-      .filter(Boolean).join('&');
-    const rows = await gateReq<any[]>('GET', '/api/v4/futures/usdt/account_book', {
-      key, secret, qs, testnet,
-    });
-    if (!Array.isArray(rows)) return null;
-    return rows.map(r => {
-      const t = String(r?.type || '').toLowerCase();
-      return {
-        // 바이낸스 이름으로 맞춘다. 합산 함수가 이 이름을 본다.
-        incomeType: t === 'pnl' ? 'REALIZED_PNL'
-          : t === 'fee' ? 'COMMISSION'
-          : t === 'fund' ? 'FUNDING_FEE'
-          : t.toUpperCase(),
-        income: Number(r?.change),
-        // 초 → ms. 이걸 빼먹으면 오늘 기록이 전부 '어제 이전'으로 걸러진다.
-        time: Number(r?.time) * 1000,
-      };
-    });
+    const out: { incomeType: string; income: number; time: number }[] = [];
+    for (let page = 0; page < MAX_PAGES; page += 1) {
+      const qs = [
+        `limit=${LIMIT}`, `offset=${page * LIMIT}`,
+        opts.fromSec ? `from=${opts.fromSec}` : '',
+      ].filter(Boolean).join('&');
+      const rows = await gateReq<any[]>('GET', '/api/v4/futures/usdt/account_book', {
+        key, secret, qs, testnet,
+      });
+      if (!Array.isArray(rows)) return null;
+
+      for (const r of rows) {
+        // ── 못 읽은 금액을 0으로 적지 않는다 ──
+        //
+        //   `Number(null)`도 `Number('')`도 **0**이다. 그 0이 "손익 0"으로
+        //   섞이면 실제 손실이 장부에서 사라진다. 조용히 건너뛰어도 같다 —
+        //   건너뛴 그 줄이 큰 손실이었을 수 있다.
+        //   **정상적인 0은 허용한다.** 막아야 하는 것은 못 읽은 것이다.
+        const income = gateDecimal(r?.change);
+        if (income == null) return null;
+        // ── 시각도 같다 ──
+        //
+        //   `Number(null) * 1000 = 0` → 1970년이 되고, 오늘 집계에서
+        //   조용히 빠진다. 손실이 사라지는 또 하나의 문이다.
+        const sec = gateDecimal(r?.time);
+        if (sec == null || sec <= 0) return null;
+
+        const t = String(r?.type || '').toLowerCase();
+        out.push({
+          // 바이낸스 이름으로 맞춘다. 합산 함수가 이 이름을 본다.
+          incomeType: t === 'pnl' ? 'REALIZED_PNL'
+            : t === 'fee' ? 'COMMISSION'
+            : t === 'fund' ? 'FUNDING_FEE'
+            : t.toUpperCase(),
+          income,
+          // 초 → ms. 이걸 빼먹으면 오늘 기록이 전부 '어제 이전'으로 걸러진다.
+          time: sec * 1000,
+        });
+      }
+
+      // 쪽이 `limit`보다 짧다 = 목록의 끝이다. 여기까지가 전부다.
+      if (rows.length < LIMIT) return out;
+    }
+    // 상한까지 모든 쪽이 가득 찼다 = 아직 남았다. 불완전한 원장을
+    // 돌려주면 "덜 잃었다"가 되므로 돌려주지 않는다.
+    return null;
   } catch { return null; }
+}
+
+/**
+ * Gate 응답의 수치 한 칸. **읽히지 않으면 null이고, 그건 0이 아니다.**
+ *
+ * `Number()`를 그대로 쓰면 `null`·`''`·공백이 전부 0이 된다. 원장에서
+ * 그 0은 "손익 0"으로 섞여 실제 손실을 지운다.
+ */
+function gateDecimal(value: unknown): number | null {
+  if (typeof value !== 'string' && typeof value !== 'number') return null;
+  const raw = String(value).trim();
+  if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(raw)) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
 }
 
 // ── 레버리지 설정 ────────────────────────────────────
