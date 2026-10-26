@@ -135,6 +135,7 @@ import { runSmokeRunTests } from './src/lib/smoke/smokeRun.test';
 import { runCronAuthTests } from './src/lib/cron/cronAuth.test';
 import { runCronAuthRouteTests } from './src/test/integration/cronAuthRouteIntegration.test';
 import { runCalendarProviderOutageRouteTests } from './src/test/integration/calendarProviderOutageRouteIntegration.test';
+import { runNewsProviderOutageRouteTests } from './src/test/integration/newsProviderOutageRouteIntegration.test';
 import { runCancelRunTests } from './src/lib/smoke/cancelRun.test';
 import { runExitPolicyTests } from './src/lib/strategies/exitPolicy.test';
 import { runRunRequestTests } from './src/lib/strategies/runRequest.test';
@@ -428,6 +429,7 @@ runMigrationStatusTests(); runWalletTruthTests(); runSmokePlanTests(); runSmokeR
   await runKillCloseIntegrationTests();
   await runCronAuthRouteTests();
   await runCalendarProviderOutageRouteTests();
+  await runNewsProviderOutageRouteTests();
   await flushAsync();
   const s = summary();
   console.log('\\n결과: ' + s.passed + ' 통과 / ' + s.failed + ' 실패');
