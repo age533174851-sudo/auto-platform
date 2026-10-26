@@ -95,15 +95,19 @@ export async function GET(req: NextRequest) {
   const dryRun = req.nextUrl.searchParams.get('dry') === '1';
 
   try {
-    const scan = await scanPendingRows(async (from, to) => {
-      const { data, error } = await sb.from('live_orders')
+    const scan = await scanPendingRows(async (from, to, cursor) => {
+      let query = sb.from('live_orders')
         .select('id, user_id, connection_id, status, created_at, symbol')
-        .in('status', [...RECONCILE_TARGET_STATUSES])
-        // 시간 동률도 id로 고정한다. offset이 다른 행으로 미끄러지면
-        // 순서/중복 검사에서 실패로 적는다 — 조용히 누락하지 않는다.
+        .in('status', [...RECONCILE_TARGET_STATUSES]);
+      if (cursor) {
+        // OFFSET은 앞쪽 행이 삭제되면 한 행을 조용히 건너뛴다.
+        // (created_at, id) 복합 커서로 마지막으로 본 행 뒤에서 계속한다.
+        query = query.or(`created_at.gt.${cursor.createdAt},and(created_at.eq.${cursor.createdAt},id.gt.${cursor.id})`);
+      }
+      const { data, error } = await query
         .order('created_at', { ascending: true })
         .order('id', { ascending: true })
-        .range(from, to);
+        .limit(to - from + 1);
       return { data, error };
     });
 

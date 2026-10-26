@@ -329,6 +329,26 @@ export function runPendingReconcileTests() {
     eq(r.error, 'invalid_page');
   });
 
+
+  test('★ #453 페이지 사이 앞쪽 행 삭제 시 OFFSET 누락 없이 커서로 이어 읽는다', async () => {
+    const rows = Array.from({ length: 1001 }, (_, i) => scanRow(i, 'c1'));
+    let reads = 0;
+    const r = await scanPendingRows(async (from, to, cursor?) => {
+      // 첫 500건을 읽은 직후 앞쪽 한 행이 삭제된다.
+      // OFFSET 500은 원래 501번째 행을 건너뛰지만 keyset은 그렇지 않다.
+      if (reads++ === 1) rows.splice(100, 1);
+      const remaining = cursor
+        ? rows.filter(x => x.created_at > cursor.createdAt
+          || (x.created_at === cursor.createdAt && x.id > cursor.id))
+        : rows;
+      const start = cursor ? 0 : from;
+      return { data: remaining.slice(start, start + to - from + 1), error: null };
+    });
+    eq(r.complete, true);
+    eq(r.rows.length, 1001, 'OFFSET 드리프트로 한 행이 누락됐다');
+    eq(r.rows.some(x => x.id === '000500'), true, '경계 바로 뒤의 주문이 누락됐다');
+  });
+
   test('실패는 앞줄에 적는다', () => {
     // 앞줄만 읽는 사람이 많다. 뒤에 숨기면 "대조 정상"으로 읽힌다.
     const s = summarizeOutcomes([
