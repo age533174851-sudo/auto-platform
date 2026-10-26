@@ -160,6 +160,7 @@ import {
   runPrecisionIntegrationTests,
   runPrecisionMatrixTests,
 } from './src/test/integration/orderPathIntegration.test';
+import { runDailyLossReadTests } from './src/test/integration/dailyLossReadIntegration.test';
 import { runSmokeStartRouteTests } from './src/test/integration/smokeStartRouteIntegration.test';
 import { runHoldExtensionIntegrationTests } from './src/test/integration/holdExtensionIntegration.test';
 import { runFailureRecoveryTests } from './src/lib/engine/failureRecovery.test';
@@ -413,6 +414,7 @@ runMigrationStatusTests(); runWalletTruthTests(); runSmokePlanTests(); runSmokeR
   await runCloseIntegrationTests();
   await runTransitionIntegrationTests();
   await runCoinMRouteIntegrationTests();
+  await runDailyLossReadTests();
   await runGateExecIntegrationTests();
   await runGateDupIntegrationTests();
   await runNoFixedTpIntegrationTests();
