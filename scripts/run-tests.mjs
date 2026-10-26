@@ -132,6 +132,7 @@ import { runWalletTruthTests } from './src/lib/portfolio/walletTruth.test';
 import { runWalletTruthViewTests } from './src/lib/portfolio/walletTruthView.test';
 import { runSmokePlanTests } from './src/lib/smoke/smokePlan.test';
 import { runSmokeRunTests } from './src/lib/smoke/smokeRun.test';
+import { runUnreadSelectRatchetTests } from './src/test/unreadSelectRatchet.test';
 import { runCancelRunTests } from './src/lib/smoke/cancelRun.test';
 import { runExitPolicyTests } from './src/lib/strategies/exitPolicy.test';
 import { runRunRequestTests } from './src/lib/strategies/runRequest.test';
@@ -385,6 +386,11 @@ runDeployDispatchTests(); runExecutorHealthTests(); runManualPlanTests(); runClo
 runFuturesExecTests(); runPromotionMapTests(); runTradeModeTests(); runPaperPlanTests(); runDailyLossTests(); runRegimeGateTests(); runTrailPlanTests(); runPaperRunnerTests(); runAllocationTests(); runStatsTests(); runRoutingTests(); runGateSpotPlanTests(); runLossStreakTests(); runTradeVetoTests(); runCalibrationTests(); runRecordPredictionTests(); runSubAccountTests(); runExitRulesTests(); runSafetyLogTests(); runFredTests(); runEventGuardTests(); runStopVerifyTests();
 runManualOverrideTests();
 runWebhookAuthTests();
+// **자기 줄로, 메가 한 줄에서 멀리.** 통합 시험을 더하는 PR이 전부
+// 그 한 줄 근처에 몰려 있어 서로 병합할 때마다 충돌한다 — 붙어 있는
+// 변경은 git이 못 합치고, 기계적으로 합치다가 시험이 두 번 등록되거나
+// 통째로 사라진다(check-test-registry.mjs 주석의 실제 사고).
+runUnreadSelectRatchetTests();
 runShortGuardTests();
 runEmergencyLevelTests();
 runTradingCapabilityTests(); runCheckOverrideTests(); runMarketHoursTests();
@@ -537,7 +543,14 @@ const cleanup = () => { try { rmSync(dir, { recursive: true, force: true }); } c
 process.on('exit', cleanup);
 
 try {
-  execFileSync(process.execPath, ['run.js'], { cwd: dir, stdio: 'inherit' });
+  // **저장소 뿌리를 알려 준다.** 여기서는 `src`만 임시 디렉터리로
+  // 복사해 `cwd`를 그쪽으로 옮겨 돌린다. 그래서 소스 트리를 직접
+  // 훑는 시험(예: 조회 실패 래칫)은 `cwd`도 `__dirname`도 쓸 수
+  // 없다 — 사본을 세게 되고 `worker/`는 아예 안 보인다.
+  execFileSync(process.execPath, ['run.js'], {
+    cwd: dir, stdio: 'inherit',
+    env: { ...process.env, TRAIGO_REPO_ROOT: root },
+  });
 } catch (e) {
   cleanup();
   process.exit(typeof e?.status === 'number' ? e.status : 1);
