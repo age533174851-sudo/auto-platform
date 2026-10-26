@@ -11,7 +11,7 @@ import { test, assert, eq } from '../../test/harness';
 import { ORDER_STATUSES, TERMINAL_ORDER_STATUSES } from './orderExecutor';
 import {
   RECONCILE_QUERY_STATUSES, RECONCILE_TARGET_STATUSES,
-  pendingTargets, skipReason, summarizeOutcomes,
+  pendingTargets, skipReason, summarizeOutcomes, connectionLookupOutcome,
   PENDING_STATUSES, DEFAULT_GRACE_MS,
 } from './pendingReconcile';
 
@@ -183,6 +183,41 @@ export function runPendingReconcileTests() {
   });
 
   console.log('[미확정 대조 — 0건과 못 함은 다르다]');
+
+  test('★ 연결 조회 DB 오류는 건너뜀/성공이 아니라 대조 실패다', () => {
+    const outcome = connectionLookupOutcome('c1', {
+      data: null, error: { message: 'secret DB failure detail' },
+    });
+    assert(outcome !== null);
+    eq(outcome!.connectionId, 'c1');
+    eq(outcome!.ok, false);
+    eq(outcome!.error, 'connection_lookup_failed');
+    eq(outcome!.skipped, undefined);
+    const summary = summarizeOutcomes([outcome!]);
+    assert(summary.startsWith('⚠️ 대조 실패 1개'), summary);
+    assert(!summary.includes('secret DB failure detail'));
+  });
+
+  test('★ 데이터가 있어도 오류가 동반되면 연결을 사용하지 않는다', () => {
+    const outcome = connectionLookupOutcome('c2', {
+      data: { api_key: 'untrusted', api_secret_enc: 'untrusted' },
+      error: { code: 'XX000' },
+    });
+    eq(outcome?.ok, false);
+    eq(outcome?.error, 'connection_lookup_failed');
+  });
+
+  test('★ 연결 부재와 조회 실패는 구분한다', () => {
+    eq(connectionLookupOutcome('missing', { data: null, error: null }), null);
+    eq(connectionLookupOutcome('present', {
+      data: { api_key: 'k', api_secret_enc: 'e' }, error: null,
+    }), null);
+    eq(connectionLookupOutcome('malformed', null)?.ok, false);
+    eq(connectionLookupOutcome('malformed', { error: null })?.ok, false);
+    eq(connectionLookupOutcome('malformed', { data: undefined, error: null })?.ok, false);
+  });
+
+
 
   test('실패는 앞줄에 적는다', () => {
     // 앞줄만 읽는 사람이 많다. 뒤에 숨기면 "대조 정상"으로 읽힌다.
