@@ -47,6 +47,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { timingSafeEqual } from 'crypto';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
+import { scanPendingRows } from '@/lib/engine/pendingReconcileScan';
 import {
   pendingTargets, skipReason, summarizeOutcomes, connectionLookupOutcome,
   RECONCILE_TARGET_STATUSES, parseReconcileGraceMs, DEFAULT_MAX_CONNECTIONS,
@@ -94,20 +95,29 @@ export async function GET(req: NextRequest) {
   const dryRun = req.nextUrl.searchParams.get('dry') === '1';
 
   try {
-    const { data: rows, error } = await sb.from('live_orders')
-      .select('id, user_id, connection_id, status, created_at, symbol')
-      // ACKED가 빠져 있어서 ACKED만 남은 연결은 방문되지 않았다.
-      .in('status', [...RECONCILE_TARGET_STATUSES])
-      .order('created_at', { ascending: true })
-      .limit(500);
+    const scan = await scanPendingRows(async (from, to) => {
+      const { data, error } = await sb.from('live_orders')
+        .select('id, user_id, connection_id, status, created_at, symbol')
+        .in('status', [...RECONCILE_TARGET_STATUSES])
+        // 시간 동률도 id로 고정한다. offset이 다른 행으로 미끄러지면
+        // 순서/중복 검사에서 실패로 적는다 — 조용히 누락하지 않는다.
+        .order('created_at', { ascending: true })
+        .order('id', { ascending: true })
+        .range(from, to);
+      return { data, error };
+    });
 
-    if (error) {
-      // **조회 실패를 '없음'으로 적지 않는다.** 0건과 못 셌음은 다르다.
+    // 중간 페이지 실패/응답 손상/상한 초과에서 '전체 대조 성공'을
+    // 내보내지 않는다. 부분 목록으로 주문을 대조하지도 않는다.
+    if (!scan.complete) {
       return NextResponse.json({
-        ok: false, error: 'query_failed', message: error.message,
-        summary: '미확정 주문을 세지 못했습니다 — 대조가 돌지 않았습니다',
-      }, { status: 500, headers: { 'Cache-Control': 'no-store' } });
+        ok: false, incomplete: true, error: scan.error,
+        pendingRowsScanned: scan.rows.length, pagesRead: scan.pages,
+        summary: '미확정 주문 대상 조회가 끝나지 않아 거래소 대조를 시작하지 않았습니다',
+      }, { status: scan.error === 'scan_limit' ? 503 : 500,
+           headers: { 'Cache-Control': 'no-store' } });
     }
+    const rows = scan.rows;
 
     const targets = pendingTargets(rows, { now, graceMs, maxConnections: DEFAULT_MAX_CONNECTIONS });
     if (targets.length === 0) {
