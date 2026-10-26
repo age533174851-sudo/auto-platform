@@ -305,11 +305,28 @@ export async function closeOpposingPositions(
   // 여기서 기본 계좌로 넘어가면 위에 적은 고장이 그대로 살아난다.
   if (!paperAccountId) return 0;
   const opposing = newSide === 'LONG' ? 'SHORT' : 'LONG';
-  const { data } = await sb.from('paper_positions')
+  const { data, error } = await sb.from('paper_positions')
     .select('id').eq('user_id', userId)
     .eq('paper_account_id', paperAccountId)
     .eq('symbol', symbol).eq('side', opposing).eq('status', 'open');
-  if (!Array.isArray(data) || !data.length) return 0;
+  // ★ **못 읽은 것을 "반대 포지션 없음"으로 적지 않는다.**
+  //
+  //   예전에는 `error`를 버렸다. 조회가 실패하면 0건을 돌려주고, 부르는
+  //   쪽은 그 0을 "닫을 것이 없었다"로 읽어 **새 포지션을 그대로 연다.**
+  //   그러면 모의 장부에 같은 종목의 LONG과 SHORT가 함께 남는다 —
+  //   REVERSE라는 말이 지켜지지 않고, 그 장부로 낸 연습 성과도 거짓이 된다.
+  //
+  //   던진다. 부르는 쪽이 "확인하지 못했으므로 열지 않는다"를 고를 수
+  //   있어야 하고, 0을 돌려주면 그 선택지가 사라진다.
+  if (error) {
+    throw new Error(`반대 방향 모의 포지션을 읽지 못했습니다`
+      + ` (${String((error as any)?.message || error).slice(0, 120)})`
+      + ' — 없다는 뜻이 아닙니다');
+  }
+  if (!Array.isArray(data)) {
+    throw new Error('반대 방향 모의 포지션 응답이 목록이 아닙니다 — 없다는 뜻이 아닙니다');
+  }
+  if (!data.length) return 0;
   let n = 0;
   for (const p of data) {
     const r = await closePaperPosition(sb, p.id, currentPrice, 'REVERSE', feeRatePct);
