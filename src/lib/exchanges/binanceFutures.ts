@@ -89,10 +89,22 @@ export interface FuturesPosition {
 export async function getFuturesPositions(key: string, secret: string, testnet = true) {
   try {
     const data = await fapiSigned('GET', '/fapi/v2/positionRisk', key, secret, testnet);
-    const positions: FuturesPosition[] = (Array.isArray(data) ? data : [])
-      .filter((p: any) => parseFloat(p.positionAmt) !== 0)
+    // 포지션 증거가 깨졌는데 배열/수량 0으로 간주하면 UNKNOWN 주문을
+    // 잘못 FAILED로 확정해 다음 주문을 허용할 수 있다.
+    if (!Array.isArray(data)) {
+      return { success: false, message: 'Binance 포지션 응답이 배열이 아닙니다' };
+    }
+    if (data.some((p: any) =>
+      typeof p?.symbol !== 'string' || !p.symbol.trim()
+      || (typeof p?.positionAmt !== 'string' && typeof p?.positionAmt !== 'number')
+      || String(p.positionAmt).trim() === ''
+      || !Number.isFinite(Number(p.positionAmt)))) {
+      return { success: false, message: 'Binance 포지션 응답에 유효하지 않은 수량이 있습니다' };
+    }
+    const positions: FuturesPosition[] = data
+      .filter((p: any) => Number(p.positionAmt) !== 0)
       .map((p: any) => {
-        const amt = parseFloat(p.positionAmt);
+        const amt = Number(p.positionAmt);
         return {
           symbol: p.symbol, side: amt > 0 ? 'LONG' : amt < 0 ? 'SHORT' : 'FLAT',
           amount: Math.abs(amt), entryPrice: parseFloat(p.entryPrice), markPrice: parseFloat(p.markPrice),
