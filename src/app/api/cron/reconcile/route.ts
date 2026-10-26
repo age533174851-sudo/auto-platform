@@ -49,7 +49,7 @@ import { timingSafeEqual } from 'crypto';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import {
   pendingTargets, skipReason, summarizeOutcomes, connectionLookupOutcome,
-  RECONCILE_TARGET_STATUSES, DEFAULT_GRACE_MS, DEFAULT_MAX_CONNECTIONS,
+  RECONCILE_TARGET_STATUSES, parseReconcileGraceMs, DEFAULT_MAX_CONNECTIONS,
   type ReconcileOutcome,
 } from '@/lib/engine/pendingReconcile';
 
@@ -90,10 +90,7 @@ export async function GET(req: NextRequest) {
   }
 
   const now = Date.now();
-  const graceMs = (() => {
-    const n = Number(req.nextUrl.searchParams.get('graceSec'));
-    return Number.isFinite(n) && n >= 0 ? n * 1000 : DEFAULT_GRACE_MS;
-  })();
+  const graceMs = parseReconcileGraceMs(req.nextUrl.searchParams.get('graceSec'));
   const dryRun = req.nextUrl.searchParams.get('dry') === '1';
 
   try {
