@@ -7,6 +7,8 @@ export const PENDING_SCAN_PAGE_SIZE = 500;
 export const PENDING_SCAN_MAX_PAGES = 20; // 한 크론 회차에 최대 10,000행 + 존재 검사
 export type ScanError = 'query_failed' | 'invalid_page' | 'unstable_page' | 'scan_limit';
 
+export interface PendingScanCursor { createdAt: string; id: string; }
+
 export interface ScanPage {
   data: PendingOrderRow[] | null;
   error?: unknown;
@@ -19,14 +21,17 @@ export interface PendingScanResult {
 }
 
 /**
- * 읽기 전용 페이지 스캔. 호출자는 created_at ASC, id ASC를 반드시 설정한다.
+ * 읽기 전용 페이지 스캔. 호출자는 created_at ASC, id ASC와
+ * 직전 커서보다 큰 행만 읽는 keyset 조건을 반드시 설정한다.
+ * from/to는 요청 페이지 크기 계산용이며 DB OFFSET으로 사용하면 안 된다.
  * - 마지막 페이지가 딱 꽉 차면 다음 페이지로 끝을 확인한다.
  * - 실패·비배열·중복·역행·상한 초과를 정상적인 0건으로 바꾸지 않는다.
+ * - OFFSET은 앞쪽 행 삭제 시 건너뛴 행을 감지할 수 없으므로 커서를 넘긴다.
  * - 중간 실패 시 partial rows를 반환하되 complete=false를 강제한다.
  *   호출자가 complete=false에서 주문 대조를 진행하면 안 된다.
  */
 export async function scanPendingRows(
-  read: (from: number, to: number) => Promise<ScanPage>,
+  read: (from: number, to: number, cursor: PendingScanCursor | null) => Promise<ScanPage>,
   opts: { pageSize?: number; maxPages?: number } = {},
 ): Promise<PendingScanResult> {
   const size = opts.pageSize ?? PENDING_SCAN_PAGE_SIZE;
@@ -40,6 +45,11 @@ export async function scanPendingRows(
       || !Number.isSafeInteger(cap) || cap < 1 || cap > 100) {
     return result(false, 'invalid_page');
   }
+
+  const cursor = (): PendingScanCursor | null => {
+    const last = rows[rows.length - 1];
+    return last ? { createdAt: String(last.created_at), id: String(last.id).trim() } : null;
+  };
 
   const seen = new Set<string>();
   let prevTime = -Infinity;
@@ -65,7 +75,7 @@ export async function scanPendingRows(
   for (let index = 0; index < cap; index++) {
     let page: ScanPage;
     try {
-      page = await read(index * size, (index + 1) * size - 1);
+      page = await read(index * size, (index + 1) * size - 1, cursor());
       pages++;
     } catch {
       pages++;
@@ -83,7 +93,7 @@ export async function scanPendingRows(
   // 별도 1행 조회로 구별한다. 상한 초과는 HTTP 성공이 아니다.
   let tail: ScanPage;
   try {
-    tail = await read(cap * size, cap * size);
+    tail = await read(cap * size, cap * size, cursor());
     pages++;
   } catch {
     pages++;
