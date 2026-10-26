@@ -83,6 +83,51 @@ export function runOperatingModeTests() {
     eq(canChangeMode('TESTNET', 'SHADOW_LIVE', { ...CLEAN, criticalMismatches: 1 }).allowed, false);
   });
 
+  // ── 못 센 것을 0건으로 읽지 않는다 ──
+  //
+  //   미확정 주문 수는 **승급을 막는 증거**다. 그 조회가 실패했을 때
+  //   0건으로 적으면, 막아야 할 상태에서 관문이 열린 것으로 보인다 —
+  //   "확인하지 못한 것은 통과가 아니다"가 깨지는 자리다.
+
+  test('★ 미확정 주문 수를 못 세었으면 올라갈 수 없다 — 0건이라는 뜻이 아니다', () => {
+    const r = canChangeMode('TESTNET', 'SHADOW_LIVE',
+      { ...CLEAN, unresolvedOrders: 0, unresolvedKnown: false });
+    eq(r.allowed, false, '★ 못 센 미확정 주문을 0건으로 읽어 관문이 열렸다');
+    assert(r.reasons.some(x => x.includes('확인하지 못')), r.reasons.join(', '));
+  });
+
+  test('★ 표본을 못 읽었으면 "표본 부족"이 아니라 "확인 못 함"이다', () => {
+    const r = canChangeMode('TESTNET', 'SHADOW_LIVE',
+      { ...CLEAN, completedTrades: 0, daysInMode: 0, samplesKnown: false });
+    eq(r.allowed, false);
+    assert(r.reasons.some(x => x.includes('확인하지 못')),
+      `못 읽은 것을 "부족"으로 적었다: ${r.reasons.join(', ')}`);
+  });
+
+  test('★ 실계좌 키 목록을 못 읽었으면 "등록 안 됨"이라고 적지 않는다', () => {
+    const r = canChangeMode('SHADOW_LIVE', 'LIVE_SMALL',
+      { ...CLEAN, hasLiveKey: false, liveKeyKnown: false });
+    eq(r.allowed, false, '막는 방향은 그대로다');
+    assert(r.reasons.some(x => x.includes('확인하지 못')),
+      `없다고 단정했다: ${r.reasons.join(', ')}`);
+    assert(!r.reasons.some(x => x === '실계좌 API 키가 등록돼 있지 않습니다'),
+      '못 읽은 것을 "등록돼 있지 않다"로 적었다');
+  });
+
+  test('플래그가 없거나 true면 기존 판정이 그대로다 (하위 호환)', () => {
+    eq(canChangeMode('TESTNET', 'SHADOW_LIVE', CLEAN).allowed, true);
+    eq(canChangeMode('TESTNET', 'SHADOW_LIVE', {
+      ...CLEAN, unresolvedKnown: true, samplesKnown: true, liveKeyKnown: true,
+    }).allowed, true);
+  });
+
+  test('★ 확인하지 못한 증거는 강등을 막지 않는다', () => {
+    const r = canChangeMode('LIVE_SMALL', 'TESTNET', {
+      ...CLEAN, unresolvedKnown: false, samplesKnown: false, liveKeyKnown: false,
+    });
+    eq(r.allowed, true, '★ 내려오는 길을 막으면 위험한 단계에 갇힌다');
+  });
+
   test('실거래 잠금이 걸려 있으면 실전 단계로 못 간다', () => {
     const r = canChangeMode('SHADOW_LIVE', 'LIVE_SMALL', { ...CLEAN, liveUnlocked: false });
     eq(r.allowed, false);
