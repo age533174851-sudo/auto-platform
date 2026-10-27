@@ -1804,15 +1804,29 @@ async function attachStopIfMissing(
   sb: any,
   creds: { exchange: 'binance' | 'gate'; apiKey: string; apiSecret: string; testnet: boolean },
   o: any,
-): Promise<string | null> {
+): Promise<{ message: string; needsAttention: boolean } | null> {
+  // 실패를 문자열 접두어로 판정하지 않는다. 집계는 구조화된 needsAttention만 본다.
+  const note = (message: string) => ({ message, needsAttention: false });
+  const warnGate = async (reason: string): Promise<{ message: string; needsAttention: boolean }> => {
+    const message = `⚠ 손절 복구 미확인 — ${reason}`;
+    try {
+      const { error } = await sb.from('live_orders').update({
+        needs_attention: true, error_message: message,
+      }).eq('id', o.id);
+      return { message: error ? `${message} · 경고 장부 기록도 실패 (${error.message})` : message,
+        needsAttention: true };
+    } catch (e: any) {
+      return { message: `${message} · 경고 장부 기록도 예외 (${e?.message || e})`, needsAttention: true };
+    }
+  };
   // **판정은 `stopReattachVerdict` 한 곳에 있다.** 여기서 조건을 다시
   // 쓰면 시험되는 규칙과 실제로 도는 규칙이 갈린다.
   const verdict = stopReattachVerdict(o);
-  if (!verdict.attach) return verdict.note || null;
+  if (!verdict.attach) return verdict.note ? note(verdict.note) : null;
   const stop = verdict.stopPrice as number;
 
   const symbol = String(o?.symbol || '').toUpperCase();
-  if (!symbol) return null;
+  if (!symbol) return creds.exchange === 'gate' ? warnGate('심볼 미확인 — 재부착 금지') : null;
   // 진입 방향. BUY로 들어갔으면 롱이고, 닫는 주문은 SELL이다.
   const posSide: 'LONG' | 'SHORT' = String(o?.side).toUpperCase() === 'BUY' ? 'LONG' : 'SHORT';
   const closeSide: 'BUY' | 'SELL' = posSide === 'LONG' ? 'SELL' : 'BUY';
@@ -1822,41 +1836,32 @@ async function attachStopIfMissing(
       const gf = await import('@/lib/exchanges/gateFutures');
       const gp = await import('@/lib/exchanges/gatePlan');
       const contract = gp.toGateContract(symbol);
-      if (!contract) return null;
-
-      // 포지션 조회 실패는 '포지션 0'이 아니다. 조회가 불확실한 동안
-      // 추가 주문을 보내지 않고 장부/집계에 사람 확인이 필요함을 남긴다.
-      const warn = async (reason: string): Promise<string> => {
-        const message = `⚠ 손절 복구 미확인 — ${reason}`;
-        const { error } = await sb.from('live_orders').update({
-          needs_attention: true, error_message: message,
-        }).eq('id', o.id);
-        return error ? `${message} · 경고 장부 기록도 실패 (${error.message})` : message;
-      };
+      if (!contract) return warnGate('Gate 계약 변환 실패 — 재부착 금지');
 
       // **포지션이 실제로 있는지 먼저 본다.**
       const pos = await gf.getPositionGateFutures(creds.apiKey, creds.apiSecret, contract, creds.testnet);
-      if (pos == null) return warn('Gate 포지션 조회 미확인 — 재부착 금지');
+      if (pos == null) return warnGate('Gate 포지션 조회 미확인 — 재부착 금지');
       // getPositionsGateFutures/closePositionGateFutures와 동일한 수치 정본.
       // null·빈 문자열·공백·NaN·Infinity는 정상 0과 다르다.
       const size = gf.gateNum(pos.size);
-      if (size == null) return warn('Gate 포지션 수량 미확인 — 재부착 금지');
+      if (size == null) return warnGate('Gate 포지션 수량 미확인 — 재부착 금지');
       if (size === 0) return null;               // 조회로 확인한 실제 무포지션
       // 방향이 어긋나면 걸지 않는다. 반대 방향 손절은 즉시 발동한다.
       if ((size > 0 ? 'LONG' : 'SHORT') !== posSide) {
-        return `손절 복구 안 함 — 기록은 ${posSide}인데 거래소 포지션은 ${size > 0 ? 'LONG' : 'SHORT'}입니다`;
+        return warnGate(`기록은 ${posSide}인데 거래소 포지션은 ${size > 0 ? 'LONG' : 'SHORT'}입니다 — 재부착 금지`);
       }
 
       const spec = await gf.getGateContractSpec(contract, creds.testnet);
+      if (!spec) return warnGate('Gate 계약 사양 조회 실패 — 재부착 금지');
       const stopSpec = gp.gateStopSpec(posSide, stop, null, spec);
-      if (!stopSpec.ok) return `손절 복구 실패 — ${stopSpec.reason}`;
+      if (!stopSpec.ok) return warnGate(`Gate 손절 사양 검증 실패: ${stopSpec.reason}`);
 
       // #491: 장부가 비어 있다는 사실은 거래소에 손절이 없다는 증거가 아니다.
       // #364의 페이지네이션/비배열 fail-closed 정본을 그대로 사용한다.
 
       const rows = await gf.getPriceOrdersGateFutures(
         creds.apiKey, creds.apiSecret, contract, creds.testnet);
-      if (rows === null) return warn('Gate 조건부 주문 목록 조회 실패/불완전 — 재전송 금지');
+      if (rows === null) return warnGate('Gate 조건부 주문 목록 조회 실패/불완전 — 재전송 금지');
 
       const { venueIdOf } = await import('@/lib/exchanges/losslessJson');
       const matching: Array<{ id: string; price: number }> = [];
@@ -1866,7 +1871,7 @@ async function attachStopIfMissing(
         const initialContract = String(row?.initial?.contract ?? '').trim().toUpperCase();
         const outerContract = String(row?.contract ?? '').trim().toUpperCase();
         if (initialContract && outerContract && initialContract !== outerContract) {
-          return warn('Gate 조건부 주문 계약 불일치 — ID 연결/재전송 금지');
+          return warnGate('Gate 조건부 주문 계약 불일치 — ID 연결/재전송 금지');
         }
         const rowContract = initialContract || outerContract;
         if (rowContract && rowContract !== contract) continue;
@@ -1874,36 +1879,36 @@ async function attachStopIfMissing(
         if (cls.closes && cls.closes !== posSide) continue;
         if (cls.kind === 'NOT_PROTECTIVE' || cls.kind === 'TAKE_PROFIT') continue;
         if (cls.kind === 'UNKNOWN') {
-          return warn(`Gate 같은 계약 조건부 주문 분류 불명 (${cls.reason}) — 재전송 금지`);
+          return warnGate(`Gate 같은 계약 조건부 주문 분류 불명 (${cls.reason}) — 재전송 금지`);
         }
         if (cls.kind !== 'STOP') continue;
-        if (!rowContract) return warn('Gate 기존 STOP 계약 미확인 — ID 연결/재전송 금지');
+        if (!rowContract) return warnGate('Gate 기존 STOP 계약 미확인 — ID 연결/재전송 금지');
         const price = Number(row?.trigger?.price);
         const id = venueIdOf(row?.id);
         if (!id || !Number.isFinite(price) || Math.abs(price - Number(stopSpec.triggerPrice)) > 1e-8) {
-          return warn('Gate 기존 STOP 주문 ID/트리거 가격 미확인 또는 불일치 — 재전송 금지');
+          return warnGate('Gate 기존 STOP 주문 ID/트리거 가격 미확인 또는 불일치 — 재전송 금지');
         }
         matching.push({ id, price });
       }
       if (matching.length > 1) {
-        return warn('Gate 같은 포지션의 STOP 복수 발견 — 자동 선택/재전송 금지');
+        return warnGate('Gate 같은 포지션의 STOP 복수 발견 — 자동 선택/재전송 금지');
       }
       if (matching.length === 1) {
         const { error } = await sb.from('live_orders')
           .update({ sl_order_id: matching[0].id }).eq('id', o.id);
-        if (error) return warn(`Gate 기존 STOP(${matching[0].id}) 장부 연결 실패: ${error.message}`);
-        return `손절 복구 확인 — 기존 Gate STOP(${matching[0].id}) 연결`;
+        if (error) return warnGate(`Gate 기존 STOP(${matching[0].id}) 장부 연결 실패: ${error.message}`);
+        return note(`손절 복구 확인 — 기존 Gate STOP(${matching[0].id}) 연결`);
       }
 
       // 끝까지 읽은 목록에서만 STOP 부재가 증명된다. 이때에만 1건 보낸다.
       const sl = await gf.placeStopGateFutures(creds.apiKey, creds.apiSecret, {
         contract, spec: stopSpec, clientOrderId: `${o.client_order_id}R`,
       }, creds.testnet);
-      if (!sl.success || !sl.orderId) return warn(`Gate 손절 전송 결과 미확인: ${sl.message}`);
+      if (!sl.success || !sl.orderId) return warnGate(`Gate 손절 전송 결과 미확인: ${sl.message}`);
       const { error } = await sb.from('live_orders')
         .update({ sl_order_id: sl.orderId }).eq('id', o.id);
-      if (error) return warn(`Gate STOP(${sl.orderId}) 전송 후 장부 기록 실패: ${error.message}`);
-      return `손절 복구 완료 (${stopSpec.triggerPrice})`;
+      if (error) return warnGate(`Gate STOP(${sl.orderId}) 전송 후 장부 기록 실패: ${error.message}`);
+      return note(`손절 복구 완료 (${stopSpec.triggerPrice})`);
     }
 
     const bf = await import('@/lib/exchanges/binanceFutures');
@@ -1911,7 +1916,7 @@ async function attachStopIfMissing(
     const amt = Number(rr.risk?.positionAmt ?? 0);
     if (!amt) return null;
     if ((amt > 0 ? 'LONG' : 'SHORT') !== posSide) {
-      return `손절 복구 안 함 — 기록은 ${posSide}인데 거래소 포지션은 ${amt > 0 ? 'LONG' : 'SHORT'}입니다`;
+      return note(`손절 복구 안 함 — 기록은 ${posSide}인데 거래소 포지션은 ${amt > 0 ? 'LONG' : 'SHORT'}입니다`);
     }
 
     // 복구 시에도 최초 손절 부착과 동일한 격자/방향 정본을 사용한다.
@@ -1919,7 +1924,7 @@ async function attachStopIfMissing(
     const filters = await bf.getSymbolFilters(symbol, creds.testnet);
     const tick = filters?.tickSize && filters.tickSize > 0 ? filters.tickSize : null;
     const trigger = roundTrigger(stop, posSide, 'STOP', tick);
-    if (trigger.price == null) return `손절 복구 실패 — 트리거 가격을 확인할 수 없습니다: ${trigger.note}`;
+    if (trigger.price == null) return note(`손절 복구 실패 — 트리거 가격을 확인할 수 없습니다: ${trigger.note}`);
     const quantized = quantizeOrder(Math.abs(amt), null, filters,
       { orderType: 'MARKET', reduceOnly: true });
     const fallbackQuantity = quantized.ok && quantized.quantity != null && quantized.quantity > 0
@@ -1928,11 +1933,13 @@ async function attachStopIfMissing(
       symbol, side: closeSide, stopPrice: trigger.price, type: 'STOP_MARKET',
       fallbackQuantity,
     }, creds.testnet);
-    if (!sl?.success) return `손절 복구 실패 — ${sl?.message || '원인 불명'}`;
+    if (!sl?.success) return note(`손절 복구 실패 — ${sl?.message || '원인 불명'}`);
     await updateOrderRow(sb, o.id, { sl_order_id: String(sl.orderId) });
-    return `손절 복구 완료 (${stop})`;
+    return note(`손절 복구 완료 (${stop})`);
   } catch (e: any) {
-    return `손절 복구 실패 — ${e?.message || e}`;
+    return creds.exchange === 'gate'
+      ? warnGate(`Gate 손절 복구 예외: ${e?.message || e}`)
+      : note(`손절 복구 실패 — ${e?.message || e}`);
   }
 }
 
@@ -2104,7 +2111,7 @@ export async function reconcilePendingOrders(
           // 보호가 없는 상태로 남는다. 여기서 한 번 더 건다.
           if (st === 'FILLED' || st === 'RECONCILED') {
             const rep = await attachStopIfMissing(sb, creds, o);
-            if (rep) out.details.push(`${o.symbol} ${rep}`);
+            if (rep) out.details.push(`${o.symbol} ${rep.message}`);
           }
         } else if (decision) {
           // ── 상태는 알았지만 아직 안 끝났다 ──
@@ -2137,7 +2144,7 @@ export async function reconcilePendingOrders(
           // 이유로 보호를 미루면 보호 없는 포지션이 남는다.
           if (reFacts && reFacts.filledQty != null && reFacts.filledQty > 0) {
             const rep = await attachStopIfMissing(sb, creds, o);
-            if (rep) out.details.push(`${o.symbol} ${rep}`);
+            if (rep) out.details.push(`${o.symbol} ${rep.message}`);
           }
         } else {
           // 확정 못 함. 시도 횟수가 넘었거나 모순이면 사람에게 넘긴다.
@@ -2231,8 +2238,8 @@ export async function reconcilePendingOrders(
           if (gDecision.status !== 'FAILED') {
             const rep = await attachStopIfMissing(sb, creds, o);
             if (rep) {
-              out.details.push(`${o.symbol} ${rep}`);
-              if (rep.startsWith('⚠')) out.needsAttention++;
+              out.details.push(`${o.symbol} ${rep.message}`);
+              if (rep.needsAttention) out.needsAttention++;
             }
           }
         } else if (gDecision) {
@@ -2254,8 +2261,8 @@ export async function reconcilePendingOrders(
           // attachStopIfMissing이 직접 한다.
           const rep = await attachStopIfMissing(sb, creds, o);
           if (rep) {
-              out.details.push(`${o.symbol} ${rep}`);
-              if (rep.startsWith('⚠')) out.needsAttention++;
+              out.details.push(`${o.symbol} ${rep.message}`);
+              if (rep.needsAttention) out.needsAttention++;
             }
         } else {
           const escalate = verdict.action === 'ESCALATE' || shouldEscalate(attempts + 1);
