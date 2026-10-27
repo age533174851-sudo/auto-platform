@@ -181,7 +181,10 @@ export interface FakeDbOptions {
    */
   updateFailure?: {
     table: string;
-    mode: 'error' | 'throw' | 'zero-rows';
+    mode: 'error' | 'throw' | 'zero-rows' | 'null-data' | 'undefined-data' | 'wrong-id' | 'two-rows';
+    /** PostgreSQL error code and message for schema-only fallback tests */
+    code?: string;
+    message?: string;
     times?: number;
     onlyWhen?: (patch: Record<string, any>) => boolean;
   };
@@ -216,6 +219,7 @@ export class FakeDb {
     const db = this;
     const filters: { col: string; vals: any[] }[] = [];
     let pending: { kind: 'insert' | 'update'; patch: any } | null = null;
+    let updateReturning: string | null = null;
 
     const apply = () => {
       let out = db.rows[table] ?? [];
@@ -236,22 +240,31 @@ export class FakeDb {
         db.updateFailuresUsed += 1;
         if (uf.mode === 'throw') throw new Error(`DB 연결 끊김 (${table})`);
         if (uf.mode === 'error') {
-          return { error: { message: `DB 쓰기 실패 (${table})`, code: 'XX000' } };
+          return { error: { message: uf.message ?? `DB 쓰기 실패 (${table})`, code: uf.code ?? 'XX000' } };
         }
+        if (uf.mode === 'null-data') return { error: null, data: null };
+        if (uf.mode === 'undefined-data') return { error: null, data: undefined };
+        if (uf.mode === 'wrong-id') return { error: null, data: [{ id: 'not-the-target-row' }] };
+        if (uf.mode === 'two-rows') return { error: null, data: [{ id: 'row-1' }, { id: 'row-2' }] };
         // zero-rows: **오류가 없는데 아무 줄도 안 바뀐다.**
         // 기록도 남기지 않는다 — 이것이 가장 조용한 실패다.
         return { error: null, data: [], count: 0 };
       }
       const where: Record<string, any> = {};
       for (const f of filters) where[f.col] = f.vals.length === 1 ? f.vals[0] : f.vals;
-      for (const r of apply()) Object.assign(r, pending.patch);
+      const affected = apply();
+      for (const r of affected) Object.assign(r, pending.patch);
       db.writes.push({ table, kind: 'update', patch: { ...pending.patch }, where });
-      return { error: null };
+      // Supabase/PostgREST returns updated rows only when .select('id') is requested.
+      return updateReturning != null
+        ? { error: null, data: affected.map((r) => ({ id: r.id })) }
+        : { error: null };
     };
 
     const builder: any = {
       select(_cols?: string) {
         if (pending?.kind === 'insert') return builder;
+        if (pending?.kind === 'update') updateReturning = _cols ?? '*';
         if (db.opts.failSelectsOn === table) {
           builder.__selectFails = true;
         }

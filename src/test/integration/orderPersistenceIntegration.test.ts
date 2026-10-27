@@ -177,7 +177,52 @@ export async function runOrderPersistenceTests() {
     });
   }
 
-  // ══════════ ⑤ 정상 쓰기 — 기존 동작 그대로 ══════════
+  // ══════════ ⑤ 갱신 행의 증거가 없거나 틀리면 SENT 불허 ══════════
+  // PostgREST의 .select('id')는 성공 시 정확한 대상 행을 돌려줘야 한다.
+  // data:null/undefined, 다른 id, 여러 행을 모두 실패로 취급한다.
+  for (const mode of ['null-data', 'undefined-data', 'wrong-id', 'two-rows'] as const) {
+    const db = new FakeDb({
+      updateFailure: { table: 'live_orders', mode, onlyWhen: onSent },
+    });
+    const venue = venueOk();
+    const r = await scenario(venue, () => exec(db, { clientOrderId: `PERSIST-READBACK-${mode}` }));
+    test(`★★ SENT readback ${mode}는 성공 증거가 아니다 — 주문 POST 0건`, () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 0, '갱신된 정확히 한 행을 확인하지 않고 주문을 보냈다');
+      eq((r as any).ok, false, 'DB 기록 미확인인데 성공이라고 보고했다');
+    });
+  }
+
+  // ══════════ ⑥ 복구 칼럼 후퇴는 실제 undefined_column(42703)에만 ══════════
+  {
+    const db = new FakeDb({
+      updateFailure: { table: 'live_orders', mode: 'error', code: 'XX000',
+        times: 1, onlyWhen: onSent },
+    });
+    const venue = venueOk();
+    const r = await scenario(venue, () => exec(db, { clientOrderId: 'PERSIST-NONSCHEMA' }));
+    test('★★ 일반 DB 장애 뒤 복구 칼럼 제거 재시도로 주문을 보내지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 0, 'XX000 오류를 스키마 누락으로 오인하고 재시도했다');
+      eq((r as any).ok, false);
+    });
+  }
+  {
+    const db = new FakeDb({
+      updateFailure: { table: 'live_orders', mode: 'error', code: '42703',
+        message: 'column "pos_qty_before" of relation "live_orders" does not exist',
+        times: 1, onlyWhen: onSent },
+    });
+    const venue = venueOk();
+    const r = await scenario(venue, () => exec(db, { clientOrderId: 'PERSIST-LEGACY' }));
+    test('확인된 복구 칼럼 누락만 제외 후 재시도하고 정상 전송한다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 1, '실제 구형 스키마 호환 재시도가 막혔다');
+      eq((r as any).ok, true, String((r as any).message));
+    });
+  }
+
+  // ══════════ ⑦ 정상 쓰기 — 기존 동작 그대로 ══════════
   {
     const db = new FakeDb();
     const venue = venueOk();

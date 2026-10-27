@@ -275,9 +275,8 @@ const RECOVERY_COLS = ['pos_qty_before', 'resolve_attempts', 'last_resolve_at', 
  * `INTENT`가 남았다. 그 줄은 미확정으로 쌓이고 대조는 "보낸 적 없는
  * 주문"으로 읽는다.
  *
- * `.select('id')`를 붙이는 이유: PostgREST는 그것이 있어야 **바뀐 줄**을
- * 돌려준다. 돌려주지 않는 클라이언트(배열이 아예 없는 경우)까지 실패로
- * 보지는 않는다 — 없는 증거를 실패의 증거로 쓰지 않는다.
+ * `.select('id')`로 갱신한 정확히 한 행을 확인한다. 응답이 없거나 다른
+ * 행을 돌려주면 쓰기 성공 증거가 아니므로 전송 전에 차단한다.
  */
 async function updateOrderRow(
   sb: any, id: string, patch: Record<string, any>,
@@ -286,25 +285,29 @@ async function updateOrderRow(
     try {
       const res: any = await sb.from('live_orders').update(p).eq('id', id).select('id');
       if (res?.error) {
-        return { ok: false, reason: String(res.error.message || res.error.code || 'DB 오류') };
+        return { ok: false, reason: String(res.error.message || res.error.code || 'DB 오류'),
+          code: String(res.error.code ?? ''), detail: String(res.error.message ?? '') };
       }
-      // **0행은 성공이 아니다.** 오류가 없는데 아무 줄도 안 바뀌었으면
-      // 그 줄이 없거나 조건에 걸리지 않은 것이고, 둘 다 "적혔다"가 아니다.
-      const rows = Array.isArray(res?.data) ? res.data : null;
-      if (rows != null && rows.length === 0) {
-        return { ok: false, reason: '갱신된 줄이 0개입니다' };
+      // null/undefined는 성공 증거가 아니다. 정확히 대상 id 한 줄만 인정.
+      const rows = res?.data;
+      if (!Array.isArray(rows) || rows.length !== 1 || String(rows[0]?.id) !== String(id)) {
+        return { ok: false, reason: '갱신된 대상 행을 정확히 1개 확인하지 못했습니다',
+          code: '', detail: '' };
       }
-      return { ok: true, reason: null };
+      return { ok: true, reason: null, code: '', detail: '' };
     } catch (e: any) {
-      return { ok: false, reason: String(e?.message || e) };
+      return { ok: false, reason: String(e?.message || e), code: '', detail: '' };
     }
   };
 
   const first = await write(patch);
   if (first.ok) return first;
 
-  // 스키마가 복구 전용 칸을 아직 모를 수 있다 — **그 경우에만** 떼고 한 번 더.
-  // 임의의 DB 장애를 이 후퇴로 가리지 않는다: 두 번째 결과도 본다.
+  // 복구 전용 칸 누락이 실제로 확인된 경우에만 후퇴한다.
+  // XX000/timeout/RLS 오류나 다른 칼럼 누락은 재시도로 가리지 않는다.
+  const missingRecoveryColumn = (first.code === '42703' || first.code === 'PGRST204')
+    && RECOVERY_COLS.some((col) => first.detail.toLowerCase().includes(col));
+  if (!missingRecoveryColumn) return first;
   const legacy: Record<string, any> = {};
   let stripped = false;
   for (const [k, v] of Object.entries(patch)) {
