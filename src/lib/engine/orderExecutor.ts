@@ -2006,7 +2006,7 @@ async function attachStopIfMissing(
       // 장부에 연결할 수 없다. 재전송은 중복 위험이므로 하지 않는다.
       // 'attached' 자체만으로 복구 성공이라고 적지 말고 attention을 남긴다.
       const existingId = already.orderId?.trim() ?? '';
-      if (!/^[1-9]\\d*$/.test(existingId)) {
+      if (!/^[1-9][0-9]*$/.test(existingId)) {
         return '⚠ 손절 복구 미확인 — 기존 Binance STOP은 확인했지만 유효한 주문 번호를 읽지 못해 장부에 연결하지 않았습니다';
       }
       // 거래소에는 있는데 장부에 없던 것이다. 지금 이어 둔다 —
