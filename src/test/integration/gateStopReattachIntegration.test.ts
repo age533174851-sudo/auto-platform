@@ -3,6 +3,7 @@
 import { test, eq, assert } from '../harness';
 import { FakeVenue, FakeDb } from './venueHarness';
 import { reconcilePendingOrders } from '../../lib/engine/orderExecutor';
+import { __clearGateSpecCache } from '../../lib/exchanges/gateFutures';
 
 const PRICE = '/api/v4/futures/usdt/price_orders';
 const CONTRACT = 'BTC_USDT';
@@ -23,6 +24,10 @@ const row = () => ({
 function venueWith(
   priceReply: { status?: number; json?: any; throws?: string },
   positionReply: { status?: number; json?: any; throws?: string } = { json: { contract: CONTRACT, size: 1 } },
+  specReply: { status?: number; json?: any; throws?: string } = { json: {
+    name: CONTRACT, quanto_multiplier: '0.001', order_price_round: '0.1',
+    order_size_min: 1, order_size_max: 100000, leverage_max: 100,
+  } },
 ) {
   const position = { contract: CONTRACT, size: 1 };
   return new FakeVenue()
@@ -32,10 +37,7 @@ function venueWith(
       id: '7001', contract: CONTRACT, status: 'finished', finish_as: 'filled',
       text: 't-COID-R1', size: 1, left: 0, fill_price: '60000',
     }] }, 'GET')
-    .on('/api/v4/futures/usdt/contracts/' + CONTRACT, { json: {
-      name: CONTRACT, quanto_multiplier: '0.001', order_price_round: '0.1',
-      order_size_min: 1, order_size_max: 100000, leverage_max: 100,
-    } }, 'GET')
+    .on('/api/v4/futures/usdt/contracts/' + CONTRACT, specReply, 'GET')
     .on(PRICE, priceReply, 'GET')
     .on(PRICE, { json: { id: '8801' } }, 'POST');
 }
@@ -230,4 +232,36 @@ export async function runGateStopReattachTests() {
     });
   }
 
+
+  // #500 RED: a failed STOP reattach must not be reported as a clean reconciliation.
+  for (const [label, side, size] of [
+    ['장부 LONG / 거래소 SHORT', 'BUY', -1],
+    ['장부 SHORT / 거래소 LONG', 'SELL', 1],
+  ] as Array<[string, 'BUY' | 'SELL', number]>) {
+    const db = new FakeDb().seed('live_orders', [{ ...row(), side }]);
+    const v = venueWith({ json: [] }, { json: { contract: CONTRACT, size } });
+    const { result } = await run(v, db);
+    test(`★★ #500 Gate 방향 불일치 ${label}: POST 0 + 장부·집계 attention`, () => {
+      eq(v.countOf(PRICE, 'POST'), 0);
+      eq(db.row('live_orders', { id: 'ord-1' })?.sl_order_id, null);
+      eq(db.row('live_orders', { id: 'ord-1' })?.needs_attention, true);
+      assert(result.needsAttention >= 1, '손절 복구 실패 attention 집계 누락');
+      assert(result.details.some(x => x.includes('기록은') && x.includes('거래소 포지션')),
+        '방향 불일치 원인 누락');
+    });
+  }
+
+  {
+    // A contract-spec GET failure must not become an unquantized protective POST.
+    __clearGateSpecCache();
+    const v = venueWith({ json: [] }, undefined, { status: 503, json: { message: 'unavailable' } });
+    const { result, db } = await run(v);
+    test('★★ #500 Gate 계약 사양 조회 실패: POST 0 + attention', () => {
+      eq(v.countOf(PRICE, 'POST'), 0, '사양을 못 읽고 STOP을 전송했다');
+      eq(db.row('live_orders', { id: 'ord-1' })?.needs_attention, true);
+      assert(result.needsAttention >= 1, '사양 실패 attention 누락');
+      assert(result.details.some(x => x.includes('사양') && x.includes('실패')),
+        '사양 조회 실패 사유 누락');
+    });
+  }
 }
