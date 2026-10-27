@@ -168,11 +168,30 @@ export interface FakeDbOptions {
   failInsertCode?: { table: string; code: string };
   /** select를 실패시킨다 */
   failSelectsOn?: string;
+  /**
+   * update가 **어떻게** 실패하는가.
+   *
+   * `failUpdatesOn`은 "항상 error 객체"만 낸다. 그런데 실제 DB 장애는
+   * 세 가지 모양으로 온다 — error 반환 · 예외 throw · **0행 갱신**.
+   * 마지막 것이 가장 조용하다: 성공처럼 보이는데 아무것도 안 적힌다.
+   *
+   *   mode     'error' | 'throw' | 'zero-rows'
+   *   times    이 횟수만큼만 실패시킨다 (복구 재시도 경로를 가르려면 1)
+   *   onlyWhen patch를 보고 고른다 (예: status가 SENT일 때만)
+   */
+  updateFailure?: {
+    table: string;
+    mode: 'error' | 'throw' | 'zero-rows';
+    times?: number;
+    onlyWhen?: (patch: Record<string, any>) => boolean;
+  };
 }
 
 export class FakeDb {
   readonly rows: Record<string, any[]> = {};
   readonly writes: WriteLog[] = [];
+  /** `updateFailure.times`를 세는 칸 */
+  updateFailuresUsed = 0;
   private seq = 0;
 
   constructor(private opts: FakeDbOptions = {}) {}
@@ -209,6 +228,19 @@ export class FakeDb {
       if (db.opts.failUpdatesOn === table) {
         // 거래소는 받았는데 장부에 못 적는 상황이다.
         return { error: { message: `DB 쓰기 실패 (${table})`, code: 'XX000' } };
+      }
+      const uf = db.opts.updateFailure;
+      if (uf && uf.table === table
+        && (!uf.onlyWhen || uf.onlyWhen({ ...pending.patch }))
+        && (uf.times == null || db.updateFailuresUsed < uf.times)) {
+        db.updateFailuresUsed += 1;
+        if (uf.mode === 'throw') throw new Error(`DB 연결 끊김 (${table})`);
+        if (uf.mode === 'error') {
+          return { error: { message: `DB 쓰기 실패 (${table})`, code: 'XX000' } };
+        }
+        // zero-rows: **오류가 없는데 아무 줄도 안 바뀐다.**
+        // 기록도 남기지 않는다 — 이것이 가장 조용한 실패다.
+        return { error: null, data: [], count: 0 };
       }
       const where: Record<string, any> = {};
       for (const f of filters) where[f.col] = f.vals.length === 1 ? f.vals[0] : f.vals;
