@@ -26,7 +26,7 @@ export function runVenueHarnessOrderSendsTests() {
   );
 
   test('★★ Gate price_orders POST도 주문 전송에 반드시 포함한다', () => {
-    eq(venue.countOf('/price_orders', 'POST'), 1);
+    eq(venue.calls.filter(c => c.method === 'POST' && c.path.endsWith('/price_orders')).length, 1);
     eq(venue.orderSends().filter(c => c.path.endsWith('/price_orders')).length, 1,
       'Gate 손절 중복 전송이 주문 0건으로 위장된다');
   });
