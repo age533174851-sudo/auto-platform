@@ -2002,11 +2002,18 @@ async function attachStopIfMissing(
       return `⚠ 손절 복구 미확인 — 미체결 주문을 읽지 못해 이미 걸린 손절이 있는지 확인하지 못했습니다 (${already.reason})`;
     }
     if (already.status === 'attached') {
+      // STOP은 찾았어도 번호를 못 읽으면 취소·추적 가능한 보호주문으로
+      // 장부에 연결할 수 없다. 재전송은 중복 위험이므로 하지 않는다.
+      // 'attached' 자체만으로 복구 성공이라고 적지 말고 attention을 남긴다.
+      const existingId = already.orderId?.trim() ?? '';
+      if (!/^[1-9]\\d*$/.test(existingId)) {
+        return '⚠ 손절 복구 미확인 — 기존 Binance STOP은 확인했지만 유효한 주문 번호를 읽지 못해 장부에 연결하지 않았습니다';
+      }
       // 거래소에는 있는데 장부에 없던 것이다. 지금 이어 둔다 —
       // 안 이으면 다음 회차가 같은 질문을 또 하고, 그때 조회가 실패하면
       // 그대로 중복이 된다.
       const linked = await updateOrderRow(sb, o.id,
-        { sl_order_id: already.orderId == null ? null : String(already.orderId) });
+        { sl_order_id: existingId });
       if (!linked.ok) {
         return `⚠ 손절 기록 실패 — 이미 걸린 손절(${already.orderId})을 장부에 잇지 못했습니다: ${linked.reason}`;
       }
