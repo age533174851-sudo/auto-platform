@@ -86,10 +86,10 @@ export class FakeVenue {
       (c) => c.path.includes(pathFragment) && (!method || c.method === method)).length;
   }
 
-  /** 주문 전송 횟수 — 중복 주문 판정의 핵심 숫자 */
+  /** 주문 전송 횟수 — Gate 조건부 /price_orders POST도 반드시 포함한다 */
   orderSends(): VenueCall[] {
     return this.calls.filter((c) => c.method === 'POST'
-      && /\/order\b|\/orders\b/.test(c.path));
+      && /\/(?:order|orders|price_orders)(?:\/|$)/.test(c.path));
   }
 
   install(): () => void {
