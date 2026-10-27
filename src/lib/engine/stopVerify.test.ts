@@ -54,6 +54,39 @@ export function runStopVerifyTests() {
     eq(r.orderId, '3');
   });
 
+  // ── 안전 결함 #494: STOP이라는 이름만으로 보호라고 믿지 않는다 ──
+  test('★★ reduceOnly=false + closePosition=false STOP은 보호 확인 불가다', () => {
+    const r = verifyStopAttached([stop({ reduceOnly: false, closePosition: false })], WANT);
+    eq(r.status, 'unknown', '일반 STOP은 포지션을 반대로 열 수도 있다');
+    eq(r.orderId, null, '위험한 STOP 번호를 보호 주문으로 연결하지 않는다');
+    eq(shouldUnwind(r), false, '주문이 존재하므로 새 청산도 자동으로 보내지 않는다');
+  });
+
+  test('★★ 보호 플래그를 읽지 못한 STOP은 보호 확인 불가다', () => {
+    const r = verifyStopAttached([stop({ reduceOnly: null, closePosition: null })], WANT);
+    eq(r.status, 'unknown', '보호 기능이 불명확하면 안전하다고 단정하지 않는다');
+  });
+
+  test('reduceOnly 또는 closePosition이 확인되면 정상 STOP을 인정한다', () => {
+    eq(verifyStopAttached([stop({ reduceOnly: true, closePosition: false })], WANT).status, 'attached');
+    eq(verifyStopAttached([stop({ reduceOnly: false, closePosition: true })], WANT).status, 'attached');
+  });
+
+  test('★★ 위험한 STOP 뒤의 정상 STOP까지 검사한다', () => {
+    const r = verifyStopAttached([
+      stop({ orderId: 88, reduceOnly: false, closePosition: false }),
+      stop({ orderId: 89, reduceOnly: true, closePosition: false }),
+    ], WANT);
+    eq(r.status, 'attached');
+    eq(r.orderId, '89', '앞의 위험한 STOP을 보호 주문으로 채택하면 안 된다');
+  });
+
+  test('다른 심볼의 위험한 STOP은 내 주문 판정을 막지 않는다', () => {
+    eq(verifyStopAttached([
+      stop({ symbol: 'OTHERUSDT', reduceOnly: false, closePosition: false }),
+    ], WANT).status, 'missing');
+  });
+
   // ── 없음 ────────────────────────────────────────────────
   test('빈 목록은 확인된 없음이다', () => {
     // 빈 배열은 "읽었는데 없다"이다. null과 반드시 달라야 한다.
