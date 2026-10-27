@@ -10,10 +10,11 @@
 //   ② 어떤 축이든 나빠지면 배율은 **같거나 낮아진다**
 //   ③ 어떤 입력으로도 100이 나오지 않는다
 import { test, eq, assert } from '../../test/harness';
+import { checkClockSkew } from './preTradeChecklist';
 import {
   planAdaptiveLeverage, adaptiveLeverageAllows, rungAtOrBelow,
   ADAPTIVE_LADDER, ADAPTIVE_MIN_LEVERAGE, ADAPTIVE_MAX_LEVERAGE,
-  ADAPTIVE_DEFAULT_TOP_RUNG, FORBIDDEN_LEVERAGE,
+  ADAPTIVE_DEFAULT_TOP_RUNG, FORBIDDEN_LEVERAGE, MAX_BOOK_AGE_MS,
   type AdaptiveLeverageInput,
 } from './adaptiveLeverage';
 
@@ -123,6 +124,51 @@ export function runAdaptiveLeverageTests() {
           `${key}가 비었는데 코드가 ${r.code}다 — "못 읽음"이 아니라 다른 뜻으로 적혔다`);
       }
     }
+  });
+
+  // ══════════ 미래에서 온 위험 데이터 ══════════
+  //
+  // 신선도를 `지금 − 관측시각 > 한도`로만 보면 **미래 시각은 전부
+  // 통과한다** — 차가 음수라 어떤 한도보다도 작다. 피드가 시각을 잘못
+  // 찍거나 서버 시계가 틀어지면, 그 값이 "방금 읽은 것보다도 더 새것"이
+  // 된다.
+  //
+  // **허용 폭의 숫자를 이 시험이 들고 있지 않다.** 저장소의 시계 오차
+  // 정본(`checkClockSkew`)에 물어서 경계를 정한다 — 숫자를 여기 적으면
+  // 정본이 바뀌었을 때 이 시험만 옛 값을 지킨다.
+  const FUTURE_OK = (() => {
+    for (const ms of [1, 100, 500, 1_000, 2_000, 2_500]) {
+      if (!checkClockSkew(NOW + ms, NOW).blocks) return ms;
+    }
+    return 0;
+  })();
+
+  test('★★ 미래 시각의 위험 데이터는 무제한 통과하지 않는다', () => {
+    for (const key of ['volatilityAsOfMs', 'bookAsOfMs', 'exchangeMaxAsOfMs'] as const) {
+      for (const ahead of [60_000, 3600_000, 86_400_000]) {
+        const r = planAdaptiveLeverage(base({ [key]: NOW + ahead } as any));
+        eq(r.ok, false,
+          `${key}가 ${ahead}ms 미래인데 통과했다 — 미래 데이터가 가장 신선한 값이 된다`);
+        eq(r.code, 'TIMESTAMP_IN_FUTURE', `${key}: 코드가 ${r.code}다`);
+        eq(r.leverage, null, '막혔는데 배율이 적혔다');
+        assert(/미래/.test(r.message), `사유에 미래라는 말이 없다: ${r.message}`);
+      }
+    }
+  });
+
+  test('★ 시계 오차 범위 안의 미래는 받아들인다', () => {
+    assert(FUTURE_OK > 0, '정본이 어떤 미래도 받아들이지 않는다 — 경계를 못 찾았다');
+    for (const key of ['volatilityAsOfMs', 'bookAsOfMs', 'exchangeMaxAsOfMs'] as const) {
+      const r = planAdaptiveLeverage(base({ [key]: NOW + FUTURE_OK } as any));
+      eq(r.ok, true, `${key}: ${FUTURE_OK}ms 시계 오차에 막혔다 — ${r.message}`);
+    }
+  });
+
+  test('★★ 받아들이는 미래 폭이 호가 신선도 한도보다 넓지 않다', () => {
+    // 호가를 10초면 낡았다고 보면서 미래로는 그보다 넓게 받아 주면,
+    // **미래 쪽으로만 뚫린 창**이 생긴다.
+    assert(checkClockSkew(NOW + MAX_BOOK_AGE_MS, NOW).blocks,
+      `호가 한도(${MAX_BOOK_AGE_MS}ms)만큼 미래인 값이 시계 오차로 통과한다`);
   });
 
   test('★★ 막혔을 때 최소 배율로 떨어지지 않는다', () => {

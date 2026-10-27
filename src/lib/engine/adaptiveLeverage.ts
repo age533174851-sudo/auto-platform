@@ -44,6 +44,14 @@
 // 결과로 75를 자동 선택해도 되는지가 확정되기 전에는, 코드가 그 칸을
 // 고르지 않는다. **지금 열어 두고 나중에 확인하지 않는다.**
 
+// **시계 오차 숫자를 여기서 정하지 않는다.**
+//
+// "지금과 얼마나 벌어지면 못 믿는가"는 이 저장소에 이미 정본이 있다
+// (`preTradeChecklist.checkClockSkew` — recvWindow × safetyRatio).
+// `marketFreshness`의 미래 시각 판정도 그것을 쓴다. 여기서 새 숫자를
+// 만들면 같은 질문에 답이 셋이 되고, 언젠가 하나만 고쳐진다.
+import { checkClockSkew } from './preTradeChecklist';
+
 /** 사다리의 맨 아랫칸. 이보다 낮게는 주문하지 않는다 — 막는다 */
 export const ADAPTIVE_MIN_LEVERAGE = 10;
 
@@ -115,7 +123,16 @@ export type AdaptiveLeverageCode =
   /** 배정 증거금을 못 읽었다 — 유동성·비용 상한을 만들 수 없다 */
   | 'MARGIN_UNKNOWN'
   /** 계산된 상한이 최소 배율보다 낮다 — 올려서 맞추지 않는다 */
-  | 'BELOW_MIN_LEVERAGE';
+  | 'BELOW_MIN_LEVERAGE'
+  /**
+   * 위험 데이터의 시각이 **미래**다.
+   *
+   * 신선도를 `지금 − 관측시각 > 한도`로만 보면 미래 시각은 전부
+   * 통과한다 — 차가 음수라 어떤 한도보다도 작다. 피드가 시각을 잘못
+   * 찍거나 서버 시계가 틀어지면 **가장 못 믿을 값이 가장 신선한 값**이
+   * 된다. 작은 오차는 받아들이고 그 너머는 막는다.
+   */
+  | 'TIMESTAMP_IN_FUTURE';
 
 /** 어느 축이 상한을 몇으로 잡았는가. 사후에 "왜 이 배율이었나"를 답한다 */
 export interface AdaptiveLeverageCaps {
@@ -188,6 +205,19 @@ function num(v: unknown): number | null {
 const pos = (v: unknown): boolean => { const n = num(v); return n != null && n > 0; };
 const nonNeg = (v: unknown): boolean => { const n = num(v); return n != null && n >= 0; };
 
+/**
+ * 이 시각이 **지금보다 미래**인가. 받아들일 수 있으면 null.
+ *
+ * 허용 폭은 시계 오차 정본이 정한다 — 이 파일은 묻기만 한다.
+ */
+function futureBlock(label: string, at: number, now: number): AdaptiveLeverageVerdict | null {
+  if (!(at > now)) return null;
+  const v = checkClockSkew(at, now);
+  if (!v.blocks) return null;
+  return block('TIMESTAMP_IN_FUTURE',
+    `${label} 시각이 지금보다 ${at - now}ms 미래입니다 — ${v.detail}`);
+}
+
 function block(code: AdaptiveLeverageCode, message: string): AdaptiveLeverageVerdict {
   return { ok: false, code, leverage: null, cap: null, caps: null, binding: null, message };
 }
@@ -242,6 +272,7 @@ export function planAdaptiveLeverage(i: AdaptiveLeverageInput): AdaptiveLeverage
   if (volAt == null) {
     return block('VOLATILITY_UNKNOWN', '변동성이 언제 기준인지 모릅니다');
   }
+  { const f = futureBlock('변동성', volAt, now); if (f) return f; }
   if (now - volAt > MAX_VOLATILITY_AGE_MS) {
     return block('VOLATILITY_STALE',
       `변동성이 ${Math.round((now - volAt) / 3_600_000)}시간 전 값입니다`
@@ -255,6 +286,7 @@ export function planAdaptiveLeverage(i: AdaptiveLeverageInput): AdaptiveLeverage
   if (bookAt == null) {
     return block('LIQUIDITY_UNKNOWN', '호가를 언제 읽었는지 모릅니다');
   }
+  { const f = futureBlock('호가', bookAt, now); if (f) return f; }
   if (now - bookAt > MAX_BOOK_AGE_MS) {
     return block('LIQUIDITY_STALE',
       `호가가 ${Math.round((now - bookAt) / 1000)}초 전 값입니다 — 지금 호가가 아닙니다`);
@@ -285,6 +317,7 @@ export function planAdaptiveLeverage(i: AdaptiveLeverageInput): AdaptiveLeverage
   if (capAt == null) {
     return block('EXCHANGE_CAP_UNKNOWN', '거래소 상한을 언제 읽었는지 모릅니다');
   }
+  { const f = futureBlock('거래소 상한', capAt, now); if (f) return f; }
   if (now - capAt > MAX_EXCHANGE_CAP_AGE_MS) {
     return block('EXCHANGE_CAP_STALE', '거래소 배율 상한이 하루 넘게 지난 값입니다');
   }
