@@ -20,10 +20,13 @@ const row = () => ({
   pos_qty_before: 0, resolve_attempts: 0, user_id: 'u1', connection_id: 'c1',
   stop_policy: 'FIXED_SL', stop_loss: 58920.9, sl_order_id: null, reduce_only: false,
 });
-function venueWith(priceReply: { status?: number; json?: any; throws?: string }) {
+function venueWith(
+  priceReply: { status?: number; json?: any; throws?: string },
+  positionReply: { status?: number; json?: any; throws?: string } = { json: { contract: CONTRACT, size: 1 } },
+) {
   const position = { contract: CONTRACT, size: 1 };
   return new FakeVenue()
-    .on('/api/v4/futures/usdt/positions/' + CONTRACT, { json: position }, 'GET')
+    .on('/api/v4/futures/usdt/positions/' + CONTRACT, positionReply, 'GET')
     .on('/api/v4/futures/usdt/positions', { json: [position] }, 'GET')
     .on('/api/v4/futures/usdt/orders', { json: (i: number) => i % 2 === 0 ? [] : [{
       id: '7001', contract: CONTRACT, status: 'finished', finish_as: 'filled',
@@ -144,6 +147,41 @@ export async function runGateStopReattachTests() {
     test('★★ NO_FIXED_SL은 Gate 손절 조회·재부착 자체를 하지 않는다', () => {
       eq(v.countOf(PRICE, 'GET'), 0);
       eq(v.countOf(PRICE, 'POST'), 0);
+    });
+  }
+
+  // #498: 계약별 포지션 조회 실패와 정상 flat(0)은 서로 다른 사실이다.
+  // Gate 조회 실패/수량 불량은 손절이 필요할 수 있으므로 반드시 attention으로 남긴다.
+  for (const [label, positionReply] of [
+    ['HTTP 500', { status: 500, json: { message: 'unavailable' } }],
+    ['null 응답', { json: null }],
+    ['NaN 수량', { json: { contract: CONTRACT, size: 'NaN' } }],
+    ['Infinity 수량', { json: { contract: CONTRACT, size: 'Infinity' } }],
+    ['빈 문자열 수량', { json: { contract: CONTRACT, size: '' } }],
+    ['공백 수량', { json: { contract: CONTRACT, size: ' ' } }],
+    ['수량 필드 누락', { json: { contract: CONTRACT } }],
+  ] as Array<[string, { status?: number; json?: any }]>) {
+    const v = venueWith({ json: [] }, positionReply);
+    const { result, db } = await run(v);
+    test(`★★ Gate 포지션 ${label}은 손절 복구 실패를 조용히 무시하지 않는다`, () => {
+      eq(v.countOf(PRICE, 'POST'), 0, '불확실한 포지션에 손절을 보내면 안 된다');
+      eq(v.countOf(PRICE, 'GET'), 0, '포지션 판정 전에 조건부 주문을 조회했다');
+      assert(result.needsAttention >= 1, '포지션 미확인 attention 집계가 없다');
+      eq(db.row('live_orders', { id: 'ord-1' })?.needs_attention, true);
+      assert(result.details.some(x => x.includes('포지션') && x.includes('미확인')),
+        '포지션 조회/수량 미확인 경고가 없다');
+      eq(db.row('live_orders', { id: 'ord-1' })?.sl_order_id, null);
+    });
+  }
+
+  {
+    const v = venueWith({ json: [] }, { json: { contract: CONTRACT, size: '0' } });
+    const { result, db } = await run(v);
+    test('★★ Gate 포지션 수량 정상 0은 손절 복구하지 않는다', () => {
+      eq(v.countOf(PRICE, 'POST'), 0);
+      eq(v.countOf(PRICE, 'GET'), 0);
+      eq(db.row('live_orders', { id: 'ord-1' })?.sl_order_id, null);
+      eq(result.needsAttention, 0);
     });
   }
 }
