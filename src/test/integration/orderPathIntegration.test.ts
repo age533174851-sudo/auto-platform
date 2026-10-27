@@ -465,6 +465,11 @@ export async function runReconcileIntegrationTests() {
         { filterType: 'MARKET_LOT_SIZE', stepSize: '0', minQty: '0', maxQty: '0' },
         { filterType: 'PRICE_FILTER', tickSize: '0.1' },
       ] }] } })
+      // 복구 전에 **이미 걸린 손절이 있는지** 묻는다. 이 시나리오의 주제는
+      // `closePosition` 거부 뒤의 대체 경로이므로 "확인했고 없다"를 깐다.
+      // (목록을 못 읽으면 보내지 않는 것이 맞고, 그 경우는
+      //  `stopReattachIdempotencyIntegration.test.ts`가 따로 본다.)
+      .on('/fapi/v1/openOrders', { json: [] }, 'GET')
       .onParams(BN_ORDER, 'POST', { type: 'STOP_MARKET', closePosition: 'true' },
         { status: 400, json: { code: -4120, msg: 'not supported for this endpoint' } })
       .onParams(BN_ORDER, 'POST', { type: 'STOP_MARKET', reduceOnly: 'true' },

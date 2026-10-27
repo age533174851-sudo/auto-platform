@@ -1939,7 +1939,14 @@ async function attachStopIfMissing(
         contract, spec: stopSpec, clientOrderId: `${o.client_order_id}R`,
       }, creds.testnet);
       if (!sl.success) return `손절 복구 실패 — ${sl.message}`;
-      await updateOrderRow(sb, o.id, { sl_order_id: sl.orderId ?? null });
+      // 바이낸스 갈래와 같은 이유로 쓰기 결과를 본다.
+      // (Gate는 "이미 걸려 있는가"를 묻는 확인이 아직 없다 — 조건부 주문
+      //  목록 판정이 바이낸스 쪽 `verifyStopAttached`와 어휘가 달라
+      //  같은 정본으로 묶기 전에는 만들지 않는다. 별도 작업으로 남긴다.)
+      const gWrote = await updateOrderRow(sb, o.id, { sl_order_id: sl.orderId ?? null });
+      if (!gWrote.ok) {
+        return `⚠ 손절 기록 실패 — 손절(${sl.orderId})은 걸렸으나 장부에 적지 못했습니다: ${gWrote.reason}`;
+      }
       return `손절 복구 완료 (${stopSpec.triggerPrice})`;
     }
 
@@ -1964,12 +1971,59 @@ async function attachStopIfMissing(
       { orderType: 'MARKET', reduceOnly: true });
     const fallbackQuantity = quantized.ok && quantized.quantity != null && quantized.quantity > 0
       ? quantized.quantity : Math.abs(amt);
+    // ── 보내기 전에 **거래소에 이미 걸려 있는지** 본다 ──
+    //
+    // 장부의 `sl_order_id`가 비어 있는 이유는 둘이다 — 정말 안 걸었거나,
+    // **걸었는데 적지 못했거나.** 장부만 보면 구분할 수 없고, 구분하지
+    // 않으면 다음 회차가 같은 포지션에 보호주문을 하나 더 건다. 둘 중
+    // 하나가 발동해 포지션이 닫히면 **나머지 하나가 남는다.**
+    //
+    // 판정은 진입 경로가 쓰는 `verifyStopAttached` 그대로다 — 같은
+    // 질문에 두 번째 답을 만들지 않는다. 못 읽었으면(`unknown`)
+    // **보내지 않는다**: 이미 걸려 있었다면 그 전송이 곧 중복이다.
+    let openList: any[] | null = null;
+    try {
+      const open: any = await bf.getFuturesOpenOrders(
+        creds.apiKey, creds.apiSecret, creds.testnet, symbol);
+      // **`success:false`일 때의 `orders: []`를 믿지 않는다.**
+      //
+      // `getFuturesOpenOrders`는 조회에 실패해도 `orders: []`를 함께
+      // 돌려준다. 그 빈 배열을 그대로 쓰면 "주문이 하나도 없다"가 되어
+      // `verifyStopAttached`가 `missing`을 내고, 이미 손절이 걸려 있어도
+      // 하나 더 걸게 된다. 못 읽은 것은 **없는 것이 아니다.**
+      openList = open?.success === false ? null
+        : Array.isArray(open) ? open
+          : Array.isArray(open?.orders) ? open.orders : null;
+    } catch { openList = null; }
+    const { verifyStopAttached } = await import('./stopVerify');
+    const already = verifyStopAttached(openList,
+      { symbol, side: closeSide, stopPrice: trigger.price });
+    if (already.status === 'unknown') {
+      return `⚠ 손절 복구 미확인 — 미체결 주문을 읽지 못해 이미 걸린 손절이 있는지 확인하지 못했습니다 (${already.reason})`;
+    }
+    if (already.status === 'attached') {
+      // 거래소에는 있는데 장부에 없던 것이다. 지금 이어 둔다 —
+      // 안 이으면 다음 회차가 같은 질문을 또 하고, 그때 조회가 실패하면
+      // 그대로 중복이 된다.
+      const linked = await updateOrderRow(sb, o.id,
+        { sl_order_id: already.orderId == null ? null : String(already.orderId) });
+      if (!linked.ok) {
+        return `⚠ 손절 기록 실패 — 이미 걸린 손절(${already.orderId})을 장부에 잇지 못했습니다: ${linked.reason}`;
+      }
+      return `손절 복구 안 함 — 거래소에 이미 걸려 있습니다 (${already.orderId})`;
+    }
+
     const sl: any = await bf.placeFuturesTPSL(creds.apiKey, creds.apiSecret, {
       symbol, side: closeSide, stopPrice: trigger.price, type: 'STOP_MARKET',
       fallbackQuantity,
     }, creds.testnet);
     if (!sl?.success) return `손절 복구 실패 — ${sl?.message || '원인 불명'}`;
-    await updateOrderRow(sb, o.id, { sl_order_id: String(sl.orderId) });
+    // **쓰기 결과를 본다.** 못 적으면 다음 회차가 같은 줄을 보고 또 건다.
+    // 주문은 이미 나갔으므로 되돌리지 않고 **크게 남긴다.**
+    const wrote = await updateOrderRow(sb, o.id, { sl_order_id: String(sl.orderId) });
+    if (!wrote.ok) {
+      return `⚠ 손절 기록 실패 — 손절(${sl.orderId})은 걸렸으나 장부에 적지 못했습니다: ${wrote.reason}`;
+    }
     return `손절 복구 완료 (${stop})`;
   } catch (e: any) {
     return `⚠ 손절 복구 미확인 — ${e?.message || e}`;
@@ -2009,7 +2063,10 @@ export async function reconcilePendingOrders(
   const reportStopReattach = async (o: any, rep: string | null) => {
     if (!rep) return;
     out.details.push(`${o.symbol} ${rep}`);
-    if (!rep.startsWith('⚠ 손절 복구 미확인')) return;
+    // **경고는 전부 attention이다.** 예전에는 '미확인' 한 문구만 봤는데,
+    // 손절을 걸고도 장부에 적지 못한 경우처럼 **다른 모양의 ⚠**가
+    // 생기면 그것만 조용히 사라진다. 사람이 볼 이유는 같다.
+    if (!rep.startsWith('⚠')) return;
     out.needsAttention++;
     const saved = await updateOrderRow(sb, o.id, {
       needs_attention: true, error_message: rep,
