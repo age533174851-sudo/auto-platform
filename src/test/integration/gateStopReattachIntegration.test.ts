@@ -184,4 +184,50 @@ export async function runGateStopReattachTests() {
       eq(result.needsAttention, 0);
     });
   }
+  // #498 후속: Gate 응답의 계약 근거가 없거나 서로 모순되면
+  // 다른 계약의 STOP을 이 포지션의 보호주문으로 연결할 수 없다.
+  {
+    const v = venueWith({ json: [stop({
+      contract: null,
+      initial: { size: 0, auto_size: 'close_long', reduce_only: true },
+    })] });
+    const { result, db } = await run(v);
+    test('★★ Gate STOP 계약 근거 누락은 기존 ID 연결 금지·POST 0·attention', () => {
+      eq(v.countOf(PRICE, 'POST'), 0, '계약 불명의 STOP을 보고 새 손절을 보내면 안 된다');
+      eq(db.row('live_orders', { id: 'ord-1' })?.sl_order_id, null,
+        '계약을 모르는 STOP ID를 내 포지션에 연결했다');
+      assert(result.needsAttention >= 1, '계약 불명 attention 누락');
+      assert(result.details.some(x => x.includes('계약') && x.includes('미확인')),
+        '계약 불명 경고 누락');
+    });
+  }
+
+  {
+    const v = venueWith({ json: [stop({
+      contract: 'ETH_USDT',
+      initial: { contract: CONTRACT, size: 0, auto_size: 'close_long', reduce_only: true },
+    })] });
+    const { result, db } = await run(v);
+    test('★★ Gate STOP 상위/initial 계약 불일치는 ID 연결 금지·POST 0·attention', () => {
+      eq(v.countOf(PRICE, 'POST'), 0);
+      eq(db.row('live_orders', { id: 'ord-1' })?.sl_order_id, null,
+        '서로 모순되는 계약의 STOP ID를 연결했다');
+      assert(result.needsAttention >= 1, '계약 불일치 attention 누락');
+      assert(result.details.some(x => x.includes('계약') && x.includes('불일치')),
+        '계약 불일치 경고 누락');
+    });
+  }
+
+  {
+    const v = venueWith({ json: [stop({
+      initial: { size: 0, auto_size: 'close_long', reduce_only: true },
+    })] });
+    const { result, db } = await run(v);
+    test('★★ Gate STOP 상위 contract만 유효한 정상 응답은 기존 ID 연결 유지', () => {
+      eq(v.countOf(PRICE, 'POST'), 0);
+      eq(db.row('live_orders', { id: 'ord-1' })?.sl_order_id, '9901');
+      eq(result.needsAttention, 0);
+    });
+  }
+
 }
