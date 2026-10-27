@@ -13,7 +13,7 @@ import { test, eq, assert } from '../../test/harness';
 import {
   planAdaptiveLeverage, adaptiveLeverageAllows, rungAtOrBelow,
   ADAPTIVE_LADDER, ADAPTIVE_MIN_LEVERAGE, ADAPTIVE_MAX_LEVERAGE,
-  ADAPTIVE_DEFAULT_TOP_RUNG, FORBIDDEN_LEVERAGE,
+  ADAPTIVE_DEFAULT_TOP_RUNG, FORBIDDEN_LEVERAGE, MAX_FUTURE_SKEW_MS,
   type AdaptiveLeverageInput,
 } from './adaptiveLeverage';
 
@@ -85,9 +85,11 @@ export function runAdaptiveLeverageTests() {
     ['변동성 없음', { atrPct: null }, 'VOLATILITY_UNKNOWN'],
     ['변동성 시각 없음', { volatilityAsOfMs: null }, 'VOLATILITY_UNKNOWN'],
     ['변동성 이틀 전', { volatilityAsOfMs: NOW - 48 * 3600_000 }, 'VOLATILITY_STALE'],
+    ['변동성 1분 뒤', { volatilityAsOfMs: NOW + 60_000 }, 'VOLATILITY_FUTURE'],
     ['호가 깊이 없음', { depthUsd: null }, 'LIQUIDITY_UNKNOWN'],
     ['호가 시각 없음', { bookAsOfMs: null }, 'LIQUIDITY_UNKNOWN'],
     ['호가 1분 전', { bookAsOfMs: NOW - 60_000 }, 'LIQUIDITY_STALE'],
+    ['호가 1분 뒤', { bookAsOfMs: NOW + 60_000 }, 'LIQUIDITY_FUTURE'],
     ['스프레드 없음', { spreadBps: null }, 'SPREAD_UNKNOWN'],
     ['수수료 없음', { roundTripFeeBps: null }, 'COST_UNKNOWN'],
     ['유지증거금률 없음', { maintenanceMarginRate: null }, 'MAINTENANCE_UNKNOWN'],
@@ -95,6 +97,7 @@ export function runAdaptiveLeverageTests() {
     ['거래소 상한 없음', { exchangeMaxLeverage: null }, 'EXCHANGE_CAP_UNKNOWN'],
     ['거래소 상한 시각 없음', { exchangeMaxAsOfMs: null }, 'EXCHANGE_CAP_UNKNOWN'],
     ['거래소 상한 이틀 전', { exchangeMaxAsOfMs: NOW - 48 * 3600_000 }, 'EXCHANGE_CAP_STALE'],
+    ['거래소 상한 1분 뒤', { exchangeMaxAsOfMs: NOW + 60_000 }, 'EXCHANGE_CAP_FUTURE'],
   ];
   for (const [label, over, code] of unreadable) {
     test(`★★ ${label} → 진입 차단 (${code})`, () => {
@@ -104,6 +107,16 @@ export function runAdaptiveLeverageTests() {
       eq(r.leverage, null, '막혔는데 배율이 적혔다 — null이어야 한다');
     });
   }
+
+  test('★★ 미래 시각 허용 경계는 세 자료에서 동일하다', () => {
+    for (const key of ['volatilityAsOfMs', 'bookAsOfMs', 'exchangeMaxAsOfMs'] as const) {
+      const within = planAdaptiveLeverage(base({ [key]: NOW + MAX_FUTURE_SKEW_MS }));
+      eq(within.ok, true, `${key}: 허용된 2초 시계 오차를 막았다 (${within.code})`);
+      const beyond = planAdaptiveLeverage(base({ [key]: NOW + MAX_FUTURE_SKEW_MS + 1 }));
+      eq(beyond.ok, false, `${key}: 2초를 넘는 미래 시각을 통과시켰다`);
+      eq(beyond.leverage, null, `${key}: 미래 시각인데 배율을 냈다`);
+    }
+  });
 
   test('★★ 0은 값이고 빈 칸은 값이 아니다 (Number(null) === 0 덫)', () => {
     // 수수료 0 · 스프레드 0 · 유지증거금률 0은 **실제로 있을 수 있는 값**이다.
