@@ -6,7 +6,8 @@ export function runStopVerifyTests() {
 
   const WANT = { symbol: 'BTCUSDT', side: 'SELL' as const, stopPrice: 100 };
   const stop = (o: Partial<OpenOrderLike> = {}): OpenOrderLike => ({
-    symbol: 'BTCUSDT', side: 'SELL', type: 'STOP_MARKET', stopPrice: 100, orderId: 7, ...o,
+    symbol: 'BTCUSDT', side: 'SELL', type: 'STOP_MARKET', stopPrice: 100, orderId: 7,
+    reduceOnly: true, closePosition: false, ...o,
   });
 
   // ── 있음 ────────────────────────────────────────────────
