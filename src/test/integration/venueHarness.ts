@@ -168,11 +168,33 @@ export interface FakeDbOptions {
   failInsertCode?: { table: string; code: string };
   /** select를 실패시킨다 */
   failSelectsOn?: string;
+  /**
+   * update가 **어떻게** 실패하는가.
+   *
+   * `failUpdatesOn`은 "항상 error 객체"만 낸다. 그런데 실제 DB 장애는
+   * 세 가지 모양으로 온다 — error 반환 · 예외 throw · **0행 갱신**.
+   * 마지막 것이 가장 조용하다: 성공처럼 보이는데 아무것도 안 적힌다.
+   *
+   *   mode     'error' | 'throw' | 'zero-rows'
+   *   times    이 횟수만큼만 실패시킨다 (복구 재시도 경로를 가르려면 1)
+   *   onlyWhen patch를 보고 고른다 (예: status가 SENT일 때만)
+   */
+  updateFailure?: {
+    table: string;
+    mode: 'error' | 'throw' | 'zero-rows' | 'null-data' | 'undefined-data' | 'wrong-id' | 'two-rows';
+    /** PostgreSQL error code and message for schema-only fallback tests */
+    code?: string;
+    message?: string;
+    times?: number;
+    onlyWhen?: (patch: Record<string, any>) => boolean;
+  };
 }
 
 export class FakeDb {
   readonly rows: Record<string, any[]> = {};
   readonly writes: WriteLog[] = [];
+  /** `updateFailure.times`를 세는 칸 */
+  updateFailuresUsed = 0;
   private seq = 0;
 
   constructor(private opts: FakeDbOptions = {}) {}
@@ -196,11 +218,32 @@ export class FakeDb {
   from(table: string): any {
     const db = this;
     const filters: { col: string; vals: any[] }[] = [];
+    // 범위 조건(`gte`·`lte`). 창 단위로 센 줄을 읽는 질의가 쓴다 —
+    // 이것이 없으면 그런 질의가 **시험에서만** 터진다.
+    const ranges: { col: string; op: 'gte' | 'lte'; val: any }[] = [];
+    // `select('id', { count: 'exact', head: true })` 형태인가.
+    let headCount = false;
     let pending: { kind: 'insert' | 'update'; patch: any } | null = null;
+    let updateReturning: string | null = null;
+
+    /** 시각 문자열과 숫자를 같은 축에서 비교한다 */
+    const cmpVal = (v: any): number => {
+      if (typeof v === 'number') return v;
+      const t = Date.parse(String(v));
+      return Number.isFinite(t) ? t : Number(v);
+    };
 
     const apply = () => {
       let out = db.rows[table] ?? [];
       for (const f of filters) out = out.filter((r) => f.vals.includes(r[f.col]));
+      for (const g of ranges) {
+        const bound = cmpVal(g.val);
+        out = out.filter((r) => {
+          const v = cmpVal(r[g.col]);
+          if (!Number.isFinite(v) || !Number.isFinite(bound)) return false;
+          return g.op === 'gte' ? v >= bound : v <= bound;
+        });
+      }
       return out;
     };
 
@@ -210,16 +253,39 @@ export class FakeDb {
         // 거래소는 받았는데 장부에 못 적는 상황이다.
         return { error: { message: `DB 쓰기 실패 (${table})`, code: 'XX000' } };
       }
+      const uf = db.opts.updateFailure;
+      if (uf && uf.table === table
+        && (!uf.onlyWhen || uf.onlyWhen({ ...pending.patch }))
+        && (uf.times == null || db.updateFailuresUsed < uf.times)) {
+        db.updateFailuresUsed += 1;
+        if (uf.mode === 'throw') throw new Error(`DB 연결 끊김 (${table})`);
+        if (uf.mode === 'error') {
+          return { error: { message: uf.message ?? `DB 쓰기 실패 (${table})`, code: uf.code ?? 'XX000' } };
+        }
+        if (uf.mode === 'null-data') return { error: null, data: null };
+        if (uf.mode === 'undefined-data') return { error: null, data: undefined };
+        if (uf.mode === 'wrong-id') return { error: null, data: [{ id: 'not-the-target-row' }] };
+        if (uf.mode === 'two-rows') return { error: null, data: [{ id: 'row-1' }, { id: 'row-2' }] };
+        // zero-rows: **오류가 없는데 아무 줄도 안 바뀐다.**
+        // 기록도 남기지 않는다 — 이것이 가장 조용한 실패다.
+        return { error: null, data: [], count: 0 };
+      }
       const where: Record<string, any> = {};
       for (const f of filters) where[f.col] = f.vals.length === 1 ? f.vals[0] : f.vals;
-      for (const r of apply()) Object.assign(r, pending.patch);
+      const affected = apply();
+      for (const r of affected) Object.assign(r, pending.patch);
       db.writes.push({ table, kind: 'update', patch: { ...pending.patch }, where });
-      return { error: null };
+      // Supabase/PostgREST returns updated rows only when .select('id') is requested.
+      return updateReturning != null
+        ? { error: null, data: affected.map((r) => ({ id: r.id })) }
+        : { error: null };
     };
 
     const builder: any = {
-      select(_cols?: string) {
+      select(_cols?: string, opts?: { count?: string; head?: boolean }) {
+        if (opts?.count != null || opts?.head === true) headCount = true;
         if (pending?.kind === 'insert') return builder;
+        if (pending?.kind === 'update') updateReturning = _cols ?? '*';
         if (db.opts.failSelectsOn === table) {
           builder.__selectFails = true;
         }
@@ -227,6 +293,8 @@ export class FakeDb {
       },
       eq(col: string, val: any) { filters.push({ col, vals: [val] }); return builder; },
       in(col: string, vals: any[]) { filters.push({ col, vals: [...vals] }); return builder; },
+      gte(col: string, val: any) { ranges.push({ col, op: 'gte', val }); return builder; },
+      lte(col: string, val: any) { ranges.push({ col, op: 'lte', val }); return builder; },
       order() { return builder; },
       limit() { return builder; },
       insert(row: any) { pending = { kind: 'insert', patch: row }; return builder; },
@@ -255,8 +323,16 @@ export class FakeDb {
         // await로 바로 끝나는 체인 (update().eq() · select().in() 등)
         const run = async () => {
           if (pending?.kind === 'update') return flushUpdate();
-          if (builder.__selectFails) return { data: null, error: { message: '조회 실패' } };
-          return { data: apply().map((r) => ({ ...r })), error: null };
+          if (builder.__selectFails) {
+            // **개수 질의도 실패는 실패다.** 0건으로 돌려주면 호출부의
+            // fail-closed 분기가 시험에서 영영 안 돈다.
+            return headCount
+              ? { count: null, data: null, error: { message: '조회 실패' } }
+              : { data: null, error: { message: '조회 실패' } };
+          }
+          const rows = apply();
+          if (headCount) return { count: rows.length, data: null, error: null };
+          return { data: rows.map((r) => ({ ...r })), error: null };
         };
         return run().then(resolve, reject);
       },

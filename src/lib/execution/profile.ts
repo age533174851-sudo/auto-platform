@@ -387,22 +387,31 @@ export function exact100xIdentity(
  * 화면 문구도 넣지 않는다 — `simSeed`를 바꿨다고 실행 계약 버전을 올려야
  * 한다면 그 버전은 실행을 가리키는 것이 아니게 된다.
  */
-export function executionContractFingerprint(): string {
-  // 칸 이름도 지문에 넣는다. 값만 넣으면 계약 칸의 **이름을 바꾸는 변경**이
+export function executionContractRows(): Array<[string, string]> {
+  // 칸 이름도 한 줄이다. 값만 넣으면 계약 칸의 **이름을 바꾸는 변경**이
   // (예: takeProfitPct → tpPct) 같은 지문으로 남는다 — 실제로는 다른 칸을
   // 투영하는 다른 계약이다.
-  const rows: any[] = [['#fields', CONTRACT_FIELDS.join(',')]];
+  const rows: Array<[string, string]> = [['#fields', CONTRACT_FIELDS.join(',')]];
   for (const pid of Object.keys(PROFILES).sort()) {
     for (const sid of Object.keys(PRESET_TABLE).sort()) {
       const r = resolveExecutionProfile(pid, sid, EXECUTION_CONTRACT_VERSION);
-      if (!r.ok || r.kind !== 'contract') {
-        rows.push([pid, sid, 'UNRESOLVED']);
-        continue;
-      }
-      rows.push([pid, sid, CONTRACT_FIELDS.map(f => (r.contract as any)[f])]);
+      // **조합 하나가 줄 하나다.** 줄 단위로 봐야 "기존 조합이 바뀐 것"과
+      // "새 조합이 생긴 것"을 가를 수 있다. 둘을 한 문자열로 이어 붙이면
+      // 프로필을 하나 더하는 것이 모든 예약의 의미가 바뀐 것과 같은 값이
+      // 되고, 그 값은 **운영 중인 예약 전부를 VERSION_MISMATCH로 만든다.**
+      const key = `${pid}|${sid}`;
+      rows.push([key, JSON.stringify(
+        !r.ok || r.kind !== 'contract'
+          ? 'UNRESOLVED'
+          : CONTRACT_FIELDS.map(f => (r.contract as any)[f]))]);
     }
   }
-  return JSON.stringify(rows);
+  return rows;
+}
+
+/** 줄 전체를 이어 붙인 값. 같으면 계약이 그대로다 */
+export function executionContractFingerprint(): string {
+  return JSON.stringify(executionContractRows());
 }
 
 /**
