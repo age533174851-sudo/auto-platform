@@ -223,8 +223,22 @@ export async function runOrderPathIntegrationTests() {
   }
 
   // ══════════ ⑦ 거래소 체결 성공 + DB 기록 실패 ══════════
+  //
+  // **전송 뒤** 기록이 실패하는 경우다. 이 시나리오가 묻는 것은 그대로다 —
+  // 이미 나간 주문을 다시 보내지 않고, 그 줄이 대조 대상으로 남는가.
+  //
+  // 픽스처가 `failUpdatesOn`(모든 update 실패)에서 **전송 뒤 쓰기만**
+  // 실패로 바뀐 이유: 이제 `SENT` 기록이 실패하면 주문을 **보내지 않는다**
+  // (전송 전 fail-closed). 모든 쓰기를 실패시키면 이 시험은 "전송 0건"에
+  // 걸려 의도한 자리를 더 이상 보지 못한다. 전송 전 실패는
+  // `orderPersistenceIntegration.test.ts`가 따로 본다.
   {
-    const db = new FakeDb({ failUpdatesOn: 'live_orders' });
+    const db = new FakeDb({
+      updateFailure: {
+        table: 'live_orders', mode: 'error',
+        onlyWhen: (p) => p.status === 'FILLED' || p.status === 'ACKED',
+      },
+    });
     const venue = baseVenue()
       .on(BN_ORDER, { status: 400, json: { code: -2013, msg: 'Order does not exist.' } }, 'GET')
       .on(BN_ORDER, { json: bnOrder({ status: 'FILLED', executedQty: '0.010', avgPrice: '95000' }) }, 'POST');
