@@ -151,7 +151,7 @@ export async function getPositionModeGateFutures(
  * ⚠ PR #361이 같은 모양의 `gateDecimal`을 원장 쪽에 추가한다. 두 PR이
  *   각자 main에서 갈라져 나왔기 때문이다 — 병합할 때 하나로 합치면 된다.
  */
-function gateNum(value: unknown): number | null {
+export function gateNum(value: unknown): number | null {
   if (typeof value !== 'string' && typeof value !== 'number') return null;
   const raw = String(value).trim();
   if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(raw)) return null;
