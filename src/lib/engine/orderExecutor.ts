@@ -1837,11 +1837,56 @@ async function attachStopIfMissing(
       const stopSpec = gp.gateStopSpec(posSide, stop, null, spec);
       if (!stopSpec.ok) return `손절 복구 실패 — ${stopSpec.reason}`;
 
+      // #491: 장부가 비어 있다는 사실은 거래소에 손절이 없다는 증거가 아니다.
+      // #364의 페이지네이션/비배열 fail-closed 정본을 그대로 사용한다.
+      const warn = async (reason: string): Promise<string> => {
+        const message = `⚠ 손절 복구 미확인 — ${reason}`;
+        const { error } = await sb.from('live_orders').update({
+          needs_attention: true, error_message: message,
+        }).eq('id', o.id);
+        return error ? `${message} · 경고 장부 기록도 실패 (${error.message})` : message;
+      };
+      const rows = await gf.getPriceOrdersGateFutures(
+        creds.apiKey, creds.apiSecret, contract, creds.testnet);
+      if (rows === null) return warn('Gate 조건부 주문 목록 조회 실패/불완전 — 재전송 금지');
+
+      const { venueIdOf } = await import('@/lib/exchanges/losslessJson');
+      const matching: Array<{ id: string; price: number }> = [];
+      for (const row of rows) {
+        const rowContract = String(row?.initial?.contract ?? row?.contract ?? '').toUpperCase();
+        if (rowContract && rowContract !== contract) continue;
+        const cls = gp.gateProtectiveKind(row);
+        if (cls.closes && cls.closes !== posSide) continue;
+        if (cls.kind === 'NOT_PROTECTIVE' || cls.kind === 'TAKE_PROFIT') continue;
+        if (cls.kind === 'UNKNOWN') {
+          return warn(`Gate 같은 계약 조건부 주문 분류 불명 (${cls.reason}) — 재전송 금지`);
+        }
+        if (cls.kind !== 'STOP') continue;
+        const price = Number(row?.trigger?.price);
+        const id = venueIdOf(row?.id);
+        if (!id || !Number.isFinite(price) || Math.abs(price - Number(stopSpec.triggerPrice)) > 1e-8) {
+          return warn('Gate 기존 STOP 주문 ID/트리거 가격 미확인 또는 불일치 — 재전송 금지');
+        }
+        matching.push({ id, price });
+      }
+      if (matching.length > 1) {
+        return warn('Gate 같은 포지션의 STOP 복수 발견 — 자동 선택/재전송 금지');
+      }
+      if (matching.length === 1) {
+        const { error } = await sb.from('live_orders')
+          .update({ sl_order_id: matching[0].id }).eq('id', o.id);
+        if (error) return warn(`Gate 기존 STOP(${matching[0].id}) 장부 연결 실패: ${error.message}`);
+        return `손절 복구 확인 — 기존 Gate STOP(${matching[0].id}) 연결`;
+      }
+
+      // 끝까지 읽은 목록에서만 STOP 부재가 증명된다. 이때에만 1건 보낸다.
       const sl = await gf.placeStopGateFutures(creds.apiKey, creds.apiSecret, {
         contract, spec: stopSpec, clientOrderId: `${o.client_order_id}R`,
       }, creds.testnet);
-      if (!sl.success) return `손절 복구 실패 — ${sl.message}`;
-      await updateOrderRow(sb, o.id, { sl_order_id: sl.orderId ?? null });
+      if (!sl.success || !sl.orderId) return warn(`Gate 손절 전송 결과 미확인: ${sl.message}`);
+      const { error } = await sb.from('live_orders')
+        .update({ sl_order_id: sl.orderId }).eq('id', o.id);
+      if (error) return warn(`Gate STOP(${sl.orderId}) 전송 후 장부 기록 실패: ${error.message}`);
       return `손절 복구 완료 (${stopSpec.triggerPrice})`;
     }
 
@@ -2169,7 +2214,10 @@ export async function reconcilePendingOrders(
           // 존재를 다시 확인한다.
           if (gDecision.status !== 'FAILED') {
             const rep = await attachStopIfMissing(sb, creds, o);
-            if (rep) out.details.push(`${o.symbol} ${rep}`);
+            if (rep) {
+              out.details.push(`${o.symbol} ${rep}`);
+              if (rep.startsWith('⚠')) out.needsAttention++;
+            }
           }
         } else if (gDecision) {
           // 거래소에 아직 열려 있다. 끝났다고 적지 않고 다음 대조에 넘긴다.
@@ -2189,7 +2237,10 @@ export async function reconcilePendingOrders(
           // 부분 체결이면 포지션이 생긴 것이다. 포지션 존재 확인은
           // attachStopIfMissing이 직접 한다.
           const rep = await attachStopIfMissing(sb, creds, o);
-          if (rep) out.details.push(`${o.symbol} ${rep}`);
+          if (rep) {
+              out.details.push(`${o.symbol} ${rep}`);
+              if (rep.startsWith('⚠')) out.needsAttention++;
+            }
         } else {
           const escalate = verdict.action === 'ESCALATE' || shouldEscalate(attempts + 1);
           await updateOrderRow(sb, o.id, {
