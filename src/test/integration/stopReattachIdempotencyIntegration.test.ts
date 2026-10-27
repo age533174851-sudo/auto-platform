@@ -191,4 +191,31 @@ export async function runStopReattachIdempotencyTests() {
         '내 손절이 아닌 주문을 보호로 읽고 걸지 않았다 — 포지션이 무방비로 남는다');
     });
   }
+  // ══════════ ⑥ 기존 STOP의 주문 ID를 못 읽으면 성공으로 기록하지 않는다 ══════════
+  //
+  // 조회에서 STOP 자체는 발견했지만 주문 번호가 없으면, 취소·관리 가능한
+  // 보호주문으로 장부에 연결할 수 없다. 이때 새 주문을 보내면 중복이고,
+  // 경고 없이 종료하면 다음 대조에서 추적할 근거가 사라진다.
+  for (const [shape, orderId] of [['missing', null], ['blank', '']] as const) {
+    const db = new FakeDb().seed('live_orders', [pendingRow()]);
+    const venue = baseVenue([existingStop({ orderId })]);
+    const r = await scenario(venue, () => reconcile(db));
+
+    test(`★★ 기존 STOP 주문 ID ${shape}: 중복 손절 POST 0건`, () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(stopSends(venue).length, 0, 'ID를 못 읽었다고 손절을 한 번 더 걸면 안 된다');
+    });
+    test(`★★ 기존 STOP 주문 ID ${shape}: 확인 불가 경고와 attention`, () => {
+      const row = db.row('live_orders', { id: 'ord-1' });
+      eq(row?.needs_attention, true, '주문 번호를 못 읽었는데 성공으로 보고했다');
+      assert((r as any).details?.some((d: string) =>
+        /손절/.test(d) && /번호|ID|미확인/.test(d)),
+      `주문 번호 미확인 사유가 없다: ${JSON.stringify((r as any).details)}`);
+    });
+    test(`기존 STOP 주문 ID ${shape}: 장부에 가짜 번호를 적지 않는다`, () => {
+      const row = db.row('live_orders', { id: 'ord-1' });
+      assert(!row?.sl_order_id, '유효하지 않은 ID를 장부에 연결했다');
+    });
+  }
+
 }
