@@ -161,6 +161,7 @@ import {
   runPrecisionMatrixTests,
 } from './src/test/integration/orderPathIntegration.test';
 import { runOrderPersistenceTests } from './src/test/integration/orderPersistenceIntegration.test';
+import { runStopReattachIdempotencyTests } from './src/test/integration/stopReattachIdempotencyIntegration.test';
 import { runSmokeStartRouteTests } from './src/test/integration/smokeStartRouteIntegration.test';
 import { runHoldExtensionIntegrationTests } from './src/test/integration/holdExtensionIntegration.test';
 import { runFailureRecoveryTests } from './src/lib/engine/failureRecovery.test';
@@ -410,6 +411,7 @@ runMigrationStatusTests(); runWalletTruthTests(); runSmokePlanTests(); runSmokeR
   //   하나도 없다"로 보였다. 그래서 전부 끝난 뒤에 돌린다.
   await runOrderPathIntegrationTests();
   await runOrderPersistenceTests();
+  await runStopReattachIdempotencyTests();
   await runReconcileIntegrationTests();
   await runSpotIntegrationTests();
   await runCloseIntegrationTests();
