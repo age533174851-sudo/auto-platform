@@ -72,13 +72,19 @@ export function runStopVerifyTests() {
     eq(verifyStopAttached([stop({ reduceOnly: false, closePosition: true })], WANT).status, 'attached');
   });
 
-  test('★★ 위험한 STOP 뒤의 정상 STOP까지 검사한다', () => {
-    const r = verifyStopAttached([
-      stop({ orderId: 88, reduceOnly: false, closePosition: false }),
-      stop({ orderId: 89, reduceOnly: true, closePosition: false }),
-    ], WANT);
-    eq(r.status, 'attached');
-    eq(r.orderId, '89', '앞의 위험한 STOP을 보호 주문으로 채택하면 안 된다');
+  test('★★ 위험한 STOP과 정상 STOP이 함께 있어도 보호 완료로 보고하지 않는다', () => {
+    // 정상 STOP이 하나 있어도 일반 STOP이 나중에 발동해 반대 포지션을 열 수 있다.
+    // 앞/뒤 순서 모두 같은 안전 판정이어야 한다.
+    for (const orders of [
+      [stop({ orderId: 88, reduceOnly: false, closePosition: false }),
+       stop({ orderId: 89, reduceOnly: true, closePosition: false })],
+      [stop({ orderId: 89, reduceOnly: true, closePosition: false }),
+       stop({ orderId: 88, reduceOnly: false, closePosition: false })],
+    ]) {
+      const r = verifyStopAttached(orders, WANT);
+      eq(r.status, 'unknown', '비보호 STOP이 함께 있는데 정상 손절이라고 말하면 안 된다');
+      eq(r.orderId, null, '어느 주문 ID도 안전한 보호로 연결하지 않는다');
+    }
   });
 
   test('다른 심볼의 위험한 STOP은 내 주문 판정을 막지 않는다', () => {
