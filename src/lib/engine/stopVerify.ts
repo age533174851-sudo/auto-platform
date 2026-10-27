@@ -108,6 +108,11 @@ export function verifyStopAttached(
 
   const tol = Math.abs(wantPx) * (Math.max(0, tolPct) / 100);
 
+  // 같은 발동가의 STOP이 여러 건이면 목록 순서에 안전을 맡기지 않는다.
+  // 정상 STOP이 하나 있더라도 비보호 STOP이 함께 있으면 역방향 노출 위험이
+  // 남는다. 이때 'attached'도 'missing'도 아닌 확인 불가로 멈춘다.
+  let protectedMatch: StopCheck | null = null;
+  let unprotectedMatch = false;
   for (const o of orders) {
     if (!o) continue;
     if (sym && String(o.symbol || '').toUpperCase() !== sym) continue;
@@ -119,13 +124,25 @@ export function verifyStopAttached(
     if (px == null) continue;
     if (Math.abs(px - wantPx) > tol) continue;
 
-    return {
+    // 일반 STOP은 반대 포지션을 열 수도 있다. 필드가 누락된 경우도
+    // 보호된 주문이라고 추측하지 않는다. Binance 목록 정본은 두 필드를
+    // boolean으로 반환한다. 'missing'이면 중복 전송될 수 있으므로 unknown.
+    if (o.reduceOnly !== true && o.closePosition !== true) {
+      unprotectedMatch = true;
+      continue;
+    }
+    protectedMatch = {
       status: 'attached',
       reason: `손절이 거래소에 걸려 있습니다 (발동가 ${px})`,
       orderId: o.orderId == null ? null : String(o.orderId),
       foundStopPrice: px,
     };
   }
+  if (unprotectedMatch) {
+    return none('unknown',
+      '기존 STOP 주문의 reduceOnly/closePosition 보호 기능이 확인되지 않았습니다 — 중복 주문·자동 청산 없이 확인이 필요합니다');
+  }
+  if (protectedMatch) return protectedMatch;
 
   // 목록은 읽었는데 없다. 이건 확인된 '없음'이다.
   return none('missing',
