@@ -274,6 +274,35 @@ export async function runOrderPathIntegrationTests() {
       eq((r as any).status, 'ACKED');
     });
   }
+
+  // ══════════ P1: 청산 후 포지션 수량 파싱 실패 ≠ 전량 종료 ══════════
+  {
+    const db = new FakeDb();
+    const venue = baseVenue()
+      .on(BN_ORDER, { status: 400, json: { code: -2013, msg: 'Order does not exist.' } }, 'GET')
+      .on(BN_ORDER, { json: bnOrder({ status: 'FILLED', executedQty: '0.010', avgPrice: '95000' }) }, 'POST');
+    // 정상적인 v2 응답처럼 HTTP 200을 주되, positionAmt만 깨진 경우.
+    // baseVenue()가 이미 BN_POS 규칙을 갖고 있어 앞에 삽입한다.
+    (venue as any).rules.unshift({
+      label: 'bad-position-amount',
+      match: (c: any) => c.method === 'GET' && c.path === BN_POS,
+      reply: { json: [{ symbol: 'BTCUSDT', positionAmt: 'NaN', entryPrice: '95000',
+        leverage: '100', marginType: 'isolated', liquidationPrice: '94000' }] },
+    });
+    const result = await scenario(venue, () => exec(db, {
+      clientOrderId: 'COID-CLOSE-UNKNOWN', reduceOnly: true,
+    }));
+
+    test('★ 청산 주문 접수 후 positionAmt가 깨지면 remainingQty=null — 0이 아니다', () => {
+      assert(!(result instanceof Error), String((result as any)?.message));
+      eq(venue.orderSends().length, 1, '청산 주문 전송을 막거나 중복으로 보냈다');
+      eq((result as any).remainingQty, null,
+        '깨진 positionAmt를 0으로 읽어 청산 완료를 거짓 확정했다');
+      assert(String((result as any).message).includes('종료를 확인하지 못했습니다'),
+        '확인 불가를 사용자에게 경고하지 않았다');
+    });
+  }
+
 }
 
 // ══════════════════════════════════════════════════════════════════
