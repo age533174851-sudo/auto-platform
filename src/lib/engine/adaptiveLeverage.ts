@@ -77,6 +77,8 @@ export const MAX_VOLATILITY_AGE_MS = 36 * 60 * 60 * 1000;
 export const MAX_BOOK_AGE_MS = 10_000;
 /** 거래소 배율 상한(구간표). 자주 바뀌지 않지만 무한정 믿지는 않는다 */
 export const MAX_EXCHANGE_CAP_AGE_MS = 24 * 60 * 60 * 1000;
+/** 제공자·로컬 시계 사이의 작은 오차만 허용한다. 미래로 밀린 자료는 신선하지 않다. */
+export const MAX_FUTURE_SKEW_MS = 2_000;
 
 // ── 예산 상수 ──
 //
@@ -99,9 +101,11 @@ export type AdaptiveLeverageCode =
   /** 변동성을 못 읽었다 — 낮은 배율로 대신하지 않는다 */
   | 'VOLATILITY_UNKNOWN'
   | 'VOLATILITY_STALE'
+  | 'VOLATILITY_FUTURE'
   /** 호가 깊이를 못 읽었다 */
   | 'LIQUIDITY_UNKNOWN'
   | 'LIQUIDITY_STALE'
+  | 'LIQUIDITY_FUTURE'
   /** 스프레드를 못 읽었거나 너무 넓다 */
   | 'SPREAD_UNKNOWN'
   | 'SPREAD_TOO_WIDE'
@@ -112,6 +116,7 @@ export type AdaptiveLeverageCode =
   /** 거래소 상한을 못 읽었다 */
   | 'EXCHANGE_CAP_UNKNOWN'
   | 'EXCHANGE_CAP_STALE'
+  | 'EXCHANGE_CAP_FUTURE'
   /** 배정 증거금을 못 읽었다 — 유동성·비용 상한을 만들 수 없다 */
   | 'MARGIN_UNKNOWN'
   /** 계산된 상한이 최소 배율보다 낮다 — 올려서 맞추지 않는다 */
@@ -242,6 +247,9 @@ export function planAdaptiveLeverage(i: AdaptiveLeverageInput): AdaptiveLeverage
   if (volAt == null) {
     return block('VOLATILITY_UNKNOWN', '변동성이 언제 기준인지 모릅니다');
   }
+  if (volAt - now > MAX_FUTURE_SKEW_MS) {
+    return block('VOLATILITY_FUTURE', '변동성 기준 시각이 허용 시계 오차보다 미래입니다 — 진입하지 않습니다');
+  }
   if (now - volAt > MAX_VOLATILITY_AGE_MS) {
     return block('VOLATILITY_STALE',
       `변동성이 ${Math.round((now - volAt) / 3_600_000)}시간 전 값입니다`
@@ -254,6 +262,9 @@ export function planAdaptiveLeverage(i: AdaptiveLeverageInput): AdaptiveLeverage
   const bookAt = num(i.bookAsOfMs);
   if (bookAt == null) {
     return block('LIQUIDITY_UNKNOWN', '호가를 언제 읽었는지 모릅니다');
+  }
+  if (bookAt - now > MAX_FUTURE_SKEW_MS) {
+    return block('LIQUIDITY_FUTURE', '호가 시각이 허용 시계 오차보다 미래입니다 — 진입하지 않습니다');
   }
   if (now - bookAt > MAX_BOOK_AGE_MS) {
     return block('LIQUIDITY_STALE',
@@ -284,6 +295,9 @@ export function planAdaptiveLeverage(i: AdaptiveLeverageInput): AdaptiveLeverage
   const capAt = num(i.exchangeMaxAsOfMs);
   if (capAt == null) {
     return block('EXCHANGE_CAP_UNKNOWN', '거래소 상한을 언제 읽었는지 모릅니다');
+  }
+  if (capAt - now > MAX_FUTURE_SKEW_MS) {
+    return block('EXCHANGE_CAP_FUTURE', '거래소 상한 시각이 허용 시계 오차보다 미래입니다 — 진입하지 않습니다');
   }
   if (now - capAt > MAX_EXCHANGE_CAP_AGE_MS) {
     return block('EXCHANGE_CAP_STALE', '거래소 배율 상한이 하루 넘게 지난 값입니다');
