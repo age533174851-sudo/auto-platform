@@ -160,6 +160,7 @@ import {
   runPrecisionIntegrationTests,
   runPrecisionMatrixTests,
 } from './src/test/integration/orderPathIntegration.test';
+import { runVenueHarnessOrderSendsTests } from './src/test/integration/venueHarnessOrderSends.test';
 import { runSmokeStartRouteTests } from './src/test/integration/smokeStartRouteIntegration.test';
 import { runHoldExtensionIntegrationTests } from './src/test/integration/holdExtensionIntegration.test';
 import { runFailureRecoveryTests } from './src/lib/engine/failureRecovery.test';
@@ -407,6 +408,7 @@ runMigrationStatusTests(); runWalletTruthTests(); runSmokePlanTests(); runSmokeR
   //   아직 대기 중이면 그쪽 스텁이 이 스텁을 덮어써서, 실행기가 **남의
   //   가짜 거래소**에 묻게 된다. 실제로 그 일이 났고 "거래소 호출이
   //   하나도 없다"로 보였다. 그래서 전부 끝난 뒤에 돌린다.
+  runVenueHarnessOrderSendsTests();
   await runOrderPathIntegrationTests();
   await runReconcileIntegrationTests();
   await runSpotIntegrationTests();
