@@ -254,6 +254,40 @@ export function runStopVerifyTests() {
     eq(findAnyStop(orders, { symbol: 'BTCUSDT', positionSide: 'LONG' }).status, 'attached');
   });
 
+  // ── 비보호 STOP의 화면 false GREEN — #495는 복구 판정만 막았다 ──
+  test('★★ 카드: reduceOnly=false/closePosition=false STOP은 보호 완료가 아니다', () => {
+    const r = findAnyStop([stop({ orderId: 301, reduceOnly: false, closePosition: false })], LONG);
+    eq(r.status, 'unknown', '일반 STOP은 반대 포지션을 열 수도 있다');
+    eq(r.orderId, null, '비보호 STOP 번호를 정상 보호주문으로 노출하지 않는다');
+    eq(shouldUnwind(r), false, '확인 불가만으로 자동 청산하지 않는다');
+  });
+
+  test('★★ 카드: 보호 플래그 누락도 정상 손절로 표시하지 않는다', () => {
+    const r = findAnyStop([stop({ reduceOnly: null, closePosition: null })], LONG);
+    eq(r.status, 'unknown', '보호 여부를 모르면 화면도 확인 불가여야 한다');
+    eq(r.orderId, null);
+  });
+
+  test('★★ 카드: 정상·비보호 STOP 혼재는 목록 순서와 무관하게 unknown', () => {
+    const safe = stop({ orderId: 302, reduceOnly: true, closePosition: false });
+    const unsafe = stop({ orderId: 303, reduceOnly: false, closePosition: false });
+    for (const orders of [[safe, unsafe], [unsafe, safe]]) {
+      const r = findAnyStop(orders, LONG);
+      eq(r.status, 'unknown', '앞의 정상 STOP만 보고 위험한 STOP을 놓치면 안 된다');
+      eq(r.orderId, null, '위험한 목록에서 임의 ID를 보호 완료로 표시하지 않는다');
+    }
+  });
+
+  test('카드: 다른 종목·반대 청산 방향의 비보호 STOP은 정상 STOP을 막지 않는다', () => {
+    const r = findAnyStop([
+      stop({ symbol: 'ETHUSDT', reduceOnly: false, closePosition: false }),
+      stop({ side: 'BUY', reduceOnly: false, closePosition: false }),
+      stop({ orderId: 304, reduceOnly: false, closePosition: true }),
+    ], LONG);
+    eq(r.status, 'attached');
+    eq(r.orderId, '304');
+  });
+
   console.log('[손절 조회 — 있음과 쓸모 있음은 다르다]');
 
   test('롱의 손절이 현재가 위면 통과시키되 적어 둔다', () => {
