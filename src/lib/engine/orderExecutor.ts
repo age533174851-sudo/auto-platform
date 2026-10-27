@@ -1824,10 +1824,24 @@ async function attachStopIfMissing(
       const contract = gp.toGateContract(symbol);
       if (!contract) return null;
 
+      // 포지션 조회 실패는 '포지션 0'이 아니다. 조회가 불확실한 동안
+      // 추가 주문을 보내지 않고 장부/집계에 사람 확인이 필요함을 남긴다.
+      const warn = async (reason: string): Promise<string> => {
+        const message = `⚠ 손절 복구 미확인 — ${reason}`;
+        const { error } = await sb.from('live_orders').update({
+          needs_attention: true, error_message: message,
+        }).eq('id', o.id);
+        return error ? `${message} · 경고 장부 기록도 실패 (${error.message})` : message;
+      };
+
       // **포지션이 실제로 있는지 먼저 본다.**
       const pos = await gf.getPositionGateFutures(creds.apiKey, creds.apiSecret, contract, creds.testnet);
-      const size = Number(pos?.size ?? 0);
-      if (!size) return null;                     // 포지션 없음 — 걸 이유가 없다
+      if (pos == null) return warn('Gate 포지션 조회 미확인 — 재부착 금지');
+      // getPositionsGateFutures/closePositionGateFutures와 동일한 수치 정본.
+      // null·빈 문자열·공백·NaN·Infinity는 정상 0과 다르다.
+      const size = gf.gateNum(pos.size);
+      if (size == null) return warn('Gate 포지션 수량 미확인 — 재부착 금지');
+      if (size === 0) return null;               // 조회로 확인한 실제 무포지션
       // 방향이 어긋나면 걸지 않는다. 반대 방향 손절은 즉시 발동한다.
       if ((size > 0 ? 'LONG' : 'SHORT') !== posSide) {
         return `손절 복구 안 함 — 기록은 ${posSide}인데 거래소 포지션은 ${size > 0 ? 'LONG' : 'SHORT'}입니다`;
@@ -1839,13 +1853,7 @@ async function attachStopIfMissing(
 
       // #491: 장부가 비어 있다는 사실은 거래소에 손절이 없다는 증거가 아니다.
       // #364의 페이지네이션/비배열 fail-closed 정본을 그대로 사용한다.
-      const warn = async (reason: string): Promise<string> => {
-        const message = `⚠ 손절 복구 미확인 — ${reason}`;
-        const { error } = await sb.from('live_orders').update({
-          needs_attention: true, error_message: message,
-        }).eq('id', o.id);
-        return error ? `${message} · 경고 장부 기록도 실패 (${error.message})` : message;
-      };
+
       const rows = await gf.getPriceOrdersGateFutures(
         creds.apiKey, creds.apiSecret, contract, creds.testnet);
       if (rows === null) return warn('Gate 조건부 주문 목록 조회 실패/불완전 — 재전송 금지');
