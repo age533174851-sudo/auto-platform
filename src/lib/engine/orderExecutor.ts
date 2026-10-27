@@ -1861,7 +1861,14 @@ async function attachStopIfMissing(
       const { venueIdOf } = await import('@/lib/exchanges/losslessJson');
       const matching: Array<{ id: string; price: number }> = [];
       for (const row of rows) {
-        const rowContract = String(row?.initial?.contract ?? row?.contract ?? '').toUpperCase();
+        // Gate 응답에서 계약 필드가 둘 다 없거나 서로 모순되면
+        // 방향·가격이 같아도 이 포지션의 보호주문이라고 증명할 수 없다.
+        const initialContract = String(row?.initial?.contract ?? '').trim().toUpperCase();
+        const outerContract = String(row?.contract ?? '').trim().toUpperCase();
+        if (initialContract && outerContract && initialContract !== outerContract) {
+          return warn('Gate 조건부 주문 계약 불일치 — ID 연결/재전송 금지');
+        }
+        const rowContract = initialContract || outerContract;
         if (rowContract && rowContract !== contract) continue;
         const cls = gp.gateProtectiveKind(row);
         if (cls.closes && cls.closes !== posSide) continue;
@@ -1870,6 +1877,7 @@ async function attachStopIfMissing(
           return warn(`Gate 같은 계약 조건부 주문 분류 불명 (${cls.reason}) — 재전송 금지`);
         }
         if (cls.kind !== 'STOP') continue;
+        if (!rowContract) return warn('Gate 기존 STOP 계약 미확인 — ID 연결/재전송 금지');
         const price = Number(row?.trigger?.price);
         const id = venueIdOf(row?.id);
         if (!id || !Number.isFinite(price) || Math.abs(price - Number(stopSpec.triggerPrice)) > 1e-8) {
