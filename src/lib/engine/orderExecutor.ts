@@ -21,7 +21,7 @@ import { ownedOrderIds, cancelLedger, rollbackNote, type CancelAttempt } from '.
 import { futuresApplyLeverage, unknownResultVerdict } from '../exchanges/futuresExec';
 import { executionIdentityComplete } from '../execution/profile';
 import type { StopPolicy, TakeProfitPolicy } from '../strategies/profiles';
-import { stopReattachVerdict } from './stopReattach';
+import { stopReattachVerdict, stopPositionQty } from './stopReattach';
 import { fillFactsOf } from './orderFillFacts';
 import { RECONCILE_QUERY_STATUSES } from './pendingReconcile';
 import { quantizeOrder } from '../exchanges/quantize';
@@ -1921,8 +1921,11 @@ async function attachStopIfMissing(
 
       // **포지션이 실제로 있는지 먼저 본다.**
       const pos = await gf.getPositionGateFutures(creds.apiKey, creds.apiSecret, contract, creds.testnet);
-      const size = Number(pos?.size ?? 0);
-      if (!size) return null;                     // 포지션 없음 — 걸 이유가 없다
+      const size = stopPositionQty(pos?.size);
+      if (size === null) {
+        return '⚠ 손절 복구 미확인 — Gate 포지션 조회 실패 또는 수량 증거가 유효하지 않습니다';
+      }
+      if (size === 0) return null;                // 정상 응답으로 확인된 무포지션
       // 방향이 어긋나면 걸지 않는다. 반대 방향 손절은 즉시 발동한다.
       if ((size > 0 ? 'LONG' : 'SHORT') !== posSide) {
         return `손절 복구 안 함 — 기록은 ${posSide}인데 거래소 포지션은 ${size > 0 ? 'LONG' : 'SHORT'}입니다`;
@@ -1942,8 +1945,11 @@ async function attachStopIfMissing(
 
     const bf = await import('@/lib/exchanges/binanceFutures');
     const rr = await bf.getSymbolPositionRiskEx(creds.apiKey, creds.apiSecret, symbol, creds.testnet);
-    const amt = Number(rr.risk?.positionAmt ?? 0);
-    if (!amt) return null;
+    const amt = stopPositionQty(rr?.risk?.positionAmt);
+    if (amt === null) {
+      return `⚠ 손절 복구 미확인 — Binance 포지션 조회 실패 또는 수량 증거가 유효하지 않습니다${rr?.error ? ` (${rr.error})` : ''}`;
+    }
+    if (amt === 0) return null;
     if ((amt > 0 ? 'LONG' : 'SHORT') !== posSide) {
       return `손절 복구 안 함 — 기록은 ${posSide}인데 거래소 포지션은 ${amt > 0 ? 'LONG' : 'SHORT'}입니다`;
     }
@@ -1966,7 +1972,7 @@ async function attachStopIfMissing(
     await updateOrderRow(sb, o.id, { sl_order_id: String(sl.orderId) });
     return `손절 복구 완료 (${stop})`;
   } catch (e: any) {
-    return `손절 복구 실패 — ${e?.message || e}`;
+    return `⚠ 손절 복구 미확인 — ${e?.message || e}`;
   }
 }
 
@@ -1997,6 +2003,21 @@ export async function reconcilePendingOrders(
   }
 ): Promise<ReconcileResult> {
   const out: ReconcileResult = { checked: 0, resolved: 0, stillUnknown: 0, stillOpen: 0, needsAttention: 0, details: [] };
+
+  // 체결 대조 완료와 손절 보호 확인은 별개의 사실이다. 복구 조회가
+  // 미확인이면 주문을 새로 보내지 않고 경고를 DB와 반환 결과에 남긴다.
+  const reportStopReattach = async (o: any, rep: string | null) => {
+    if (!rep) return;
+    out.details.push(`${o.symbol} ${rep}`);
+    if (!rep.startsWith('⚠ 손절 복구 미확인')) return;
+    out.needsAttention++;
+    const saved = await updateOrderRow(sb, o.id, {
+      needs_attention: true, error_message: rep,
+    });
+    if (!saved.ok) {
+      out.details.push(`${o.symbol} ⚠ 손절 복구 경고를 DB에 기록하지 못했습니다 (${saved.reason})`);
+    }
+  };
 
   // **ACKED가 빠져 있었다.**
   //
@@ -2138,7 +2159,7 @@ export async function reconcilePendingOrders(
           // 보호가 없는 상태로 남는다. 여기서 한 번 더 건다.
           if (st === 'FILLED' || st === 'RECONCILED') {
             const rep = await attachStopIfMissing(sb, creds, o);
-            if (rep) out.details.push(`${o.symbol} ${rep}`);
+            await reportStopReattach(o, rep);
           }
         } else if (decision) {
           // ── 상태는 알았지만 아직 안 끝났다 ──
@@ -2171,7 +2192,7 @@ export async function reconcilePendingOrders(
           // 이유로 보호를 미루면 보호 없는 포지션이 남는다.
           if (reFacts && reFacts.filledQty != null && reFacts.filledQty > 0) {
             const rep = await attachStopIfMissing(sb, creds, o);
-            if (rep) out.details.push(`${o.symbol} ${rep}`);
+            await reportStopReattach(o, rep);
           }
         } else {
           // 확정 못 함. 시도 횟수가 넘었거나 모순이면 사람에게 넘긴다.
@@ -2264,7 +2285,7 @@ export async function reconcilePendingOrders(
           // 존재를 다시 확인한다.
           if (gDecision.status !== 'FAILED') {
             const rep = await attachStopIfMissing(sb, creds, o);
-            if (rep) out.details.push(`${o.symbol} ${rep}`);
+            await reportStopReattach(o, rep);
           }
         } else if (gDecision) {
           // 거래소에 아직 열려 있다. 끝났다고 적지 않고 다음 대조에 넘긴다.
@@ -2284,7 +2305,7 @@ export async function reconcilePendingOrders(
           // 부분 체결이면 포지션이 생긴 것이다. 포지션 존재 확인은
           // attachStopIfMissing이 직접 한다.
           const rep = await attachStopIfMissing(sb, creds, o);
-          if (rep) out.details.push(`${o.symbol} ${rep}`);
+          await reportStopReattach(o, rep);
         } else {
           const escalate = verdict.action === 'ESCALATE' || shouldEscalate(attempts + 1);
           await updateOrderRow(sb, o.id, {
