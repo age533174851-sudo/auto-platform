@@ -25,7 +25,7 @@ function venueWith(priceReply: { status?: number; json?: any; throws?: string })
   return new FakeVenue()
     .on('/api/v4/futures/usdt/positions/' + CONTRACT, { json: position }, 'GET')
     .on('/api/v4/futures/usdt/positions', { json: [position] }, 'GET')
-    .on('/api/v4/futures/usdt/orders', { json: (i: number) => i === 0 ? [] : [{
+    .on('/api/v4/futures/usdt/orders', { json: (i: number) => i % 2 === 0 ? [] : [{
       id: '7001', contract: CONTRACT, status: 'finished', finish_as: 'filled',
       text: 't-COID-R1', size: 1, left: 0, fill_price: '60000',
     }] }, 'GET')
@@ -98,6 +98,52 @@ export async function runGateStopReattachTests() {
     test('★★ 모호한 같은 계약 조건부 주문이 있으면 추가 POST 0건', () => {
       eq(v.countOf(PRICE, 'POST'), 0);
       assert(result.details.some(x => x.includes('미확인')), '모호한 주문이 조용히 무시됐다');
+    });
+  }
+
+  {
+    // 첫 100건은 다른 계약, 101번째에 진짜 STOP이 있다.
+    let v: FakeVenue;
+    const other = Array.from({ length: 100 }, (_, i) => stop({
+      id: String(1000 + i), contract: 'ETH_USDT',
+      initial: { contract: 'ETH_USDT', size: 0, auto_size: 'close_long', reduce_only: true },
+    }));
+    v = venueWith({ json: () => {
+      const last = v.calls[v.calls.length - 1];
+      return Number(last?.params?.offset ?? 0) === 0 ? other : [stop()];
+    } });
+    const { db } = await run(v);
+    test('★★ 101번째 Gate STOP도 조회하고 재전송하지 않는다', () => {
+      eq(v.countOf(PRICE, 'GET'), 2, '첫 100건만 읽었다');
+      eq(v.countOf(PRICE, 'POST'), 0);
+      eq(db.row('live_orders', { id: 'ord-1' })?.sl_order_id, '9901');
+    });
+  }
+
+  {
+    // POST가 이미 성공했지만 DB 쓰기 실패. 다음 회차는 거래소 STOP을 발견한다.
+    const db = new FakeDb({ failUpdatesOn: 'live_orders' }).seed('live_orders', [row()]);
+    const v = venueWith({ json: (i: number) => i === 0 ? [] : [stop({ id: '8801' })] });
+    const first = await run(v, db);
+    const second = await run(v, db);
+    test('★★ Gate 손절 전송 후 DB 기록 실패는 경고로 남는다', () => {
+      eq(v.countOf(PRICE, 'POST'), 1, '첫 회차에서 정확히 1건이어야 한다');
+      assert(first.result.details.some(x => x.includes('장부 기록 실패')), 'DB 기록 실패가 조용히 사라졌다');
+      assert(first.result.needsAttention >= 1, 'DB 실패 attention 누락');
+    });
+    test('★★ DB 기록 실패 후 재시작해도 같은 Gate STOP을 또 보내지 않는다', () => {
+      eq(v.countOf(PRICE, 'POST'), 1, '두 번째 대조가 중복 POST했다');
+      assert(second.result.needsAttention >= 1, '기존 STOP 연결 실패 attention 누락');
+    });
+  }
+
+  {
+    const db = new FakeDb().seed('live_orders', [{ ...row(), stop_policy: 'NO_FIXED_SL' }]);
+    const v = venueWith({ json: [] });
+    await run(v, db);
+    test('★★ NO_FIXED_SL은 Gate 손절 조회·재부착 자체를 하지 않는다', () => {
+      eq(v.countOf(PRICE, 'GET'), 0);
+      eq(v.countOf(PRICE, 'POST'), 0);
     });
   }
 }
