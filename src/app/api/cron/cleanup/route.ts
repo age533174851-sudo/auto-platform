@@ -131,7 +131,15 @@ export async function GET(req: NextRequest) {
     results.push(base);
   }
 
-  const incompleteDelete = results.some(r => r.deleted === null);
+  // HTTP 200/ok:true는 표별 삭제 성공의 증거여야 한다.
+  // 조회 미확인·안전 관문 거부·일부만 삭제됨도 "완료"로 표시하면
+  // #466의 크론 판정기가 없는 다른 호출자는 실패를 성공으로 오인한다.
+  // 미리보기의 "실제 삭제하지 않음"과 정상 0건은 실패가 아니다.
+  const incompleteDelete = results.some(r =>
+    r.eligible === null || r.total === null || r.deleted === null ||
+    (apply && r.eligible > 0 &&
+      (r.skipped !== '' || r.deleted !== r.eligible))
+  );
   const totalDeleted = incompleteDelete
     ? null : results.reduce((s, r) => s + (r.deleted ?? 0), 0);
 
