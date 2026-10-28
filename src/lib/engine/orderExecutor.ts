@@ -2041,12 +2041,66 @@ async function attachStopIfMissing(
       { orderType: 'MARKET', reduceOnly: true });
     const fallbackQuantity = quantized.ok && quantized.quantity != null && quantized.quantity > 0
       ? quantized.quantity : Math.abs(amt);
+    // ── 보내기 전에 **거래소에 이미 걸려 있는지** 본다 ──
+    //
+    // 장부의 `sl_order_id`가 비어 있는 이유는 둘이다 — 정말 안 걸었거나,
+    // **걸었는데 적지 못했거나.** 장부만 보면 구분할 수 없고, 구분하지
+    // 않으면 다음 회차가 같은 포지션에 보호주문을 하나 더 건다. 둘 중
+    // 하나가 발동해 포지션이 닫히면 **나머지 하나가 남는다.**
+    //
+    // 판정은 진입 경로가 쓰는 `verifyStopAttached` 그대로다 — 같은
+    // 질문에 두 번째 답을 만들지 않는다. 못 읽었으면(`unknown`)
+    // **보내지 않는다**: 이미 걸려 있었다면 그 전송이 곧 중복이다.
+    let openList: any[] | null = null;
+    try {
+      const open: any = await bf.getFuturesOpenOrders(
+        creds.apiKey, creds.apiSecret, creds.testnet, symbol);
+      // **`success:false`일 때의 `orders: []`를 믿지 않는다.**
+      //
+      // `getFuturesOpenOrders`는 조회에 실패해도 `orders: []`를 함께
+      // 돌려준다. 그 빈 배열을 그대로 쓰면 "주문이 하나도 없다"가 되어
+      // `verifyStopAttached`가 `missing`을 내고, 이미 손절이 걸려 있어도
+      // 하나 더 걸게 된다. 못 읽은 것은 **없는 것이 아니다.**
+      openList = open?.success === false ? null
+        : Array.isArray(open) ? open
+          : Array.isArray(open?.orders) ? open.orders : null;
+    } catch { openList = null; }
+    const { verifyStopAttached } = await import('./stopVerify');
+    const already = verifyStopAttached(openList,
+      { symbol, side: closeSide, stopPrice: trigger.price });
+    if (already.status === 'unknown') {
+      return warn(`기존 STOP의 보호 상태를 확정하지 못했습니다 (${already.reason})`);
+    }
+    if (already.status === 'attached') {
+      // STOP은 찾았어도 번호를 못 읽으면 취소·추적 가능한 보호주문으로
+      // 장부에 연결할 수 없다. 재전송은 중복 위험이므로 하지 않는다.
+      // 'attached' 자체만으로 복구 성공이라고 적지 말고 attention을 남긴다.
+      const existingId = already.orderId?.trim() ?? '';
+      if (!/^[1-9][0-9]*$/.test(existingId)) {
+        return warn('기존 Binance STOP은 확인했지만 유효한 주문 번호(ID)를 읽지 못해 장부에 연결하지 않았습니다');
+      }
+      // 거래소에는 있는데 장부에 없던 것이다. 지금 이어 둔다 —
+      // 안 이으면 다음 회차가 같은 질문을 또 하고, 그때 조회가 실패하면
+      // 그대로 중복이 된다.
+      const linked = await updateOrderRow(sb, o.id,
+        { sl_order_id: existingId });
+      if (!linked.ok) {
+        return warn(`이미 걸린 손절(${already.orderId})의 장부 기록(연결)에 실패했습니다: ${linked.reason}`);
+      }
+      return note(`손절 복구 안 함 — 거래소에 이미 걸려 있습니다 (${already.orderId})`);
+    }
+
     const sl: any = await bf.placeFuturesTPSL(creds.apiKey, creds.apiSecret, {
       symbol, side: closeSide, stopPrice: trigger.price, type: 'STOP_MARKET',
       fallbackQuantity,
     }, creds.testnet);
     if (!sl?.success) return note(`손절 복구 실패 — ${sl?.message || '원인 불명'}`);
-    await updateOrderRow(sb, o.id, { sl_order_id: String(sl.orderId) });
+    // **쓰기 결과를 본다.** 못 적으면 다음 회차가 같은 줄을 보고 또 건다.
+    // 주문은 이미 나갔으므로 되돌리지 않고 **크게 남긴다.**
+    const wrote = await updateOrderRow(sb, o.id, { sl_order_id: String(sl.orderId) });
+    if (!wrote.ok) {
+      return warn(`손절(${sl.orderId})은 걸렸으나 장부 기록에 실패했습니다: ${wrote.reason}`);
+    }
     return note(`손절 복구 완료 (${stop})`);
   } catch (e: any) {
     return creds.exchange === 'gate'

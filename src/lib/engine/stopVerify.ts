@@ -108,6 +108,11 @@ export function verifyStopAttached(
 
   const tol = Math.abs(wantPx) * (Math.max(0, tolPct) / 100);
 
+  // 같은 발동가의 STOP이 여러 건이면 목록 순서에 안전을 맡기지 않는다.
+  // 정상 STOP이 하나 있더라도 비보호 STOP이 함께 있으면 역방향 노출 위험이
+  // 남는다. 이때 'attached'도 'missing'도 아닌 확인 불가로 멈춘다.
+  let protectedMatch: StopCheck | null = null;
+  let unprotectedMatch = false;
   for (const o of orders) {
     if (!o) continue;
     if (sym && String(o.symbol || '').toUpperCase() !== sym) continue;
@@ -119,13 +124,25 @@ export function verifyStopAttached(
     if (px == null) continue;
     if (Math.abs(px - wantPx) > tol) continue;
 
-    return {
+    // 일반 STOP은 반대 포지션을 열 수도 있다. 필드가 누락된 경우도
+    // 보호된 주문이라고 추측하지 않는다. Binance 목록 정본은 두 필드를
+    // boolean으로 반환한다. 'missing'이면 중복 전송될 수 있으므로 unknown.
+    if (o.reduceOnly !== true && o.closePosition !== true) {
+      unprotectedMatch = true;
+      continue;
+    }
+    protectedMatch = {
       status: 'attached',
       reason: `손절이 거래소에 걸려 있습니다 (발동가 ${px})`,
       orderId: o.orderId == null ? null : String(o.orderId),
       foundStopPrice: px,
     };
   }
+  if (unprotectedMatch) {
+    return none('unknown',
+      '기존 STOP 주문의 reduceOnly/closePosition 보호 기능이 확인되지 않았습니다 — 중복 주문·자동 청산 없이 확인이 필요합니다');
+  }
+  if (protectedMatch) return protectedMatch;
 
   // 목록은 읽었는데 없다. 이건 확인된 '없음'이다.
   return none('missing',
@@ -182,11 +199,22 @@ export function findAnyStop(
   // 포지션을 닫는 방향. 이걸 안 보면 반대 방향 진입 예약이 손절로 잡힌다.
   const closeSide = want?.positionSide === 'LONG' ? 'SELL' : 'BUY';
 
+  // #495의 verifyStopAttached와 같은 보호 증거를 요구한다.
+  // 첫 정상 STOP만 보고 반환하면 뒤에 있는 비보호 STOP을 숨기게 된다.
+  let protectedMatch: StopCheck | null = null;
+  let unprotectedMatch = false;
   for (const o of orders) {
     if (!o) continue;
     if (sym && String(o.symbol || '').toUpperCase() !== sym) continue;
     if (String(o.side || '').toUpperCase() !== closeSide) continue;
     if (!isStopType(o.type)) continue;
+
+    // STOP이라는 주문 종류만으로는 포지션을 닫는다는 보증이 없다.
+    // 보호 플래그 누락도 정상으로 추측하지 않는다.
+    if (o.reduceOnly !== true && o.closePosition !== true) {
+      unprotectedMatch = true;
+      continue;
+    }
 
     const px = num(o.stopPrice) ?? num(o.triggerPrice) ?? num(o.price);
 
@@ -205,17 +233,24 @@ export function findAnyStop(
       }
     }
 
-    return {
-      status: 'attached',
-      reason: px == null
-        ? '손절 주문이 걸려 있습니다 (발동가를 읽지 못했습니다)'
-        : `손절 ${px}에 걸려 있습니다`,
-      orderId: o.orderId == null ? null : String(o.orderId),
-      foundStopPrice: px,
-      warning,
-    };
+    if (!protectedMatch) {
+      protectedMatch = {
+        status: 'attached',
+        reason: px == null
+          ? '손절 주문이 걸려 있습니다 (발동가를 읽지 못했습니다)'
+          : `손절 ${px}에 걸려 있습니다`,
+        orderId: o.orderId == null ? null : String(o.orderId),
+        foundStopPrice: px,
+        warning,
+      };
+    }
   }
 
+  if (unprotectedMatch) {
+    return none('unknown',
+      '기존 STOP의 reduceOnly/closePosition 보호 기능을 확인하지 못했습니다 — 정상 손절로 표시하지 않습니다');
+  }
+  if (protectedMatch) return protectedMatch;
   return none('missing', '이 포지션에 걸린 손절 주문이 없습니다');
 }
 
