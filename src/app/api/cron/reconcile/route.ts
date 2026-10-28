@@ -47,9 +47,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { timingSafeEqual } from 'crypto';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
+import { scanPendingRows } from '@/lib/engine/pendingReconcileScan';
 import {
-  pendingTargets, skipReason, summarizeOutcomes,
-  RECONCILE_TARGET_STATUSES, DEFAULT_GRACE_MS, DEFAULT_MAX_CONNECTIONS,
+  pendingTargets, skipReason, summarizeOutcomes, connectionLookupOutcome,
+  RECONCILE_TARGET_STATUSES, parseReconcileGraceMs, DEFAULT_MAX_CONNECTIONS,
   type ReconcileOutcome,
 } from '@/lib/engine/pendingReconcile';
 
@@ -76,7 +77,6 @@ export async function GET(req: NextRequest) {
   }
   const given = req.headers.get('authorization')?.replace(/^Bearer\s+/i, '')
     || req.headers.get('x-admin-secret')
-    || req.nextUrl.searchParams.get('secret')
     || '';
   if (!safeEqual(given, secret)) {
     return NextResponse.json({ ok: false, error: 'unauthorized' },
@@ -90,27 +90,37 @@ export async function GET(req: NextRequest) {
   }
 
   const now = Date.now();
-  const graceMs = (() => {
-    const n = Number(req.nextUrl.searchParams.get('graceSec'));
-    return Number.isFinite(n) && n >= 0 ? n * 1000 : DEFAULT_GRACE_MS;
-  })();
+  const graceMs = parseReconcileGraceMs(req.nextUrl.searchParams.get('graceSec'));
   const dryRun = req.nextUrl.searchParams.get('dry') === '1';
 
   try {
-    const { data: rows, error } = await sb.from('live_orders')
-      .select('id, user_id, connection_id, status, created_at, symbol')
-      // ACKED가 빠져 있어서 ACKED만 남은 연결은 방문되지 않았다.
-      .in('status', [...RECONCILE_TARGET_STATUSES])
-      .order('created_at', { ascending: true })
-      .limit(500);
+    const scan = await scanPendingRows(async (from, to, cursor) => {
+      let query = sb.from('live_orders')
+        .select('id, user_id, connection_id, status, created_at, symbol')
+        .in('status', [...RECONCILE_TARGET_STATUSES]);
+      if (cursor) {
+        // OFFSET은 앞쪽 행이 삭제되면 한 행을 조용히 건너뛴다.
+        // (created_at, id) 복합 커서로 마지막으로 본 행 뒤에서 계속한다.
+        query = query.or(`created_at.gt.${cursor.createdAt},and(created_at.eq.${cursor.createdAt},id.gt.${cursor.id})`);
+      }
+      const { data, error } = await query
+        .order('created_at', { ascending: true })
+        .order('id', { ascending: true })
+        .limit(to - from + 1);
+      return { data, error };
+    });
 
-    if (error) {
-      // **조회 실패를 '없음'으로 적지 않는다.** 0건과 못 셌음은 다르다.
+    // 중간 페이지 실패/응답 손상/상한 초과에서 '전체 대조 성공'을
+    // 내보내지 않는다. 부분 목록으로 주문을 대조하지도 않는다.
+    if (!scan.complete) {
       return NextResponse.json({
-        ok: false, error: 'query_failed', message: error.message,
-        summary: '미확정 주문을 세지 못했습니다 — 대조가 돌지 않았습니다',
-      }, { status: 500, headers: { 'Cache-Control': 'no-store' } });
+        ok: false, incomplete: true, error: scan.error,
+        pendingRowsScanned: scan.rows.length, pagesRead: scan.pages,
+        summary: '미확정 주문 대상 조회가 끝나지 않아 거래소 대조를 시작하지 않았습니다',
+      }, { status: scan.error === 'scan_limit' ? 503 : 500,
+           headers: { 'Cache-Control': 'no-store' } });
     }
+    const rows = scan.rows;
 
     const targets = pendingTargets(rows, { now, graceMs, maxConnections: DEFAULT_MAX_CONNECTIONS });
     if (targets.length === 0) {
@@ -132,10 +142,23 @@ export async function GET(req: NextRequest) {
 
     const outcomes: ReconcileOutcome[] = [];
     for (const t of targets) {
-      const { data: conn } = await sb.from('exchange_connections')
-        .select('id, user_id, exchange_id, api_key, api_secret_enc, has_withdrawal, is_testnet')
-        .eq('id', t.connectionId)
-        .maybeSingle();
+      // Supabase는 조회 실패를 throw 대신 { data: null, error }로 돌려준다.
+      // 실패를 '연결 없음'으로 건너뛰면 UNKNOWN/ACKED 대조가 거짓 성공이 된다.
+      let conn: any;
+      try {
+        const lookup = await sb.from('exchange_connections')
+          .select('id, user_id, exchange_id, api_key, api_secret_enc, has_withdrawal, is_testnet')
+          .eq('id', t.connectionId)
+          .maybeSingle();
+        const failed = connectionLookupOutcome(t.connectionId, lookup);
+        if (failed) { outcomes.push(failed); continue; }
+        conn = lookup.data;
+      } catch {
+        // 한 연결의 DB 오류가 다른 연결의 대조까지 막지 않도록 격리한다.
+        const failed = connectionLookupOutcome(t.connectionId, null);
+        if (failed) outcomes.push(failed);
+        continue;
+      }
 
       const skip = skipReason(conn);
       if (skip) { outcomes.push({ connectionId: t.connectionId, ok: true, skipped: skip }); continue; }

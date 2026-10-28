@@ -77,6 +77,18 @@ export const RECONCILE_TARGET_STATUSES = [
  */
 export const DEFAULT_GRACE_MS = 90_000;
 
+/**
+ * /api/cron/reconcile의 유예 파라미터.
+ * URLSearchParams.get()의 null을 Number(null)=0으로 바꾸면,
+ * 미지정 요청에서 진행 중인 주문을 90초 앞당겨 대조하게 된다.
+ */
+export function parseReconcileGraceMs(raw: string | null): number {
+  if (raw === null || raw.trim() === '') return DEFAULT_GRACE_MS;
+  const seconds = Number(raw);
+  const ms = seconds * 1000;
+  return Number.isFinite(ms) && ms >= 0 ? ms : DEFAULT_GRACE_MS;
+}
+
 /** 한 번에 몇 개 연결까지. 서버리스 실행 시간 안에 끝나야 한다 */
 export const DEFAULT_MAX_CONNECTIONS = 20;
 
@@ -189,6 +201,19 @@ export interface ReconcileOutcome {
   resolved?: number;
   checked?: number;
   error?: string;
+}
+
+/**
+ * 연결 조회의 성공 여부. 데이터 없음(null)은 실제 연결 부재일 수 있지만,
+ * Supabase error나 비정상 응답은 '연결 없음'으로 바꿔서는 안 된다.
+ * 오류 세부/자격증명은 HTTP 응답에 노출하지 않는다.
+ */
+export function connectionLookupOutcome(
+  connectionId: string,
+  lookup: { data?: ConnectionLike | null; error?: unknown } | null | undefined,
+): ReconcileOutcome | null {
+  if (lookup && lookup.data !== undefined && lookup.error == null) return null;
+  return { connectionId, ok: false, error: 'connection_lookup_failed' };
 }
 
 /** 여러 연결의 결과를 사람이 읽을 한 줄로 */
