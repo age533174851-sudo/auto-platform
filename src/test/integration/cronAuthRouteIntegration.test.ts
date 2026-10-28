@@ -321,6 +321,7 @@ export async function runCronAuthRouteTests(): Promise<void> {
     }));
     const calls: string[] = [];
     let deleted = 0;
+    let dropped = false;
     const fakeDb = {
       from(table: string) {
         const pk = table === 'news_articles' ? 'hash' : table === 'ai_usage' ? 'id' : 'cache_key';
@@ -370,9 +371,9 @@ export async function runCronAuthRouteTests(): Promise<void> {
               select(_column: string) {
                 calls.push('bounded_delete');
                 const ids = new Set(selectedIds || []);
-                if (dropOne && ids.size > 0) {
+                if (dropOne && !dropped && ids.size > 0) {
                   const first = ids.values().next().value;
-                  if (first) ids.delete(first); // DELETE 전에 1행이 다른 워커에 의해 삭제됨
+                  if (first) { ids.delete(first); dropped = true; } // DELETE 전에 1행이 다른 워커에 의해 삭제됨
                 }
                 const removed = source.filter(r => ids.has(String((r as any)[pk])));
                 for (const r of removed) {
