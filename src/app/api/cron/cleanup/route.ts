@@ -140,7 +140,11 @@ export async function GET(req: NextRequest) {
     (apply && r.eligible > 0 &&
       (r.skipped !== '' || r.deleted !== r.eligible))
   );
-  const totalDeleted = incompleteDelete
+  // HTTP 실패 여부와 삭제 건수의 관측 가능성은 별개다.
+  // 4,999건 대상 중 4,998건만 삭제된 경우는 실패(207)이지만,
+  // 실제 삭제 4,998건은 확인된 수치이므로 숨기지 않는다.
+  // 반면 삭제 결과 자체가 null인 경우에는 총량을 추정하지 않는다.
+  const totalDeleted = results.some(r => r.deleted === null)
     ? null : results.reduce((s, r) => s + (r.deleted ?? 0), 0);
 
   return NextResponse.json({
