@@ -420,6 +420,9 @@ runMigrationStatusTests(); runWalletTruthTests(); runSmokePlanTests(); runSmokeR
   await runPrecisionIntegrationTests();
   await runPrecisionMatrixTests();
   await runSmokeStartRouteTests();
+  // smokeStartRoute registers asynchronous tests; finish them before swapping
+  // the Supabase module cache and fetch boundary for the cron auth cases.
+  await flushAsync();
   await runReconcileCronAuthIntegrationTests();
   await runHoldExtensionIntegrationTests();
   await runKillCloseIntegrationTests();
