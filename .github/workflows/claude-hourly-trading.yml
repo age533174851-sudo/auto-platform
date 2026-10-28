@@ -90,44 +90,47 @@ jobs:
       - name: main 보호 규칙 확인
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ACK: ${{ inputs.ack_unprotected }}
         run: |
-          set -uo pipefail
-          body=$(mktemp)
-          code=$(curl -sS -o "$body" -w '%{http_code}' \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/branches/main/protection" || echo 000)
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, sys, urllib.request, urllib.error
 
-          state=UNKNOWN
-          if [ "$code" = "200" ]; then
-            if python3 -c "import json,sys; d=json.load(open('$body')); sys.exit(0 if d.get('required_pull_request_reviews') else 1)"; then
-              state=PROTECTED
-            else
-              state=NO_PR_REQUIRED
-            fi
-          elif [ "$code" = "404" ]; then
-            state=UNPROTECTED
-          fi
-          echo "main 보호: ${state} (HTTP ${code})"
+          repo = os.environ['GITHUB_REPOSITORY']
+          api = os.environ['GITHUB_API_URL']
+          token = os.environ['GH_TOKEN']
+          headers = {
+              'Authorization': 'Bearer ' + token,
+              'Accept': 'application/vnd.github+json',
+              'X-GitHub-Api-Version': '2022-11-28',
+          }
 
-          if [ "$state" = "PROTECTED" ]; then
-            echo "보호 규칙 확인 — 진행합니다"
-            exit 0
-          fi
+          def get(path):
+              req = urllib.request.Request(api + '/repos/' + repo + path, headers=headers)
+              try:
+                  with urllib.request.urlopen(req, timeout=15) as res:
+                      return res.status, json.load(res)
+              except urllib.error.HTTPError as err:
+                  return err.code, None
 
-          if [ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ]; then
-            echo "::error::main 보호 규칙을 확인하지 못했습니다 (${state}) — 예약 실행을 멈춥니다."
-            echo "::error::Settings → Branches → main 에 'Require a pull request before merging'을 켜세요."
-            echo "::error::토큰에 권한이 없어 읽지 못한 것이라면, 수동 실행에서 ack_unprotected=true로 한 번 확인하세요."
-            exit 1
-          fi
+          status, protection = get('/branches/main/protection')
+          if status == 200 and isinstance(protection, dict) and protection.get('required_pull_request_reviews') is not None:
+              print('main: classic branch protection requires pull requests')
+              sys.exit(0)
 
-          if [ "${ACK:-false}" != "true" ]; then
-            echo "::error::보호 규칙이 ${state} 입니다 — 수동 실행은 ack_unprotected=true 로만 지나갑니다"
-            exit 1
-          fi
-          echo "::warning::보호 규칙이 ${state} 인데 사람이 인정하고 진행합니다"
+          # GitHub Rulesets are independent from classic branch protection.
+          # Inspect effective rules for main, not all rulesets (which may target other branches).
+          status, rules = get('/rules/branches/main')
+          if status != 200 or not isinstance(rules, list):
+              print('::error::Cannot verify effective main branch rules (HTTP %s); fail closed' % status)
+              sys.exit(1)
+
+          if any(isinstance(rule, dict) and rule.get('type') == 'pull_request' for rule in rules):
+              print('main: effective ruleset requires pull requests')
+              sys.exit(0)
+
+          print('::error::No effective pull-request requirement for main; fail closed')
+          sys.exit(1)
+          PY
 
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
