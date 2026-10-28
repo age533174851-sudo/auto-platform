@@ -220,21 +220,51 @@ export async function runCronAuthRouteTests(): Promise<void> {
     const prevServer = require.cache[serverPath];
     let deleteCalls = 0;
     const fakeDb = {
-      from(_table: string) {
+      from(table: string) {
+        const pk = table === 'news_articles' ? 'hash' : 'id';
         return {
-          select() {
+          select(_column: string, opts?: { head?: boolean }) {
+            if (opts?.head) {
+              let eligibleQuery = false;
+              return {
+                lt() { eligibleQuery = true; return this; },
+                then(resolve: any, reject: any) {
+                  return Promise.resolve({
+                    error: null, count: eligibleQuery ? eligibleCount : totalCount,
+                  }).then(resolve, reject);
+                },
+              };
+            }
+            let cursor: string | null = null;
+            let take = 200;
             return {
-              lt: async () => ({ error: null, count: eligibleCount }),
+              lt() { return this; },
+              order() { return this; },
+              gt(_col: string, id: string) { cursor = id; return this; },
+              limit(n: number) { take = n; return this; },
               then(resolve: any, reject: any) {
-                return Promise.resolve({ error: null, count: totalCount }).then(resolve, reject);
+                const count = typeof eligibleCount === 'number' ? eligibleCount : 0;
+                const ids = Array.from({ length: Math.max(0, count) },
+                  (_, i) => String(i).padStart(6, '0'));
+                return Promise.resolve({
+                  error: null, data: ids.filter(id => cursor == null || id > cursor)
+                    .slice(0, take).map(id => ({ [pk]: id })),
+                }).then(resolve, reject);
               },
             };
           },
           delete() {
-            return { lt: async () => {
-              deleteCalls++;
-              return { error: null };
-            } };
+            let ids: string[] = [];
+            return {
+              in(_col: string, selected: string[]) { ids = selected; return this; },
+              lt() { return this; },
+              select() {
+                deleteCalls++;
+                return Promise.resolve({
+                  error: null, data: ids.map(id => ({ [pk]: id })),
+                });
+              },
+            };
           },
         };
       },
