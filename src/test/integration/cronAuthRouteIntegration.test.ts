@@ -308,5 +308,122 @@ export async function runCronAuthRouteTests(): Promise<void> {
     }
   });
 
+
+  // ══════════ ⑥ cleanup: COUNT와 DELETE 사이 동시 삽입 (Issue #471) ══════════
+  // 실제 GET + 가짜 Supabase. COUNT 시점 4,999건, DELETE 시점 5,099건.
+  // DELETE는 반드시 사전에 선택한 PK의 유한 집합으로만 수행해야 한다.
+  async function cleanupConcurrentInsertCase(dropOne = false) {
+    const prevSecret = process.env.CRON_SECRET;
+    const resolved = require.resolve(ROUTES[0].path);
+    const prevServer = require.cache[serverPath];
+    const rows = Array.from({ length: 5_099 }, (_, i) => ({
+      hash: `h${String(i).padStart(6, '0')}`, published_at: '2020-01-01T00:00:00Z',
+    }));
+    const calls: string[] = [];
+    let deleted = 0;
+    const fakeDb = {
+      from(table: string) {
+        const pk = table === 'news_articles' ? 'hash' : table === 'ai_usage' ? 'id' : 'cache_key';
+        const source = table === 'news_articles' ? rows : [];
+        return {
+          select(column: string, opts?: { head?: boolean }) {
+            if (opts?.head) {
+              let eligibleQuery = false;
+              return {
+                lt() { eligibleQuery = true; return this; },
+                then(resolve: any, reject: any) {
+                  return Promise.resolve({
+                    error: null,
+                    count: table === 'news_articles' ? (eligibleQuery ? 4_999 : 10_000)
+                      : (eligibleQuery ? 0 : 10),
+                  }).then(resolve, reject);
+                },
+              };
+            }
+            let cursor: string | null = null;
+            let limit = 500;
+            return {
+              lt() { return this; },
+              order() { return this; },
+              gt(_column: string, value: string) { cursor = value; return this; },
+              limit(n: number) { limit = n; return this; },
+              then(resolve: any, reject: any) {
+                calls.push('select_ids');
+                const selected = source.filter(r => cursor == null || String((r as any)[pk]) > cursor!)
+                  .slice(0, limit).map(r => ({ [pk]: (r as any)[pk] }));
+                return Promise.resolve({ error: null, data: selected }).then(resolve, reject);
+              },
+            };
+          },
+          delete() {
+            let selectedIds: string[] | null = null;
+            return {
+              in(_column: string, ids: string[]) { selectedIds = ids; return this; },
+              lt() {
+                if (selectedIds) return this;
+                // 이전 코드의 무제한 .delete().lt() 경로.
+                calls.push('unbounded_delete');
+                deleted += source.length;
+                source.splice(0, source.length);
+                return Promise.resolve({ error: null });
+              },
+              select(_column: string) {
+                calls.push('bounded_delete');
+                const ids = new Set(selectedIds || []);
+                if (dropOne && ids.size > 0) {
+                  const first = ids.values().next().value;
+                  if (first) ids.delete(first); // DELETE 전에 1행이 다른 워커에 의해 삭제됨
+                }
+                const removed = source.filter(r => ids.has(String((r as any)[pk])));
+                for (const r of removed) {
+                  const at = source.indexOf(r);
+                  if (at >= 0) source.splice(at, 1);
+                }
+                deleted += removed.length;
+                return Promise.resolve({
+                  error: null, data: removed.map(r => ({ [pk]: (r as any)[pk] })),
+                });
+              },
+            };
+          },
+        };
+      },
+    };
+    process.env.CRON_SECRET = SECRET;
+    require.cache[serverPath] = {
+      id: serverPath, filename: serverPath, loaded: true,
+      exports: { getSupabaseAdmin: () => fakeDb },
+    } as any;
+    delete require.cache[resolved];
+    try {
+      const mod = require(resolved);
+      const request = req(`Bearer ${SECRET}`);
+      request.nextUrl.searchParams.set('apply', '1');
+      const res = await mod.GET(request);
+      return { status: res.status, json: await res.json(), deleted, calls };
+    } finally {
+      delete require.cache[resolved];
+      if (prevServer) require.cache[serverPath] = prevServer;
+      else delete require.cache[serverPath];
+      if (prevSecret === undefined) delete process.env.CRON_SECRET;
+      else process.env.CRON_SECRET = prevSecret;
+    }
+  }
+
+  const race = await cleanupConcurrentInsertCase();
+  test('★★ #471 COUNT 4999 뒤 100행 삽입되어도 DELETE 4999 이하 · PK 고정', () => {
+    eq(race.deleted, 4_999, 'COUNT 뒤에 생긴 100행까지 삭제했다');
+    assert(!race.calls.includes('unbounded_delete'), '삭제 대상 ID를 고정하지 않았다');
+    eq(race.json.tables.find((t: any) => t.table === 'news_articles')?.deleted, 4_999);
+    eq(race.json.totalDeleted, 4_999);
+  });
+
+  const raceDrop = await cleanupConcurrentInsertCase(true);
+  test('★★ #471 실제 DELETE 결과가 4998이면 사전 COUNT 4999를 성공 건수로 기록하지 않는다', () => {
+    eq(raceDrop.deleted, 4_998);
+    eq(raceDrop.json.tables.find((t: any) => t.table === 'news_articles')?.deleted, 4_998);
+    eq(raceDrop.json.totalDeleted, 4_998);
+  });
+
   restoreResolve();
 }
