@@ -395,6 +395,7 @@ import { runAdaptiveLeverageOrderPathTests } from './src/test/integration/adapti
 import { runGateCloseTests } from './src/test/integration/gateCloseIntegration.test';
 import { runGateOrderReadTests } from './src/test/integration/gateOrderReadIntegration.test';
 import { runGateStopReattachTests } from './src/test/integration/gateStopReattachIntegration.test';
+import { runGateStopReattachDbAckTests } from './src/test/integration/gateStopReattachDbAckIntegration.test';
 import { runVenueHarnessOrderSendsTests } from './src/test/integration/venueHarnessOrderSends.test';
 import { summary, flushAsync } from './src/test/harness';
 console.log('════════ TRAIGO 코어 유닛 테스트 ════════');
@@ -450,6 +451,7 @@ runSmokePlanTests(); runSmokeRunTests(); runCancelRunTests(); runExitPolicyTests
   await runGateCloseTests();
   await runGateOrderReadTests();
   await runGateStopReattachTests();
+  await runGateStopReattachDbAckTests();
   await runAdaptiveLeverageOrderPathTests();
   await flushAsync();
   const s = summary();
