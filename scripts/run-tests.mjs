@@ -165,6 +165,7 @@ import {
 } from './src/test/integration/orderPathIntegration.test';
 import { runOrderPersistenceTests } from './src/test/integration/orderPersistenceIntegration.test';
 import { runStopReattachIdempotencyTests } from './src/test/integration/stopReattachIdempotencyIntegration.test';
+import { runStopReattachMatrixTests } from './src/test/integration/stopReattachMatrixIntegration.test';
 import { runSmokeStartRouteTests } from './src/test/integration/smokeStartRouteIntegration.test';
 import { runForcedEntryRouteTests } from './src/test/integration/forcedEntryRouteIntegration.test';
 import { runBuySellRoundTripTests } from './src/test/integration/buySellRoundTripIntegration.test';
@@ -433,6 +434,7 @@ runSmokePlanTests(); runSmokeRunTests(); runCancelRunTests(); runExitPolicyTests
   await runOrderPathIntegrationTests();
   await runOrderPersistenceTests();
   await runStopReattachIdempotencyTests();
+  await runStopReattachMatrixTests();
   await runReconcileIntegrationTests();
   await runSpotIntegrationTests();
   await runCloseIntegrationTests();

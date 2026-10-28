@@ -112,6 +112,7 @@ export function verifyStopAttached(
   // 정상 STOP이 하나 있더라도 비보호 STOP이 함께 있으면 역방향 노출 위험이
   // 남는다. 이때 'attached'도 'missing'도 아닌 확인 불가로 멈춘다.
   let protectedMatch: StopCheck | null = null;
+  let protectedCount = 0;
   let unprotectedMatch = false;
   for (const o of orders) {
     if (!o) continue;
@@ -131,6 +132,7 @@ export function verifyStopAttached(
       unprotectedMatch = true;
       continue;
     }
+    protectedCount += 1;
     protectedMatch = {
       status: 'attached',
       reason: `손절이 거래소에 걸려 있습니다 (발동가 ${px})`,
@@ -141,6 +143,14 @@ export function verifyStopAttached(
   if (unprotectedMatch) {
     return none('unknown',
       '기존 STOP 주문의 reduceOnly/closePosition 보호 기능이 확인되지 않았습니다 — 중복 주문·자동 청산 없이 확인이 필요합니다');
+  }
+  // 조건에 맞는 보호 STOP이 둘 이상이면 **하나를 골라 장부에 잇지 않는다.**
+  // 고르는 순간 나머지 한 건은 장부에 없는 보호주문으로 남고, 그건 다음
+  // 주기에 '내 주문이 아닌' 손절로 보여 Cancel All 유혹을 만든다.
+  // Gate 경로가 이미 같은 판단을 한다 — '복수 발견 — 자동 선택/재전송 금지'.
+  if (protectedCount > 1) {
+    return none('unknown',
+      `같은 조건의 보호 STOP이 ${protectedCount}건 있습니다 — 자동 선택·재전송 없이 확인이 필요합니다`);
   }
   if (protectedMatch) return protectedMatch;
 
