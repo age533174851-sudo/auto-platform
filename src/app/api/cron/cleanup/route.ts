@@ -14,11 +14,13 @@
 // 전부 멈추면 정리가 영영 안 되고, 전부 진행하면 잘못된 설정이 그대로
 // 실행된다.
 import { NextRequest, NextResponse } from 'next/server';
+import { cronAuthFromRequest } from '@/lib/cron/cronAuth';
 import { getSupabaseAdmin } from '@/lib/supabase/server';
 import {
   planCleanup, checkDeleteSize, DEFAULT_RULES,
   MIN_RETENTION_DAYS, MAX_DELETE_PER_RUN,
 } from '@/lib/maintenance/retention';
+import { deleteBoundedCleanupRows } from '@/lib/maintenance/boundedDelete';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -31,17 +33,26 @@ interface TableResult {
   eligible: number | null;
   /** 표 전체 개수. 세지 못하면 null */
   total: number | null;
-  deleted: number;
+  /** null: DELETE가 일어났을 수 있지만 반환 건수를 확인하지 못함 */
+  deleted: number | null;
   skipped: string;
   reason: string;
 }
 
 export async function GET(req: NextRequest) {
-  const secret = process.env.CRON_SECRET || '';
-  if (secret) {
-    const given = req.headers.get('authorization')?.replace(/^Bearer\s+/i, '')
-      || req.nextUrl.searchParams.get('secret') || '';
-    if (given !== secret) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
+  // ── 크론 인증 ──
+  //
+  // **판정은 `cronAuthVerdict` 한 곳에 있다.** 예전에는 다섯 경로가
+  // 각자 적고 있었고, 그래서 `if (secret) { … }`라는 같은 실수를
+  // 다섯 벌이 같이 갖고 있었다 — `CRON_SECRET`이 없으면 인증이
+  // 통째로 사라져 아무나 부를 수 있었다.
+  //
+  // **인증 전에는 DB도 외부 API도 건드리지 않는다.** 이 반환이
+  // 함수의 첫 문장이어야 하는 이유다.
+  const auth = cronAuthFromRequest(req);
+  if (!auth.ok) {
+    return NextResponse.json({ ok: false, error: auth.error, message: auth.message },
+      { status: auth.status, headers: { 'Cache-Control': 'no-store' } });
   }
 
   const sb = getSupabaseAdmin();
@@ -73,12 +84,20 @@ export async function GET(req: NextRequest) {
       const q = await ((sb as any).from(item.table) as any)
         .select('*', { count: 'exact', head: true })
         .lt(item.column, item.cutoff);
-      if (!q.error) eligible = Number(q.count) || 0;
-      else base.skipped = `개수 조회 실패: ${q.error.message}`;
+      // Supabase exact count는 number | null이다. null/undefined/NaN을
+      // Number(...) || 0으로 바꾸면 "조회 실패"가 "지울 것 없음"이 된다.
+      if (q.error) base.skipped = `개수 조회 실패: ${q.error.message}`;
+      else if (typeof q.count === 'number' && Number.isSafeInteger(q.count) && q.count >= 0) {
+        eligible = q.count;
+      } else base.skipped = '개수 조회 결과 미확인 — 삭제하지 않습니다';
 
       const t = await ((sb as any).from(item.table) as any)
         .select('*', { count: 'exact', head: true });
-      if (!t.error) total = Number(t.count) || 0;
+      if (t.error) {
+        if (!base.skipped) base.skipped = `전체 개수 조회 실패: ${t.error.message}`;
+      } else if (typeof t.count === 'number' && Number.isSafeInteger(t.count) && t.count >= 0) {
+        total = t.count;
+      } else if (!base.skipped) base.skipped = '전체 개수 조회 결과 미확인 — 삭제하지 않습니다';
     } catch (e: any) {
       base.skipped = `조회 중 오류: ${e?.message || e}`;
     }
@@ -86,9 +105,11 @@ export async function GET(req: NextRequest) {
     base.eligible = eligible;
     base.total = total;
 
-    if (eligible == null) { results.push(base); continue; }
+    // 두 count가 모두 검증되어야 삭제 관문에 진입한다.
+    // total 미확인은 0이 아니다. 0건 eligible이어도 실패 증거를 남긴다.
+    if (eligible == null || total == null) { results.push(base); continue; }
 
-    const size = checkDeleteSize(eligible, total ?? 0);
+    const size = checkDeleteSize(eligible, total);
     if (!size.ok) {
       base.skipped = size.reason;
       results.push(base);
@@ -102,22 +123,32 @@ export async function GET(req: NextRequest) {
       continue;
     }
 
-    try {
-      const { error } = await ((sb as any).from(item.table) as any)
-        .delete()
-        .lt(item.column, item.cutoff);
-      if (error) base.skipped = `삭제 실패: ${error.message}`;
-      else base.deleted = eligible;
-    } catch (e: any) {
-      base.skipped = `삭제 중 오류: ${e?.message || e}`;
-    }
+    // 사전 COUNT는 삭제할 행의 신원을 고정하지 않는다. DELETE 전에
+    // 최대 eligible개의 PK를 선택하고 그 집합만 삭제해야 TOCTOU 상한이 유지된다.
+    const bounded = await deleteBoundedCleanupRows(sb as any, item, eligible, MAX_DELETE_PER_RUN);
+    base.deleted = bounded.deleted;
+    if (bounded.error) base.skipped = bounded.error;
     results.push(base);
   }
 
-  const totalDeleted = results.reduce((s, r) => s + r.deleted, 0);
+  // HTTP 200/ok:true는 표별 삭제 성공의 증거여야 한다.
+  // 조회 미확인·안전 관문 거부·일부만 삭제됨도 "완료"로 표시하면
+  // #466의 크론 판정기가 없는 다른 호출자는 실패를 성공으로 오인한다.
+  // 미리보기의 "실제 삭제하지 않음"과 정상 0건은 실패가 아니다.
+  const incompleteDelete = results.some(r =>
+    r.eligible === null || r.total === null || r.deleted === null ||
+    (apply && r.eligible > 0 &&
+      (r.skipped !== '' || r.deleted !== r.eligible))
+  );
+  // HTTP 실패 여부와 삭제 건수의 관측 가능성은 별개다.
+  // 4,999건 대상 중 4,998건만 삭제된 경우는 실패(207)이지만,
+  // 실제 삭제 4,998건은 확인된 수치이므로 숨기지 않는다.
+  // 반면 삭제 결과 자체가 null인 경우에는 총량을 추정하지 않는다.
+  const totalDeleted = results.some(r => r.deleted === null)
+    ? null : results.reduce((s, r) => s + (r.deleted ?? 0), 0);
 
   return NextResponse.json({
-    ok: true,
+    ok: !incompleteDelete,
     applied: apply,
     totalDeleted,
     tables: results,
@@ -127,5 +158,6 @@ export async function GET(req: NextRequest) {
     note: apply
       ? '삭제는 되돌릴 수 없습니다.'
       : '미리보기입니다 — 아무것도 지우지 않았습니다. 실제 삭제는 apply=1.',
-  }, { headers: { 'Cache-Control': 'no-store' } });
+  }, { status: incompleteDelete ? 207 : 200,
+    headers: { 'Cache-Control': 'no-store' } });
 }
