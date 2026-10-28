@@ -297,6 +297,8 @@ export async function runCronAuthRouteTests(): Promise<void> {
     const got = await cleanupCountCase(count, 10);
     test(`⑤ cleanup eligible count ${label}: 삭제 0 · 미확인으로 보고`, () => {
       eq(got.deleteCalls, 0, '세지 못했는데 삭제했다');
+      eq(got.json.ok, false, 'COUNT 미확인을 cleanup 성공으로 보고했다');
+      eq(got.status, 207, 'COUNT 미확인은 부분 실패로 드러나야 한다');
       for (const table of got.json.tables) {
         eq(table.eligible, null, '미확인 count를 0건으로 바꾸면 안 된다');
         assert(table.skipped.includes('조회'), '미확인인데 지울 것 없음으로 보고했다');
@@ -311,6 +313,8 @@ export async function runCronAuthRouteTests(): Promise<void> {
     const got = await cleanupCountCase(2, count);
     test(`⑤ cleanup total count ${label}: 전체 삭제 방어 우회 금지`, () => {
       eq(got.deleteCalls, 0, '전체 건수를 모른 채 삭제했다');
+      eq(got.json.ok, false, '전체 COUNT 미확인을 cleanup 성공으로 보고했다');
+      eq(got.status, 207);
       for (const table of got.json.tables) {
         eq(table.total, null, '전체 건수 미확인을 0으로 바꾸면 안 된다');
         assert(table.skipped.includes('조회'), '전체 건수 조회 실패를 드러내지 않았다');
@@ -321,16 +325,37 @@ export async function runCronAuthRouteTests(): Promise<void> {
   const empty = await cleanupCountCase(0, 10);
   test('⑤ cleanup 정상 0건: 삭제 0 · 지울 것 없음', () => {
     eq(empty.deleteCalls, 0);
+    eq(empty.json.ok, true, '정상 0건을 실패로 처리했다');
+    eq(empty.status, 200);
     for (const table of empty.json.tables) {
       eq(table.eligible, 0);
       eq(table.skipped, '지울 것 없음');
     }
   });
 
+
+  const safetyStop = await cleanupCountCase(5_001, 10_000);
+  test('★★ cleanup 삭제 상한 거부는 HTTP 200 ok:true가 아니다', () => {
+    eq(safetyStop.deleteCalls, 0);
+    eq(safetyStop.json.ok, false);
+    eq(safetyStop.status, 207);
+    assert(safetyStop.json.tables.some((t: any) => t.skipped.includes('상한')));
+  });
+
+  const fullStop = await cleanupCountCase(10, 10);
+  test('★★ cleanup 전체 삭제 차단은 완료로 보고하지 않는다', () => {
+    eq(fullStop.deleteCalls, 0);
+    eq(fullStop.json.ok, false);
+    eq(fullStop.status, 207);
+    assert(fullStop.json.tables.some((t: any) => t.skipped.includes('전체')));
+  });
+
   const partial = await cleanupCountCase(2, 10);
   test('⑤ cleanup 정상 부분 삭제: 가짜 DB만 호출 · 과잉 차단 없음', () => {
     eq(partial.deleteCalls, 2, 'news_articles/ai_usage 두 표만 처리한다');
     eq(partial.json.totalDeleted, 4);
+    eq(partial.json.ok, true);
+    eq(partial.status, 200);
     for (const table of partial.json.tables) {
       eq(table.eligible, 2);
       eq(table.total, 10);
@@ -454,6 +479,8 @@ export async function runCronAuthRouteTests(): Promise<void> {
     eq(raceDrop.deleted, 4_998);
     eq(raceDrop.json.tables.find((t: any) => t.table === 'news_articles')?.deleted, 4_998);
     eq(raceDrop.json.totalDeleted, 4_998);
+    eq(raceDrop.json.ok, false, '4999 대상 중 4998 삭제를 전체 성공으로 보고했다');
+    eq(raceDrop.status, 207);
   });
 
   restoreResolve();
