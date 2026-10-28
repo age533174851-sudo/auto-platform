@@ -76,3 +76,19 @@ export function stopReattachVerdict(o: {
 
   return { attach: true, code: 'ATTACH', note: '', stopPrice: stop };
 }
+
+
+/**
+ * 손절 복구 전용 포지션 수량 증거.
+ *
+ * 정상 0과 조회 실패/깨진 응답을 섞지 않는다. Number(null), Number('')
+ * 는 0이므로 단순 Number(raw) || 0은 위험하다. 조회 실패 시에는
+ * 포지션이 없다고 결론 내리지 않고, 보호주문도 임의로 만들지 않는다.
+ */
+export function stopPositionQty(raw: unknown): number | null {
+  if (raw == null || typeof raw === 'boolean') return null;
+  if (typeof raw !== 'string' && typeof raw !== 'number') return null;
+  if (typeof raw === 'string' && raw.trim() === '') return null;
+  const qty = Number(raw);
+  return Number.isFinite(qty) ? qty : null;
+}
