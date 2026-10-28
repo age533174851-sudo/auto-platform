@@ -127,9 +127,34 @@ export function runRetentionTests() {
     eq(checkDeleteSize(50, 100).ok, true);
   });
 
-  test('전체 개수를 모르면 개수 상한만 본다', () => {
-    // total=0은 '표가 비었다'일 수도 '못 셌다'일 수도 있다.
-    // 그때 전체 삭제 검사를 걸면 정상 정리까지 막힌다.
-    eq(checkDeleteSize(10, 0).ok, true);
+  test('전체 개수를 모르면 삭제하지 않는다 — 조회 실패를 0으로 바꿔도 fail-closed', () => {
+    // cleanup/route.ts는 total 조회 실패/null을 total ?? 0으로 전달한다.
+    // 실제 표가 10건이면 이 경로에서 전체 삭제가 발생할 수 있었으므로 거절해야 한다.
+    const r = checkDeleteSize(10, 0);
+    eq(r.ok, false);
+    assert(r.reason.includes('전체 개수'), r.reason);
+  });
+
+  test('전체 개수 NaN·Infinity·음수·소수는 삭제하지 않는다', () => {
+    for (const total of [NaN, Infinity, -1, 1.5]) {
+      eq(checkDeleteSize(10, total).ok, false, `전체 개수 ${total}로 삭제를 허용하면 안 된다`);
+    }
+  });
+
+  test('대상 개수가 소수·Infinity이면 삭제하지 않는다', () => {
+    for (const count of [1.5, Infinity, -Infinity]) {
+      eq(checkDeleteSize(count, 100).ok, false, `대상 개수 ${count}로 삭제를 허용하면 안 된다`);
+    }
+  });
+
+  test('대상 0건은 전체 개수를 못 읽어도 안전하게 no-op', () => {
+    eq(checkDeleteSize(0, 0).ok, true);
+    eq(checkDeleteSize(0, NaN).ok, true);
+  });
+
+  test('일부 삭제는 유지, 전체 삭제와 상한 초과는 계속 거부', () => {
+    eq(checkDeleteSize(10, 100).ok, true);
+    eq(checkDeleteSize(100, 100).ok, false);
+    eq(checkDeleteSize(MAX_DELETE_PER_RUN + 1, 100_000).ok, false);
   });
 }
