@@ -87,6 +87,16 @@ for (const status of ['401', '500']) {
     assert.equal(newsPipelineVerdict('cleanup', status, cleanupBody([cleanupRow()])).ok, false);
   });
 }
+// #505 returns HTTP 207 while preserving confirmed partial DELETE counts.
+// The cron workflow must never treat that partial result as completed cleanup.
+test('cleanup: #505 confirmed 4,998/4,999 partial DELETE (HTTP 207) fails closed', () => {
+  const response = cleanupBody([
+    cleanupRow({ eligible: 4999, total: 10000, deleted: 4998, skipped: '' }),
+  ], { ok: false, totalDeleted: 4998 });
+  assert.deepEqual(newsPipelineVerdict('cleanup', '207', response),
+    { ok: false, reason: 'http_207' });
+});
+
 test('cleanup: HTTP 200 ok:false fails', () => {
   assert.equal(newsPipelineVerdict('cleanup', '200',
     cleanupBody([cleanupRow()], { ok: false })).ok, false);
