@@ -400,6 +400,7 @@ import { runGateOrderReadTests } from './src/test/integration/gateOrderReadInteg
 import { runGateStopReattachTests } from './src/test/integration/gateStopReattachIntegration.test';
 import { runGateStopReattachDbAckTests } from './src/test/integration/gateStopReattachDbAckIntegration.test';
 import { runCronAuthRouteTests } from './src/test/integration/cronAuthRouteIntegration.test';
+import { runReconcileCronAuthIntegrationTests } from './src/test/integration/reconcileCronAuthIntegration.test';
 import { runVenueHarnessOrderSendsTests } from './src/test/integration/venueHarnessOrderSends.test';
 import { summary, flushAsync } from './src/test/harness';
 console.log('════════ TRAIGO 코어 유닛 테스트 ════════');
@@ -461,6 +462,8 @@ runSmokePlanTests(); runSmokeRunTests(); runCancelRunTests(); runExitPolicyTests
   await runGateStopReattachDbAckTests();
   await runCronAuthRouteTests();
   await runAdaptiveLeverageOrderPathTests();
+  await flushAsync();
+  await runReconcileCronAuthIntegrationTests();
   await flushAsync();
   const s = summary();
   console.log('\\n결과: ' + s.passed + ' 통과 / ' + s.failed + ' 실패');
