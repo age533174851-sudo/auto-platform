@@ -94,17 +94,27 @@ export async function scanKeyset<T>(
   let prevKey = '';
   let cursor: string | null = null;
 
-  /** 페이지를 받아 누적한다. 키 증거가 깨지면 false */
+  /**
+   * 페이지를 받아 누적한다. 키 증거가 깨지면 false.
+   *
+   * 깨진 지점 **앞까지는 남긴다.** 키 하나가 이상해서 그 페이지를 통째로
+   * 버리면, 멀쩡히 읽은 수십 개가 같이 사라진다. 킬스위치에서는 그게
+   * "한 행이 중복이라 50개 연결을 굶긴다"가 된다. 전진을 멈추는 것과
+   * 읽은 것을 버리는 것은 다른 일이다 — 멈추기만 한다.
+   */
   const accept = (page: T[]): boolean => {
+    const good: T[] = [];
+    let ok = true;
     for (const row of page) {
       const key = keyOf(row);
-      if (!key || seen.has(key) || key <= prevKey) return false;
+      if (!key || seen.has(key) || key <= prevKey) { ok = false; break; }
       seen.add(key);
       prevKey = key;
+      good.push(row);
     }
-    rows.push(...page);
+    rows.push(...good);
     cursor = prevKey;
-    return true;
+    return ok;
   };
 
   for (let i = 0; i < cap; i++) {

@@ -122,6 +122,17 @@ export async function runKeysetScanTests() {
     });
   }
 
+  test('★★ 키 증거가 깨져도 깨진 지점 앞까지는 남긴다 — 페이지를 통째로 버리지 않는다', async () => {
+    // 2페이지의 3번째 행에서 키가 역행한다. 앞의 2행은 멀쩡하다.
+    const p = pagerOf(rows(200), (n) => (n === 2
+      ? { data: [{ k: 'k00051' }, { k: 'k00052' }, { k: 'k00010' }], error: null }
+      : undefined));
+    const r = await scanKeyset<Row>(p.read, keyOf, opts);
+    eq(r.complete, false, '깨진 응답을 완전하다고 적었다');
+    eq(r.failure, 'unstable_page', `판정이 ${r.failure}다`);
+    eq(r.rows.length, 52, `${r.rows.length}행만 남겼다 — 멀쩡히 읽은 것을 버렸다`);
+  });
+
   test('chunk는 순서를 지키고 아무것도 잃지 않는다', () => {
     const c = chunk([1, 2, 3, 4, 5], 2);
     eq(JSON.stringify(c), '[[1,2],[3,4],[5]]', '쪼개기가 틀렸다');

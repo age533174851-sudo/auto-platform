@@ -329,6 +329,36 @@ export async function runKillSwitchRecoveryScanTests() {
     });
   }
 
+  // ══════════ ⑭-b 같은 connection_id가 두 행 ══════════
+  //
+  // `connection_id`가 커서다. 같은 값이 두 번 오면 **커서가 전진하지
+  // 않는다** — 그대로 다음 페이지를 물으면 같은 페이지를 영원히 받거나
+  // 뒤쪽을 건너뛴다. 그래서 거기서 멈추고 "끝까지 읽었다"고 하지 않는다.
+  //
+  // 그렇다고 그 페이지에서 **이미 켜진 것을 확인한 연결**을 버리면
+  // 안 된다. 한 행이 이상해서 50개 연결의 킬스위치를 굶기는 것이 된다.
+  {
+    const db = new FakeDb()
+      .seed('kill_switch_state', [
+        { connection_id: cid(1), active: true, action_mode: 'BC' },
+        { connection_id: cid(1), active: true, action_mode: 'BC' },
+        { connection_id: cid(2), active: true, action_mode: 'BC' },
+      ])
+      .seed('exchange_connections', [connRow(1), connRow(2)]);
+    const o = await run(db);
+    test('★★ 같은 connection_id가 두 행이면 끝까지 읽었다고 하지 않는다', () => {
+      eq(o.rep.stateComplete, false,
+        '커서가 전진하지 않는 응답을 완전한 목록으로 읽었다');
+      assert(warned(o) > 0, '커서 이상을 아무 데도 적지 않았다');
+    });
+    test('★★ 한 행이 이상해도 그 전에 확인한 연결은 보호한다', () => {
+      assert(o.madeFor.includes(cid(1)),
+        '커서 이상 때문에 켜진 것을 확인한 연결까지 굶겼다');
+      const dupes = o.madeFor.filter((c) => c === cid(1)).length;
+      eq(dupes, 1, `같은 연결에 ${dupes}건을 넣었다 — 중복 행을 두 건으로 셌다`);
+    });
+  }
+
   // ══════════ ⑮ 2워커 경합 — 페이지 순회로는 원자성을 못 만든다 ══════════
   //
   // 이건 **결함 재현이 아니라 한계 기록**이다. 두 워커가 같은 순간에
