@@ -24,7 +24,9 @@ import { FakeVenue, FakeDb, withCryptoEnv } from './venueHarness';
 import { executeOrder, reconcilePendingOrders } from '../../lib/engine/orderExecutor';
 import { placeSpotOrder } from '../../lib/exchanges/spotOrderExecutor';
 import { RECONCILE_TARGET_STATUSES } from '../../lib/engine/pendingReconcile';
+import { UNRESOLVED_ENTRY_STATUSES } from '../../lib/engine/maxOpenPositionsGate';
 import { isProvenFill } from '../../lib/engine/holdingEvidence';
+import { stopPositionQty } from '../../lib/engine/stopReattach';
 import { encryptSecret } from '../../lib/exchanges/crypto';
 
 const BN_ORDER = '/fapi/v1/order';
@@ -223,8 +225,22 @@ export async function runOrderPathIntegrationTests() {
   }
 
   // ══════════ ⑦ 거래소 체결 성공 + DB 기록 실패 ══════════
+  //
+  // **전송 뒤** 기록이 실패하는 경우다. 이 시나리오가 묻는 것은 그대로다 —
+  // 이미 나간 주문을 다시 보내지 않고, 그 줄이 대조 대상으로 남는가.
+  //
+  // 픽스처가 `failUpdatesOn`(모든 update 실패)에서 **전송 뒤 쓰기만**
+  // 실패로 바뀐 이유: 이제 `SENT` 기록이 실패하면 주문을 **보내지 않는다**
+  // (전송 전 fail-closed). 모든 쓰기를 실패시키면 이 시험은 "전송 0건"에
+  // 걸려 의도한 자리를 더 이상 보지 못한다. 전송 전 실패는
+  // `orderPersistenceIntegration.test.ts`가 따로 본다.
   {
-    const db = new FakeDb({ failUpdatesOn: 'live_orders' });
+    const db = new FakeDb({
+      updateFailure: {
+        table: 'live_orders', mode: 'error',
+        onlyWhen: (p) => p.status === 'FILLED' || p.status === 'ACKED',
+      },
+    });
     const venue = baseVenue()
       .on(BN_ORDER, { status: 400, json: { code: -2013, msg: 'Order does not exist.' } }, 'GET')
       .on(BN_ORDER, { json: bnOrder({ status: 'FILLED', executedQty: '0.010', avgPrice: '95000' }) }, 'POST');
@@ -259,6 +275,35 @@ export async function runOrderPathIntegrationTests() {
       eq((r as any).status, 'ACKED');
     });
   }
+
+  // ══════════ P1: 청산 후 포지션 수량 파싱 실패 ≠ 전량 종료 ══════════
+  {
+    const db = new FakeDb();
+    const venue = baseVenue()
+      .on(BN_ORDER, { status: 400, json: { code: -2013, msg: 'Order does not exist.' } }, 'GET')
+      .on(BN_ORDER, { json: bnOrder({ status: 'FILLED', executedQty: '0.010', avgPrice: '95000' }) }, 'POST');
+    // 정상적인 v2 응답처럼 HTTP 200을 주되, positionAmt만 깨진 경우.
+    // baseVenue()가 이미 BN_POS 규칙을 갖고 있어 앞에 삽입한다.
+    (venue as any).rules.unshift({
+      label: 'bad-position-amount',
+      match: (c: any) => c.method === 'GET' && c.path === BN_POS,
+      reply: { json: [{ symbol: 'BTCUSDT', positionAmt: 'NaN', entryPrice: '95000',
+        leverage: '100', marginType: 'isolated', liquidationPrice: '94000' }] },
+    });
+    const result = await scenario(venue, () => exec(db, {
+      clientOrderId: 'COID-CLOSE-UNKNOWN', reduceOnly: true,
+    }));
+
+    test('★ 청산 주문 접수 후 positionAmt가 깨지면 remainingQty=null — 0이 아니다', () => {
+      assert(!(result instanceof Error), String((result as any)?.message));
+      eq(venue.orderSends().length, 1, '청산 주문 전송을 막거나 중복으로 보냈다');
+      eq((result as any).remainingQty, null,
+        '깨진 positionAmt를 0으로 읽어 청산 완료를 거짓 확정했다');
+      assert(String((result as any).message).includes('종료를 확인하지 못했습니다'),
+        '확인 불가를 사용자에게 경고하지 않았다');
+    });
+  }
+
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -421,6 +466,11 @@ export async function runReconcileIntegrationTests() {
         { filterType: 'MARKET_LOT_SIZE', stepSize: '0', minQty: '0', maxQty: '0' },
         { filterType: 'PRICE_FILTER', tickSize: '0.1' },
       ] }] } })
+      // 복구 전에 **이미 걸린 손절이 있는지** 묻는다. 이 시나리오의 주제는
+      // `closePosition` 거부 뒤의 대체 경로이므로 "확인했고 없다"를 깐다.
+      // (목록을 못 읽으면 보내지 않는 것이 맞고, 그 경우는
+      //  `stopReattachIdempotencyIntegration.test.ts`가 따로 본다.)
+      .on('/fapi/v1/openOrders', { json: [] }, 'GET')
       .onParams(BN_ORDER, 'POST', { type: 'STOP_MARKET', closePosition: 'true' },
         { status: 400, json: { code: -4120, msg: 'not supported for this endpoint' } })
       .onParams(BN_ORDER, 'POST', { type: 'STOP_MARKET', reduceOnly: 'true' },
@@ -460,6 +510,72 @@ export async function runReconcileIntegrationTests() {
       eq(venue.orderSends().length, 0, 'NO_FIXED_SL인데 복구가 STOP_MARKET을 보냈다');
       assert((result as any).details.some((d: string) => d.includes('고정 손절을 쓰지 않는')),
         '정책에 따른 의도적 미부착 이유가 누락됐다');
+    });
+  }
+
+  // ══════════ ⑤-d 손절 복구 포지션 증거 — 못 읽음 ≠ 수량 0 ══════════
+  test('★★ 손절 복구 포지션 파서는 미확인과 진짜 0을 구분한다', () => {
+    for (const bad of [null, undefined, '', '  ', 'bad', 'Infinity', NaN, Infinity, true]) {
+      eq(stopPositionQty(bad), null, `깨진 포지션 증거를 수량 0으로 인정했다: ${String(bad)}`);
+    }
+    eq(stopPositionQty(0), 0);
+    eq(stopPositionQty('0'), 0);
+    eq(stopPositionQty('0.003'), 0.003);
+    eq(stopPositionQty('-0.003'), -0.003);
+  });
+
+  for (const shape of ['missing', 'malformed'] as const) {
+    const db = new FakeDb().seed('live_orders', [pendingRow({
+      status: 'UNKNOWN', stop_policy: 'FIXED_SL', stop_loss: 58920.9,
+      sl_order_id: null, reduce_only: false,
+    })]);
+    const positions = shape === 'missing' ? [] : [{
+      symbol: 'BTCUSDT', positionAmt: 'bad', entryPrice: '95000',
+      leverage: '100', marginType: 'isolated', liquidationPrice: '90000',
+    }];
+    const venue = new FakeVenue()
+      .on(BN_POS, { json: positions })
+      .on(BN_ORDER, { json: bnOrder({
+        status: 'FILLED', executedQty: '0.010', avgPrice: '95000',
+      }) }, 'GET');
+    const result = await scenario(venue, () => reconcile(db));
+    test(`★★ Binance ${shape}: 손절 복구 조회 미확인은 경고·attention이고 주문 0건`, () => {
+      assert(!(result instanceof Error), String((result as any)?.message));
+      eq((result as any).resolved, 1, '체결 주문의 대조 자체는 유지한다');
+      assert((result as any).needsAttention >= 1, '손절 복구 미확인이 경고 없이 사라졌다');
+      eq(db.row('live_orders', { id: 'ord-1' })?.needs_attention, true);
+      eq(venue.orderSends().length, 0, '수량을 모르는 상태에서 손절 주문을 보냈다');
+      assert((result as any).details.some((d: string) => d.includes('손절 복구 미확인')),
+        '미확인 원인이 결과에 없다');
+    });
+  }
+
+  for (const shape of ['http-error', 'malformed'] as const) {
+    const db = new FakeDb().seed('live_orders', [pendingRow({
+      exchange: 'gate', status: 'UNKNOWN', stop_policy: 'FIXED_SL',
+      stop_loss: 58920.9, sl_order_id: null, reduce_only: false,
+    })]);
+    const posReply = shape === 'http-error'
+      ? { status: 503, json: { label: 'SERVICE_UNAVAILABLE' } }
+      : { json: { contract: 'BTC_USDT', size: 'bad' } };
+    const venue = new FakeVenue()
+      // 단건 규칙을 전체 목록보다 먼저 둔다.
+      .on('/api/v4/futures/usdt/positions/BTC_USDT', posReply, 'GET')
+      .on('/api/v4/futures/usdt/positions', { json: [] }, 'GET')
+      .on('/api/v4/futures/usdt/orders', { json: (i: number) => i === 0 ? [] : [{
+        id: 9009, contract: 'BTC_USDT', size: 2, price: '0',
+        status: 'finished', finish_as: 'filled', text: 't-COID-R1',
+        left: 0, fill_price: '95000',
+      }] }, 'GET');
+    const result = await scenario(venue, () => reconcile(db, 'gate'));
+    test(`★★ Gate ${shape}: 손절 복구 조회 미확인은 경고·attention이고 주문 0건`, () => {
+      assert(!(result instanceof Error), String((result as any)?.message));
+      eq((result as any).resolved, 1, '체결 주문의 대조 자체는 유지한다');
+      assert((result as any).needsAttention >= 1, '손절 복구 미확인이 경고 없이 사라졌다');
+      eq(db.row('live_orders', { id: 'ord-1' })?.needs_attention, true);
+      eq(venue.orderSends().length, 0, '수량을 모르는 상태에서 손절 주문을 보냈다');
+      assert((result as any).details.some((d: string) => d.includes('손절 복구 미확인')),
+        '미확인 원인이 결과에 없다');
     });
   }
 
@@ -1182,6 +1298,113 @@ export async function runGateDupIntegrationTests() {
       eq(venue.countOf('/api/v4/spot/orders', 'POST'), 0, '중복인데 주문을 보냈다');
     });
   }
+
+  // ══════════ ⑥ Exact100X 계약(NO_FIXED_SL)은 Gate에서 **진입 자체가 막힌다** ══════════
+  //
+  // **이것이 10/31 가동의 거래소 선택을 가른다.**
+  //
+  // 위 시나리오들은 전부 `GATE_ARGS`로 **고정 손절을 주고** 돌린다 —
+  // 그러지 않으면 Gate 진입이 통째로 막히기 때문이다(이 파일 1024행).
+  // 그런데 그 "막힌다"를 **아무도 테스트로 적어 두지 않았다.** 그래서
+  // 운영에서 예약의 연결을 Gate로 바꾸면 09:00 강제 진입이 매일 거부되는데,
+  // 저장소 안에는 그 사실이 글(주석)로만 있다.
+  //
+  // 09:00 강제 진입이 쓰는 계약은 `MAX_LEV_100X`/`EXACT_100X`이고 그것은
+  // `NO_FIXED_SL`이다(`profiles.ts:282`). 그래서 `stopLoss`가 아예 넘어오지
+  // 않고(`scalp/route.ts:1394`의 주석), Gate 갈래는 `stopLoss`가 없으면
+  // `gateStopSpec`이 실패해 **주문을 보내기 전에 REJECTED**로 끝난다
+  // (`orderExecutor.ts:1269`).
+  //
+  // **이 테스트는 고치자는 것이 아니다.** 막는 쪽이 옳다 — Gate의 전용
+  // 종료 권한이 아직 감사되지 않았으므로, 손절 없는 포지션을 Gate에서 열
+  // 수 있게 만드는 것이 더 위험하다. 여기서 하는 일은 그 제약을
+  // **실행되는 사실로** 적어 두는 것이다. 누군가 이 분기를 지우면 이
+  // 테스트가 깨지고, 그때 비로소 "Gate에서 손절 없는 100배를 연다"는
+  // 결정을 사람이 내리게 된다.
+  {
+    const db = new FakeDb();
+    const venue = gateBaseVenue()
+      .on('/api/v4/futures/usdt/positions/BTC_USDT/leverage', { json: { leverage: '100' } })
+      // 여기까지 오면 **안 된다.** 와 버리면 아래 전송 수 단언이 잡는다.
+      .on('/api/v4/futures/usdt/orders', { json: { id: 9001, status: 'finished' } }, 'POST');
+    // `exec`의 기본값이 곧 Exact100X 계약이다: NO_FIXED_SL · NO_FIXED_TP ·
+    // 손절값 없음. 거래소만 Gate로 바꾼다.
+    const r = await scenario(venue, () => exec(db, {
+      exchange: 'gate', clientOrderId: 'GCOID-EX100X-1',
+    }));
+
+    test('★★ Gate + Exact100X(NO_FIXED_SL)는 주문을 한 건도 보내지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.countOf('/api/v4/futures/usdt/orders', 'POST'), 0,
+        'Gate에 손절 없는 100배 진입이 나갔다 — 종료 권한이 감사되지 않은 거래소다');
+    });
+
+    test('★★ 그 결과는 REJECTED이고, 이유가 손절이라고 적힌다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq((r as any).status, 'REJECTED',
+        `Gate + NO_FIXED_SL인데 ${(r as any).status}다`);
+      assert(/손절/.test(String((r as any).message ?? '')),
+        `이유에 손절이 없다: ${(r as any).message}`);
+      const row = db.table('live_orders')[0];
+      assert(row, '장부 줄이 없다 — 실행기가 안 돌았다');
+      eq(row.status, 'REJECTED', '반환은 거부인데 장부가 다르다');
+      // **여기가 진짜 피해다.** 장부가 INTENT로 남으면 그 줄은
+      // `UNRESOLVED_ENTRY_STATUSES`에 걸려 **미확정 진입 자리를 영구히
+      // 차지한다.** 거래소에 보낸 적이 없으니 조회로 확정될 수도 없다 —
+      // 매일 09:00마다 한 줄씩 쌓이고, 자리가 차면 다른 거래소의 진입까지
+      // 막힌다.
+      assert(!UNRESOLVED_ENTRY_STATUSES.includes(row.status as any),
+        `보내지도 않고 끝난 주문이 미확정(${row.status})으로 남았다 — 자리를 영구히 먹는다`);
+    });
+  }
+
+  // ══════════ ⑦ 같은 계약이 **바이낸스에서는** 주문까지 간다 ══════════
+  //
+  // ⑥만 있으면 "Exact100X 계약 자체가 어디서든 막힌다"로 읽힌다. 막히는
+  // 것은 **거래소 갈래**이지 계약이 아니다. 두 갈래를 같은 인자로 나란히
+  // 돌려야 그 차이가 어디서 나는지가 눈에 보인다.
+  {
+    const db = new FakeDb();
+    const venue = baseVenue()
+      .on(BN_ORDER, { status: 400, json: { code: -2013, msg: 'Order does not exist.' } }, 'GET')
+      .on(BN_ORDER, { json: bnOrder({
+        status: 'FILLED', executedQty: '0.010', avgPrice: '95000',
+      }) }, 'POST');
+    const r = await scenario(venue, () => exec(db, { clientOrderId: 'BCOID-EX100X-1' }));
+
+    test('★★ 같은 Exact100X 계약이 바이낸스에서는 전송까지 간다 (차이는 거래소다)', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.countOf(BN_ORDER, 'POST'), 1,
+        '바이낸스에서도 안 나갔다면 막는 것은 거래소가 아니라 계약이다');
+      assert((r as any).status !== 'REJECTED',
+        `바이낸스에서도 거부됐다 (${(r as any).message})`);
+    });
+  }
+
+  // ══════════ ⑧ 막히는 것은 **진입뿐**이다 — 청산은 같은 관문에 걸리지 않는다 ══════════
+  //
+  // 진입을 막는 관문이 청산까지 막으면, Gate에 이미 열려 있는 포지션을
+  // 닫을 수 없게 된다. 그건 막는 것보다 나쁘다. `reduceOnly`는 손절
+  // 관문 앞에서 빠져나간다(`orderExecutor.ts:1270`의 `!args.reduceOnly`).
+  {
+    const db = new FakeDb();
+    const venue = gateBaseVenue()
+      .on('/api/v4/futures/usdt/positions/BTC_USDT/leverage', { json: { leverage: '100' } })
+      .on('/api/v4/futures/usdt/orders', { json: {
+        id: 9002, status: 'finished', finish_as: 'filled', size: -1, left: 0,
+        fill_price: '95000', text: 't-GCOID-EX100X-CLOSE',
+      } }, 'POST');
+    const r = await scenario(venue, () => exec(db, {
+      exchange: 'gate', reduceOnly: true, clientOrderId: 'GCOID-EX100X-CLOSE',
+    }));
+
+    test('★★ 청산(reduce-only)은 손절 관문에 막히지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      assert(!/손절을 걸 수 없어/.test(String((r as any).message ?? '')),
+        `청산이 진입용 손절 관문에 막혔다 — 열린 포지션을 닫을 수 없게 된다: ${(r as any).message}`);
+    });
+  }
+
 }
 
 // ══════════════════════════════════════════════════════════════════

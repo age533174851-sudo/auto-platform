@@ -100,6 +100,10 @@ jobs:
       - name: 유닛 테스트
         run: npm test
 
+      # 뉴스·캘린더·AI·정리 응답의 거짓 GREEN 방지 — #435 + #466
+      - name: 뉴스 파이프라인 응답 판정 회귀
+        run: node --test scripts/news-pipeline-verdict.test.mjs
+
       # ── 워커 빌드 ──
       #
       # 워커는 루트 tsconfig 밖에 있다. 그래서 `npx tsc --noEmit`도,

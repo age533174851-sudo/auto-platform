@@ -108,9 +108,16 @@ for (const banned of ['simSeed', 'simCurrency', 'simTargetEquity', 'simPrice', '
   }
 }
 // 지문과 투영이 같은 목록을 써야 한다. 목록이 둘이면 언젠가 갈린다.
+//
+// 투영은 **줄 목록을 만드는 쪽**(`executionContractRows`)에 있고, 지문은
+// 그 줄을 이어 붙이기만 한다. 그래서 둘 다 본다 — 줄 목록이 다른 목록을
+// 쓰거나, 지문이 줄 목록을 거치지 않고 **따로 투영하면** 목록이 둘이 된다.
 {
-  const i = plan.indexOf('executionContractFingerprint');
+  const i = plan.indexOf('executionContractRows');
   const body = i < 0 ? '' : plan.slice(i);
+  if (i < 0) {
+    err(`${PLAN}: executionContractRows()가 없습니다 — 줄 단위 비교를 할 수 없습니다`);
+  }
   if (!body.includes('CONTRACT_FIELDS')) {
     err(`${PLAN}: 지문이 CONTRACT_FIELDS를 쓰지 않습니다 — 목록이 둘이 됩니다`);
   }
@@ -406,7 +413,57 @@ if (!/incomplete_selection/i.test(sched)) {
       err(`${what}: executionContractFingerprint()가 없습니다`);
       return undefined;
     }
-    return { v: mod.EXECUTION_CONTRACT_VERSION, fp: mod.executionContractFingerprint() };
+    // ── 줄 목록을 만든다 ──
+    //
+    // 새 정본은 `executionContractRows()`를 갖는다. **base 커밋에는 없을
+    // 수 있다** — 그때는 옛 지문 문자열을 같은 모양으로 눕힌다. 여기서
+    // 포기하고 "지문이 다르다"로 적으면, 이 변경 자체가 버전 올림을
+    // 요구하게 되고 그것이 바로 없애려는 그 피해다.
+    const rowsOf = () => {
+      if (typeof mod.executionContractRows === 'function') {
+        return mod.executionContractRows().map(r => [String(r[0]), String(r[1])]);
+      }
+      let parsed;
+      try { parsed = JSON.parse(mod.executionContractFingerprint()); }
+      catch { return null; }
+      if (!Array.isArray(parsed)) return null;
+      return parsed.map(r => Array.isArray(r) && r.length >= 3
+        // 옛 모양: [프로필, 프리셋, 값] → [프로필|프리셋, JSON(값)]
+        ? [`${r[0]}|${r[1]}`, JSON.stringify(r[2])]
+        : [String(r[0]), String(r[1])]);
+    };
+    return { v: mod.EXECUTION_CONTRACT_VERSION, fp: mod.executionContractFingerprint(),
+      rows: rowsOf() };
+  };
+
+  /**
+   * 줄 비교 판정을 **컴파일해서 쓴다.**
+   *
+   * base 커밋에는 이 파일이 없을 수 있으므로 **작업 트리의 것만** 쓴다 —
+   * 이 판정은 "무엇이 계약인가"가 아니라 "버전을 올려야 하는가"이고,
+   * 그것은 지금 규칙이지 저장된 값이 아니다.
+   */
+  const DIFF = 'src/lib/execution/contractDiff.ts';
+  const loadContractDiff = async () => {
+    const src = read(DIFF);
+    if (!src) { err(`${DIFF}: 줄 비교 판정이 없습니다`); return null; }
+    const dir = mkdtempSync(join(tmpdir(), 'traigo-diff-'));
+    const dest = join(dir, DIFF);
+    mkdirSync(dirname(dest), { recursive: true });
+    writeFileSync(dest, src);
+    const tsc = join(process.cwd(), 'node_modules', 'typescript', 'bin', 'tsc');
+    try {
+      execFileSync(process.execPath, [tsc, DIFF, '--module', 'commonjs',
+        '--target', 'es2019', '--skipLibCheck'], { cwd: dir, stdio: 'pipe', timeout: 180_000 });
+    } catch (e) {
+      err(`${DIFF}: 컴파일되지 않습니다\n${String(e.stdout || e.message).trim().slice(0, 300)}`);
+      return null;
+    }
+    const m = await import(`file://${join(dir, DIFF.replace(/\.ts$/, '.js'))}`);
+    if (typeof m.contractBumpVerdict !== 'function') {
+      err(`${DIFF}: contractBumpVerdict()가 없습니다`); return null;
+    }
+    return m;
   };
 
   const head = await contractAt(f => read(f) || null, 'HEAD');
@@ -439,20 +496,29 @@ if (!/incomplete_selection/i.test(sched)) {
       }
       console.log(`· bootstrap — ${base.label}에 실행 계약이 없습니다. v1로 시작합니다`);
     } else if (baseC) {
-      if (baseC.fp === head.fp) {
-        // 지문이 같으면 실행 의미가 그대로다. 주석·타입 정리는 여기서 걸리지 않는다.
-        if (head.v < baseC.v) {
-          err(`EXECUTION_CONTRACT_VERSION이 내려갔습니다 (${baseC.v} → ${head.v})`
-            + ' — 저장된 예약이 모두 VERSION_MISMATCH가 됩니다');
-        }
-      } else if (head.v === baseC.v) {
-        err('실행 계약 지문이 바뀌었는데 EXECUTION_CONTRACT_VERSION이 그대로입니다'
-          + ` (${head.v}) — 같은 예약이 다른 의미로 실행됩니다. base=${base.label}`
-          + ` (${base.rev.slice(0, 8)})`);
-      } else if (head.v < baseC.v) {
-        err(`실행 계약이 바뀌었는데 버전이 내려갔습니다 (${baseC.v} → ${head.v})`);
+      // ── 줄 단위로 가른다 ──
+      //
+      // 판단은 `src/lib/execution/contractDiff.ts` 한 곳에 있고 여기서는
+      // 그 파일을 컴파일해서 **부른다.** 검사기에 같은 조건을 복제하면
+      // 시험이 닿지 않는 판단이 하나 더 생긴다.
+      //
+      // **줄 목록을 못 만들었으면 통과시키지 않는다.** 못 읽은 것을
+      // "달라진 것이 없다"로 적는 것이 이 저장소가 반복해서 잡아 온 형태다.
+      if (!Array.isArray(head.rows) || head.rows.length === 0) {
+        err(`${PLAN}: 계약 줄 목록을 만들지 못했습니다 — 버전 검사를 할 수 없습니다`);
+      } else if (!Array.isArray(baseC.rows) || baseC.rows.length === 0) {
+        err(`base(${base.label}): 계약 줄 목록을 만들지 못했습니다`
+          + ' — 비교 없이 통과시키지 않습니다');
       } else {
-        console.log(`· 실행 계약이 바뀌었고 버전도 올랐습니다 (${baseC.v} → ${head.v})`);
+        const diffMod = await loadContractDiff();
+        if (diffMod) {
+          const v = diffMod.contractBumpVerdict({
+            base: baseC.rows, head: head.rows,
+            baseVersion: baseC.v, headVersion: head.v,
+          });
+          if (!v.ok) err(`${v.message} base=${base.label} (${base.rev.slice(0, 8)})`);
+          else console.log(`· ${v.message}`);
+        }
       }
     }
   }
