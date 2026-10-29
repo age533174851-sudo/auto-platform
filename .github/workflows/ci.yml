@@ -100,6 +100,14 @@ jobs:
       - name: 유닛 테스트
         run: npm test
 
+      # Claude 무인 회차 진단기 — #533.
+      # `npm test`는 TypeScript 러너라 `.mjs` 시험이 안 걸린다. 여기서
+      # 돌리지 않으면 **PR에서 한 번도 안 돈다** — 이 저장소가 이미 당한 모양이다.
+      - name: Claude 회차 진단기 회귀 (민감정보 유출 0 포함)
+        run: |
+          node --test scripts/test-claude-api-preflight.mjs
+          node --test scripts/test-claude-exec-category.mjs
+
       # ── 워커 빌드 ──
       #
       # 워커는 루트 tsconfig 밖에 있다. 그래서 `npx tsc --noEmit`도,
