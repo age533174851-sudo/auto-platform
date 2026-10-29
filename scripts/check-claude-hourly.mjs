@@ -268,13 +268,19 @@ if (lane.mode === 'trading') {
     err(`${WF}: 보호 규칙에서 PR 필수 여부를 보지 않습니다 — `
       + '보호가 켜져 있어도 PR 없이 밀 수 있으면 관문이 아닙니다');
   }
-  // 읽지 못한 경우를 통과로 보면 관문이 없는 것과 같다.
-  if (!/UNKNOWN/.test(src)) {
-    err(`${WF}: 보호 규칙을 **읽지 못한 경우**를 따로 다루지 않습니다 — `
-      + '모르는 것은 통과가 아닙니다');
+  // 기존 보호 API만으로는 Ruleset 기반 보호를 검출할 수 없다.
+  // 두 API 중 하나에서 PR 필수 조건을 증명해야 하며, 읽기 실패는 거부한다.
+  if (!/rules\/branches\/main/.test(src)) {
+    err(`${WF}: main에 적용되는 Ruleset을 확인하지 않습니다`);
   }
-  if (!/workflow_dispatch["']?\s*\]?\s*;?\s*then[\s\S]{0,200}exit 1|GITHUB_EVENT_NAME..\s*!=\s*"workflow_dispatch"/.test(src)) {
-    err(`${WF}: 보호가 확인되지 않았을 때 **예약 실행**을 멈추지 않습니다`);
+  if (!/get\('type'\)\s*==\s*'pull_request'/.test(src)) {
+    err(`${WF}: 유효한 Ruleset에서 PR 필수 규칙을 검증하지 않습니다`);
+  }
+  if (!/status\s*!=\s*200/.test(src) || !/sys\.exit\(1\)/.test(src)) {
+    err(`${WF}: 보호 규칙 조회 실패를 fail-closed로 처리하지 않습니다`);
+  }
+  if (!/No effective pull-request requirement/.test(src) || !/sys\.exit\(1\)/.test(src)) {
+    err(`${WF}: PR 필수 규칙이 없을 때 실행을 차단하지 않습니다`);
   }
 }
 
