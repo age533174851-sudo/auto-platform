@@ -18,9 +18,16 @@
 // 지우는 것(마스킹)이 아니라 **애초에 담지 않는 것**이다. 마스킹은
 // 패턴을 하나 놓치면 새지만, 화이트리스트는 새로운 칸이 생겨도 안 샌다.
 //
-// 가장 중요한 단서는 문구가 아니라 숫자다: `num_turns`가 1이고
-// `modelUsage`가 비어 있고 비용이 0이면 **모델을 한 번도 부르지 못한
-// 것**이다. 그 사실은 숫자에서만 나오므로 언제나 안전하게 적을 수 있다.
+// 숫자는 문구보다 안전하지만 **숫자도 과장할 수 있다.**
+//
+// `modelUsage`는 모델별 사용량 묶음이라 `Object.keys().length`는
+// **서로 다른 모델의 개수**지 호출 횟수가 아니다 — 한 모델을 100번 불러도
+// 1이다. 그래서 '호출 수'로 적지 않는다.
+//
+// 비어 있는 것도 "한 번도 안 불렀다"의 증거가 아니다. SDK가 기록을 남기지
+// 못했거나 집계가 늦었을 수도 있다. 이 저장소의 규칙 그대로 —
+// **확인하지 못한 것은 통과도 0도 아니다.** `no_usage_record`는 "사용 기록이
+// 없다"는 관측이지 "호출이 없었다"는 결론이 아니다.
 
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -74,13 +81,14 @@ export function categorize(input) {
   if (!r) {
     return {
       category: 'no_execution_record', isError: null, subtype: null,
-      numTurns: null, durationMs: null, costUsd: null,
-      modelCalls: null, permissionDenials: null,
+      numTurns: null, durationMs: null, costUsd: null, permissionDenials: null,
     };
   }
 
-  const modelUsage = r.modelUsage && typeof r.modelUsage === 'object' ? r.modelUsage : null;
-  const modelCalls = modelUsage ? Object.keys(modelUsage).length : null;
+  // 칸이 아예 없으면 **모른다**. 0으로 바꾸지 않는다.
+  const hasUsageField = r.modelUsage != null && typeof r.modelUsage === 'object';
+  const usageModelKinds = hasUsageField ? Object.keys(r.modelUsage).length : null;
+  const usageRecord = !hasUsageField ? 'unknown' : (usageModelKinds > 0 ? 'present' : 'absent');
   const numTurns = num(r.num_turns);
   const out = {
     // subtype은 SDK가 정한 짧은 열거값이다. 자유 문구가 아니다.
@@ -89,7 +97,10 @@ export function categorize(input) {
     numTurns,
     durationMs: num(r.duration_ms),
     costUsd: num(r.total_cost_usd),
-    modelCalls,
+    // **호출 횟수가 아니다.** modelUsage에 나타난 모델 종류의 수다.
+    usageModelKinds,
+    /** 'present' | 'absent' | 'unknown' */
+    usageRecord,
     permissionDenials: Array.isArray(r.permission_denials) ? r.permission_denials.length : null,
     category: 'unknown',
   };
@@ -103,9 +114,11 @@ export function categorize(input) {
     if (re.test(haystack)) { out.category = category; return out; }
   }
 
-  // 문구가 없을 때. **모델을 한 번도 못 불렀다는 것은 숫자로 안다.**
-  if (modelCalls === 0 && numTurns != null && numTurns <= 1 && (out.costUsd ?? 0) === 0) {
-    out.category = 'no_model_call';
+  // 문구가 없을 때. 사용 기록이 **비어 있다는 관측**까지만 적는다.
+  // 기록이 없는 것과 호출이 없었던 것을 같은 말로 쓰지 않는다.
+  if (usageRecord === 'absent' && numTurns != null && numTurns <= 1
+      && (out.costUsd ?? 0) === 0) {
+    out.category = 'no_usage_record';
   }
   return out;
 }
@@ -122,12 +135,14 @@ export function render(c) {
     `- 턴 수: ${v(c.numTurns)}`,
     `- 소요: ${c.durationMs == null ? '확인 못 함' : `${c.durationMs}ms`}`,
     `- 비용(USD): ${v(c.costUsd)}`,
-    `- 모델 호출 수: ${v(c.modelCalls)}`,
+    `- 모델 사용 기록: ${{ present: '있음', absent: '없음', unknown: '확인 못 함' }[c.usageRecord] ?? '확인 못 함'}`,
+    `- 사용 기록의 모델 종류 수: ${v(c.usageModelKinds)} (호출 횟수가 아닙니다)`,
     `- 권한 거부 수: ${v(c.permissionDenials)}`,
     '',
-    c.category === 'no_model_call'
-      ? '**모델을 한 번도 부르지 못했습니다.** 생성 요청 전 시작 단계에서 끝났습니다 —'
-        + ' 인증·모델 권한·SDK 기동 쪽을 봅니다.'
+    c.category === 'no_usage_record'
+      ? '**모델 사용 기록이 없습니다.** 생성 요청에 닿지 못했을 수도 있고, SDK가'
+        + ' 사용량을 기록하지 못했을 수도 있습니다 — 둘을 여기서 확정하지'
+        + ' 않습니다. 인증·모델 권한·SDK 기동 쪽을 먼저 봅니다.'
       : c.category === 'no_execution_record'
         ? '실행 기록 파일을 찾지 못했습니다. **성공으로 보지 않습니다.**'
         : '오류 문구 자체는 키·요청 ID를 담을 수 있어 적지 않았습니다. 범주만 적습니다.',

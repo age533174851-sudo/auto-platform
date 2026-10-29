@@ -155,6 +155,9 @@ jobs:
           node scripts/claude-api-preflight.mjs
 
       - name: Claude Code — 거래 엔진 개발
+        # 실행 기록 파일의 **출처를 Action이 직접 알려 주게 한다.**
+        # 디렉터리를 뒤져 찾으면 남의 파일을 집을 수 있다.
+        id: claude
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -277,6 +280,11 @@ jobs:
       # 모델이 실제로 불렸는지(`모델 호출 수`)를 증거로 남긴다.
       - name: Claude 실행 진단 (민감정보 제외)
         if: always()
+        env:
+          # Action이 돌려주는 경로가 1순위다. 비어 있으면 스크립트가
+          # `$RUNNER_TEMP`를 뒤지고, 그래도 없으면 `no_execution_record`로
+          # 적는다 — **없는 것을 성공으로 적지 않는다.**
+          CLAUDE_EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
         run: |
           node scripts/claude-exec-category.mjs | tee -a "$GITHUB_STEP_SUMMARY"
 

@@ -149,7 +149,8 @@ test('★★ 모델 접근은 메시지 경로에서 확인한다 (생성 없음
     retries: 0, sleep: async () => {},
   });
   assert.equal(result.ok, true);
-  assert.equal(result.code, 'model_messages_accessible');
+  // **생성 성공의 증거가 아니다.** 이름도 그렇게 적지 않는다.
+  assert.equal(result.code, 'messages_endpoint_http_ok');
   assert.equal(s.seen[0].method, 'POST');
   assert.ok(s.seen[0].url.endsWith('/v1/messages/count_tokens'),
     `생성 엔드포인트를 불렀다: ${s.seen[0].url}`);

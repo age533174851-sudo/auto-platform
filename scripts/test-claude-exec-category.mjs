@@ -22,19 +22,53 @@ const OBSERVED = {
   permission_denials: [], modelUsage: {},
 };
 
-test('관측된 모양 — 모델을 한 번도 못 불렀다고 분류한다', () => {
+test('관측된 모양 — 사용 기록이 없다고 적는다 (호출 0으로 단정하지 않는다)', () => {
   const c = categorize([OBSERVED]);
-  assert.equal(c.category, 'no_model_call');
+  assert.equal(c.category, 'no_usage_record');
   assert.equal(c.isError, true);
   assert.equal(c.numTurns, 1);
   assert.equal(c.durationMs, 361);
-  assert.equal(c.modelCalls, 0);
+  assert.equal(c.usageRecord, 'absent');
+  assert.equal(c.usageModelKinds, 0);
 });
 
-test('modelUsage가 있으면 no_model_call이 아니다', () => {
+test('modelUsage가 있으면 no_usage_record가 아니다', () => {
   const c = categorize([{ ...OBSERVED, modelUsage: { 'claude-opus-5-5': { inputTokens: 10 } } }]);
-  assert.notEqual(c.category, 'no_model_call');
-  assert.equal(c.modelCalls, 1);
+  assert.notEqual(c.category, 'no_usage_record');
+  assert.equal(c.usageRecord, 'present');
+  assert.equal(c.usageModelKinds, 1);
+});
+
+// ── GPT 검수 ① — 종류 수를 호출 횟수로 적지 않는다 ──
+//
+// `Object.keys(modelUsage).length`는 **서로 다른 모델 키의 개수**다.
+// 한 모델을 100번 불러도 1이다. 그걸 "모델 호출 수"로 적으면 숫자가
+// 거짓말을 한다.
+test('★★ 한 모델을 여러 번 불러도 종류 수는 1이다 — 호출 횟수가 아니다', () => {
+  const c = categorize([{ ...OBSERVED, is_error: false, num_turns: 40,
+    modelUsage: { 'claude-opus-5-5': { inputTokens: 999999, outputTokens: 88888 } } }]);
+  assert.equal(c.usageModelKinds, 1, '모델 종류는 하나다');
+  assert.equal(c.usageRecord, 'present');
+  const out = render(c);
+  assert.ok(!out.includes('모델 호출 수'),
+    `종류 수를 호출 횟수로 적었다: ${out}`);
+});
+
+test('★★ 사용 기록이 비었다고 "한 번도 못 불렀다"로 단정하지 않는다', () => {
+  const out = render(categorize([OBSERVED]));
+  assert.ok(!out.includes('한 번도'),
+    `SDK 기록 누락 가능성을 배제하고 단정했다: ${out}`);
+  assert.ok(out.includes('사용 기록'), `무엇이 없는지 적지 않았다: ${out}`);
+  assert.ok(/기록하지 못했|누락|확정하지/.test(out),
+    `기록 누락 가능성을 적지 않았다: ${out}`);
+});
+
+test('modelUsage가 아예 없는 칸이면 확인 불가다 — 0으로 적지 않는다', () => {
+  const { modelUsage, ...noUsage } = OBSERVED;
+  const c = categorize([noUsage]);
+  assert.equal(c.usageRecord, 'unknown');
+  assert.equal(c.usageModelKinds, null, 'null이어야 한다 — 0은 "없다"는 주장이다');
+  assert.equal(c.category, 'unknown', '확인 못 한 것을 특정 범주로 적었다');
 });
 
 test('성공 회차는 ok로 분류한다', () => {
@@ -42,6 +76,7 @@ test('성공 회차는 ok로 분류한다', () => {
     modelUsage: { 'claude-opus-5-5': { inputTokens: 100 } } }]);
   assert.equal(c.category, 'ok');
   assert.equal(c.isError, false);
+  assert.equal(c.usageRecord, 'present');
 });
 
 // ── 오류 문구 → 범주. **문구 자체는 절대 출력하지 않는다** ──
@@ -132,5 +167,5 @@ test('result 메시지가 없으면 모른다고 적는다', () => {
 
 test('배열이 아니라 객체로 감싸 와도 읽는다', () => {
   const c = categorize({ messages: [OBSERVED] });
-  assert.equal(c.category, 'no_model_call');
+  assert.equal(c.category, 'no_usage_record');
 });

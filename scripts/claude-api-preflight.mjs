@@ -105,12 +105,16 @@ export async function check({
 }
 
 /**
- * **모델이 메시지 경로에서 쓸 수 있는가.**
+ * 메시지 경로가 **이 요청에 어떤 HTTP 상태를 돌려주는가.**
  *
- * 토큰 세기는 생성이 아니고 요금이 붙지 않는다. 그래도 인증·모델 권한은
- * 생성과 같은 경로에서 평가되므로, 메타데이터 GET보다 훨씬 가까운 증거다.
- * 그렇다고 **생성이 성공한다는 증거는 아니다** — 한도·동시성·정책은 여기서
- * 보이지 않는다.
+ * 토큰 세기는 생성이 아니고 요금이 붙지 않는다. 메타데이터 GET보다 생성에
+ * 가까운 경로이긴 하다.
+ *
+ * **그래도 이것은 생성 성공의 증거가 아니다.** 모델 접근 권한·청구 상태·
+ * 가용성을 확정하지도 못한다 — 한도·동시성·정책은 여기서 보이지 않고,
+ * 이 순간의 상태가 다음 순간의 상태도 아니다. 돌려주는 것은 **그 호출의
+ * HTTP 상태 분류**뿐이다. 실제 생성이 되는지는 **Claude Code Action이
+ * 실제로 성공한 회차**로만 판정한다.
  */
 export async function checkModelAccess({
   apiKey = '', request = fetch, log = console.log,
@@ -134,7 +138,9 @@ export async function checkModelAccess({
     },
     request, log, retries, sleep, timeoutMs,
   });
-  return result.ok ? { ok: true, code: 'model_messages_accessible' } : result;
+  // 이름을 '모델 접근 가능'으로 적지 않는다 — 그건 이 호출이 말할 수 있는
+  // 것보다 큰 주장이다. 적는 것은 "그 호출이 200이었다"까지다.
+  return result.ok ? { ok: true, code: 'messages_endpoint_http_ok' } : result;
 }
 
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
