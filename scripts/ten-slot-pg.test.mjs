@@ -502,4 +502,63 @@ if (!target.ok) {
       assert.equal(readState(target, green, campaignId).statuses.length, 10);
     }
   });
+
+  // ── 주문 의도가 **모양부터** 성립하는가 ──
+  //
+  // `INTENT_INVALID` 검사에는 `client_order_id`와 `requested_lots`뿐이었다.
+  // `quantity`·`leverage`·`symbol`·`side`·`exchange`·`order_type`·LIMIT 가격은
+  // 아무 검사 없이 `live_orders`에 들어갔고, `012`에도 그 칸들의 CHECK가 없다.
+  // 그래서 수량 -0.001, 배율 -1, 빈 종목, `side='HOLD'` 같은 입력이
+  // **내구적으로 예약**될 수 있었다 — 전송은 반드시 실패하는데 슬롯은
+  // RESERVED로 잡힌 채 남는다.
+  //
+  // 여기서 보는 것은 **도메인(어디서도 유효하지 않은 값)**이다. 거래소별
+  // LOT_SIZE·틱·배율 한도는 SQL에 복제하지 않는다 — 그 정본은 실행기다.
+  test('★ 모양이 성립하지 않는 주문 의도는 예약도 만들지 않는다', () => {
+    const bad = [
+      ['수량 음수', { quantity: -0.001 }],
+      ['수량 0', { quantity: 0 }],
+      ['수량 없음', { quantity: null }],
+      ['배율 음수', { leverage: -1 }],
+      ['배율 0', { leverage: 0 }],
+      ['진입인데 배율 없음', { leverage: null }],
+      ['빈 종목', { symbol: '' }],
+      ['공백 종목', { symbol: '   ' }],
+      ['종목 없음', { symbol: null }],
+      ['알 수 없는 방향', { side: 'HOLD' }],
+      ['방향 없음', { side: null }],
+      ['알 수 없는 거래소', { exchange: 'not-a-venue' }],
+      ['거래소 없음', { exchange: null }],
+      ['알 수 없는 주문유형', { orderType: 'INVALID' }],
+      ['LIMIT인데 가격 없음', { orderType: 'LIMIT', price: null }],
+      ['LIMIT인데 가격 0', { orderType: 'LIMIT', price: 0 }],
+      ['LIMIT인데 가격 음수', { orderType: 'LIMIT', price: -100 }],
+    ];
+    for (const [label, over] of bad) {
+      const campaignId = fresh();
+      const r = claim({ campaignId, expectedVersion: 0,
+        clientOrderId: `shape-${campaignId}`, ...over });
+      assert.equal(r.code, 'INTENT_INVALID', `${label}이 예약됐다`);
+      const st = readState(target, green, campaignId);
+      assert.deepEqual({ version: st.version, active: st.active, claims: st.claims, intents: st.intents },
+        { version: 0, active: 0, claims: 0, intents: 0 }, `${label}에서 무언가 남았다`);
+    }
+  });
+
+  test('★ 정당한 주문은 막지 않는다 — MARKET · LIMIT · 청산(배율 없음)', () => {
+    const good = [
+      ['MARKET 진입', {}],
+      ['LIMIT 진입', { orderType: 'LIMIT', price: 95000 }],
+      ['SELL 진입', { side: 'SELL' }],
+      ['Gate 거래소', { exchange: 'gate' }],
+      // 청산은 배율이 없을 수 있다 — 실행기도 reduceOnly에서는 배율을 요구하지 않는다.
+      ['청산(배율 없음)', { reduceOnly: true, leverage: null }],
+    ];
+    for (const [label, over] of good) {
+      const campaignId = fresh();
+      const r = claim({ campaignId, expectedVersion: 0,
+        clientOrderId: `shapeok-${campaignId}`, ...over });
+      assert.equal(r.code, 'RESERVATION_AND_INTENT_DURABLE', `${label}을 잘못 막았다`);
+    }
+  });
 }

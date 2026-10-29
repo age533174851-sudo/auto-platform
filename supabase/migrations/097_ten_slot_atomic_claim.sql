@@ -230,7 +230,8 @@ $$;
 --
 --   CAMPAIGN_MISSING  캠페인이 없다 (만들지 않는다)
 --   COUPLING_CORRUPT  슬롯 10줄이 아니거나 FREE/비FREE 배열이 불가능하다
---   INTENT_INVALID    client_order_id나 수량이 유효하지 않다
+--   INTENT_INVALID    주문 의도의 모양이 성립하지 않는다 (주문 ID · 로트 ·
+--                     수량 · 종목 · 방향 · 거래소 · 주문유형 · 배율 · 지정가)
 --   MOCK_NOT_TRADABLE 모의 캠페인이다 — 실거래 장부에 의도를 적지 않는다
 --   ENVIRONMENT_MISMATCH 캠페인 환경과 호출자가 말한 주문 모드가 다르다
 --   ORDER_ID_REUSED   그 주문 ID는 이미 쓰였다 (예약 또는 live_orders에)
@@ -270,6 +271,8 @@ DECLARE
   v_active     INT;
   v_index      INT;
   v_mode       TEXT;
+  v_type       TEXT;
+  v_reduce     BOOLEAN;
   v_order_id   UUID;
   v_next       BIGINT;
   v_rows       INT;
@@ -307,9 +310,40 @@ BEGIN
   END IF;
 
   -- ③ 의도 자체가 성립하는가
+  --
+  --   **모양부터 본다.** 예전에는 `client_order_id`와 `requested_lots`만
+  --   봤고, 수량·배율·종목·방향·거래소·주문유형은 아무 검사 없이
+  --   `live_orders`에 들어갔다. `012`에도 그 칸들의 CHECK가 없다. 그래서
+  --   수량 -0.001, 배율 -1, 빈 종목, `side='HOLD'` 같은 입력이 **내구적으로
+  --   예약**될 수 있었다 — 전송은 반드시 실패하는데 슬롯은 RESERVED로
+  --   잡힌 채 남는다. 되돌릴 사람이 없으면 그 캠페인은 거기서 멈춘다.
+  --
+  --   여기서 보는 것은 **도메인**이다: 어디서도 유효할 수 없는 값.
+  --   거래소별 LOT_SIZE·틱·최소 명목가·배율 한도는 **여기에 적지 않는다** —
+  --   그 정본은 주문 실행기(`src/lib/engine/orderExecutor.ts`)이고, SQL에
+  --   복제하면 같은 판단이 두 곳에 생겨 언젠가 한쪽만 바뀐다(074의 원칙).
+  --   이 함수가 보장하는 것은 "거래소가 받아 줄 주문"이 아니라
+  --   **"말이 되는 의도만 내구화한다"**이다.
+  v_type   := COALESCE(p_order_type, 'MARKET');
+  v_reduce := COALESCE(p_reduce_only, FALSE);
+
   IF p_client_order_id IS NULL OR length(btrim(p_client_order_id)) = 0
      OR length(p_client_order_id) > 128
-     OR p_requested_lots IS NULL OR p_requested_lots <= 0 THEN
+     OR p_requested_lots IS NULL OR p_requested_lots <= 0
+     -- NUMERIC의 'NaN'은 모든 수보다 크다. `> 0`만으로는 걸러지지 않는다.
+     OR p_quantity IS NULL OR p_quantity = 'NaN'::NUMERIC OR p_quantity <= 0
+     OR p_symbol IS NULL OR length(btrim(p_symbol)) = 0 OR length(p_symbol) > 32
+     OR p_side IS NULL OR p_side NOT IN ('BUY', 'SELL')
+     OR p_exchange IS NULL OR p_exchange NOT IN ('binance', 'gate')
+     OR v_type NOT IN ('MARKET', 'LIMIT')
+     -- 배율은 진입에만 필요하다. 청산은 없을 수 있지만, **있는데 1 미만**은
+     -- 어느 쪽이든 말이 안 된다 (실행기도 진입에서 `leverage >= 1`을 요구한다).
+     OR (NOT v_reduce AND (p_leverage IS NULL OR p_leverage < 1))
+     OR (p_leverage IS NOT NULL AND p_leverage < 1)
+     -- 지정가인데 가격이 없으면 보내지 않는다. 여기서 시장가로 바꾸지 않는다 —
+     -- 사용자가 지정가를 쓴 이유가 사라진다(실행기와 같은 판단).
+     OR (v_type = 'LIMIT' AND (p_price IS NULL OR p_price = 'NaN'::NUMERIC OR p_price <= 0))
+     OR (p_price IS NOT NULL AND (p_price = 'NaN'::NUMERIC OR p_price <= 0)) THEN
     RETURN QUERY SELECT 'INTENT_INVALID'::TEXT, NULL::INT, v_campaign.version, NULL::UUID;
     RETURN;
   END IF;
@@ -398,8 +432,10 @@ BEGIN
   ) VALUES (
     p_client_order_id, p_signal_id, v_campaign.user_id, v_campaign.connection_id,
     -- **캠페인에서 끌어낸 값을 적는다.** 호출자가 넘긴 p_mode가 아니다.
-    p_exchange, v_mode, p_symbol, p_side, COALESCE(p_order_type, 'MARKET'),
-    p_quantity, p_price, p_leverage, COALESCE(p_reduce_only, FALSE), 'INTENT'
+    -- 주문유형·청산여부는 ③에서 **검사한 그 값**을 쓴다 — 검사한 것과
+    -- 적는 것이 다르면 검사는 아무것도 보장하지 않는다.
+    p_exchange, v_mode, p_symbol, p_side, v_type,
+    p_quantity, p_price, p_leverage, v_reduce, 'INTENT'
   )
   RETURNING id INTO v_order_id;
 
