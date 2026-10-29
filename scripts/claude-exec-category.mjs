@@ -46,8 +46,14 @@ const PATTERNS = [
   ['invalid_request', /invalid_request_error|\b400\b|bad request/i],
 ];
 
-/** 숫자 하나를 안전하게 읽는다. 못 읽으면 null — 0으로 바꾸지 않는다 */
-const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+/**
+ * 숫자 하나를 안전하게 읽는다. 못 읽으면 null — 0으로 바꾸지 않는다.
+ *
+ * **불가능한 값도 못 읽은 것이다.** 턴 수·소요 시간·비용은 음수가 될 수
+ * 없다. 음수를 그대로 적으면 그 위에서 범주를 고르게 되고(`numTurns <= 1`),
+ * 손상된 기록이 특정 진단으로 단정된다.
+ */
+const num = (v) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null);
 
 /** 결과 메시지를 찾는다. 배열·`{messages:[]}`·생 JSON 문자열을 받는다 */
 function resultOf(input) {
@@ -60,13 +66,15 @@ function resultOf(input) {
     : Array.isArray(data.messages) ? data.messages
       : Array.isArray(data.output) ? data.output
         : [data];
-  // 마지막 result 메시지가 최종 판정이다.
+  // 마지막 **result** 메시지가 최종 판정이다.
+  //
+  // `type`을 보지 않고 "is_error가 boolean이면 결과"로 읽던 자리였다.
+  // 그러면 결과 뒤에 붙은 `{type:'assistant', is_error:false}` 한 줄이
+  // **진짜 실패 결과를 밀어내고 성공이 된다.** result가 없으면 없는
+  // 것으로 둔다 — 비결과 메시지에서 판정을 지어내지 않는다.
   for (let i = list.length - 1; i >= 0; i--) {
     const m = list[i];
-    if (m && typeof m === 'object'
-        && (m.type === 'result' || typeof m.is_error === 'boolean' || num(m.num_turns) != null)) {
-      return m;
-    }
+    if (m && typeof m === 'object' && m.type === 'result') return m;
   }
   return null;
 }
@@ -105,7 +113,13 @@ export function categorize(input) {
     category: 'unknown',
   };
 
-  if (out.isError === false) { out.category = 'ok'; return out; }
+  // **성공은 결과 메시지가 성공이라고 적었을 때만이다.**
+  //
+  // `is_error === false`만 보던 자리였다. 그러면
+  // `subtype:'error_max_turns', is_error:false`처럼 스스로 모순된 기록도
+  // 성공이 된다. 모순된 것은 아래 문구 판정으로 내려보낸다 — 거기서도
+  // 못 고르면 `unknown`이다. **확인하지 못한 것은 통과가 아니다.**
+  if (out.isError === false && out.subtype === 'success') { out.category = 'ok'; return out; }
 
   // 범주를 고르는 데만 쓴다. 이 문자열은 **어디에도 출력되지 않는다.**
   const haystack = [r.result, r.error?.message, r.error?.type, r.message, r.subtype]
@@ -116,8 +130,10 @@ export function categorize(input) {
 
   // 문구가 없을 때. 사용 기록이 **비어 있다는 관측**까지만 적는다.
   // 기록이 없는 것과 호출이 없었던 것을 같은 말로 쓰지 않는다.
+  // 비용은 **읽힌 0만** 0으로 센다. `?? 0`으로 두면 비용 칸이 없는 기록이
+  // "비용 0"이 되어, 확인하지 못한 것 위에서 범주를 단정하게 된다.
   if (usageRecord === 'absent' && numTurns != null && numTurns <= 1
-      && (out.costUsd ?? 0) === 0) {
+      && out.costUsd === 0) {
     out.category = 'no_usage_record';
   }
   return out;

@@ -169,3 +169,76 @@ test('배열이 아니라 객체로 감싸 와도 읽는다', () => {
   const c = categorize({ messages: [OBSERVED] });
   assert.equal(c.category, 'no_usage_record');
 });
+
+// ══════════════════════════════════════════════════════════════════
+// GPT 검수 ② — **가짜 `ok`를 만들 수 있었다** (#533)
+//
+// 두 자리가 겹쳐서 실패를 성공으로 덮었다:
+//
+//   ① `resultOf`가 `type === 'result'`가 아닌 메시지도 최종 결과로
+//      채택했다. `is_error`가 boolean이거나 `num_turns`가 숫자이면
+//      충분했다 — 그래서 결과 뒤에 붙은 `{type:'assistant',
+//      is_error:false}` 한 줄이 **진짜 실패 결과를 밀어냈다.**
+//
+//   ② `is_error === false`이면 `subtype`을 보지 않고 `ok`로 끝냈다.
+//      그래서 `subtype:'error_max_turns', is_error:false`처럼
+//      **스스로 모순된 기록**도 성공이 됐다.
+//
+// 진단기가 가짜 초록을 만드는 것은 이 저장소에서 가장 비싼 실패다 —
+// 복구가 끝났다고 적힌 채 회차가 계속 죽는다.
+// ══════════════════════════════════════════════════════════════════
+
+test('★★ 결과 뒤에 붙은 비결과 메시지가 실패를 성공으로 덮지 않는다', () => {
+  const c = categorize([
+    { type: 'result', subtype: 'error_during_execution', is_error: true,
+      num_turns: 1, modelUsage: {}, total_cost_usd: 0 },
+    { type: 'assistant', is_error: false },
+  ]);
+  assert.notEqual(c.category, 'ok', '실패 기록이 뒤 메시지에 덮였다');
+  assert.equal(c.isError, true, '최종 결과가 아닌 메시지를 결과로 읽었다');
+  assert.equal(c.subtype, 'error_during_execution');
+});
+
+test('★★ 결과 메시지가 없으면 비결과 메시지의 is_error로 성공을 적지 않는다', () => {
+  const c = categorize([{ type: 'assistant', is_error: false }]);
+  assert.equal(c.category, 'no_execution_record');
+  assert.equal(c.isError, null, '결과가 아닌 것을 결과로 읽었다');
+});
+
+test('★★ num_turns만 있는 비결과 메시지도 결과로 읽지 않는다', () => {
+  const c = categorize([{ type: 'assistant', num_turns: 3 }]);
+  assert.equal(c.category, 'no_execution_record');
+  assert.equal(c.numTurns, null);
+});
+
+test('★★ is_error:false인데 subtype이 성공이 아니면 ok로 적지 않는다', () => {
+  const c = categorize([{ type: 'result', subtype: 'error_max_turns', is_error: false,
+    num_turns: 40, modelUsage: { m: {} }, total_cost_usd: 1 }]);
+  assert.notEqual(c.category, 'ok', '모순된 기록을 성공으로 적었다');
+  assert.equal(c.category, 'max_turns_exhausted');
+});
+
+test('★★ is_error:false인데 subtype을 못 읽었으면 ok로 적지 않는다', () => {
+  const c = categorize([{ type: 'result', is_error: false,
+    num_turns: 5, modelUsage: { m: {} }, total_cost_usd: 1 }]);
+  assert.notEqual(c.category, 'ok', '증거 없이 성공으로 적었다');
+  assert.equal(c.subtype, null);
+});
+
+test('★★ 음수 턴·소요·비용은 0이 아니라 확인 못 함이다', () => {
+  const c = categorize([{ ...OBSERVED, num_turns: -3, duration_ms: -1, total_cost_usd: -0.5 }]);
+  assert.equal(c.numTurns, null, '음수 턴을 그대로 적었다');
+  assert.equal(c.durationMs, null);
+  assert.equal(c.costUsd, null);
+  assert.notEqual(c.category, 'no_usage_record',
+    '불가능한 숫자 위에서 범주를 단정했다');
+});
+
+test('★★ 비용 칸이 아예 없으면 0으로 바꿔 범주를 단정하지 않는다', () => {
+  const { total_cost_usd, ...noCost } = OBSERVED;
+  const c = categorize([noCost]);
+  assert.equal(c.costUsd, null, '없는 비용을 0으로 적었다');
+  assert.notEqual(c.category, 'no_usage_record',
+    '확인 못 한 비용을 0으로 바꿔 범주를 단정했다');
+  assert.equal(c.category, 'unknown');
+});
