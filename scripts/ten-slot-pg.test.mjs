@@ -46,11 +46,11 @@ if (!target.ok) {
   });
 
   let seq = 0;
-  const fresh = (equity = 1000) => {
+  const fresh = (equity = 1000, environment = 'TESTNET') => {
     const campaignId = `c-${++seq}-${Date.now().toString(36)}`;
     const rows = psql(target, green, openCampaignSql({
       campaignId, userId: '11111111-1111-4111-8111-111111111111',
-      environment: 'TESTNET', startingEquity: equity,
+      environment, startingEquity: equity,
     }));
     assert.equal(rows[0], 'OPENED|0');
     return campaignId;
@@ -376,5 +376,54 @@ if (!target.ok) {
       compared++;
     }
     assert.ok(compared >= 160, `비교한 경우가 너무 적습니다 (${compared})`);
+  });
+
+  // ── 환경 경계 — MOCK / TESTNET / LIVE의 장부는 절대 섞이지 않는다 ──
+  //
+  // RPC가 `p_mode`를 **호출자에게서 받아** `live_orders.mode`에 그대로
+  // 적었다. 캠페인의 `environment`와 비교하는 코드가 한 줄도 없어서,
+  // TESTNET 캠페인이 `mode='LIVE'`인 의도를 커밋할 수 있었다. 라우트가
+  // 아직 안 붙어 실제 주문이 나간 적은 없지만, 붙는 순간 TESTNET/LIVE
+  // 격리가 깨진다. `CLAUDE.md`의 절대 규칙이라 미리 막는다.
+  test('★ 캠페인 환경과 주문 모드가 어긋나면 예약도 의도도 만들지 않는다', () => {
+    for (const [environment, mode] of [
+      ['TESTNET', 'LIVE'], ['LIVE', 'TESTNET'],
+      ['TESTNET', null], ['TESTNET', 'PAPER'], ['LIVE', 'MOCK'],
+    ]) {
+      const campaignId = fresh(1000, environment);
+      const r = claim({ campaignId, expectedVersion: 0, mode,
+        clientOrderId: `envmix-${campaignId}` });
+      assert.equal(r.code, 'ENVIRONMENT_MISMATCH',
+        `환경 ${environment} 캠페인이 mode=${mode} 의도를 받았다`);
+      const s = readState(target, green, campaignId);
+      assert.deepEqual({ version: s.version, active: s.active, claims: s.claims, intents: s.intents },
+        { version: 0, active: 0, claims: 0, intents: 0 },
+        `환경 ${environment} / mode ${mode}에서 무언가 남았다`);
+    }
+  });
+
+  test('★ MOCK 캠페인은 실거래 장부에 의도를 적지 않는다', () => {
+    for (const mode of ['TESTNET', 'LIVE', 'MOCK', null]) {
+      const campaignId = fresh(1000, 'MOCK');
+      const r = claim({ campaignId, expectedVersion: 0, mode,
+        clientOrderId: `mock-${campaignId}` });
+      // 모의 장부를 실거래 장부로 조용히 바꾸지 않는다. 막고 말한다.
+      assert.equal(r.code, 'MOCK_NOT_TRADABLE', `MOCK 캠페인이 mode=${mode}로 통과했다`);
+      const s = readState(target, green, campaignId);
+      assert.deepEqual({ version: s.version, claims: s.claims, intents: s.intents },
+        { version: 0, claims: 0, intents: 0 });
+    }
+  });
+
+  test('★ 장부에 적히는 환경은 호출자 값이 아니라 캠페인에서 나온다', () => {
+    for (const environment of ['TESTNET', 'LIVE']) {
+      const campaignId = fresh(1000, environment);
+      const coid = `envok-${campaignId}`;
+      const r = claim({ campaignId, expectedVersion: 0, mode: environment, clientOrderId: coid });
+      assert.equal(r.code, 'RESERVATION_AND_INTENT_DURABLE');
+      const [row] = psql(target, green,
+        `SELECT mode FROM live_orders WHERE client_order_id = '${coid}'`);
+      assert.equal(row, environment, `장부에 ${row}가 적혔다 (캠페인은 ${environment})`);
+    }
   });
 }

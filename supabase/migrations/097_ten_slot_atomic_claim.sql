@@ -94,6 +94,10 @@ CREATE TABLE IF NOT EXISTS ten_slot_claims (
   PRIMARY KEY (campaign_id, slot_index),
   FOREIGN KEY (campaign_id, slot_index)
     REFERENCES ten_slot_slots (campaign_id, slot_index),
+  -- 의도 줄이 사라지면 이 예약이 무엇을 예약한 것인지 알 수 없게 된다.
+  -- 지금 `live_orders`를 지우는 경로는 저장소에 없지만(전수 확인),
+  -- 생기더라도 예약만 남은 상태가 만들어지지 않게 DB가 거절한다.
+  FOREIGN KEY (live_order_id) REFERENCES live_orders (id),
   CONSTRAINT ten_slot_claims_lots_chk CHECK (requested_lots > 0),
   CONSTRAINT ten_slot_claims_coid_chk
     CHECK (length(client_order_id) > 0 AND length(client_order_id) <= 128)
@@ -174,6 +178,8 @@ $$;
 --   CAMPAIGN_MISSING  캠페인이 없다 (만들지 않는다)
 --   COUPLING_CORRUPT  슬롯 10줄이 아니거나 FREE/비FREE 배열이 불가능하다
 --   INTENT_INVALID    client_order_id나 수량이 유효하지 않다
+--   MOCK_NOT_TRADABLE 모의 캠페인이다 — 실거래 장부에 의도를 적지 않는다
+--   ENVIRONMENT_MISMATCH 캠페인 환경과 호출자가 말한 주문 모드가 다르다
 --   ORDER_ID_REUSED   그 주문 ID는 이미 쓰였다 (예약 또는 live_orders에)
 --   STALE_VERSION     읽은 버전이 지금 버전이 아니다 (= 경합에서 졌다)
 --   KILL_SWITCH       캠페인이 중지됐다
@@ -210,6 +216,7 @@ DECLARE
   v_non_free   INT;
   v_active     INT;
   v_index      INT;
+  v_mode       TEXT;
   v_order_id   UUID;
   v_next       BIGINT;
   v_rows       INT;
@@ -251,6 +258,34 @@ BEGIN
      OR length(p_client_order_id) > 128
      OR p_requested_lots IS NULL OR p_requested_lots <= 0 THEN
     RETURN QUERY SELECT 'INTENT_INVALID'::TEXT, NULL::INT, v_campaign.version, NULL::UUID;
+    RETURN;
+  END IF;
+
+  -- ③-2 **환경 경계. MOCK / TESTNET / LIVE의 장부는 절대 섞이지 않는다.**
+  --
+  --   예전에는 `live_orders.mode`에 **호출자가 넘긴 `p_mode`를 그대로**
+  --   적었다. 캠페인의 `environment`와 비교하는 코드가 한 줄도 없어서
+  --   TESTNET 캠페인이 `mode='LIVE'`인 의도를 커밋할 수 있었다. 라우트가
+  --   붙는 순간 그건 실계좌 주문이 된다.
+  --
+  --   그래서 **적을 값을 호출자에게서 받지 않는다** — 캠페인 환경에서
+  --   끌어낸다. `p_mode`는 호출자가 믿고 있는 환경을 **선언**하는 값으로만
+  --   쓰고, 둘이 다르면 거절한다. 조용히 한쪽을 따르면 호출부와 장부가
+  --   서로 다른 환경을 믿은 채로 진행한다.
+  v_mode := CASE v_campaign.environment
+    WHEN 'TESTNET' THEN 'TESTNET'
+    WHEN 'LIVE'    THEN 'LIVE'
+    ELSE NULL
+  END;
+
+  IF v_mode IS NULL THEN
+    -- 모의 캠페인을 실거래 장부로 조용히 바꾸지 않는다. 막고 말한다.
+    RETURN QUERY SELECT 'MOCK_NOT_TRADABLE'::TEXT, NULL::INT, v_campaign.version, NULL::UUID;
+    RETURN;
+  END IF;
+
+  IF p_mode IS DISTINCT FROM v_mode THEN
+    RETURN QUERY SELECT 'ENVIRONMENT_MISMATCH'::TEXT, NULL::INT, v_campaign.version, NULL::UUID;
     RETURN;
   END IF;
 
@@ -309,7 +344,8 @@ BEGIN
     quantity, price, leverage, reduce_only, status
   ) VALUES (
     p_client_order_id, p_signal_id, v_campaign.user_id, v_campaign.connection_id,
-    p_exchange, p_mode, p_symbol, p_side, COALESCE(p_order_type, 'MARKET'),
+    -- **캠페인에서 끌어낸 값을 적는다.** 호출자가 넘긴 p_mode가 아니다.
+    p_exchange, v_mode, p_symbol, p_side, COALESCE(p_order_type, 'MARKET'),
     p_quantity, p_price, p_leverage, COALESCE(p_reduce_only, FALSE), 'INTENT'
   )
   RETURNING id INTO v_order_id;
@@ -426,6 +462,7 @@ COMMENT ON FUNCTION public.ten_slot_claim(
   TEXT, TEXT, TEXT, TEXT, TEXT, NUMERIC, NUMERIC, INT, BOOLEAN, TEXT
 ) IS
   '10슬롯 예약과 live_orders INTENT를 한 트랜잭션으로 적는다. 거래소 요청은 '
-  '이 안에 없다. 확인하지 못한 노출은 0으로 적지 않고 EXPOSURE_UNKNOWN으로 막는다.';
+  '이 안에 없다. 확인하지 못한 노출은 0으로 적지 않고 EXPOSURE_UNKNOWN으로 막는다. '
+  '장부에 적는 mode는 캠페인 환경에서 끌어낸다 — 호출자가 넘긴 값이 아니다.';
 COMMENT ON INDEX ten_slot_active_one IS
   '캠페인당 활성 슬롯은 하나뿐이다 — 응용 코드가 FOR UPDATE를 빼먹어도 DB가 거절한다.';

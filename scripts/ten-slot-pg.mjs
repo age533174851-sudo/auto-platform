@@ -151,8 +151,8 @@ export function claimSql(a) {
     ${q(a.campaignId)}, ${n(a.expectedVersion)}, ${a.clientOrderId === null ? 'NULL' : q(a.clientOrderId)},
     ${n(fill(a.requestedLots, 1))},
     ${n(e?.positions)}, ${n(e?.openOrders)}, ${n(e?.pendingEntries)},
-    ${q(a.exchange || 'binance')}, ${q(a.mode || 'TESTNET')}, ${q(a.symbol || 'BTCUSDT')},
-    ${q(a.side || 'BUY')}, ${q(a.orderType || 'MARKET')}, ${n(fill(a.quantity, 0.001))},
+    ${q(fill(a.exchange, 'binance'))}, ${q(fill(a.mode, 'TESTNET'))}, ${q(fill(a.symbol, 'BTCUSDT'))},
+    ${q(fill(a.side, 'BUY'))}, ${q(fill(a.orderType, 'MARKET'))}, ${n(fill(a.quantity, 0.001))},
     ${a.price == null ? 'NULL' : n(a.price)}, ${n(fill(a.leverage, 10))},
     ${a.reduceOnly ? 'TRUE' : 'FALSE'}, ${a.signalId ? q(a.signalId) : 'NULL'})`;
 }
