@@ -17,6 +17,9 @@ const validJournal = s => !!s && validId(s.campaignId) && Number.isSafeInteger(s
   (s.phase !== 'EXIT_PARTIAL' || (s.exitedLots > 0 && s.exitedLots < s.filledLots)) &&
   (s.phase !== 'CLOSED' || s.exitedLots === s.filledLots);
 
+// Reuse the canonical offline journal validator for coupled-record invariants.
+export const validOfflineJournal = validJournal;
+
 function advance(s, event) {
   if (!validJournal(s)) return blocked('JOURNAL_CORRUPT');
   if (!event || !validId(event.eventId) || !validId(event.clientOrderId)) return blocked('EVENT_UNKNOWN');
