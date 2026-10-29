@@ -168,6 +168,14 @@ export interface FakeDbOptions {
   failInsertCode?: { table: string; code: string };
   /** select를 실패시킨다 */
   failSelectsOn?: string;
+  /**
+   * UPDATE의 **결과**를 바꾼다.
+   *
+   * `error`는 DB가 오류를 돌려준 경우, `zero-rows`는 **오류 없이 0행**인
+   * 경우다. 뒤쪽이 더 조용해서 더 위험하다 — 조건에 걸린 줄이 없는데
+   * `error: null`이라 성공으로 읽힌다.
+   */
+  updateFailure?: { table: string; mode: 'error' | 'zero-rows' };
 }
 
 export class FakeDb {
@@ -197,6 +205,7 @@ export class FakeDb {
     const db = this;
     const filters: { col: string; vals: any[] }[] = [];
     let pending: { kind: 'insert' | 'update'; patch: any } | null = null;
+    let wantsReadback = false;
 
     const apply = () => {
       let out = db.rows[table] ?? [];
@@ -210,15 +219,29 @@ export class FakeDb {
         // 거래소는 받았는데 장부에 못 적는 상황이다.
         return { error: { message: `DB 쓰기 실패 (${table})`, code: 'XX000' } };
       }
+      const uf = db.opts.updateFailure;
+      if (uf && uf.table === table) {
+        if (uf.mode === 'error') {
+          return { data: null, error: { message: `DB 쓰기 실패 (${table})`, code: 'XX000' } };
+        }
+        // **오류 없이 0행.** 조건에 걸린 줄이 없었다는 뜻이고 성공이 아니다.
+        return { data: [], error: null };
+      }
       const where: Record<string, any> = {};
       for (const f of filters) where[f.col] = f.vals.length === 1 ? f.vals[0] : f.vals;
-      for (const r of apply()) Object.assign(r, pending.patch);
+      const hit = apply();
+      for (const r of hit) Object.assign(r, pending.patch);
       db.writes.push({ table, kind: 'update', patch: { ...pending.patch }, where });
-      return { error: null };
+      // `.select(...)`를 붙였으면 **되읽은 줄**을 돌려준다. 실제 클라이언트가
+      // 그렇게 동작하고, 0행과 1행을 구분하려면 이 값이 있어야 한다.
+      return wantsReadback
+        ? { data: hit.map((r) => ({ id: r.id })), error: null }
+        : { error: null };
     };
 
     const builder: any = {
       select(_cols?: string) {
+        if (pending?.kind === 'update') { wantsReadback = true; return builder; }
         if (pending?.kind === 'insert') return builder;
         if (db.opts.failSelectsOn === table) {
           builder.__selectFails = true;
