@@ -21,7 +21,7 @@
 // 거래소는 가짜다. 이 시험은 **실제 Binance 주문이 아니다.**
 
 import { test, eq, assert } from '../harness';
-import { FakeDb, withCryptoEnv } from './venueHarness';
+import { FakeDb, FakeVenue, withCryptoEnv } from './venueHarness';
 import { encryptSecret } from '../../lib/exchanges/crypto';
 
 const ADMIN = 'test-admin-secret-0123456789';
@@ -53,6 +53,7 @@ export async function runSmokeStartRouteTests() {
   const serverPath = require.resolve('../../lib/supabase/server');
   const adminPath = require.resolve('../../lib/supabase/admin');
   const routePath = require.resolve('../../app/api/autotrade/smoke-test/route');
+  const attestRoutePath = require.resolve('../../app/api/autotrade/smoke-test/attest-exposure/route');
   const evidenceRoutePath = require.resolve('../../app/api/autotrade/smoke-test/legacy-evidence/route');
 
   /**
@@ -183,6 +184,185 @@ export async function runSmokeStartRouteTests() {
       eq(db.writes.length, 0);
     } finally { r.restore(); }
   });
+
+
+  // ══════════ #344 노출 사후 확인 — 막은 것을 푸는 경로 ══════════
+  //
+  // 여기서는 거래소까지 간다. FakeVenue가 `fetch`를 가로채므로 실제
+  // Binance 호출은 0건이다. 보는 것은 **GET만 나가는가**, **못 읽었을 때
+  // 비었다고 적지 않는가**, **장부에 정확히 한 줄을 썼는가**다.
+  //
+  // 주의: 이 하네스의 `test(async)`는 **동시에** 돈다. FakeVenue는
+  // `globalThis.fetch`를 갈아 끼우므로 시험 안에서 설치하면 서로 엉킨다
+  // (실제로 엉켜서 다른 시험의 거래소 응답을 받았다). 그래서 관측은
+  // 여기서 **순차로 미리** 돌리고, 시험에는 단언만 둔다.
+  {
+    const ATT = '22222222-2222-4222-8222-222222222222';
+    const attReq = (auth = true) =>
+      req({ testId: ATT }, auth ? { authorization: 'Bearer fake.jwt' } : {});
+
+    const legacySmoke = (over: Record<string, any> = {}) => ({
+      id: ATT, user_id: 'u-1', connection_id: 'c-testnet',
+      symbol: 'BTCUSDT', state: 'UNKNOWN', mode: 'TESTNET',
+      steps: {
+        PREFLIGHT: { state: 'PASS' },
+        ENTRY: { state: 'FAIL', note: '[-1111] Precision is over the maximum' },
+        POSITION_ZERO: { state: 'PASS' },
+      },
+      created_at: '2026-10-16T04:22:40.000Z',
+      ...over,
+    });
+
+    /** 비어 있는 거래소 — 세 조회 모두 빈 배열 */
+    const emptyVenue = () => new FakeVenue()
+      .on('/fapi/v2/positionRisk', { json: [] })
+      .on('/fapi/v1/openOrders', { json: [] })
+      .on('/fapi/v1/openAlgoOrders', { json: [] });
+
+    const pendingFirst = () => ({
+      at: new Date(Date.now() - 11 * 60_000).toISOString(),
+      code: 'OBSERVED_FLAT_NOW', positions: 0, regular: 0, algo: 0,
+    });
+
+    async function attest(venue: FakeVenue, opts: {
+      smoke?: any[]; jwt?: string | null; dbOpts?: any; conn?: any; auth?: boolean;
+    } = {}) {
+      const restoreCrypto = withCryptoEnv();
+      const uninstall = venue.install();
+      const db = new FakeDb(opts.dbOpts ?? {});
+      db.seed('exchange_connections', [opts.conn ?? conn()]);
+      db.seed('smoke_tests', opts.smoke ?? [legacySmoke()]);
+      const r = loadRoute(db, opts.jwt === undefined ? 'u-1' : opts.jwt, attestRoutePath);
+      try {
+        const res = await r.POST(attReq(opts.auth !== false));
+        return { status: res.status, json: await res.json(), db, venue };
+      } finally { r.restore(); uninstall(); restoreCrypto(); }
+    }
+
+    const attOf = (db: FakeDb) => (db.row('smoke_tests', { id: ATT })?.steps as any)?._attestation ?? null;
+
+    // ── 관측을 순차로 먼저 돌린다 ──
+    const FIRST = await attest(emptyVenue());
+    const DONE = await attest(emptyVenue(), {
+      smoke: [legacySmoke({ steps: {
+        PREFLIGHT: { state: 'PASS' }, ENTRY: { state: 'FAIL' },
+        POSITION_ZERO: { state: 'PASS' },
+        _attestation: { code: 'PENDING', first: pendingFirst(), method: 'm', env: 'TESTNET' },
+      } })],
+    });
+    const ALGO_OPEN = await attest(new FakeVenue()
+      .on('/fapi/v2/positionRisk', { json: [] })
+      .on('/fapi/v1/openOrders', { json: [] })
+      .on('/fapi/v1/openAlgoOrders', { json: [{ algoId: 9, symbol: 'BTCUSDT' }] }));
+    const READ_FAIL = await attest(new FakeVenue()
+      .on('/fapi/v2/positionRisk', { json: [] })
+      .on('/fapi/v1/openOrders', { status: 503, json: { code: -1001, msg: 'Internal error' } })
+      .on('/fapi/v1/openAlgoOrders', { json: [] }));
+    const MALFORMED = await attest(new FakeVenue()
+      .on('/fapi/v2/positionRisk', { json: [] })
+      .on('/fapi/v1/openOrders', { json: { oops: true } })
+      .on('/fapi/v1/openAlgoOrders', { json: [] }));
+    const ZERO_ROWS = await attest(emptyVenue(), {
+      dbOpts: { updateFailure: { table: 'smoke_tests', mode: 'zero-rows' } },
+    });
+    const WRITE_ERR = await attest(emptyVenue(), {
+      dbOpts: { updateFailure: { table: 'smoke_tests', mode: 'error' } },
+    });
+    const RECORDED_FAIL = await attest(emptyVenue(), {
+      smoke: [legacySmoke({ steps: {
+        POSITION_ZERO: { state: 'PASS' }, ORDERS_ZERO: { state: 'FAIL', note: '손절 123 남음' },
+      } })],
+    });
+    const OTHER_OWNER = await attest(emptyVenue(), { smoke: [legacySmoke({ user_id: 'someone-else' })] });
+    const LIVE_CONN = await attest(emptyVenue(), { conn: conn({ is_testnet: false }) });
+    const NO_AUTH = await attest(emptyVenue(), { jwt: null, auth: false });
+
+    test('★★ #344 비어 있으면 첫 관측을 적는다 — 읽고 끝나지 않는다', () => {
+      eq(FIRST.status, 200, `응답 ${FIRST.status}: ${JSON.stringify(FIRST.json).slice(0, 200)}`);
+      eq(FIRST.json.phase, 'FIRST', `단계가 ${FIRST.json.phase}다`);
+      eq(FIRST.json.code, 'OBSERVED_FLAT_NOW', `관측이 ${FIRST.json.code}다`);
+      assert(attOf(FIRST.db) != null,
+        '관측을 장부에 적지 않았다 — 읽고 끝나면 사람이 DB를 고치게 된다');
+      eq(attOf(FIRST.db).code, 'PENDING', '한 번 보고 완료로 적었다');
+      eq(FIRST.venue.orderSends().length, 0, '주문을 보냈다');
+      eq(FIRST.venue.calls.filter((c: any) => c.method !== 'GET').length, 0, 'GET이 아닌 요청이 나갔다');
+      eq(FIRST.venue.calls.length, 3, `거래소 조회가 ${FIRST.venue.calls.length}번이다 — 셋 다 읽어야 한다`);
+    });
+
+    test('★★ #344 과거 판정은 그대로다 — state·verdict·ENTRY를 고치지 않는다', () => {
+      const row = FIRST.db.row('smoke_tests', { id: ATT });
+      eq(row.state, 'UNKNOWN', '과거 판정을 바꿨다');
+      eq((row.steps as any).ENTRY.state, 'FAIL', '과거 ENTRY 실패를 덮었다');
+      eq((row.steps as any).ORDERS_ZERO, undefined, 'ORDERS_ZERO를 증거 없이 적었다');
+    });
+
+    test('★★ #344 간격을 채운 두 번째 관측에서 완료되고 차단이 풀린다', () => {
+      eq(DONE.json.phase, 'COMPLETED', `단계가 ${DONE.json.phase}다`);
+      eq(attOf(DONE.db).code, 'ATTESTED_FLAT', '완료인데 PENDING으로 적었다');
+      const { unresolvedExposureBlock } = require('../../lib/smoke/smokePlan');
+      const blk = unresolvedExposureBlock({
+        rows: [DONE.db.row('smoke_tests', { id: ATT })], connectionId: 'c-testnet',
+      });
+      eq(blk.blocked, false, `적어 놓고도 막힌다 (${blk.code}) — 배선이 안 됐다`);
+    });
+
+    test('★★ #344 사후 확인은 진입 허가가 아니다 — mayStartSmoke는 항상 false', () => {
+      eq(DONE.json.mayStartSmoke, false, '사후 확인이 진입을 허가했다');
+      eq(DONE.json.priorSmokeVerdictUnchanged, true, '과거 판정을 바꿨다고 적었다');
+    });
+
+    test('★★ #344 조건부(Algo) 주문이 남아 있으면 비었다고 적지 않는다', () => {
+      eq(ALGO_OPEN.json.code, 'EXPOSURE_OPEN', `관측이 ${ALGO_OPEN.json.code}다`);
+      assert(ALGO_OPEN.json.phase !== 'COMPLETED', `남아 있는데 ${ALGO_OPEN.json.phase}로 끝냈다`);
+      eq(attOf(ALGO_OPEN.db), null, '노출이 보이는데 관측을 남겼다');
+    });
+
+    test('★★ #344 서명 GET이 실패하면 비었다고 적지 않는다 (못 읽음 ≠ 0건)', () => {
+      eq(READ_FAIL.json.code, 'UNKNOWN', `조회 실패를 ${READ_FAIL.json.code}로 읽었다`);
+      eq(attOf(READ_FAIL.db), null, '못 읽었는데 관측을 적었다');
+    });
+
+    test('★★ #344 HTTP 200인데 배열이 아니면 0건으로 적지 않는다', () => {
+      eq(MALFORMED.json.code, 'UNKNOWN', `깨진 200을 ${MALFORMED.json.code}로 읽었다`);
+      eq(attOf(MALFORMED.db), null, '깨진 응답으로 관측을 적었다');
+    });
+
+    test('★★ #344 장부 UPDATE가 0행이면 성공으로 적지 않는다', () => {
+      eq(ZERO_ROWS.status, 409, `응답이 ${ZERO_ROWS.status}다`);
+      eq(ZERO_ROWS.json.code, 'ATTESTATION_WRITE_UNCONFIRMED', `코드가 ${ZERO_ROWS.json.code}다`);
+    });
+
+    test('★★ #344 장부 UPDATE가 오류면 성공으로 적지 않는다', () => {
+      eq(WRITE_ERR.status, 503, `응답이 ${WRITE_ERR.status}다`);
+      eq(WRITE_ERR.json.code, 'ATTESTATION_WRITE_FAILED', `코드가 ${WRITE_ERR.json.code}다`);
+    });
+
+    test('★★ #344 기록된 ORDERS_ZERO=FAIL은 사후 확인 대상이 아니다', () => {
+      eq(RECORDED_FAIL.status, 409, `응답이 ${RECORDED_FAIL.status}다`);
+      eq(RECORDED_FAIL.json.code, 'RECORDED_FAILURE_NOT_ATTESTABLE', `코드가 ${RECORDED_FAIL.json.code}다`);
+      eq(RECORDED_FAIL.db.writes.length, 0, '본 적 있는 FAIL 위에 뭔가 썼다');
+      eq(RECORDED_FAIL.venue.calls.length, 0, 'FAIL 줄인데 거래소를 불렀다');
+    });
+
+    test('#344 타인의 회차는 보이지 않는다', () => {
+      eq(OTHER_OWNER.status, 404, `응답이 ${OTHER_OWNER.status}다`);
+      eq(OTHER_OWNER.json.code, 'NOT_FOUND');
+      eq(OTHER_OWNER.db.writes.length, 0, '남의 줄을 건드렸다');
+    });
+
+    test('#344 LIVE 연결로는 사후 확인을 하지 않는다', () => {
+      eq(LIVE_CONN.status, 409, `응답이 ${LIVE_CONN.status}다`);
+      eq(LIVE_CONN.json.code, 'VERIFIED_TESTNET_REQUIRED', `코드가 ${LIVE_CONN.json.code}다`);
+      eq(LIVE_CONN.db.writes.length, 0, 'LIVE 연결로 장부를 건드렸다');
+      eq(LIVE_CONN.venue.calls.length, 0, 'LIVE 연결인데 거래소를 불렀다');
+    });
+
+    test('#344 비인증 요청은 401이고 거래소를 부르지 않는다', () => {
+      eq(NO_AUTH.status, 401, `응답이 ${NO_AUTH.status}다`);
+      eq(NO_AUTH.venue.calls.length, 0, '인증 전에 거래소를 불렀다');
+      eq(NO_AUTH.db.writes.length, 0, '인증 전에 장부를 건드렸다');
+    });
+  }
 
   // ── ① 인증 우회가 없는가 ──
 
