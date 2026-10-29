@@ -120,7 +120,12 @@ export async function resumeCoupledOffline(store, campaignId) {
   if (index === -1) return { ok: true, code: 'LEDGER_IDLE_ONLY', version: s.version };
   if (s.ledger.slots[index].status === 'UNKNOWN') return blocked('RECONCILIATION_REQUIRED');
   const journal = s.journals[index];
-  const event = { eventId: 'restart-' + s.version, clientOrderId: journal.clientOrderId, type: 'UNCERTAIN' };
+  // A prior venue event can own the deterministic restart ID. Choose an unused one.
+  let restartId = 'restart-' + s.version;
+  for (let suffix = 0; journal.eventIds.includes(restartId); suffix++) {
+    restartId = 'restart-' + s.version + '-' + suffix;
+  }
+  const event = { eventId: restartId, clientOrderId: journal.clientOrderId, type: 'UNCERTAIN' };
   const j = planOfflineLifecycleEvent(journal, journal.version, event);
   if (!j.ok) return j;
   const move = advanceOfflineSlot(s.ledger, s.ledger.version, index, 'UNKNOWN');

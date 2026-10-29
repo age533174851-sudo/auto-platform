@@ -169,3 +169,28 @@ test('journal version rolled back after durable partial fill is corrupt; no furt
   assert.equal((await applyCoupledOfflineEvent(db, 'camp', protect)).code, 'COUPLING_CORRUPT');
   assert.equal(db.writes, writes);
 });
+
+test('restart collision with venue event ID still durably marks UNKNOWN', async () => {
+  const db = new FakeDB(); await claim(db);
+  assert.equal((await applyCoupledOfflineEvent(db, 'camp', event('restart-2', 'ENTRY_PARTIAL', { cumulativeLots: 3 }))).ok, true);
+  const writes = db.writes;
+  const result = await resumeCoupledOffline(db, 'camp');
+  assert.equal(result.code, 'RECONCILIATION_REQUIRED');
+  assert.equal(result.persisted, true);
+  assert.equal(db.writes, writes + 1);
+  assert.equal(db.state.ledger.slots[0].status, 'UNKNOWN');
+  assert.equal(db.state.journals[0].phase, 'UNKNOWN');
+  assert.equal(db.state.journals[0].eventIds.at(-1), 'restart-2-0');
+});
+
+test('restart skips multiple occupied restart IDs without changing earlier events', async () => {
+  const db = new FakeDB(); await claim(db);
+  await applyCoupledOfflineEvent(db, 'camp', event('restart-3', 'ENTRY_PARTIAL', { cumulativeLots: 3 }));
+  await applyCoupledOfflineEvent(db, 'camp', event('restart-3-0', 'ENTRY_PARTIAL', { cumulativeLots: 4 }));
+  const before = [...db.state.journals[0].eventIds];
+  const result = await resumeCoupledOffline(db, 'camp');
+  assert.equal(result.persisted, true);
+  assert.equal(db.state.journals[0].eventIds.at(-1), 'restart-3-1');
+  assert.deepEqual(db.state.journals[0].eventIds.slice(0, 2), before);
+  assert.equal(db.state.ledger.slots[0].status, 'UNKNOWN');
+});
