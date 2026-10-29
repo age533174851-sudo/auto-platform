@@ -20,14 +20,34 @@ export function createOfflineLedger(campaignId, startingEquity) {
   };
 }
 
+// A one-position campaign has only SPENT* -> optional ACTIVE -> FREE*.
+// Reject impossible persisted snapshots before any plan, transition or kill.
+function validSlotOrder(slots) {
+  let phase = 0; // 0: spent prefix, 1: active, 2: free suffix
+  for (const slot of slots) {
+    if (slot.status === 'SPENT') {
+      if (phase !== 0) return false;
+    } else if (ACTIVE.has(slot.status)) {
+      if (phase !== 0) return false;
+      phase = 1;
+    } else if (slot.status === 'FREE') {
+      phase = 2;
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
+
 function validLedger(s) {
   return !!s && typeof s.campaignId === 'string' && !!s.campaignId.trim() &&
     Number.isFinite(s.startingEquity) && s.startingEquity > 0 &&
-    validCount(s.version) && typeof s.killed === 'boolean' &&
+    validCount(s.version) && s.version < Number.MAX_SAFE_INTEGER && typeof s.killed === 'boolean' &&
     Array.isArray(s.slots) && s.slots.length === SLOT_COUNT &&
     s.slots.every((slot, index) => slot && slot.index === index &&
       STATES.has(slot.status) && Number.isFinite(slot.marginBudget) &&
-      slot.marginBudget === s.startingEquity / SLOT_COUNT);
+      slot.marginBudget === s.startingEquity / SLOT_COUNT) &&
+    validSlotOrder(s.slots);
 }
 
 function withSlot(s, index, status) {
