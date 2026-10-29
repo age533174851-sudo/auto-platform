@@ -128,12 +128,46 @@ DROP POLICY IF EXISTS ten_slot_claims_service ON ten_slot_claims;
 CREATE POLICY ten_slot_claims_service ON ten_slot_claims
   FOR ALL TO service_role USING (true) WITH CHECK (true);
 
+-- ── 이미 있는 캠페인이 **내가 열려던 그 캠페인인가** ──
+--
+-- 판정을 한 곳에만 둔다. 개설 경로에는 "먼저 읽어 보는 자리"와 "동시
+-- 삽입에서 진 뒤 다시 읽는 자리"가 둘 있고, 두 곳에 같은 비교를 적으면
+-- 언젠가 한쪽만 바뀐다 — 이 저장소의 상습 고장이다.
+--
+-- `IS DISTINCT FROM`을 쓴다. `connection_id`는 NULL일 수 있고 `=`는
+-- NULL을 만나면 NULL을 돌려줘서 **다른 것을 같다고 읽는다.**
+CREATE OR REPLACE FUNCTION public.ten_slot_identity_verdict(
+  p_row             public.ten_slot_campaigns,
+  p_user_id         UUID,
+  p_connection_id   UUID,
+  p_environment     TEXT,
+  p_starting_equity NUMERIC
+)
+RETURNS TEXT
+LANGUAGE sql
+IMMUTABLE
+AS $$
+  SELECT CASE
+    WHEN p_row.user_id         IS DISTINCT FROM p_user_id
+      OR p_row.connection_id   IS DISTINCT FROM p_connection_id
+      OR p_row.environment     IS DISTINCT FROM p_environment
+      OR p_row.starting_equity IS DISTINCT FROM p_starting_equity
+    THEN 'CAMPAIGN_IDENTITY_MISMATCH'
+    ELSE 'ALREADY_OPEN'
+  END
+$$;
+
 -- ── 캠페인 개설 ──
 --
 -- 캠페인 줄과 슬롯 10줄은 **함께 생기거나 함께 안 생긴다.** 쪼개서 넣으면
 -- 슬롯이 7개인 캠페인이 만들어지고, 그 뒤의 모든 판단이 그 위에서 돈다.
--- 이미 있으면 ALREADY_OPEN을 돌려주고 아무것도 바꾸지 않는다 — 재호출이
--- 버전을 올리거나 슬롯을 되돌리지 않는다.
+--
+-- **이미 있다는 것만으로 ALREADY_OPEN을 돌려주지 않는다.** 예전에는
+-- `campaign_id`로 줄이 있으면 무조건 성공처럼 끝냈다. 그러면 다른 주인이,
+-- 다른 환경으로, 같은 ID를 열었을 때도 `ALREADY_OPEN`이 나온다. 그 뒤의
+-- `ten_slot_claim`은 **저장된** 캠페인의 user/connection을 `live_orders`에
+-- 적으므로, 호출자는 남의 캠페인을 자기 것으로 믿은 채 주문 의도를 적게
+-- 된다. 그래서 정체성을 대조하고 어긋나면 fail-closed로 돌려준다.
 CREATE OR REPLACE FUNCTION public.ten_slot_open_campaign(
   p_campaign_id     TEXT,
   p_user_id         UUID,
@@ -145,15 +179,17 @@ RETURNS TABLE (code TEXT, campaign_version BIGINT)
 LANGUAGE plpgsql
 AS $$
 DECLARE
-  v_version BIGINT;
+  v_row        public.ten_slot_campaigns;
+  v_constraint TEXT;
 BEGIN
-  SELECT c.version INTO v_version
+  SELECT * INTO v_row
     FROM public.ten_slot_campaigns AS c
    WHERE c.campaign_id = p_campaign_id
      FOR UPDATE;
 
-  IF v_version IS NOT NULL THEN
-    RETURN QUERY SELECT 'ALREADY_OPEN'::TEXT, v_version;
+  IF v_row.campaign_id IS NOT NULL THEN
+    RETURN QUERY SELECT public.ten_slot_identity_verdict(
+      v_row, p_user_id, p_connection_id, p_environment, p_starting_equity), v_row.version;
     RETURN;
   END IF;
 
@@ -166,6 +202,23 @@ BEGIN
   SELECT p_campaign_id, i FROM generate_series(0, 9) AS g(i);
 
   RETURN QUERY SELECT 'OPENED'::TEXT, 0::BIGINT;
+
+EXCEPTION
+  WHEN unique_violation THEN
+    -- **없는 줄의 `FOR UPDATE`는 삽입 경쟁을 직렬화하지 못한다.** 둘 다
+    -- "없다"를 보고 INSERT로 가고, 늦은 쪽이 PK 충돌로 깨진다. 그걸 그대로
+    -- 던지면 호출부는 "동시 개설"과 "DB 고장"을 구분할 수 없다. 다시 읽어
+    -- 위와 **같은 판정**을 돌려준다.
+    GET STACKED DIAGNOSTICS v_constraint = CONSTRAINT_NAME;
+    IF v_constraint IS DISTINCT FROM 'ten_slot_campaigns_pkey' THEN
+      -- 모르는 유니크 위반을 '이미 열림'으로 삼키지 않는다.
+      RAISE;
+    END IF;
+    SELECT * INTO v_row
+      FROM public.ten_slot_campaigns AS c
+     WHERE c.campaign_id = p_campaign_id;
+    RETURN QUERY SELECT public.ten_slot_identity_verdict(
+      v_row, p_user_id, p_connection_id, p_environment, p_starting_equity), v_row.version;
 END;
 $$;
 
@@ -442,6 +495,11 @@ $$;
 -- 이 표들은 service_role만 쓴다(위 정책). 함수도 **호출자의 권한으로 돈다** —
 -- SECURITY DEFINER로 만들지 않는다. 만들면 authenticated가 남의 캠페인에
 -- 주문 의도를 적을 통로가 생긴다(074와 같은 판단).
+REVOKE ALL ON FUNCTION public.ten_slot_identity_verdict(
+  public.ten_slot_campaigns, UUID, UUID, TEXT, NUMERIC) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.ten_slot_identity_verdict(
+  public.ten_slot_campaigns, UUID, UUID, TEXT, NUMERIC) TO service_role;
+
 REVOKE ALL ON FUNCTION public.ten_slot_open_campaign(TEXT, UUID, UUID, TEXT, NUMERIC) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.ten_slot_open_campaign(TEXT, UUID, UUID, TEXT, NUMERIC) TO service_role;
 
@@ -464,5 +522,10 @@ COMMENT ON FUNCTION public.ten_slot_claim(
   '10슬롯 예약과 live_orders INTENT를 한 트랜잭션으로 적는다. 거래소 요청은 '
   '이 안에 없다. 확인하지 못한 노출은 0으로 적지 않고 EXPOSURE_UNKNOWN으로 막는다. '
   '장부에 적는 mode는 캠페인 환경에서 끌어낸다 — 호출자가 넘긴 값이 아니다.';
+COMMENT ON FUNCTION public.ten_slot_open_campaign(TEXT, UUID, UUID, TEXT, NUMERIC) IS
+  '캠페인 줄과 슬롯 10줄을 한 트랜잭션으로 만든다. 이미 있으면 정체성'
+  '(주인·연결·환경·시작 자본)을 대조해 같을 때만 ALREADY_OPEN이다 — '
+  '다르면 CAMPAIGN_IDENTITY_MISMATCH로 막는다. 동시 개설도 예외가 아니라 '
+  '같은 판정으로 끝난다.';
 COMMENT ON INDEX ten_slot_active_one IS
   '캠페인당 활성 슬롯은 하나뿐이다 — 응용 코드가 FOR UPDATE를 빼먹어도 DB가 거절한다.';

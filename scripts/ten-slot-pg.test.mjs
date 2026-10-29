@@ -426,4 +426,80 @@ if (!target.ok) {
       assert.equal(row, environment, `장부에 ${row}가 적혔다 (캠페인은 ${environment})`);
     }
   });
+
+  // ── 캠페인 정체성 — 같은 ID를 다른 주인·다른 환경으로 열 수 없다 ──
+  //
+  // `ten_slot_open_campaign`은 `campaign_id`로 줄이 있으면 **무조건**
+  // `ALREADY_OPEN`을 돌려줬다. 저장된 `user_id`·`connection_id`·
+  // `environment`·`starting_equity`를 요청 값과 대조하는 코드가 없었다.
+  // `ten_slot_claim`은 저장된 캠페인의 user/connection을 `live_orders`에
+  // 적으므로, 호출자가 `ALREADY_OPEN`을 성공으로 읽으면 **남의 캠페인을
+  // 자기 것으로 오인한 채** 주문 의도를 적게 된다.
+  const OWNER_A = '11111111-1111-4111-8111-111111111111';
+  const OWNER_B = '22222222-2222-4222-8222-222222222222';
+  const CONN_A = '33333333-3333-4333-8333-333333333333';
+  const openSql = (campaignId, o = {}) => openCampaignSql({
+    campaignId, userId: o.userId ?? OWNER_A,
+    connectionId: o.connectionId === undefined ? CONN_A : o.connectionId,
+    environment: o.environment ?? 'TESTNET',
+    startingEquity: o.startingEquity ?? 1000,
+  });
+  /** 저장된 줄을 그대로 읽는다 — 함수가 무엇을 돌려줬는지와 별개로 본다 */
+  const storedRow = (campaignId) => psql(target, green,
+    `SELECT user_id || '|' || coalesce(connection_id::text, '-') || '|' || environment
+            || '|' || starting_equity || '|' || version
+       FROM ten_slot_campaigns WHERE campaign_id = '${campaignId}'`)[0];
+
+  test('★ 같은 정체성으로 다시 열면 멱등이다 — 아무것도 바뀌지 않는다', () => {
+    const campaignId = `ident-same-${++seq}-${Date.now().toString(36)}`;
+    assert.deepEqual(psql(target, green, openSql(campaignId)), ['OPENED|0']);
+    const before = storedRow(campaignId);
+    assert.deepEqual(psql(target, green, openSql(campaignId)), ['ALREADY_OPEN|0']);
+    assert.equal(storedRow(campaignId), before);
+    assert.equal(readState(target, green, campaignId).statuses.length, 10);
+  });
+
+  test('★ 같은 ID를 다른 정체성으로 열면 ALREADY_OPEN으로 성공처럼 끝나지 않는다', () => {
+    const variants = [
+      ['다른 주인', { userId: OWNER_B }],
+      ['연결 없음', { connectionId: null }],
+      ['다른 연결', { connectionId: '44444444-4444-4444-8444-444444444444' }],
+      ['TESTNET → LIVE', { environment: 'LIVE' }],
+      ['TESTNET → MOCK', { environment: 'MOCK' }],
+      ['다른 시작 자본', { startingEquity: 5000 }],
+    ];
+    for (const [label, over] of variants) {
+      const campaignId = `ident-${++seq}-${Date.now().toString(36)}`;
+      assert.deepEqual(psql(target, green, openSql(campaignId)), ['OPENED|0']);
+      const before = storedRow(campaignId);
+      assert.deepEqual(psql(target, green, openSql(campaignId, over)),
+        ['CAMPAIGN_IDENTITY_MISMATCH|0'], `${label}이 ALREADY_OPEN으로 통과했다`);
+      // 저장된 줄은 한 글자도 바뀌지 않았다.
+      assert.equal(storedRow(campaignId), before, `${label}에서 저장된 캠페인이 바뀌었다`);
+      const st = readState(target, green, campaignId);
+      assert.deepEqual({ version: st.version, claims: st.claims, intents: st.intents },
+        { version: 0, claims: 0, intents: 0 });
+    }
+  });
+
+  test('★ 같은 ID를 동시에 열어도 예외가 아니라 정해진 코드로 끝난다', async () => {
+    // 없는 줄의 FOR UPDATE는 삽입 경쟁을 직렬화하지 못한다 — 둘 다 INSERT로 간다.
+    for (const [label, over, loser] of [
+      ['같은 정체성', {}, 'ALREADY_OPEN'],
+      ['다른 정체성', { userId: OWNER_B }, 'CAMPAIGN_IDENTITY_MISMATCH'],
+    ]) {
+      const campaignId = `ident-race-${++seq}-${Date.now().toString(36)}`;
+      const results = await raceClaims(target, green,
+        [openSql(campaignId), openSql(campaignId, over)], 991777);
+      for (const r of results) {
+        assert.equal(r.code, 0, `${label}: 호출이 예외로 끝났다 — ${r.err}`);
+      }
+      const codes = results
+        .map(r => (r.rows.find(l => l.includes('|')) || '').split('|')[0]).sort();
+      assert.deepEqual(codes, [loser, 'OPENED'].sort(),
+        `${label}: 동시 개설 결과가 ${codes}다`);
+      // 슬롯은 정확히 10줄. 두 번 들어가지 않았다.
+      assert.equal(readState(target, green, campaignId).statuses.length, 10);
+    }
+  });
 }
