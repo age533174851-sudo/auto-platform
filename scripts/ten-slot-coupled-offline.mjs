@@ -27,13 +27,17 @@ export function createCoupledOfflineCampaign(campaignId, equity) {
 export function validCoupledOfflineSnapshot(s) {
   if (!s || !validId(s.campaignId) || !validVersion(s.version) ||
       !s.ledger || s.ledger.campaignId !== s.campaignId || !validVersion(s.ledger.version) ||
+      // Every ledger CAS is accompanied by exactly one envelope CAS.
+      s.ledger.version > s.version ||
       !Array.isArray(s.journals) || s.journals.length !== 10) return false;
   if (planOfflineClaim(s.ledger, s.ledger.version, ZERO).code === 'LEDGER_UNKNOWN') return false;
   const ids = new Set();
   return s.ledger.slots.every((slot, i) => {
     const journal = s.journals[i];
     if (slot.status === 'FREE') return journal === null;
-    if (!validOfflineJournal(journal) || journal.campaignId !== s.campaignId || journal.slotIndex !== i ||
+    // A journal is created in an envelope CAS before its first event increments it.
+    if (!validOfflineJournal(journal) || journal.version >= s.version ||
+        journal.campaignId !== s.campaignId || journal.slotIndex !== i ||
         !PHASE_FOR_SLOT[slot.status]?.has(journal.phase) || ids.has(journal.clientOrderId)) return false;
     ids.add(journal.clientOrderId);
     return true;
