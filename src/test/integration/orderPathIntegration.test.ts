@@ -21,7 +21,7 @@ import { FakeVenue, FakeDb, withCryptoEnv } from './venueHarness';
 //   넣지 않는다**(run.ts에서 도달 불가). 그러면 런타임에 "Cannot find
 //   module"이 난다. 정적으로 가져오면 컴파일되고, 그 파일 안의 `@/`
 //   동적 import는 러너의 해석 shim이 처리한다.
-import { executeOrder, reconcilePendingOrders } from '../../lib/engine/orderExecutor';
+import { executeOrder, reconcilePendingOrders, canAdoptIntent } from '../../lib/engine/orderExecutor';
 import { placeSpotOrder } from '../../lib/exchanges/spotOrderExecutor';
 import { RECONCILE_TARGET_STATUSES } from '../../lib/engine/pendingReconcile';
 import { isProvenFill } from '../../lib/engine/holdingEvidence';
@@ -1770,5 +1770,140 @@ export async function runPrecisionMatrixTests() {
         });
       }
     }
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// 097이 커밋해 둔 의도를 이어받는 경로 (#531)
+//
+// 097의 `ten_slot_claim`은 슬롯 예약과 `live_orders` INTENT를 한
+// 트랜잭션으로 적는다. 그 뒤에 `executeOrder`가 같은 `client_order_id`로
+// 불리면 INSERT가 23505로 깨진다. **그 자리의 기존 동작은 "이미 처리된
+// 주문"으로 끝나는 것이고, 그러면 예약은 커밋됐는데 주문은 영원히 나가지
+// 않는다.** 이어받기는 그 자리를 여는데, 조건이 느슨하면 다른 주문의
+// 의도로 전송하거나 이미 나간 주문을 또 보낸다.
+// ══════════════════════════════════════════════════════════════════
+
+/** 097이 커밋해 둔 INTENT 줄. `exec()`가 조립하는 의도와 같은 값이다 */
+const committedIntent = (over: Record<string, any> = {}) => ({
+  id: 'claim-1', client_order_id: 'COID-1', status: 'INTENT',
+  exchange: 'binance', mode: 'TESTNET', symbol: 'BTCUSDT', side: 'BUY',
+  order_type: 'MARKET', quantity: 0.01, leverage: 100, reduce_only: false,
+  exchange_order_id: null, sent_at: null, attempt_count: 0,
+  ...over,
+});
+
+/** 예약된 의도가 있는 상태. INSERT는 유니크로 깨진다 */
+const adoptDb = (row: Record<string, any> = {}) =>
+  new FakeDb({ failInsertCode: { table: 'live_orders', code: '23505' } })
+    .seed('live_orders', [committedIntent(row)]);
+
+const sendableVenue = () => baseVenue()
+  .on(BN_ORDER, { status: 400, json: { code: -2013, msg: 'Order does not exist.' } }, 'GET')
+  .on(BN_ORDER, { json: bnOrder({ status: 'NEW', executedQty: '0' }) }, 'POST');
+
+export async function runAdoptIntentIntegrationTests() {
+  console.log('[통합 — 커밋된 주문 의도 이어받기 (#531)]');
+
+  // ══════════ ① RED — 이어받지 않으면 주문이 영원히 나가지 않는다 ══════════
+  {
+    const db = adoptDb();
+    const venue = sendableVenue();
+    const r = await scenario(venue, () => exec(db, {}));
+
+    test('★ 예약이 커밋된 의도를 이어받지 않으면 주문이 나가지 않는다 (기존 동작)', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 0, '이어받기를 요청하지 않았는데 주문이 나갔다');
+      eq((r as any).duplicate, true);
+      // **이것이 #531이 가리키는 구멍이다.** 장부에는 의도가 있고 슬롯은
+      // 예약됐는데, 거래소에는 아무 일도 일어나지 않고 ok는 false다.
+      eq((r as any).ok, false);
+      eq(db.table('live_orders')[0].status, 'INTENT');
+    });
+  }
+
+  // ══════════ ② GREEN — 이어받으면 전송이 계속된다 ══════════
+  {
+    const db = adoptDb();
+    const venue = sendableVenue();
+    const r = await scenario(venue, () => exec(db, { adoptIntent: true }));
+
+    test('★ 커밋된 의도를 이어받아 주문을 한 번만 보낸다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 1, `주문이 ${venue.orderSends().length}번 나갔다`);
+      eq((r as any).duplicate, undefined, '이어받았는데 중복으로 끝났다');
+      eq((r as any).status, 'ACKED');
+      // **의도를 또 적지 않는다.** 커밋된 그 줄을 쓴다.
+      eq(db.table('live_orders').length, 1, '의도가 두 줄이 됐다');
+      eq(db.table('live_orders')[0].id, 'claim-1', '예약이 적어 둔 줄이 아닌 다른 줄을 썼다');
+      eq(db.table('live_orders')[0].status, 'ACKED');
+    });
+  }
+
+  // ══════════ ③ 이어받기를 거절해야 하는 경우들 ══════════
+  //
+  // 하나라도 통과하면 "다른 주문의 의도로 전송" 또는 "이미 나간 주문 재전송"이다.
+  const refusals: Array<[string, Record<string, any>]> = [
+    ['이미 전송된 줄', { status: 'SENT' }],
+    ['이미 접수된 줄', { status: 'ACKED' }],
+    ['거래소 주문 번호가 남은 줄', { exchange_order_id: '7001' }],
+    ['전송 시각이 남은 줄', { sent_at: '2026-10-29T00:00:00Z' }],
+    ['시도 횟수가 남은 줄', { attempt_count: 1 }],
+    ['수량이 다른 줄', { quantity: 0.02 }],
+    ['종목이 다른 줄', { symbol: 'ETHUSDT' }],
+    ['방향이 다른 줄', { side: 'SELL' }],
+    ['청산 여부가 다른 줄', { reduce_only: true }],
+    ['배율이 다른 줄', { leverage: 10 }],
+    ['거래소가 다른 줄', { exchange: 'gate' }],
+    ['환경이 다른 줄', { mode: 'LIVE' }],
+  ];
+  for (const [label, over] of refusals) {
+    const db = adoptDb(over);
+    const venue = sendableVenue();
+    const r = await scenario(venue, () => exec(db, { adoptIntent: true }));
+
+    test(`★ ${label}은 이어받지 않고 주문도 보내지 않는다`, () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 0, `${label}인데 주문이 나갔다`);
+      eq((r as any).duplicate, true, `${label}을 이어받았다`);
+    });
+  }
+
+  // ══════════ ④ 줄을 못 읽었으면 이어받지 않는다 ══════════
+  {
+    const db = new FakeDb({ failInsertCode: { table: 'live_orders', code: '23505' } });
+    const venue = sendableVenue();
+    const r = await scenario(venue, () => exec(db, { adoptIntent: true }));
+
+    test('★ 커밋된 의도를 못 읽으면 이어받지 않는다 — UNKNOWN을 통과로 적지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 0, '의도를 못 읽었는데 주문이 나갔다');
+      eq((r as any).status, 'UNKNOWN');
+      eq((r as any).duplicate, true);
+    });
+  }
+
+  // ══════════ ⑤ 판단 함수 자체 ══════════
+  {
+    const intent = {
+      client_order_id: 'COID-1', exchange: 'binance', mode: 'TESTNET',
+      symbol: 'BTCUSDT', side: 'BUY', order_type: 'MARKET',
+      quantity: 0.01, leverage: 100, reduce_only: false,
+    };
+    test('canAdoptIntent: 같은 의도만 이어받는다', () => {
+      assert(canAdoptIntent(committedIntent(), intent).ok, '같은 의도를 거절했다');
+      // 문자열·숫자 표기 차이로 거절하지 않는다 (DB는 NUMERIC을 문자열로 준다)
+      assert(canAdoptIntent(committedIntent({ quantity: '0.0100' as any }), intent).ok,
+        '같은 수량의 다른 표기를 거절했다');
+      for (const [, over] of refusals) {
+        assert(!canAdoptIntent(committedIntent(over), intent).ok,
+          `${JSON.stringify(over)}를 이어받았다`);
+      }
+      assert(!canAdoptIntent(null, intent).ok, 'null을 이어받았다');
+      assert(!canAdoptIntent(undefined, intent).ok, 'undefined를 이어받았다');
+      // 청산 주문은 배율이 없을 수 있다 — **있는데 다른 것**만 거절한다.
+      assert(canAdoptIntent(committedIntent({ leverage: null }), intent).ok,
+        '배율이 없는 줄을 거절했다');
+    });
   }
 }

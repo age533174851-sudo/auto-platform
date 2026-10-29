@@ -13,6 +13,9 @@ execFileSync(process.execPath, ['--test', 'scripts/ten-slot-persistence-offline.
 execFileSync(process.execPath, ['--test', 'scripts/ten-slot-lifecycle-offline.test.mjs'], { cwd: root, stdio: 'inherit' });
 execFileSync(process.execPath, ['--test', 'scripts/ten-slot-coupled-offline.test.mjs'], { cwd: root, stdio: 'inherit' });
 execFileSync(process.execPath, ['--test', 'scripts/ten-slot-reconcile-evidence-offline.test.mjs'], { cwd: root, stdio: 'inherit' });
+// 실제 PostgreSQL 원자성 검증. `TEN_SLOT_PG_URL`이 없으면 **건너뛴다고 말한다** —
+// 돌지 않은 것을 통과로 적지 않는다. 설정 방법은 그 파일 머리말에 있다.
+execFileSync(process.execPath, ['--test', 'scripts/ten-slot-pg.test.mjs'], { cwd: root, stdio: 'inherit' });
 const dir = mkdtempSync(join(tmpdir(), 'traigo-test-'));
 cpSync(join(root, 'src'), join(dir, 'src'), { recursive: true });
 
@@ -165,6 +168,7 @@ import {
   runGateExecIntegrationTests, runGateDupIntegrationTests, runNoFixedTpIntegrationTests,
   runPrecisionIntegrationTests,
   runPrecisionMatrixTests,
+  runAdoptIntentIntegrationTests,
 } from './src/test/integration/orderPathIntegration.test';
 import { runSmokeStartRouteTests } from './src/test/integration/smokeStartRouteIntegration.test';
 import { runHoldExtensionIntegrationTests } from './src/test/integration/holdExtensionIntegration.test';
@@ -414,6 +418,7 @@ runMigrationStatusTests(); runWalletTruthTests(); runSmokePlanTests(); runSmokeR
   //   가짜 거래소**에 묻게 된다. 실제로 그 일이 났고 "거래소 호출이
   //   하나도 없다"로 보였다. 그래서 전부 끝난 뒤에 돌린다.
   await runOrderPathIntegrationTests();
+  await runAdoptIntentIntegrationTests();
   await runReconcileIntegrationTests();
   await runSpotIntegrationTests();
   await runCloseIntegrationTests();
