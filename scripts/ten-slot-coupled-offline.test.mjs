@@ -116,6 +116,32 @@ test('kill switch is durable and rejects claims without resetting journals', asy
   assert.equal((await claimAndIntentCoupledOffline(db, 'camp', clear, 'order-2', 10)).code, 'KILL_SWITCH');
 });
 
+test('repeated kill is idempotent and does not consume a second CAS version', async () => {
+  const db = new FakeDB(); await claim(db);
+  const first = await killCoupledOffline(db, 'camp');
+  const version = db.state.version, writes = db.writes;
+  const second = await killCoupledOffline(db, 'camp');
+  assert.equal(first.code, 'KILL_PERSISTED');
+  assert.deepEqual(second, { ok: true, code: 'KILL_ALREADY_PERSISTED', version });
+  assert.equal(db.state.version, version);
+  assert.equal(db.writes, writes);
+  assert.equal((await claimAndIntentCoupledOffline(db, 'camp', clear, 'order-2', 10)).code, 'KILL_SWITCH');
+});
+
+test('ambiguous committed kill retry acknowledges durable kill without rewriting', async () => {
+  const db = new FakeDB(); await claim(db);
+  db.commitThenThrow = true;
+  assert.equal((await killCoupledOffline(db, 'camp')).code, 'STORE_UNAVAILABLE');
+  assert.equal(db.state.ledger.killed, true);
+  const version = db.state.version, writes = db.writes;
+  db.commitThenThrow = false;
+  assert.deepEqual(await killCoupledOffline(db, 'camp'),
+    { ok: true, code: 'KILL_ALREADY_PERSISTED', version });
+  assert.equal(db.writes, writes);
+  assert.equal(db.state.version, version);
+  assert.equal(validCoupledOfflineSnapshot(db.state), true);
+});
+
 test('DB read failure and unsafe envelope version block writes', async () => {
   const db = new FakeDB(); db.failRead = true;
   assert.equal((await claim(db)).code, 'STORE_UNAVAILABLE');
@@ -212,6 +238,43 @@ test('combined envelope and ledger rollback cannot erase a second claim', async 
   await claimAndIntentCoupledOffline(db, 'camp', clear, 'order-2', 10);
   assert.equal(validCoupledOfflineSnapshot(db.state), true);
   db.state.version = 4; db.state.ledger.version = 4;
+  assert.equal(validCoupledOfflineSnapshot(db.state), false);
+  const writes = db.writes;
+  assert.equal((await resumeCoupledOffline(db, 'camp')).code, 'COUPLING_CORRUPT');
+  assert.equal(db.writes, writes);
+});
+
+
+test('EXIT_PENDING without the protected-entry event history fails closed', async () => {
+  const db = new FakeDB(); await claim(db);
+  await applyCoupledOfflineEvent(db, 'camp', protect);
+  await applyCoupledOfflineEvent(db, 'camp', event('exit', 'EXIT_INTENT', { exitIntentDurable: true }));
+  db.state.journals[0].version = 1;
+  db.state.journals[0].eventIds = ['exit'];
+  assert.equal(validCoupledOfflineSnapshot(db.state), false);
+  const writes = db.writes;
+  assert.equal((await applyCoupledOfflineEvent(db, 'camp', flat)).code, 'COUPLING_CORRUPT');
+  assert.equal(db.writes, writes);
+});
+
+test('CLOSED without its minimum durable event history cannot unlock another slot', async () => {
+  const db = new FakeDB(); await claim(db);
+  await applyCoupledOfflineEvent(db, 'camp', protect);
+  await applyCoupledOfflineEvent(db, 'camp', event('exit', 'EXIT_INTENT', { exitIntentDurable: true }));
+  await applyCoupledOfflineEvent(db, 'camp', flat);
+  db.state.journals[0].version = 1;
+  db.state.journals[0].eventIds = ['flat'];
+  assert.equal(validCoupledOfflineSnapshot(db.state), false);
+  const writes = db.writes;
+  assert.equal((await claimAndIntentCoupledOffline(db, 'camp', clear, 'order-2', 10)).code, 'COUPLING_CORRUPT');
+  assert.equal(db.writes, writes);
+});
+
+test('INTENT_PENDING with phantom event evidence cannot be restarted as valid', async () => {
+  const db = new FakeDB(); await claim(db);
+  db.state.version = 2;
+  db.state.journals[0].version = 1;
+  db.state.journals[0].eventIds = ['phantom'];
   assert.equal(validCoupledOfflineSnapshot(db.state), false);
   const writes = db.writes;
   assert.equal((await resumeCoupledOffline(db, 'camp')).code, 'COUPLING_CORRUPT');
