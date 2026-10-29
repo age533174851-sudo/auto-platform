@@ -31,6 +31,14 @@ export function validCoupledOfflineSnapshot(s) {
       s.ledger.version > s.version ||
       !Array.isArray(s.journals) || s.journals.length !== 10) return false;
   if (planOfflineClaim(s.ledger, s.ledger.version, ZERO).code === 'LEDGER_UNKNOWN') return false;
+  // Lower bounds from durable transitions. A claimed slot and each event
+  // consume an envelope CAS; slot status changes consume ledger CAS versions.
+  const minTransitions = { FREE: 0, RESERVED: 1, OPEN: 2, CLOSING: 3, UNKNOWN: 2, SPENT: 3 };
+  const minLedger = s.ledger.slots.reduce((n, slot) => n + (minTransitions[slot.status] ?? Infinity), 0)
+    + Number(s.ledger.killed);
+  const claimed = s.ledger.slots.filter(slot => slot.status !== 'FREE').length;
+  const journalEvents = s.journals.reduce((n, journal) => n + (journal?.version ?? 0), 0);
+  if (s.ledger.version < minLedger || s.version < claimed + journalEvents + Number(s.ledger.killed)) return false;
   const ids = new Set();
   return s.ledger.slots.every((slot, i) => {
     const journal = s.journals[i];
