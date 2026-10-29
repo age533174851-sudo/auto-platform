@@ -131,3 +131,21 @@ test('duplicate event cannot advance journal or ledger version', async () => {
   assert.equal((await applyCoupledOfflineEvent(db, 'camp', event('partial', 'ENTRY_PARTIAL', { cumulativeLots: 4 }))).code, 'DUPLICATE_EVENT');
   assert.deepEqual(db.state, before);
 });
+
+test('corrupt envelope version below durable ledger version blocks all transitions', async () => {
+  const db = new FakeDB(); await claim(db);
+  db.state.ledger.version = db.state.version + 1;
+  assert.equal(validCoupledOfflineSnapshot(db.state), false);
+  const writes = db.writes;
+  assert.equal((await applyCoupledOfflineEvent(db, 'camp', protect)).code, 'COUPLING_CORRUPT');
+  assert.equal(db.writes, writes);
+});
+
+test('corrupt envelope version equal to journal version blocks all transitions', async () => {
+  const db = new FakeDB(); await claim(db);
+  db.state.journals[0].version = db.state.version;
+  assert.equal(validCoupledOfflineSnapshot(db.state), false);
+  const writes = db.writes;
+  assert.equal((await applyCoupledOfflineEvent(db, 'camp', protect)).code, 'COUPLING_CORRUPT');
+  assert.equal(db.writes, writes);
+});
