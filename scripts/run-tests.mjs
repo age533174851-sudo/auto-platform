@@ -9,6 +9,7 @@ import { join } from 'node:path';
 const root = process.cwd();
 // Offline ten-slot model is deliberately separate from live order execution.
 execFileSync(process.execPath, ['--test', 'scripts/ten-slot-offline.test.mjs'], { cwd: root, stdio: 'inherit' });
+execFileSync(process.execPath, ['--test', 'scripts/ten-slot-persistence-offline.test.mjs'], { cwd: root, stdio: 'inherit' });
 const dir = mkdtempSync(join(tmpdir(), 'traigo-test-'));
 cpSync(join(root, 'src'), join(dir, 'src'), { recursive: true });
 
