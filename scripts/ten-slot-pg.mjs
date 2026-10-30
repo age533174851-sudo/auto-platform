@@ -159,7 +159,45 @@ export function claimSql(a) {
     ${q(fill(a.side, 'BUY'))}, ${q(fill(a.orderType, 'MARKET'))},
     ${raw(a.quantityExpr, n(fill(a.quantity, 0.001)))},
     ${raw(a.priceExpr, a.price == null ? 'NULL' : n(a.price))}, ${n(fill(a.leverage, 10))},
-    ${a.reduceOnly ? 'TRUE' : 'FALSE'}, ${a.signalId ? q(a.signalId) : 'NULL'})`;
+    ${a.reduceOnly ? 'TRUE' : 'FALSE'}, ${a.signalId ? q(a.signalId) : 'NULL'},
+    ${raw(a.stopLossExpr, a.stopLoss == null ? 'NULL' : n(a.stopLoss))},
+    ${raw(a.takeProfitExpr, a.takeProfit == null ? 'NULL' : n(a.takeProfit))},
+    ${q(fill(a.stopPolicy, null))},
+    ${q(fill(a.profileId, null))}, ${q(fill(a.presetId, null))},
+    ${n(fill(a.contractVersion, null))},
+    ${raw(a.adversePctExpr, n(fill(a.adversePct, null)))},
+    ${raw(a.liqPctRawExpr, n(fill(a.liqPctRaw, null)))})`;
+}
+
+/**
+ * 커밋된 **의도 한 줄**을 그대로 읽는다.
+ *
+ * 예약 줄(`ten_slot_claims`)을 거치지 않고 `live_orders`를 직접 본다 —
+ * 예약은 됐는데 의도에 계약이 안 적힌 상태를 보려면 장부 쪽을 봐야 한다.
+ *
+ * NULL은 빈 문자열로 돌려준다. 이 칸들은 전부 "값이 있으면 빈 문자열이
+ * 아닌" 종류라서 구분이 선다. **빈 문자열을 0이나 '없음'으로 읽지 않는다 —
+ * 기록이 없다는 뜻이다.**
+ */
+export function intentRow(target, db, clientOrderId) {
+  const rows = psql(target, db, `SELECT
+      coalesce(status, ''), coalesce(mode, ''), coalesce(order_type, ''),
+      coalesce(price::text, ''),
+      coalesce(stop_loss::text, ''), coalesce(take_profit::text, ''),
+      coalesce(stop_policy, ''),
+      coalesce(execution_profile_id, ''), coalesce(execution_preset_id, ''),
+      coalesce(execution_contract_version::text, ''),
+      coalesce(entry_adverse_distance_pct::text, ''),
+      coalesce(entry_liquidation_distance_pct_raw::text, '')
+    FROM live_orders WHERE client_order_id = ${q(clientOrderId)}`);
+  if (rows.length === 0) return null;
+  const f = String(rows[0]).split('|');
+  return {
+    status: f[0], mode: f[1], orderType: f[2], price: f[3],
+    stopLoss: f[4], takeProfit: f[5], stopPolicy: f[6],
+    profileId: f[7], presetId: f[8], contractVersion: f[9],
+    adversePct: f[10], liqPctRaw: f[11],
+  };
 }
 
 export function parseClaim(rows) {

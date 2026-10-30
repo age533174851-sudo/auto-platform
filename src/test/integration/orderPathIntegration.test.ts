@@ -1784,11 +1784,23 @@ export async function runPrecisionMatrixTests() {
 // 의도로 전송하거나 이미 나간 주문을 또 보낸다.
 // ══════════════════════════════════════════════════════════════════
 
-/** 097이 커밋해 둔 INTENT 줄. `exec()`가 조립하는 의도와 같은 값이다 */
+/**
+ * 097이 커밋해 둔 INTENT 줄. `exec()`가 조립하는 의도와 같은 값이다.
+ *
+ * **`stop_policy`가 여기 있는 이유.** `exec()`의 기본값은
+ * `stopPolicy: 'NO_FIXED_SL'`이고, 그러면 `executeOrder`가 조립하는 의도에
+ * `stop_policy: 'NO_FIXED_SL'`이 붙는다. 예약이 커밋한 줄에 그 칸이 없으면
+ * 이어받은 뒤 장부에는 **정책이 없는 100배 주문**이 남는다 — 복구 경로가
+ * 그것을 고정 손절 주문으로 읽는 바로 그 상태다(078).
+ *
+ * 처음에는 이 칸이 없었고, 그래서 이어받기가 통과했다. 097이 그 칸을
+ * 적게 되면서 **적힌 것과 같은 모양**이 됐다.
+ */
 const committedIntent = (over: Record<string, any> = {}) => ({
   id: 'claim-1', client_order_id: 'COID-1', status: 'INTENT',
   exchange: 'binance', mode: 'TESTNET', symbol: 'BTCUSDT', side: 'BUY',
   order_type: 'MARKET', quantity: 0.01, leverage: 100, reduce_only: false,
+  stop_policy: 'NO_FIXED_SL',
   exchange_order_id: null, sent_at: null, attempt_count: 0,
   ...over,
 });
@@ -1856,6 +1868,28 @@ export async function runAdoptIntentIntegrationTests() {
     ['배율이 다른 줄', { leverage: 10 }],
     ['거래소가 다른 줄', { exchange: 'gate' }],
     ['환경이 다른 줄', { mode: 'LIVE' }],
+    // ── 여기부터가 이 회차에 닫은 구멍이다 ──
+    //
+    //   전부 "같은 주문인데 기록이 반쪽"인 경우다. 통과하면 전송은 되고
+    //   장부에는 계약·정책이 없는 100배 주문이 남는다.
+    ['손절 정책이 빠진 줄', { stop_policy: null }],
+    ['손절 정책이 다른 줄', { stop_policy: 'FIXED_SL' }],
+    ['손절 정책이 공백인 줄', { stop_policy: '   ' }],
+    ['없어야 할 손절가가 적힌 줄', { stop_loss: 61000 }],
+    ['없어야 할 익절가가 적힌 줄', { take_profit: 72000 }],
+    ['계약 프로필만 적힌 줄', { execution_profile_id: 'MAX_LEV_100X' }],
+    ['계약 프리셋만 적힌 줄', { execution_preset_id: 'EXACT_100X' }],
+    ['계약 버전만 적힌 줄', { execution_contract_version: 3 }],
+    ['계약 세 칸이 다 적힌 줄', {
+      execution_profile_id: 'MAX_LEV_100X', execution_preset_id: 'EXACT_100X',
+      execution_contract_version: 3,
+    }],
+    // 097은 지정가를 장부에 적지만 의도 객체에는 아직 `price` 칸이 없다.
+    // 그래서 **지정가 예약은 이어받지 않는다** — 적힌 가격과 보낼 가격이
+    // 같은지 확인할 수 없는 채로 전송하지 않는다.
+    ['지정가가 적힌 줄', { price: 65000 }],
+    ['위험 좌표가 적힌 줄', { entry_adverse_distance_pct: 0.42 }],
+    ['청산여유가 적힌 줄', { entry_liquidation_distance_pct_raw: 0.97 }],
   ];
   for (const [label, over] of refusals) {
     const db = adoptDb(over);
@@ -1889,6 +1923,7 @@ export async function runAdoptIntentIntegrationTests() {
       client_order_id: 'COID-1', exchange: 'binance', mode: 'TESTNET',
       symbol: 'BTCUSDT', side: 'BUY', order_type: 'MARKET',
       quantity: 0.01, leverage: 100, reduce_only: false,
+      stop_policy: 'NO_FIXED_SL',
     };
     test('canAdoptIntent: 같은 의도만 이어받는다', () => {
       assert(canAdoptIntent(committedIntent(), intent).ok, '같은 의도를 거절했다');
@@ -1904,6 +1939,41 @@ export async function runAdoptIntentIntegrationTests() {
       // 청산 주문은 배율이 없을 수 있다 — **있는데 다른 것**만 거절한다.
       assert(canAdoptIntent(committedIntent({ leverage: null }), intent).ok,
         '배율이 없는 줄을 거절했다');
+    });
+
+    // ── 계약까지 **같을 때만** 이어받는다 ──
+    test('canAdoptIntent: 실행 계약이 양쪽에 같으면 이어받는다', () => {
+      const contract = {
+        execution_profile_id: 'MAX_LEV_100X', execution_preset_id: 'EXACT_100X',
+        execution_contract_version: 3,
+      };
+      const withContract = { ...intent, ...contract };
+      assert(canAdoptIntent(committedIntent(contract), withContract).ok,
+        '같은 계약을 거절했다');
+      // DB가 숫자를 문자열로 주는 경우 — 표기 차이로 거절하지 않는다.
+      assert(canAdoptIntent(
+        committedIntent({ ...contract, execution_contract_version: '3' as any }),
+        withContract).ok, '같은 버전의 다른 표기를 거절했다');
+      // 버전만 다르면 **다른 계약**이다.
+      assert(!canAdoptIntent(
+        committedIntent({ ...contract, execution_contract_version: 4 }),
+        withContract).ok, '다른 버전을 이어받았다');
+      // 보낼 주문에는 계약이 있는데 적힌 줄에 없다 — 이것이 이 회차의 구멍이다.
+      assert(!canAdoptIntent(committedIntent(), withContract).ok,
+        '계약이 없는 줄을 이어받았다');
+      // 읽을 수 없는 값은 통과가 아니다 (NaN은 자기 자신과도 다르다).
+      assert(!canAdoptIntent(
+        committedIntent({ ...contract, execution_contract_version: '셋' as any }),
+        withContract).ok, '읽을 수 없는 버전을 이어받았다');
+
+      // 고정 손절 프로필: 정책과 손절가가 양쪽에 같아야 한다.
+      const fixed = { stop_policy: 'FIXED_SL', stop_loss: 61000, take_profit: 72000 };
+      assert(canAdoptIntent(committedIntent(fixed), { ...intent, ...fixed }).ok,
+        '같은 손절·익절가를 거절했다');
+      assert(!canAdoptIntent(committedIntent({ ...fixed, stop_loss: 60000 }),
+        { ...intent, ...fixed }).ok, '다른 손절가를 이어받았다');
+      assert(!canAdoptIntent(committedIntent({ stop_policy: 'FIXED_SL' }),
+        { ...intent, ...fixed }).ok, '손절가가 빠진 줄을 이어받았다');
     });
   }
 }

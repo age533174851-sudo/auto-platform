@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import {
   PG_URL_ENV, PG_RESTART_ENV, pgTarget, psql, createScratchDb, dropScratchDb,
   openCampaignSql, claimSql, parseClaim, readState, raceClaims, psqlSpawn,
-  migrationPaths, restartCommand, restartCluster,
+  migrationPaths, restartCommand, restartCluster, intentRow,
 } from './ten-slot-pg.mjs';
 import { createOfflineLedger, planOfflineClaim } from './ten-slot-offline.mjs';
 
@@ -36,10 +36,25 @@ async function killSleeper(tag, db) { // db는 반드시 넘긴다
 if (!target.ok) {
   test(`실제 PostgreSQL 검증을 건너뜁니다 (${target.reason})`, { skip: target.reason }, () => {});
 } else {
-  // 012만 적용한 DB = 097 **이전**의 실제 스키마다. RED는 여기서 재현한다.
-  const red = createScratchDb(target, 'tsred', migrationPaths(root, ['012_live_orders.sql']));
+  // **운영 스키마와 같은 칸을 깔아 둔다.**
+  //
+  //   097은 `live_orders`에 의도를 적는다. 그 표의 칸은 012 이후
+  //   078(`stop_policy`) · 090(실행 계약 세 칸) · 091(진입 위험 좌표 두 칸)이
+  //   더한다. 097보다 번호가 작으므로 **운영 DB에는 이미 있는 칸**이다.
+  //
+  //   여기서 012만 깔면 시험은 "그 칸이 없는 DB"를 보게 되고, 097이 그
+  //   칸을 못 적는 것이 결함인지 스키마가 없어서인지 구분할 수 없다.
+  //   운영과 같은 모양을 깔아야 **적지 않는 것이 결함으로 드러난다.**
+  const SCHEMA = [
+    '012_live_orders.sql',
+    '078_live_orders_stop_policy.sql',
+    '090_live_orders_execution_identity.sql',
+    '091_live_orders_entry_risk_snapshot.sql',
+  ];
+  // 097 **이전**의 실제 스키마다. RED는 여기서 재현한다.
+  const red = createScratchDb(target, 'tsred', migrationPaths(root, SCHEMA));
   const green = createScratchDb(target, 'tsgreen',
-    migrationPaths(root, ['012_live_orders.sql', '097_ten_slot_atomic_claim.sql']));
+    migrationPaths(root, [...SCHEMA, '097_ten_slot_atomic_claim.sql']));
   process.on('exit', () => {
     try { dropScratchDb(target, red); } catch { /* 정리 실패는 결과를 바꾸지 않는다 */ }
     try { dropScratchDb(target, green); } catch { /* 같음 */ }
@@ -686,6 +701,153 @@ if (!target.ok) {
         assert.deepEqual({ version: st.version, claims: st.claims, intents: st.intents },
           { version: 0, claims: 0, intents: 0 }, `${label}에서 무언가 남았다`);
       }
+    }
+  });
+
+  // ── 커밋된 의도에 **실행 계약과 손절 정책**이 남는가 ──
+  //
+  //   RED: `ten_slot_claim`은 수량·가격·배율까지만 적고 `stop_policy`와
+  //   실행 계약 세 칸(090) · 손절/익절가 · 진입 위험 좌표 두 칸(091)을
+  //   받지도 적지도 않았다.
+  //
+  //   왜 그게 결함인가. 이 함수가 적는 줄은 **전송 전 의도**이고, 전송은
+  //   `orderExecutor`가 그 줄을 이어받아(`adoptIntent`) 한다. 이어받는 줄에
+  //   `stop_policy='NO_FIXED_SL'`이 없으면 복구 경로는 그 포지션을
+  //   **고정 손절 주문으로 읽는다** — 078 주석이 적은 바로 그 고장이다.
+  //   계약 세 칸이 없으면 "배율 100이고 손절이 없으니 Exact100X겠지"로
+  //   되돌아간다 — 090이 끝낸 그 추론이다.
+  //
+  //   그래서 **적을 수 있어야 하고, 적은 대로 남아야 한다.**
+  test('의도에 손절 정책·실행 계약·진입 위험 좌표가 그대로 남는다', () => {
+    const campaignId = fresh();
+    const coid = `order-${campaignId}`;
+    const r = claim({
+      campaignId, expectedVersion: 0, clientOrderId: coid,
+      leverage: 100, stopPolicy: 'NO_FIXED_SL',
+      profileId: 'MAX_LEV_100X', presetId: 'EXACT_100X', contractVersion: 3,
+      adversePct: 0.42, liqPctRaw: 0.97,
+    });
+    assert.equal(r.code, 'RESERVATION_AND_INTENT_DURABLE');
+
+    const row = intentRow(target, green, coid);
+    assert.ok(row, '의도 줄이 없다');
+    // 상태·환경은 기존 보장 그대로다.
+    assert.equal(row.status, 'INTENT');
+    assert.equal(row.mode, 'TESTNET');
+    // ★ 여기가 RED였다.
+    assert.equal(row.stopPolicy, 'NO_FIXED_SL', 'stop_policy가 안 남았다');
+    assert.equal(row.profileId, 'MAX_LEV_100X');
+    assert.equal(row.presetId, 'EXACT_100X');
+    assert.equal(row.contractVersion, '3');
+    assert.equal(Number(row.adversePct), 0.42);
+    assert.equal(Number(row.liqPctRaw), 0.97);
+    // NO_FIXED_SL이므로 손절가는 없는 것이 맞다. **0이 아니라 기록 없음이다.**
+    assert.equal(row.stopLoss, '');
+    assert.equal(row.takeProfit, '');
+  });
+
+  test('고정 손절 프로필의 손절·익절가도 그대로 남는다', () => {
+    const campaignId = fresh();
+    const coid = `order-${campaignId}`;
+    const r = claim({
+      campaignId, expectedVersion: 0, clientOrderId: coid,
+      stopPolicy: 'FIXED_SL', stopLoss: 61000, takeProfit: 72000,
+      orderType: 'LIMIT', price: 65000,
+    });
+    assert.equal(r.code, 'RESERVATION_AND_INTENT_DURABLE');
+    const row = intentRow(target, green, coid);
+    assert.equal(row.stopPolicy, 'FIXED_SL');
+    assert.equal(Number(row.stopLoss), 61000);
+    assert.equal(Number(row.takeProfit), 72000);
+    assert.equal(row.orderType, 'LIMIT');
+    assert.equal(Number(row.price), 65000);
+    // 계약을 안 넘겼으면 **추측해서 채우지 않는다.** NULL은 "기록 없음"이다.
+    assert.equal(row.profileId, '');
+    assert.equal(row.presetId, '');
+    assert.equal(row.contractVersion, '');
+  });
+
+  // **반쪽은 받지 않는다.** 실행 계약 세 칸은 전부 오거나 전부 없다.
+  //
+  //   090의 CHECK 제약도 같은 선을 긋지만, 제약에 걸리면 **예외**가 나고
+  //   슬롯은 되돌아간다 — 호출부는 "왜 거절됐는지"를 코드로 받지 못한다.
+  //   그래서 ③에서 코드로 거절한다. 제약은 마지막 그물로 남겨 둔다.
+  //
+  //   짝 규칙(`MAX_LEV_100X`는 `EXACT_100X`와만)은 **여기에 적지 않는다** —
+  //   그 표의 정본은 `src/lib/execution/profile.ts`이고, SQL에 베끼면 같은
+  //   판단이 두 곳에 생긴다(074·CLAUDE.md의 규칙).
+  test('실행 계약이 반쪽이면 거절하고 아무것도 남기지 않는다', () => {
+    const half = [
+      ['프로필만', { profileId: 'MAX_LEV_100X' }],
+      ['프리셋만', { presetId: 'EXACT_100X' }],
+      ['버전만', { contractVersion: 3 }],
+      ['버전 빠짐', { profileId: 'MAX_LEV_100X', presetId: 'EXACT_100X' }],
+      ['프리셋 빠짐', { profileId: 'MAX_LEV_100X', contractVersion: 3 }],
+      ['프로필 빠짐', { presetId: 'EXACT_100X', contractVersion: 3 }],
+      ['빈 프로필', { profileId: '   ', presetId: 'EXACT_100X', contractVersion: 3 }],
+      ['빈 프리셋', { profileId: 'MAX_LEV_100X', presetId: '', contractVersion: 3 }],
+      ['버전 0', { profileId: 'MAX_LEV_100X', presetId: 'EXACT_100X', contractVersion: 0 }],
+      ['버전 음수', { profileId: 'MAX_LEV_100X', presetId: 'EXACT_100X', contractVersion: -1 }],
+    ];
+    for (const [label, extra] of half) {
+      const campaignId = fresh();
+      const r = claim({
+        campaignId, expectedVersion: 0, clientOrderId: `order-${campaignId}`, ...extra,
+      });
+      assert.equal(r.code, 'INTENT_INVALID', `${label}: ${r.code}로 적었다`);
+      const st = readState(target, green, campaignId);
+      assert.deepEqual({ version: st.version, claims: st.claims, intents: st.intents },
+        { version: 0, claims: 0, intents: 0 }, `${label}에서 무언가 남았다`);
+    }
+  });
+
+  // **모순은 조용히 정리하지 않는다.** 실행기와 같은 판단이다.
+  test('손절 정책과 손절가가 모순이면 거절한다', () => {
+    const bad = [
+      ['NO_FIXED_SL + 손절가', { stopPolicy: 'NO_FIXED_SL', stopLoss: 61000 }],
+      ['모르는 정책', { stopPolicy: 'MAYBE_SL' }],
+      ['빈 정책', { stopPolicy: '  ' }],
+      ['손절가 0', { stopLoss: 0 }],
+      ['손절가 음수', { stopLoss: -1 }],
+      ['손절가 NaN', { stopLossExpr: "'NaN'::numeric" }],
+      ['손절가 Infinity', { stopLossExpr: "'Infinity'::numeric" }],
+      ['익절가 0', { takeProfit: 0 }],
+      ['익절가 NaN', { takeProfitExpr: "'NaN'::numeric" }],
+      ['위험거리 0', { adversePct: 0 }],
+      ['위험거리 음수', { adversePct: -0.1 }],
+      ['위험거리 NaN', { adversePctExpr: "'NaN'::double precision" }],
+      ['청산여유 0', { liqPctRaw: 0 }],
+      ['청산여유 Infinity', { liqPctRawExpr: "'Infinity'::double precision" }],
+    ];
+    for (const [label, extra] of bad) {
+      const campaignId = fresh();
+      const r = claim({
+        campaignId, expectedVersion: 0, clientOrderId: `order-${campaignId}`, ...extra,
+      });
+      assert.equal(r.code, 'INTENT_INVALID', `${label}: ${r.code}로 적었다`);
+      const st = readState(target, green, campaignId);
+      assert.deepEqual({ version: st.version, claims: st.claims, intents: st.intents },
+        { version: 0, claims: 0, intents: 0 }, `${label}에서 무언가 남았다`);
+    }
+  });
+
+  // 위험 좌표 두 칸은 **서로 독립**이다. 091이 CHECK를 걸지 않은 이유가
+  // 그것이다 — 한쪽만 구해진 상황이 실제로 있고, 그때 저장을 통째로
+  // 실패시키면 구한 값까지 버린다. 여기서도 반쪽을 받는다.
+  test('진입 위험 좌표는 한쪽만 있어도 받는다', () => {
+    for (const [label, extra, expect] of [
+      ['위험거리만', { adversePct: 0.42 }, { adversePct: '0.42', liqPctRaw: '' }],
+      ['청산여유만', { liqPctRaw: 0.97 }, { adversePct: '', liqPctRaw: '0.97' }],
+    ]) {
+      const campaignId = fresh();
+      const coid = `order-${campaignId}`;
+      const r = claim({ campaignId, expectedVersion: 0, clientOrderId: coid, ...extra });
+      assert.equal(r.code, 'RESERVATION_AND_INTENT_DURABLE', label);
+      const row = intentRow(target, green, coid);
+      assert.equal(row.adversePct === '' ? '' : String(Number(row.adversePct)),
+        expect.adversePct, `${label}: 위험거리`);
+      assert.equal(row.liqPctRaw === '' ? '' : String(Number(row.liqPctRaw)),
+        expect.liqPctRaw, `${label}: 청산여유`);
     }
   });
 }
