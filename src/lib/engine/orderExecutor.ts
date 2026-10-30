@@ -389,6 +389,7 @@ async function readRemaining(
 export function canAdoptIntent(
   prev: any,
   intent: Record<string, any>,
+  expectedLimitPrice?: number | null,
 ): { ok: boolean; reason: string } {
   if (!prev || typeof prev !== 'object') {
     return { ok: false, reason: '커밋된 의도를 읽지 못했습니다' };
@@ -396,9 +397,22 @@ export function canAdoptIntent(
   if (prev.status !== 'INTENT') {
     return { ok: false, reason: `장부 상태가 ${prev.status || '알 수 없음'}입니다 — 전송이 이미 있었을 수 있습니다` };
   }
+  if (typeof prev.id !== 'string' || prev.id.length === 0) {
+    return { ok: false, reason: '커밋된 의도의 DB 행 ID를 확인하지 못했습니다' };
+  }
   if (prev.exchange_order_id != null || prev.sent_at != null
       || Number(prev.attempt_count ?? 0) !== 0) {
     return { ok: false, reason: '전송 흔적이 남아 있습니다 — 다시 보내지 않습니다' };
+  }
+  // 예약된 INTENT는 service_role로 읽힌다. client_order_id만으로 소유자를
+  // 증명할 수 없으므로 인증된 호출자가 넘긴 정체성과 저장된 정체성을
+  // 모두 요구한다. 어느 쪽이 비었어도 다른 주문을 이어받지 않는다.
+  for (const col of ['user_id', 'connection_id', 'signal_id']) {
+    if (typeof prev[col] !== 'string' || !prev[col].trim()
+        || typeof intent[col] !== 'string' || !intent[col].trim()
+        || prev[col] !== intent[col]) {
+      return { ok: false, reason: `커밋된 의도의 ${col} 정체성을 확인하지 못했습니다` };
+    }
   }
   for (const col of ['client_order_id', 'exchange', 'mode', 'symbol', 'side', 'order_type']) {
     if (String(prev[col]) !== String(intent[col])) {
@@ -410,6 +424,37 @@ export function canAdoptIntent(
   }
   if (Number(prev.quantity) !== Number(intent.quantity)) {
     return { ok: false, reason: '적힌 의도의 수량이 보낼 주문과 다릅니다' };
+  }
+  // SQL 097은 price를 따로 저장한다. LIMIT의 가격을 대조하지 않으면
+  // 같은 주문 ID/수량으로 다른 지정가를 보내는 것이 가능하다.
+  // NULL과 0을 같은 값으로 취급하지 않는다.
+  const sameOptionalNumber = (a: unknown, b: unknown): boolean => {
+    if (a == null || b == null) return a == null && b == null;
+    const x = Number(a), y = Number(b);
+    return Number.isFinite(x) && Number.isFinite(y) && x === y;
+  };
+  if (intent.order_type === 'LIMIT'
+      && (expectedLimitPrice == null || !Number.isFinite(Number(expectedLimitPrice)))) {
+    return { ok: false, reason: '지정가 주문의 가격을 확인하지 못했습니다' };
+  }
+  for (const [col, expected] of [
+    ['price', expectedLimitPrice ?? null],
+    ['stop_loss', intent.stop_loss ?? null],
+    ['take_profit', intent.take_profit ?? null],
+  ] as const) {
+    if (!sameOptionalNumber(prev[col], expected)) {
+      return { ok: false, reason: `커밋된 의도의 ${col}가 보낼 주문과 다릅니다` };
+    }
+  }
+  // NO_FIXED_SL/실행 계약은 주문 후 복구의 정체성이다. SQL이 해당 칸을
+  // 아직 저장하지 않는다면 이어받기를 거절하고, 조용히 누락하지 않는다.
+  for (const col of [
+    'stop_policy', 'execution_profile_id', 'execution_preset_id',
+    'execution_contract_version',
+  ]) {
+    if (String(prev[col] ?? '') !== String(intent[col] ?? '')) {
+      return { ok: false, reason: `커밋된 의도의 ${col}가 보낼 계약과 다릅니다` };
+    }
   }
   // 배율은 청산 주문에 없을 수 있다. **있는데 다른 것**만 거절한다.
   if (intent.leverage != null && prev.leverage != null
@@ -616,7 +661,7 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
     if (String(insErr.code) === '23505') {
       const { data: prev } = await sb.from('live_orders').select('*').eq('client_order_id', clientOrderId).maybeSingle();
       const adopt = args.adoptIntent === true
-        ? canAdoptIntent(prev, intent)
+        ? canAdoptIntent(prev, intent, args.limitPrice)
         : { ok: false, reason: '이어받기를 요청하지 않았습니다' };
       if (!adopt.ok) {
         // 이미 처리된 주문 — 기존 상태를 그대로 반환 (재시도해도 결과 동일)
