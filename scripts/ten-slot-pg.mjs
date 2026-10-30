@@ -135,7 +135,8 @@ const n = v => (v === null || v === undefined ? 'NULL' : String(v));
 export function openCampaignSql(c) {
   return `SELECT code, campaign_version FROM ten_slot_open_campaign(
     ${q(c.campaignId)}, ${q(c.userId)}, ${c.connectionId ? q(c.connectionId) : 'NULL'},
-    ${q(c.environment || 'TESTNET')}, ${n(c.startingEquity ?? 1000)})`;
+    ${q(c.environment || 'TESTNET')},
+    ${c.startingEquityExpr === undefined ? n(c.startingEquity ?? 1000) : c.startingEquityExpr})`;
 }
 
 /**
@@ -146,14 +147,18 @@ export function claimSql(a) {
   // **`??`로 기본값을 주지 않는다.** 그러면 시험이 일부러 넘긴 null이
   // 기본값으로 바뀌어, 거절해야 하는 경우가 통과로 보인다.
   const fill = (v, d) => (v === undefined ? d : v);
+  // `Infinity`는 JS로 렌더하면 유효한 SQL이 아니다. 그런 값은 **SQL 식을
+  // 그대로** 넘겨야 검사할 수 있다 (`'Infinity'::numeric`).
+  const raw = (expr, v) => (expr === undefined ? v : expr);
   const e = a.exposure === undefined ? { positions: 0, openOrders: 0, pendingEntries: 0 } : a.exposure;
   return `SELECT code, slot_index, campaign_version, live_order_id FROM ten_slot_claim(
     ${q(a.campaignId)}, ${n(a.expectedVersion)}, ${a.clientOrderId === null ? 'NULL' : q(a.clientOrderId)},
     ${n(fill(a.requestedLots, 1))},
     ${n(e?.positions)}, ${n(e?.openOrders)}, ${n(e?.pendingEntries)},
     ${q(fill(a.exchange, 'binance'))}, ${q(fill(a.mode, 'TESTNET'))}, ${q(fill(a.symbol, 'BTCUSDT'))},
-    ${q(fill(a.side, 'BUY'))}, ${q(fill(a.orderType, 'MARKET'))}, ${n(fill(a.quantity, 0.001))},
-    ${a.price == null ? 'NULL' : n(a.price)}, ${n(fill(a.leverage, 10))},
+    ${q(fill(a.side, 'BUY'))}, ${q(fill(a.orderType, 'MARKET'))},
+    ${raw(a.quantityExpr, n(fill(a.quantity, 0.001)))},
+    ${raw(a.priceExpr, a.price == null ? 'NULL' : n(a.price))}, ${n(fill(a.leverage, 10))},
     ${a.reduceOnly ? 'TRUE' : 'FALSE'}, ${a.signalId ? q(a.signalId) : 'NULL'})`;
 }
 

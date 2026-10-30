@@ -561,4 +561,75 @@ if (!target.ok) {
       assert.equal(r.code, 'RESERVATION_AND_INTENT_DURABLE', `${label}을 잘못 막았다`);
     }
   });
+
+  // ── 무한대와 너무 짧은 주문 ID ──
+  //
+  // `NUMERIC`에는 `'Infinity'`가 있다. **NaN도 아니고 0 이하도 아니라서**
+  // 앞의 모양 검사를 그대로 통과한다. 실행기는 `isFinite`로 막는데 SQL은
+  // 막지 않았다. 그리고 `client_order_id`는 SQL이 1자부터 받는데
+  // 실행기는 4자 미만을 거절한다 — 예약은 되고 전송은 안 되는 조합이다.
+  test('★ 무한대 수량·가격은 예약도 만들지 않는다', () => {
+    for (const [label, over] of [
+      ['수량 Infinity', { quantityExpr: "'Infinity'::numeric" }],
+      ['수량 -Infinity', { quantityExpr: "'-Infinity'::numeric" }],
+      ['LIMIT 가격 Infinity', { orderType: 'LIMIT', priceExpr: "'Infinity'::numeric" }],
+      ['MARKET 가격 Infinity', { priceExpr: "'Infinity'::numeric" }],
+    ]) {
+      const campaignId = fresh();
+      const r = claim({ campaignId, expectedVersion: 0,
+        clientOrderId: `inf-${campaignId}`, ...over });
+      assert.equal(r.code, 'INTENT_INVALID', `${label}이 예약됐다`);
+      const st = readState(target, green, campaignId);
+      assert.deepEqual({ version: st.version, active: st.active, claims: st.claims, intents: st.intents },
+        { version: 0, active: 0, claims: 0, intents: 0 }, `${label}에서 무언가 남았다`);
+    }
+  });
+
+  test('★ 쓸 수 없는 시작 자본으로는 캠페인을 열지 않는다', () => {
+    for (const [label, expr] of [
+      ['Infinity', "'Infinity'::numeric"],
+      ['-Infinity', "'-Infinity'::numeric"],
+      ['NaN', "'NaN'::numeric"],
+      ['0', '0'],
+      ['음수', '-1'],
+      ['없음', 'NULL'],
+    ]) {
+      const campaignId = `inf-eq-${++seq}-${Date.now().toString(36)}`;
+      // 예외가 아니라 **호출부가 읽을 수 있는 코드**로 돌려준다.
+      assert.deepEqual(psql(target, green, openCampaignSql({
+        campaignId, userId: '11111111-1111-4111-8111-111111111111',
+        environment: 'TESTNET', startingEquityExpr: expr,
+      })), ['CAMPAIGN_INVALID|'], `${label} 시작 자본이 통과했다`);
+      const [count] = psql(target, green,
+        `SELECT count(*) FROM ten_slot_campaigns WHERE campaign_id = '${campaignId}'`);
+      assert.equal(count, '0', `${label} 시작 자본의 캠페인이 저장됐다`);
+    }
+  });
+
+  test('★ 함수를 거치지 않아도 쓸 수 없는 시작 자본은 표가 거절한다', () => {
+    // 함수의 판정과 표의 CHECK는 같은 식을 **두 곳에** 적고 있다.
+    // 어긋나면 여기서 드러난다 — 함수를 우회한 직접 INSERT가 통과하면 안 된다.
+    for (const expr of ["'Infinity'::numeric", "'NaN'::numeric", '0', '-1']) {
+      const r = psql(target, green, `INSERT INTO ten_slot_campaigns
+        (campaign_id, user_id, environment, starting_equity)
+        VALUES ('direct-${++seq}', '11111111-1111-4111-8111-111111111111',
+                'TESTNET', ${expr})`, { expectError: true });
+      assert.match(r.error, /ten_slot_campaigns_equity_chk|not-null/,
+        `직접 INSERT로 ${expr}가 들어갔다`);
+    }
+  });
+
+  test('★ 주문 ID 최소 길이가 실행기와 같다 (4자)', () => {
+    for (const coid of ['a', 'ab', 'abc']) {
+      const campaignId = fresh();
+      const r = claim({ campaignId, expectedVersion: 0, clientOrderId: coid });
+      assert.equal(r.code, 'INTENT_INVALID', `${coid.length}자 주문 ID가 예약됐다`);
+      const st = readState(target, green, campaignId);
+      assert.deepEqual({ version: st.version, claims: st.claims }, { version: 0, claims: 0 });
+    }
+    // 4자는 실행기가 받는다 — 여기서도 막지 않는다.
+    const ok = fresh();
+    assert.equal(claim({ campaignId: ok, expectedVersion: 0, clientOrderId: 'abcd' }).code,
+      'RESERVATION_AND_INTENT_DURABLE', '실행기가 받는 4자 ID를 잘못 막았다');
+  });
 }

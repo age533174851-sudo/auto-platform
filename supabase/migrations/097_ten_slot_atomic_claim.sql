@@ -59,7 +59,13 @@ CREATE TABLE IF NOT EXISTS ten_slot_campaigns (
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT ten_slot_campaigns_env_chk
     CHECK (environment IN ('MOCK', 'TESTNET', 'LIVE')),
-  CONSTRAINT ten_slot_campaigns_equity_chk CHECK (starting_equity > 0),
+  -- `NUMERIC`에는 `'Infinity'`가 있다. **`> 0`만으로는 걸러지지 않는다.**
+  -- `'NaN'`은 모든 수보다 크므로 `< 'Infinity'`에도 걸리지만, 그 순서에
+  -- 기대지 않고 따로 적는다 — 나중에 읽는 사람이 알아볼 수 있어야 한다.
+  CONSTRAINT ten_slot_campaigns_equity_chk CHECK (
+    starting_equity > 0
+    AND starting_equity <> 'NaN'::NUMERIC
+    AND starting_equity < 'Infinity'::NUMERIC),
   CONSTRAINT ten_slot_campaigns_version_chk CHECK (version >= 0)
 );
 
@@ -128,6 +134,27 @@ DROP POLICY IF EXISTS ten_slot_claims_service ON ten_slot_claims;
 CREATE POLICY ten_slot_claims_service ON ten_slot_claims
   FOR ALL TO service_role USING (true) WITH CHECK (true);
 
+-- ── 쓸 수 있는 수인가 ──
+--
+-- `NUMERIC`은 `'NaN'`과 `'Infinity'`를 담을 수 있다. 둘 다 `> 0` 검사를
+-- 통과한다 — `'NaN'`은 모든 수보다 크고, `'Infinity'`는 말할 것도 없다.
+-- 실행기(`orderExecutor.ts`)는 `isFinite`로 막는데 SQL은 막지 않았다.
+--
+-- 수량·가격·시작 자본 세 곳에서 같은 판단을 하므로 **한 곳에 둔다.**
+-- (표의 CHECK 제약은 같은 식을 직접 적는다 — 함수를 CHECK에 쓰면
+--  덤프·복원 순서에 함수가 표보다 먼저 있어야 하는 제약이 생긴다.
+--  그 두 곳이 어긋나지 않는 것은 시험이 지킨다.)
+CREATE OR REPLACE FUNCTION public.ten_slot_finite_positive(n NUMERIC)
+RETURNS BOOLEAN
+LANGUAGE sql
+IMMUTABLE
+AS $$
+  SELECT n IS NOT NULL
+     AND n <> 'NaN'::NUMERIC
+     AND n > 0
+     AND n < 'Infinity'::NUMERIC
+$$;
+
 -- ── 이미 있는 캠페인이 **내가 열려던 그 캠페인인가** ──
 --
 -- 판정을 한 곳에만 둔다. 개설 경로에는 "먼저 읽어 보는 자리"와 "동시
@@ -182,6 +209,14 @@ DECLARE
   v_row        public.ten_slot_campaigns;
   v_constraint TEXT;
 BEGIN
+  -- 쓸 수 없는 시작 자본으로는 캠페인을 만들지 않는다. 표의 CHECK가
+  -- 마지막 방어선이지만, 그건 예외로 터진다 — 호출부가 읽을 수 있는
+  -- 코드로 먼저 돌려준다.
+  IF NOT public.ten_slot_finite_positive(p_starting_equity) THEN
+    RETURN QUERY SELECT 'CAMPAIGN_INVALID'::TEXT, NULL::BIGINT;
+    RETURN;
+  END IF;
+
   SELECT * INTO v_row
     FROM public.ten_slot_campaigns AS c
    WHERE c.campaign_id = p_campaign_id
@@ -233,6 +268,8 @@ $$;
 --   INTENT_INVALID    주문 의도의 모양이 성립하지 않는다 (주문 ID · 로트 ·
 --                     수량 · 종목 · 방향 · 거래소 · 주문유형 · 배율 · 지정가)
 --   MOCK_NOT_TRADABLE 모의 캠페인이다 — 실거래 장부에 의도를 적지 않는다
+--   (ten_slot_open_campaign은 CAMPAIGN_INVALID도 돌려준다 — 쓸 수 없는
+--    시작 자본)
 --   ENVIRONMENT_MISMATCH 캠페인 환경과 호출자가 말한 주문 모드가 다르다
 --   ORDER_ID_REUSED   그 주문 ID는 이미 쓰였다 (예약 또는 live_orders에)
 --   STALE_VERSION     읽은 버전이 지금 버전이 아니다 (= 경합에서 졌다)
@@ -328,10 +365,14 @@ BEGIN
   v_reduce := COALESCE(p_reduce_only, FALSE);
 
   IF p_client_order_id IS NULL OR length(btrim(p_client_order_id)) = 0
+     -- **최소 길이를 실행기와 맞춘다.** `orderExecutor.ts`는 4자 미만을
+     -- 거절한다. 여기서 1자를 받아 주면 예약은 되고 전송은 안 되는
+     -- 조합이 만들어진다 — 슬롯만 잡힌 채 남는다.
+     OR length(p_client_order_id) < 4
      OR length(p_client_order_id) > 128
      OR p_requested_lots IS NULL OR p_requested_lots <= 0
-     -- NUMERIC의 'NaN'은 모든 수보다 크다. `> 0`만으로는 걸러지지 않는다.
-     OR p_quantity IS NULL OR p_quantity = 'NaN'::NUMERIC OR p_quantity <= 0
+     -- NaN도 Infinity도 쓸 수 없는 수다. 판정은 한 곳에 있다.
+     OR NOT public.ten_slot_finite_positive(p_quantity)
      OR p_symbol IS NULL OR length(btrim(p_symbol)) = 0 OR length(p_symbol) > 32
      OR p_side IS NULL OR p_side NOT IN ('BUY', 'SELL')
      OR p_exchange IS NULL OR p_exchange NOT IN ('binance', 'gate')
@@ -342,8 +383,9 @@ BEGIN
      OR (p_leverage IS NOT NULL AND p_leverage < 1)
      -- 지정가인데 가격이 없으면 보내지 않는다. 여기서 시장가로 바꾸지 않는다 —
      -- 사용자가 지정가를 쓴 이유가 사라진다(실행기와 같은 판단).
-     OR (v_type = 'LIMIT' AND (p_price IS NULL OR p_price = 'NaN'::NUMERIC OR p_price <= 0))
-     OR (p_price IS NOT NULL AND (p_price = 'NaN'::NUMERIC OR p_price <= 0)) THEN
+     OR (v_type = 'LIMIT' AND NOT public.ten_slot_finite_positive(p_price))
+     -- 시장가에 가격은 없어도 된다. **있는데 쓸 수 없는 수**면 거절한다.
+     OR (p_price IS NOT NULL AND NOT public.ten_slot_finite_positive(p_price)) THEN
     RETURN QUERY SELECT 'INTENT_INVALID'::TEXT, NULL::INT, v_campaign.version, NULL::UUID;
     RETURN;
   END IF;
@@ -531,6 +573,9 @@ $$;
 -- 이 표들은 service_role만 쓴다(위 정책). 함수도 **호출자의 권한으로 돈다** —
 -- SECURITY DEFINER로 만들지 않는다. 만들면 authenticated가 남의 캠페인에
 -- 주문 의도를 적을 통로가 생긴다(074와 같은 판단).
+REVOKE ALL ON FUNCTION public.ten_slot_finite_positive(NUMERIC) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.ten_slot_finite_positive(NUMERIC) TO service_role;
+
 REVOKE ALL ON FUNCTION public.ten_slot_identity_verdict(
   public.ten_slot_campaigns, UUID, UUID, TEXT, NUMERIC) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.ten_slot_identity_verdict(
