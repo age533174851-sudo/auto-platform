@@ -660,26 +660,34 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       ? { entry_liquidation_distance_pct_raw: riskSnap.liquidationDistancePctRaw } : {}),
   };
 
-  const { data: row, error: insErr } = await sb.from('live_orders').insert(intent).select('id, status').single();
-  // 097의 예약 트랜잭션이 먼저 적어 둔 줄. 이어받기로 결정됐을 때만 채운다.
+  // 097이 이미 커밋한 INTENT를 이어받을 때는 새 INTENT를 만들지 않는다.
+  // 이전에는 먼저 INSERT하고 23505가 나야만 예약 의도를 읽었다.
+  // 예약이 없거나 UNIQUE 제약이 없는 DB에서는 adoptIntent:true가 오히려
+  // 새 INTENT를 만들어 거래소에 전송하는 fail-open 경로가 됐다.
+  let row: any = null;
   let adopted: any = null;
-  if (insErr) {
-    if (String(insErr.code) === '23505') {
-      const { data: prev } = await sb.from('live_orders').select('*').eq('client_order_id', clientOrderId).maybeSingle();
-      const adopt = args.adoptIntent === true
-        ? canAdoptIntent(prev, intent, args.limitPrice)
-        : { ok: false, reason: '이어받기를 요청하지 않았습니다' };
-      if (!adopt.ok) {
-        // 097의 예약 의도를 명시적으로 이어받는 경로에서는 실패한
-        // 소유권/계약 검증을 과거 ACKED/FILLED 상태로 덮지 않는다.
-        // 다른 사용자 주문의 거래소 ID·체결량·가격도 노출하지 않는다.
-        if (args.adoptIntent === true) {
-          return {
-            ok: false, status: 'UNKNOWN', clientOrderId, duplicate: true,
-            message: `커밋된 주문 의도를 안전하게 이어받지 못했습니다 (${adopt.reason})`,
-          };
-        }
-        // 레거시 비-adoption 호출의 중복 응답은 변경하지 않는다.
+  if (args.adoptIntent === true) {
+    const { data: prev, error: readErr } = await sb.from('live_orders')
+      .select('*').eq('client_order_id', clientOrderId).maybeSingle();
+    const adopt = readErr
+      ? { ok: false, reason: '커밋된 의도의 DB 조회가 실패했습니다' }
+      : canAdoptIntent(prev, intent, args.limitPrice);
+    if (!adopt.ok) {
+      // 다른 사용자의 과거 체결·거래소 ID도 노출하지 않는다.
+      return {
+        ok: false, status: 'UNKNOWN', clientOrderId, duplicate: true,
+        message: `커밋된 주문 의도를 안전하게 이어받지 못했습니다 (${adopt.reason})`,
+      };
+    }
+    adopted = prev;
+  } else {
+    // 레거시 비-adoption 경로의 INSERT 및 중복 응답 의미는 유지한다.
+    const { data: inserted, error: insErr } = await sb.from('live_orders')
+      .insert(intent).select('id, status').single();
+    if (insErr) {
+      if (String(insErr.code) === '23505') {
+        const { data: prev } = await sb.from('live_orders')
+          .select('*').eq('client_order_id', clientOrderId).maybeSingle();
         return {
           ok: prev?.status === 'ACKED' || prev?.status === 'FILLED',
           status: (prev?.status as OrderStatus) || 'UNKNOWN',
@@ -691,10 +699,9 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
           message: '이미 처리된 주문입니다 (중복 요청)',
         };
       }
-      adopted = prev;
-    } else {
       return { ok: false, status: 'FAILED', clientOrderId, message: `의도 기록 실패: ${insErr.message}` };
     }
+    row = inserted;
   }
 
   const orderRowId = adopted ? adopted.id : row.id;

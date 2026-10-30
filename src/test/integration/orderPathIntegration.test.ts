@@ -1904,6 +1904,38 @@ export async function runAdoptIntentIntegrationTests() {
     });
   }
 
+  // ══════════ ③-c 예약 없는 이어받기는 절대 새 INTENT를 만들지 않는다 ══════════
+  // 이전 HEAD는 adoptIntent:true여도 INSERT를 먼저 시도해, 빈 DB에서
+  // INSERT가 성공하면 그대로 거래소 주문까지 진행했다. 이 테스트는
+  // 097의 예약 없이도 보내던 fail-open을 실제 executeOrder 경로로 잡는다.
+  {
+    const db = new FakeDb();
+    const venue = sendableVenue();
+    const r = await scenario(venue, () => exec(db, { adoptIntent: true }));
+
+    test('★ 예약이 없는데 adoptIntent:true면 DB INSERT 0 · 거래소 전송 0', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(db.table('live_orders').length, 0, '예약 없는 의도를 새로 만들어 버렸다');
+      eq(venue.orderSends().length, 0, '예약 없는 주문을 거래소로 보냈다');
+      eq((r as any).ok, false);
+      eq((r as any).status, 'UNKNOWN');
+    });
+  }
+
+  {
+    const db = new FakeDb({ failSelectsOn: 'live_orders' });
+    const venue = sendableVenue();
+    const r = await scenario(venue, () => exec(db, { adoptIntent: true }));
+
+    test('★ 예약 조회 실패는 새 의도 작성 없이 fail-closed', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(db.table('live_orders').length, 0, '조회 실패 후 의도를 만들어 버렸다');
+      eq(venue.orderSends().length, 0, '조회 실패 후 주문을 보냈다');
+      eq((r as any).ok, false);
+      eq((r as any).status, 'UNKNOWN');
+    });
+  }
+
   // ══════════ ④ 줄을 못 읽었으면 이어받지 않는다 ══════════
   {
     const db = new FakeDb({ failInsertCode: { table: 'live_orders', code: '23505' } });
