@@ -664,7 +664,16 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
         ? canAdoptIntent(prev, intent, args.limitPrice)
         : { ok: false, reason: '이어받기를 요청하지 않았습니다' };
       if (!adopt.ok) {
-        // 이미 처리된 주문 — 기존 상태를 그대로 반환 (재시도해도 결과 동일)
+        // 097의 예약 의도를 명시적으로 이어받는 경로에서는 실패한
+        // 소유권/계약 검증을 과거 ACKED/FILLED 상태로 덮지 않는다.
+        // 다른 사용자 주문의 거래소 ID·체결량·가격도 노출하지 않는다.
+        if (args.adoptIntent === true) {
+          return {
+            ok: false, status: 'UNKNOWN', clientOrderId, duplicate: true,
+            message: `커밋된 주문 의도를 안전하게 이어받지 못했습니다 (${adopt.reason})`,
+          };
+        }
+        // 레거시 비-adoption 호출의 중복 응답은 변경하지 않는다.
         return {
           ok: prev?.status === 'ACKED' || prev?.status === 'FILLED',
           status: (prev?.status as OrderStatus) || 'UNKNOWN',

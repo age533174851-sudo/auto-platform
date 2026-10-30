@@ -1881,6 +1881,28 @@ export async function runAdoptIntentIntegrationTests() {
     });
   }
 
+  // ══════════ ③-b 거절된 adoption을 이전 체결 성공으로 승격하지 않는다 ══════════
+  // 이전에는 canAdoptIntent()가 ACKED/FILLED를 거절해도 아래 duplicate
+  // 응답이 prev.status만 보고 ok:true로 바꾸고 다른 계정의 체결 정보를 노출했다.
+  for (const [status, userId] of [['ACKED', 'u2'], ['FILLED', 'u1']] as const) {
+    const db = adoptDb({
+      status, user_id: userId, exchange_order_id: 'private-venue-id',
+      filled_qty: 0.5, avg_price: 50000,
+    });
+    const venue = sendableVenue();
+    const r = await scenario(venue, () => exec(db, { adoptIntent: true }));
+    test(`★ ${status} 예약 이어받기 거절은 성공도 체결정보 공개도 아니다`, () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 0, '이미 전송된 의도를 다시 보냈다');
+      eq((r as any).duplicate, true);
+      eq((r as any).ok, false, 'adoption 거절을 과거 체결 성공으로 승격했다');
+      eq((r as any).status, 'UNKNOWN', '다른 주문 상태를 신뢰 가능한 결과로 노출했다');
+      eq((r as any).exchangeOrderId, undefined, '다른 주문의 거래소 ID를 노출했다');
+      eq((r as any).filledQty, undefined, '다른 주문의 체결 수량을 노출했다');
+      eq((r as any).avgPrice, undefined, '다른 주문의 체결 가격을 노출했다');
+    });
+  }
+
   // ══════════ ④ 줄을 못 읽었으면 이어받지 않는다 ══════════
   {
     const db = new FakeDb({ failInsertCode: { table: 'live_orders', code: '23505' } });
