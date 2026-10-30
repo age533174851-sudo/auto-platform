@@ -1856,6 +1856,7 @@ export async function runAdoptIntentIntegrationTests() {
     ['방향이 다른 줄', { side: 'SELL' }],
     ['청산 여부가 다른 줄', { reduce_only: true }],
     ['배율이 다른 줄', { leverage: 10 }],
+    ['진입 주문의 예약 배율 누락', { leverage: null }],
     ['거래소가 다른 줄', { exchange: 'gate' }],
     ['환경이 다른 줄', { mode: 'LIVE' }],
     ['다른 사용자 소유 줄', { user_id: 'u2' }],
@@ -1937,9 +1938,15 @@ export async function runAdoptIntentIntegrationTests() {
       }
       assert(!canAdoptIntent(null, intent).ok, 'null을 이어받았다');
       assert(!canAdoptIntent(undefined, intent).ok, 'undefined를 이어받았다');
-      // 청산 주문은 배율이 없을 수 있다 — **있는데 다른 것**만 거절한다.
-      assert(canAdoptIntent(committedIntent({ leverage: null }), intent).ok,
-        '배율이 없는 줄을 거절했다');
+      // 진입은 예약된 배율이 없으면 전송할 계약을 증명할 수 없다.
+      assert(!canAdoptIntent(committedIntent({ leverage: null }), intent).ok,
+        '진입 예약에 배율이 없는데 이어받았다');
+      assert(!canAdoptIntent(committedIntent(), { ...intent, leverage: null }).ok,
+        '진입 요청에 배율이 없는데 이어받았다');
+      // 청산은 배율이 없을 수 있다. 청산 여부가 양쪽에서 일치해야 한다.
+      assert(canAdoptIntent(committedIntent({ leverage: null, reduce_only: true }),
+        { ...intent, leverage: null, reduce_only: true }).ok,
+        '청산 주문의 양쪽 배율 누락을 거절했다');
       // LIMIT은 SQL이 저장한 price와 실제 전송 가격까지 동일해야 한다.
       const limit = { ...intent, order_type: 'LIMIT' };
       const reservedLimit = committedIntent({ order_type: 'LIMIT', price: '50000.00' });
