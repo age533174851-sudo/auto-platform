@@ -304,8 +304,8 @@ AS $$
 DECLARE
   v_campaign   public.ten_slot_campaigns;
   v_slots      INT;
-  v_non_free   INT;
   v_active     INT;
+  v_ordered    BOOLEAN;
   v_index      INT;
   v_mode       TEXT;
   v_type       TEXT;
@@ -327,21 +327,39 @@ BEGIN
   END IF;
 
   -- ② 장부가 읽을 수 있는 모양인가. **못 읽은 것을 통과로 적지 않는다.**
-  --    슬롯 10줄이 있어야 하고, 비FREE는 0..k-1에 연속으로 있어야 한다
-  --    (SPENT 앞머리 → 활성 하나 → FREE 꼬리). 그 배열이 깨진 스냅샷은
-  --    어느 쪽을 믿어도 틀리므로 고치지 않고 거절한다.
-  -- 표에 별명을 붙여 칸을 가리킨다. RETURNS TABLE의 `slot_index`와 칸 이름이
-  -- 같아서, 별명을 빼면 plpgsql이 어느 쪽인지 알 수 없다고 거절한다.
+  --
+  --    유효한 배열은 **SPENT* → 활성 하나? → FREE*** 하나뿐이다
+  --    (`scripts/ten-slot-offline.mjs`의 `validSlotOrder`). 그 배열이 깨진
+  --    스냅샷은 어느 쪽을 믿어도 틀리므로 고치지 않고 거절한다.
+  --
+  --    예전에는 "최초 FREE 인덱스 == 비FREE 개수"만 봤다. 그건 **비FREE가
+  --    앞쪽에 몰려 있는가**만 보는 것이고, 그 앞쪽 **안에서** SPENT가
+  --    먼저인지는 보지 않는다. 그래서 `[RESERVED, SPENT, FREE×8]`처럼
+  --    활성 뒤에 SPENT가 오는 손상된 장부가 통과해 `SLOT_BUSY`로 적혔다 —
+  --    **장부가 깨진 것을 "지금 바쁘다"로 분류**하면 원인을 못 찾는다.
+  --
+  --    그래서 단계를 숫자로 매겨(SPENT 0 · 활성 1 · FREE 2) 인덱스 순으로
+  --    **줄어들지 않는지** 본다. 그것이 `validSlotOrder`와 같은 말이다.
+  --    표에 별명을 붙이는 이유: RETURNS TABLE의 `slot_index`와 칸 이름이
+  --    같아서, 별명을 빼면 plpgsql이 어느 쪽인지 모른다고 거절한다.
+  WITH ranked AS (
+    SELECT s.slot_index,
+           CASE s.status WHEN 'SPENT' THEN 0 WHEN 'FREE' THEN 2 ELSE 1 END AS phase
+      FROM public.ten_slot_slots AS s
+     WHERE s.campaign_id = p_campaign_id
+  ), stepped AS (
+    SELECT r.slot_index, r.phase,
+           r.phase >= COALESCE(lag(r.phase) OVER (ORDER BY r.slot_index), 0) AS ok
+      FROM ranked AS r
+  )
   SELECT count(*),
-         count(*) FILTER (WHERE s.status <> 'FREE'),
-         count(*) FILTER (WHERE s.status IN ('RESERVED', 'OPEN', 'CLOSING', 'UNKNOWN')),
-         min(s.slot_index) FILTER (WHERE s.status = 'FREE')
-    INTO v_slots, v_non_free, v_active, v_index
-    FROM public.ten_slot_slots AS s
-   WHERE s.campaign_id = p_campaign_id;
+         count(*) FILTER (WHERE t.phase = 1),
+         min(t.slot_index) FILTER (WHERE t.phase = 2),
+         bool_and(t.ok)
+    INTO v_slots, v_active, v_index, v_ordered
+    FROM stepped AS t;
 
-  IF v_slots <> 10 OR v_active > 1
-     OR COALESCE(v_index, v_non_free) <> v_non_free THEN
+  IF v_slots <> 10 OR v_active > 1 OR NOT COALESCE(v_ordered, FALSE) THEN
     RETURN QUERY SELECT 'COUPLING_CORRUPT'::TEXT, NULL::INT, v_campaign.version, NULL::UUID;
     RETURN;
   END IF;

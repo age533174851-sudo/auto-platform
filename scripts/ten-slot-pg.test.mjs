@@ -632,4 +632,60 @@ if (!target.ok) {
     assert.equal(claim({ campaignId: ok, expectedVersion: 0, clientOrderId: 'abcd' }).code,
       'RESERVATION_AND_INTENT_DURABLE', '실행기가 받는 4자 ID를 잘못 막았다');
   });
+
+  // ── 손상 판정이 오프라인 정본과 같은 선을 긋는가 ──
+  //
+  // SQL은 "슬롯 10줄 · 활성 <=1 · 최초 FREE 인덱스 == 비FREE 개수"만 봤다.
+  // 그건 **비FREE가 앞쪽에 몰려 있는가**만 보는 것이고, 그 앞쪽 안에서
+  // SPENT가 먼저인지(SPENT* → 활성? → FREE*)는 보지 않는다.
+  // `validSlotOrder`는 본다. 그래서 `[RESERVED, SPENT, FREE×8]` 같은
+  // 손상된 장부를 SQL은 통과시키고 `SLOT_BUSY`(일시적으로 바쁨)로 적었다 —
+  // **장부가 깨진 것을 바쁜 것으로 잘못 분류**하면 원인을 못 찾는다.
+  //
+  // 앞의 304건 비교는 `SPENT* → 활성? → FREE*` 모양만 만들었기 때문에
+  // 이 역순을 한 번도 보지 않았다. 그래서 여기서 따로 본다.
+  //
+  // 활성 둘은 `ten_slot_active_one`이 애초에 못 만들게 하므로 DB에서
+  // 구성할 수 없다 — 표현 불가능한 것은 비교 대상이 아니다.
+  const arrangeSlots = (campaignId, statuses) => psql(target, green,
+    statuses.map((st, i) =>
+      `UPDATE ten_slot_slots SET status = '${st}' WHERE campaign_id = '${campaignId}' AND slot_index = ${i};`)
+      .join('\n'));
+
+  test('★ 활성 뒤에 SPENT가 오는 장부를 "바쁨"으로 적지 않는다', () => {
+    const F = (n) => Array(n).fill('FREE');
+    const cases = [
+      // 오프라인 validSlotOrder가 거부하는 배열 — SQL도 거부해야 한다
+      ['활성 뒤 SPENT', ['RESERVED', 'SPENT', ...F(8)], 'COUPLING_CORRUPT'],
+      ['SPENT·활성·SPENT', ['SPENT', 'UNKNOWN', 'SPENT', ...F(7)], 'COUPLING_CORRUPT'],
+      ['활성 뒤 SPENT (OPEN)', ['OPEN', 'SPENT', 'SPENT', ...F(7)], 'COUPLING_CORRUPT'],
+      ['FREE 뒤 SPENT', ['SPENT', 'FREE', 'SPENT', ...F(7)], 'COUPLING_CORRUPT'],
+      ['FREE 뒤 활성', ['SPENT', 'FREE', 'CLOSING', ...F(7)], 'COUPLING_CORRUPT'],
+      ['맨 앞 FREE 뒤 SPENT', ['FREE', 'SPENT', ...F(8)], 'COUPLING_CORRUPT'],
+      // 정상 배열은 그대로 — 잘못 막지 않는다
+      ['정상 SPENT→활성→FREE', ['SPENT', 'RESERVED', ...F(8)], 'SLOT_BUSY'],
+      ['정상 SPENT만', ['SPENT', 'SPENT', ...F(8)], 'RESERVATION_AND_INTENT_DURABLE'],
+      ['정상 전부 FREE', F(10), 'RESERVATION_AND_INTENT_DURABLE'],
+    ];
+    for (const [label, statuses, expected] of cases) {
+      const campaignId = fresh();
+      arrangeSlots(campaignId, statuses);
+      // 오프라인 정본이 같은 배열을 어떻게 보는지 함께 확인한다.
+      let ledger = createOfflineLedger(campaignId, 1000);
+      ledger = { ...ledger, slots: ledger.slots.map((sl, i) => ({ ...sl, status: statuses[i] })) };
+      const offline = planOfflineClaim(ledger, ledger.version, CLEAR);
+      const offlineCode = offline.ok ? 'RESERVATION_AND_INTENT_DURABLE' : offline.code;
+      const normalise = (c) => (c === 'LEDGER_UNKNOWN' ? 'COUPLING_CORRUPT' : c);
+      assert.equal(normalise(offlineCode), expected,
+        `${label}: 오프라인 정본이 ${offlineCode}다 — 기대와 다르다`);
+
+      const r = claim({ campaignId, expectedVersion: 0, clientOrderId: `order-${campaignId}` });
+      assert.equal(r.code, expected, `${label}: SQL이 ${r.code}로 적었다`);
+      if (expected !== 'RESERVATION_AND_INTENT_DURABLE') {
+        const st = readState(target, green, campaignId);
+        assert.deepEqual({ version: st.version, claims: st.claims, intents: st.intents },
+          { version: 0, claims: 0, intents: 0 }, `${label}에서 무언가 남았다`);
+      }
+    }
+  });
 }
