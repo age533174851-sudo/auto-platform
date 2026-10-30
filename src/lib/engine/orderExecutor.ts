@@ -682,9 +682,7 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
           filledQty: prev?.filled_qty != null ? Number(prev.filled_qty) : undefined,
           avgPrice: prev?.avg_price != null ? Number(prev.avg_price) : undefined,
           duplicate: true,
-          message: args.adoptIntent === true
-            ? `이미 처리된 주문입니다 — 이어받지 않았습니다 (${adopt.reason})`
-            : '이미 처리된 주문입니다 (중복 요청)',
+          message: '이미 처리된 주문입니다 (중복 요청)',
         };
       }
       adopted = prev;
