@@ -222,7 +222,7 @@ export async function runOrderPathIntegrationTests() {
     });
   }
 
-  // ══════════ ⑦ 거래소 체결 성공 + DB 기록 실패 ══════════
+  // ══════════ ⑦ DB 선점 실패 — 거래소에 아예 보내지 않는다 ══════════
   {
     const db = new FakeDb({ failUpdatesOn: 'live_orders' });
     const venue = baseVenue()
@@ -230,12 +230,12 @@ export async function runOrderPathIntegrationTests() {
       .on(BN_ORDER, { json: bnOrder({ status: 'FILLED', executedQty: '0.010', avgPrice: '95000' }) }, 'POST');
     const r = await scenario(venue, () => exec(db, {}));
 
-    test('★ 체결 뒤 DB 기록이 실패해도 주문을 다시 보내지 않는다', async () => {
+    test('★ SENT 선점 DB 오류에서는 신규 주문도 POST하지 않는다', () => {
       assert(!(r instanceof Error), String((r as any)?.message));
-      eq(venue.orderSends().length, 1, `주문이 ${venue.orderSends().length}번 나갔다`);
-      const row = db.table('live_orders')[0];
-      assert((RECONCILE_TARGET_STATUSES as readonly string[]).includes(row.status),
-        `기록 실패로 ${row.status}에 멈춘 줄이 대조 대상이 아니다 — 영구히 방치된다`);
+      eq(venue.orderSends().length, 0, 'SENT 기록 실패인데 거래소에 전송했다');
+      eq((r as any).ok, false);
+      eq((r as any).status, 'UNKNOWN');
+      eq(db.table('live_orders')[0].status, 'INTENT');
     });
   }
 
@@ -1839,6 +1839,40 @@ export async function runAdoptIntentIntegrationTests() {
       eq(db.table('live_orders').length, 1, '의도가 두 줄이 됐다');
       eq(db.table('live_orders')[0].id, 'claim-1', '예약이 적어 둔 줄이 아닌 다른 줄을 썼다');
       eq(db.table('live_orders')[0].status, 'ACKED');
+    });
+  }
+
+  // ══════════ ②-a 동일 INTENT 동시 실행: POST 단일화 ══════════
+  {
+    const db = adoptDb();
+    const venue = sendableVenue();
+    const results = await scenario(venue, () => Promise.all([
+      exec(db, { adoptIntent: true }),
+      exec(db, { adoptIntent: true }),
+    ]));
+    test('★ 같은 예약 의도를 두 실행기가 동시에 읽어도 venue POST 최대 1회', () => {
+      assert(!(results instanceof Error), String((results as any)?.message));
+      eq(venue.orderSends().length, 1, '동일 INTENT의 중복 POST가 발생했다');
+      eq((results as any[]).filter((r: any) => r.status === 'UNKNOWN').length, 1,
+        'CAS 패자가 UNKNOWN으로 안전하게 중단하지 않았다');
+      const claims = db.writes.filter((w) => w.kind === 'update'
+        && w.patch.status === 'SENT' && w.where?.status === 'INTENT');
+      eq(claims.length, 1, '동일 INTENT의 SENT 선점이 한 번이어야 한다');
+    });
+  }
+
+  // ══════════ ②-b 예약 adoption의 DB 선점 실패: POST 0회 ══════════
+  {
+    const db = new FakeDb({ failUpdatesOn: 'live_orders' })
+      .seed('live_orders', [committedIntent()]);
+    const venue = sendableVenue();
+    const r = await scenario(venue, () => exec(db, { adoptIntent: true }));
+    test('★ 예약된 INTENT라도 DB 선점 오류 시 전송하지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 0, 'DB 오류 후 예약 주문을 전송했다');
+      eq((r as any).ok, false);
+      eq((r as any).status, 'UNKNOWN');
+      eq(db.table('live_orders')[0].status, 'INTENT');
     });
   }
 

@@ -290,6 +290,33 @@ async function updateOrderRow(sb: any, id: string, patch: Record<string, any>): 
   await sb.from('live_orders').update(legacy).eq('id', id);
 }
 
+/**
+ * 거래소 POST의 단일 소유권 관문.
+ *
+ * 읽은 INTENT가 여전히 INTENT일 때에만 SENT로 바꾸고, 실제로 변경된
+ * 행 ID를 되읽어 확인한다. 오류·0행·응답 불명은 모두 전송 금지다.
+ * 신규 INSERT와 097 예약 의도 adoption 모두 반드시 이 관문을 통과한다.
+ *
+ * SENT 선점 후 POST 전에 프로세스가 종료되면 주문이 전송되지 않았을 수도
+ * 있다. 자동 재전송하지 않고 대조/사람 확인을 기다리는 보수적 선택이다.
+ * 복구 컬럼(018)은 선점의 필수 조건에 포함하지 않는다.
+ */
+async function claimOrderDispatch(
+  sb: any, id: string, patch: Record<string, any>,
+): Promise<boolean> {
+  try {
+    const { data, error } = await sb.from('live_orders')
+      .update({ ...patch, status: 'SENT' })
+      .eq('id', id)
+      .eq('status', 'INTENT')
+      .select('id')
+      .maybeSingle();
+    return !error && data?.id === id;
+  } catch {
+    return false;
+  }
+}
+
 // 수량 정밀도 보정 — 거래소는 정해진 소수점만 받는다
 export function roundQuantity(qty: number, stepSize: number): number {
   if (!stepSize || stepSize <= 0) return qty;
@@ -937,14 +964,21 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       const sendQty = qz.quantity as number;
       const sendPrice = orderType === 'LIMIT' ? (qz.price ?? args.limitPrice) : undefined;
 
-      // ── 5) 주문 전송 ──
-      await update({
-        status: 'SENT', sent_at: new Date().toISOString(), attempt_count: 1,
-        pos_qty_before: posQtyBefore,
-        // 규격에 맞추며 깎인 수량을 장부에 남긴다. 요청 수량만 남기면
-        // 체결 수량과 비교할 기준이 틀어진다.
+      // ── 5) 원자적 전송 선점 → 주문 전송 ──
+      // INTENT를 읽은 실행기가 여럿이어도 DB에서 단 한 실행기만
+      // SENT를 선점할 수 있다. 오류·0행이면 거래소 POST는 0회다.
+      const claimed = await claimOrderDispatch(sb, orderRowId, {
+        sent_at: new Date().toISOString(), attempt_count: 1,
+        // 규격에 맞춘 수량을 실제 전송 전에 같은 원자적 쓰기로 기록한다.
         ...(qz.changed ? { quantity: sendQty } : {}),
       });
+      if (!claimed) {
+        return { ok: false, status: 'UNKNOWN', clientOrderId,
+          message: '주문 전송 권한을 DB에서 확정하지 못했습니다. 전송하지 않고 대조가 필요합니다.' };
+      }
+      currentStatus = 'SENT';
+      // 018 복구 컬럼은 구형 DB에서도 선택 사항. 선점과 분리해 적는다.
+      if (posQtyBefore !== null) await update({ pos_qty_before: posQtyBefore });
 
       let res: any;
       try {
@@ -1491,10 +1525,16 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       gatePosBefore = before ? Number(before.size) || 0 : 0;
     } catch { /* 조회 실패 시 null — 교차 확인 없이 판단하게 된다 */ }
 
-    await update({
-      status: 'SENT', sent_at: new Date().toISOString(), attempt_count: 1,
-      pos_qty_before: gatePosBefore,
+    // Gate도 Binance와 동일한 INTENT → SENT 원자적 전송 선점을 통과한다.
+    const claimed = await claimOrderDispatch(sb, orderRowId, {
+      sent_at: new Date().toISOString(), attempt_count: 1,
     });
+    if (!claimed) {
+      return { ok: false, status: 'UNKNOWN', clientOrderId,
+        message: 'Gate 주문 전송 권한을 DB에서 확정하지 못했습니다. 전송하지 않고 대조가 필요합니다.' };
+    }
+    currentStatus = 'SENT';
+    if (gatePosBefore !== null) await update({ pos_qty_before: gatePosBefore });
 
     let gres: any;
     try {
