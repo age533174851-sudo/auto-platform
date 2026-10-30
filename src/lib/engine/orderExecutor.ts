@@ -277,17 +277,47 @@ export interface ExecuteResult {
 // 실패하면 새 컬럼만 빼고 다시 쓴다. 마이그레이션이 적용되면 이 경로는 안 돌아간다.
 const RECOVERY_COLS = ['pos_qty_before', 'resolve_attempts', 'last_resolve_at', 'needs_attention'];
 
-async function updateOrderRow(sb: any, id: string, patch: Record<string, any>): Promise<void> {
-  const { error } = await sb.from('live_orders').update(patch).eq('id', id);
-  if (!error) return;
+async function updateOrderRow(
+  sb: any, id: string, patch: Record<string, any>,
+): Promise<{ ok: boolean; reason: string | null }> {
+  const write = async (p: Record<string, any>) => {
+    try {
+      const res: any = await sb.from('live_orders').update(p).eq('id', id).select('id');
+      if (res?.error) {
+        return { ok: false, reason: String(res.error.message || res.error.code || 'DB 오류'),
+          code: String(res.error.code ?? ''), detail: String(res.error.message ?? '') };
+      }
+      // null/undefined는 성공 증거가 아니다. 정확히 대상 id 한 줄만 인정.
+      const rows = res?.data;
+      if (!Array.isArray(rows) || rows.length !== 1 || String(rows[0]?.id) !== String(id)) {
+        return { ok: false, reason: '갱신된 대상 행을 정확히 1개 확인하지 못했습니다',
+          code: '', detail: '' };
+      }
+      return { ok: true, reason: null, code: '', detail: '' };
+    } catch (e: any) {
+      return { ok: false, reason: String(e?.message || e), code: '', detail: '' };
+    }
+  };
+
+  const first = await write(patch);
+  if (first.ok) return first;
+
+  // 복구 전용 칸 누락이 실제로 확인된 경우에만 후퇴한다.
+  // XX000/timeout/RLS 오류나 다른 칼럼 누락은 재시도로 가리지 않는다.
+  const missingRecoveryColumn = (first.code === '42703' || first.code === 'PGRST204')
+    && RECOVERY_COLS.some((col) => first.detail.toLowerCase().includes(col));
+  if (!missingRecoveryColumn) return first;
   const legacy: Record<string, any> = {};
   let stripped = false;
   for (const [k, v] of Object.entries(patch)) {
     if (RECOVERY_COLS.includes(k)) { stripped = true; continue; }
     legacy[k] = v;
   }
-  if (!stripped || Object.keys(legacy).length === 0) return;
-  await sb.from('live_orders').update(legacy).eq('id', id);
+  if (!stripped || Object.keys(legacy).length === 0) return first;
+
+  const second = await write(legacy);
+  if (second.ok) return { ok: true, reason: null };
+  return { ok: false, reason: `${first.reason} · 복구 칸 제외 재시도: ${second.reason}` };
 }
 
 /**
@@ -745,8 +775,16 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
 
   let currentStatus: OrderStatus = 'INTENT';
 
-  const update = async (patch: Record<string, any>) => {
+  /**
+   * 장부에 **적히지 않은** 기록들. 전송 뒤의 실패는 주문을 되돌리지
+   * 못하므로 막는 대신 **크게 남긴다** — 조용히 지나가면 화면의 상태와
+   * 거래소의 상태가 갈린 채로 아무도 모른다.
+   */
+  const persistWarn: string[] = [];
+
+  const update = async (patch: Record<string, any>): Promise<{ ok: boolean; reason: string | null }> => {
     const next = patch.status as OrderStatus | undefined;
+    let advance: OrderStatus | null = null;
     if (next && next !== currentStatus) {
       const t = applyTransition(toLifecycle(currentStatus), toLifecycle(next));
       if (!t.ok) {
@@ -757,15 +795,35 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
           log.warn('order-executor', `${clientOrderId}: ${t.reason}`);
         } catch { /* 로거 실패가 주문을 막지 않는다 */ }
         const { status: _drop, ...rest } = patch;
-        if (Object.keys(rest).length === 0) return;
+        if (Object.keys(rest).length === 0) return { ok: true, reason: null };
         patch = rest;
       } else {
-        currentStatus = next;
+        advance = next;
       }
     }
-    try { await updateOrderRow(sb, orderRowId, { ...patch, updated_at: new Date().toISOString() }); } catch {}
+    const w = await updateOrderRow(sb, orderRowId, { ...patch, updated_at: new Date().toISOString() });
+    // **쓰기를 확인한 뒤에만 메모리 상태를 전진시킨다.**
+    //
+    // 예전에는 DB보다 먼저 전진했다. 그러면 DB는 INTENT인데 메모리는
+    // SENT가 되고, 다음 전이 판정이 **장부에 없는 상태**를 기준으로
+    // 내려진다. 두 상태가 갈리는 바로 그 자리다.
+    if (w.ok && advance) currentStatus = advance;
+    if (!w.ok) {
+      persistWarn.push(`${next ?? '갱신'}: ${w.reason}`);
+      try {
+        const { log } = await import('@/lib/log/logger');
+        log.warn('order-executor', `${clientOrderId}: 장부 기록 실패 — ${w.reason}`);
+      } catch { /* 로거 실패가 주문을 막지 않는다 */ }
+    }
+    return w;
   };
 
+  /** 전송 뒤 기록 실패를 사용자에게 보이는 말에 붙인다 */
+  const withPersistNote = (msg: string) =>
+    persistWarn.length === 0 ? msg
+      : `${msg} · ⚠ 장부에 기록하지 못했습니다 (${persistWarn.join(' · ')}) — 화면과 거래소가 다를 수 있으니 대조가 필요합니다`;
+
+  const result = await (async (): Promise<ExecuteResult> => {
   try {
     if (exchange === 'binance') {
       const bf = await import('@/lib/exchanges/binanceFutures');
@@ -1926,6 +1984,8 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
     await update({ status: 'FAILED', error_message: e?.message || String(e) });
     return { ok: false, status: 'FAILED', clientOrderId, message: e?.message || '주문 실패' };
   }
+  })();
+  return { ...result, message: withPersistNote(result.message) };
 }
 
 // ── 재시작 복구: UNKNOWN/SENT 상태 주문을 거래소와 대조 ──

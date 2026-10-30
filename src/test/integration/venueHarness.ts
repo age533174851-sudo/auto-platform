@@ -164,6 +164,8 @@ export interface WriteLog {
 export interface FakeDbOptions {
   /** 이 테이블의 update를 실패시킨다 (DB 기록 실패 재현) */
   failUpdatesOn?: string;
+  /** Post-dispatch ACK write fault; the SENT CAS must still succeed. */
+  failAckUpdate?: 'error' | 'zero-rows' | 'throw';
   /** 이 테이블의 insert를 실패시킨다. '23505'면 유니크 충돌 */
   failInsertCode?: { table: string; code: string };
   /** select를 실패시킨다 */
@@ -208,6 +210,11 @@ export class FakeDb {
       if (!pending || pending.kind !== 'update') return { data: [], error: null };
       if (db.opts.failUpdatesOn === table) {
         return { data: [], error: { message: `DB 쓰기 실패 (${table})`, code: 'XX000' } };
+      }
+      if (pending.patch.status === 'ACKED' && db.opts.failAckUpdate) {
+        if (db.opts.failAckUpdate === 'throw') throw new Error('DB ACK 연결 끊김');
+        if (db.opts.failAckUpdate === 'error') return { data: [], error: { code: 'XX000', message: 'DB ACK 쓰기 실패' } };
+        return { data: [], error: null };
       }
       const where: Record<string, any> = {};
       for (const f of filters) where[f.col] = f.vals.length === 1 ? f.vals[0] : f.vals;

@@ -239,6 +239,27 @@ export async function runOrderPathIntegrationTests() {
     });
   }
 
+
+  // ══════════ ⑦-b 전송 뒤 ACK 기록 실패는 주문을 재전송하지 않고 경고 ══════════
+  for (const mode of ['error', 'zero-rows', 'throw'] as const) {
+    const db = new FakeDb({ failAckUpdate: mode });
+    const venue = baseVenue()
+      .on(BN_ORDER, { status: 400, json: { code: -2013, msg: 'Order does not exist.' } }, 'GET')
+      .on(BN_ORDER, { json: bnOrder({ status: 'NEW', executedQty: '0' }) }, 'POST');
+    const r = await scenario(venue, () => exec(db, { clientOrderId: `ACK-FAULT-${mode}` }));
+
+    test(`★ Binance ACK 장부 ${mode} 실패는 POST 1회 유지·대조 경고`, () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 1, 'ACK 기록 실패를 이유로 재전송해서는 안 된다');
+      const row = db.table('live_orders')[0];
+      eq(row?.status, 'SENT', 'ACK 기록 실패인데 DB 상태가 전진했다');
+      assert(/장부에 기록하지 못했습니다/.test(String((r as any).message)),
+        `ACK 기록 실패가 호출자에게 표시되지 않았다: ${(r as any).message}`);
+      assert((r as any).status !== 'FAILED' && (r as any).status !== 'REJECTED',
+        '이미 거래소에 전송한 주문을 실패·거부로 단정했다');
+    });
+  }
+
   // ══════════ ⑧ 장부 유니크 충돌 — 같은 키 재사용 ══════════
   {
     const db = new FakeDb({ failInsertCode: { table: 'live_orders', code: '23505' } })
