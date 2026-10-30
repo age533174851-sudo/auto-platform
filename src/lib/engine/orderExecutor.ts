@@ -416,49 +416,6 @@ export function canAdoptIntent(
       && Number(prev.leverage) !== Number(intent.leverage)) {
     return { ok: false, reason: '적힌 의도의 배율이 보낼 주문과 다릅니다' };
   }
-  // ── 정책·계약·좌표는 **없는 것도 다른 것이다** ──
-  //
-  //   위까지는 "다른 주문인가"를 봤다. 여기서 보는 것은 **"같은 주문인데
-  //   기록이 반쪽인가"**다. 둘은 다른 질문이고, 둘째를 안 보면 조용히
-  //   반쪽 장부를 남긴 채 전송까지 간다.
-  //
-  //   이어받는 줄에 `stop_policy='NO_FIXED_SL'`이 없으면 복구 경로
-  //   (`attachStopIfMissing`)는 그 포지션을 **고정 손절 주문으로 읽는다** —
-  //   078 주석이 적어 둔 바로 그 고장이고, 100배 포지션에 손절을 새로
-  //   거는 일이다. 계약 세 칸이 없으면 "배율 100이고 손절이 없으니
-  //   Exact100X겠지"로 되돌아간다 — 090이 끝낸 그 추론이다.
-  //
-  //   그래서 **빈 칸을 통과로 읽지 않는다.** 한쪽에만 값이 있으면 거절한다.
-  //   거절하면 예약이 커밋된 채 남지만, 그건 사람이 볼 수 있는 상태다 —
-  //   계약을 잃은 100배 포지션은 그렇지 않다.
-  //
-  //   `null`·`undefined`·공백을 전부 "기록 없음"으로 같게 읽는다. 의도
-  //   객체는 값이 없을 때 **칸 자체를 붙이지 않고**, DB는 같은 자리를
-  //   `null`로 준다.
-  const txt = (v: any) => (v == null || String(v).trim() === '' ? null : String(v).trim());
-  const num = (v: any) => (v == null || String(v).trim() === '' ? null : Number(v));
-  for (const col of ['stop_policy', 'execution_profile_id', 'execution_preset_id']) {
-    if (txt(prev[col]) !== txt(intent[col])) {
-      return { ok: false, reason: `적힌 의도의 ${col}가 보낼 주문과 다릅니다 — 없는 것도 다릅니다` };
-    }
-  }
-  //   숫자 칸도 같다. 표기가 달라도(`'3'` ↔ `3`) 같은 수는 같게 읽고,
-  //   읽을 수 없는 값은 `NaN`이 되어 **자기 자신과도 다르므로 거절된다** —
-  //   그쪽으로 기울여 두는 것이 맞다.
-  //
-  //   `price`를 여기 넣는 이유: 097은 지정가를 장부에 적지만
-  //   `executeOrder`의 의도 객체에는 아직 `price` 칸이 없다. 그래서 지정가
-  //   예약은 **이어받기가 거절된다** — 그게 맞다. 적힌 가격과 보낼 가격이
-  //   같은지 확인할 방법이 없는 채로 이어받으면, 장부의 가격과 실제 전송
-  //   가격이 갈릴 수 있다. 조용히 통과시키는 대신 막고 말한다.
-  //   (의도에 `price`를 적는 일은 이 변경의 범위가 아니다 — 남은 작업이다.)
-  for (const col of ['execution_contract_version', 'stop_loss', 'take_profit',
-                     'price', 'entry_adverse_distance_pct',
-                     'entry_liquidation_distance_pct_raw']) {
-    if (num(prev[col]) !== num(intent[col])) {
-      return { ok: false, reason: `적힌 의도의 ${col}가 보낼 주문과 다릅니다 — 없는 것도 다릅니다` };
-    }
-  }
   return { ok: true, reason: '커밋된 의도를 이어받습니다' };
 }
 
