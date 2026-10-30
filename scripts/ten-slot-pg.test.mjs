@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import {
   PG_URL_ENV, PG_RESTART_ENV, pgTarget, psql, createScratchDb, dropScratchDb,
   openCampaignSql, claimSql, parseClaim, readState, raceClaims, psqlSpawn,
-  migrationPaths, restartCommand, restartCluster,
+  migrationPaths, restartCommand, restartCluster, intentRow, DEFAULT_OWNER,
 } from './ten-slot-pg.mjs';
 import { createOfflineLedger, planOfflineClaim } from './ten-slot-offline.mjs';
 
@@ -36,10 +36,25 @@ async function killSleeper(tag, db) { // db는 반드시 넘긴다
 if (!target.ok) {
   test(`실제 PostgreSQL 검증을 건너뜁니다 (${target.reason})`, { skip: target.reason }, () => {});
 } else {
-  // 012만 적용한 DB = 097 **이전**의 실제 스키마다. RED는 여기서 재현한다.
-  const red = createScratchDb(target, 'tsred', migrationPaths(root, ['012_live_orders.sql']));
+  // **운영 스키마와 같은 칸을 깔아 둔다.**
+  //
+  //   097은 `live_orders`에 의도를 적는다. 그 표의 칸은 012 이후
+  //   078(`stop_policy`) · 090(실행 계약 세 칸) · 091(진입 위험 좌표 두 칸)이
+  //   더한다. 097보다 번호가 작으므로 **운영 DB에는 이미 있는 칸**이다.
+  //
+  //   여기서 012만 깔면 시험은 "그 칸이 없는 DB"를 보게 되고, 097이 그
+  //   칸을 못 적는 것이 결함인지 스키마가 없어서인지 구분할 수 없다.
+  //   운영과 같은 모양을 깔아야 **적지 않는 것이 결함으로 드러난다.**
+  const SCHEMA = [
+    '012_live_orders.sql',
+    '078_live_orders_stop_policy.sql',
+    '090_live_orders_execution_identity.sql',
+    '091_live_orders_entry_risk_snapshot.sql',
+  ];
+  // 097 **이전**의 실제 스키마다. RED는 여기서 재현한다.
+  const red = createScratchDb(target, 'tsred', migrationPaths(root, SCHEMA));
   const green = createScratchDb(target, 'tsgreen',
-    migrationPaths(root, ['012_live_orders.sql', '097_ten_slot_atomic_claim.sql']));
+    migrationPaths(root, [...SCHEMA, '097_ten_slot_atomic_claim.sql']));
   process.on('exit', () => {
     try { dropScratchDb(target, red); } catch { /* 정리 실패는 결과를 바꾸지 않는다 */ }
     try { dropScratchDb(target, green); } catch { /* 같음 */ }
@@ -49,7 +64,7 @@ if (!target.ok) {
   const fresh = (equity = 1000, environment = 'TESTNET') => {
     const campaignId = `c-${++seq}-${Date.now().toString(36)}`;
     const rows = psql(target, green, openCampaignSql({
-      campaignId, userId: '11111111-1111-4111-8111-111111111111',
+      campaignId, userId: DEFAULT_OWNER,
       environment, startingEquity: equity,
     }));
     assert.equal(rows[0], 'OPENED|0');
@@ -687,5 +702,282 @@ if (!target.ok) {
           { version: 0, claims: 0, intents: 0 }, `${label}에서 무언가 남았다`);
       }
     }
+  });
+
+  // ── 커밋된 의도에 **실행 계약과 손절 정책**이 남는가 ──
+  //
+  //   RED: `ten_slot_claim`은 수량·가격·배율까지만 적고 `stop_policy`와
+  //   실행 계약 세 칸(090) · 손절/익절가 · 진입 위험 좌표 두 칸(091)을
+  //   받지도 적지도 않았다.
+  //
+  //   왜 그게 결함인가. 이 함수가 적는 줄은 **전송 전 의도**이고, 전송은
+  //   `orderExecutor`가 그 줄을 이어받아(`adoptIntent`) 한다. 이어받는 줄에
+  //   `stop_policy='NO_FIXED_SL'`이 없으면 복구 경로는 그 포지션을
+  //   **고정 손절 주문으로 읽는다** — 078 주석이 적은 바로 그 고장이다.
+  //   계약 세 칸이 없으면 "배율 100이고 손절이 없으니 Exact100X겠지"로
+  //   되돌아간다 — 090이 끝낸 그 추론이다.
+  //
+  //   그래서 **적을 수 있어야 하고, 적은 대로 남아야 한다.**
+  test('의도에 손절 정책·실행 계약·진입 위험 좌표가 그대로 남는다', () => {
+    const campaignId = fresh();
+    const coid = `order-${campaignId}`;
+    const r = claim({
+      campaignId, expectedVersion: 0, clientOrderId: coid,
+      leverage: 100, stopPolicy: 'NO_FIXED_SL',
+      profileId: 'MAX_LEV_100X', presetId: 'EXACT_100X', contractVersion: 3,
+      adversePct: 0.42, liqPctRaw: 0.97,
+    });
+    assert.equal(r.code, 'RESERVATION_AND_INTENT_DURABLE');
+
+    const row = intentRow(target, green, coid);
+    assert.ok(row, '의도 줄이 없다');
+    // 상태·환경은 기존 보장 그대로다.
+    assert.equal(row.status, 'INTENT');
+    assert.equal(row.mode, 'TESTNET');
+    // ★ 여기가 RED였다.
+    assert.equal(row.stopPolicy, 'NO_FIXED_SL', 'stop_policy가 안 남았다');
+    assert.equal(row.profileId, 'MAX_LEV_100X');
+    assert.equal(row.presetId, 'EXACT_100X');
+    assert.equal(row.contractVersion, '3');
+    assert.equal(Number(row.adversePct), 0.42);
+    assert.equal(Number(row.liqPctRaw), 0.97);
+    // NO_FIXED_SL이므로 손절가는 없는 것이 맞다. **0이 아니라 기록 없음이다.**
+    assert.equal(row.stopLoss, '');
+    assert.equal(row.takeProfit, '');
+  });
+
+  test('고정 손절 프로필의 손절·익절가도 그대로 남는다', () => {
+    const campaignId = fresh();
+    const coid = `order-${campaignId}`;
+    const r = claim({
+      campaignId, expectedVersion: 0, clientOrderId: coid,
+      stopPolicy: 'FIXED_SL', stopLoss: 61000, takeProfit: 72000,
+      orderType: 'LIMIT', price: 65000,
+    });
+    assert.equal(r.code, 'RESERVATION_AND_INTENT_DURABLE');
+    const row = intentRow(target, green, coid);
+    assert.equal(row.stopPolicy, 'FIXED_SL');
+    assert.equal(Number(row.stopLoss), 61000);
+    assert.equal(Number(row.takeProfit), 72000);
+    assert.equal(row.orderType, 'LIMIT');
+    assert.equal(Number(row.price), 65000);
+    // 계약을 안 넘겼으면 **추측해서 채우지 않는다.** NULL은 "기록 없음"이다.
+    assert.equal(row.profileId, '');
+    assert.equal(row.presetId, '');
+    assert.equal(row.contractVersion, '');
+  });
+
+  // **반쪽은 받지 않는다.** 실행 계약 세 칸은 전부 오거나 전부 없다.
+  //
+  //   090의 CHECK 제약도 같은 선을 긋지만, 제약에 걸리면 **예외**가 나고
+  //   슬롯은 되돌아간다 — 호출부는 "왜 거절됐는지"를 코드로 받지 못한다.
+  //   그래서 ③에서 코드로 거절한다. 제약은 마지막 그물로 남겨 둔다.
+  //
+  //   짝 규칙(`MAX_LEV_100X`는 `EXACT_100X`와만)은 **여기에 적지 않는다** —
+  //   그 표의 정본은 `src/lib/execution/profile.ts`이고, SQL에 베끼면 같은
+  //   판단이 두 곳에 생긴다(074·CLAUDE.md의 규칙).
+  test('실행 계약이 반쪽이면 거절하고 아무것도 남기지 않는다', () => {
+    const half = [
+      ['프로필만', { profileId: 'MAX_LEV_100X' }],
+      ['프리셋만', { presetId: 'EXACT_100X' }],
+      ['버전만', { contractVersion: 3 }],
+      ['버전 빠짐', { profileId: 'MAX_LEV_100X', presetId: 'EXACT_100X' }],
+      ['프리셋 빠짐', { profileId: 'MAX_LEV_100X', contractVersion: 3 }],
+      ['프로필 빠짐', { presetId: 'EXACT_100X', contractVersion: 3 }],
+      ['빈 프로필', { profileId: '   ', presetId: 'EXACT_100X', contractVersion: 3 }],
+      ['빈 프리셋', { profileId: 'MAX_LEV_100X', presetId: '', contractVersion: 3 }],
+      ['버전 0', { profileId: 'MAX_LEV_100X', presetId: 'EXACT_100X', contractVersion: 0 }],
+      ['버전 음수', { profileId: 'MAX_LEV_100X', presetId: 'EXACT_100X', contractVersion: -1 }],
+    ];
+    for (const [label, extra] of half) {
+      const campaignId = fresh();
+      const r = claim({
+        campaignId, expectedVersion: 0, clientOrderId: `order-${campaignId}`, ...extra,
+      });
+      assert.equal(r.code, 'INTENT_INVALID', `${label}: ${r.code}로 적었다`);
+      const st = readState(target, green, campaignId);
+      assert.deepEqual({ version: st.version, claims: st.claims, intents: st.intents },
+        { version: 0, claims: 0, intents: 0 }, `${label}에서 무언가 남았다`);
+    }
+  });
+
+  // **모순은 조용히 정리하지 않는다.** 실행기와 같은 판단이다.
+  test('손절 정책과 손절가가 모순이면 거절한다', () => {
+    const bad = [
+      ['NO_FIXED_SL + 손절가', { stopPolicy: 'NO_FIXED_SL', stopLoss: 61000 }],
+      ['모르는 정책', { stopPolicy: 'MAYBE_SL' }],
+      ['빈 정책', { stopPolicy: '  ' }],
+      ['손절가 0', { stopLoss: 0 }],
+      ['손절가 음수', { stopLoss: -1 }],
+      ['손절가 NaN', { stopLossExpr: "'NaN'::numeric" }],
+      ['손절가 Infinity', { stopLossExpr: "'Infinity'::numeric" }],
+      ['익절가 0', { takeProfit: 0 }],
+      ['익절가 NaN', { takeProfitExpr: "'NaN'::numeric" }],
+      ['위험거리 0', { adversePct: 0 }],
+      ['위험거리 음수', { adversePct: -0.1 }],
+      ['위험거리 NaN', { adversePctExpr: "'NaN'::double precision" }],
+      ['청산여유 0', { liqPctRaw: 0 }],
+      ['청산여유 Infinity', { liqPctRawExpr: "'Infinity'::double precision" }],
+    ];
+    for (const [label, extra] of bad) {
+      const campaignId = fresh();
+      const r = claim({
+        campaignId, expectedVersion: 0, clientOrderId: `order-${campaignId}`, ...extra,
+      });
+      assert.equal(r.code, 'INTENT_INVALID', `${label}: ${r.code}로 적었다`);
+      const st = readState(target, green, campaignId);
+      assert.deepEqual({ version: st.version, claims: st.claims, intents: st.intents },
+        { version: 0, claims: 0, intents: 0 }, `${label}에서 무언가 남았다`);
+    }
+  });
+
+  // 위험 좌표 두 칸은 **서로 독립**이다. 091이 CHECK를 걸지 않은 이유가
+  // 그것이다 — 한쪽만 구해진 상황이 실제로 있고, 그때 저장을 통째로
+  // 실패시키면 구한 값까지 버린다. 여기서도 반쪽을 받는다.
+  test('진입 위험 좌표는 한쪽만 있어도 받는다', () => {
+    for (const [label, extra, expect] of [
+      ['위험거리만', { adversePct: 0.42 }, { adversePct: '0.42', liqPctRaw: '' }],
+      ['청산여유만', { liqPctRaw: 0.97 }, { adversePct: '', liqPctRaw: '0.97' }],
+    ]) {
+      const campaignId = fresh();
+      const coid = `order-${campaignId}`;
+      const r = claim({ campaignId, expectedVersion: 0, clientOrderId: coid, ...extra });
+      assert.equal(r.code, 'RESERVATION_AND_INTENT_DURABLE', label);
+      const row = intentRow(target, green, coid);
+      assert.equal(row.adversePct === '' ? '' : String(Number(row.adversePct)),
+        expect.adversePct, `${label}: 위험거리`);
+      assert.equal(row.liqPctRaw === '' ? '' : String(Number(row.liqPctRaw)),
+        expect.liqPctRaw, `${label}: 청산여유`);
+    }
+  });
+
+  // ── 호출자가 이 캠페인의 주인인가 ──
+  //
+  //   `ten_slot_claim`은 `service_role`로 불린다. 그 역할은 **모든 줄을
+  //   볼 수 있다** — RLS가 막아 주지 않는다. 그래서 캠페인 id 문자열만
+  //   알면 남의 캠페인에 주문 의도를 커밋할 수 있었다.
+  //
+  //   장부에 적히는 `user_id`·`connection_id`는 캠페인에서 끌어오므로
+  //   **피해자 이름으로 주문이 남는다.** 라우트가 붙는 순간 그건 남의
+  //   계좌로 나가는 주문이다.
+  //
+  //   그래서 호출자의 정체성을 **인자로 받아 캠페인과 대조한다.** 이것은
+  //   호출부의 인증을 대신하지 않는다 — 인증된 정체성을 여기까지 **들고
+  //   와야 한다**는 요구다. 들고 오지 않으면 거절한다(모르는 것은 통과가
+  //   아니다).
+  test('남의 캠페인에는 의도를 커밋하지 못한다', () => {
+    const campaignId = fresh();
+    const r = claim({
+      campaignId, expectedVersion: 0, clientOrderId: `order-${campaignId}`,
+      callerUserId: '22222222-2222-4222-8222-222222222222',
+    });
+    assert.equal(r.code, 'CALLER_NOT_OWNER');
+    const st = readState(target, green, campaignId);
+    assert.deepEqual({ version: st.version, claims: st.claims, intents: st.intents },
+      { version: 0, claims: 0, intents: 0 }, '남의 캠페인에 무언가 남았다');
+  });
+
+  test('호출자를 모르면 거절한다 — UNKNOWN은 통과가 아니다', () => {
+    const campaignId = fresh();
+    const r = claim({
+      campaignId, expectedVersion: 0, clientOrderId: `order-${campaignId}`,
+      callerUserId: null,
+    });
+    assert.equal(r.code, 'CALLER_UNKNOWN');
+    const st = readState(target, green, campaignId);
+    assert.deepEqual({ version: st.version, claims: st.claims, intents: st.intents },
+      { version: 0, claims: 0, intents: 0 });
+  });
+
+  // 연결도 같은 선이다. 주인은 맞는데 **다른 거래소 연결**로 들어오면
+  // 그 주문은 다른 계좌로 나간다. `IS DISTINCT FROM`으로 본다 — `=`는
+  // NULL을 만나면 NULL을 돌려줘 **다른 것을 같다고 읽는다.**
+  test('연결이 다르면 주인이라도 거절한다', () => {
+    const campaignId = fresh();
+    const r = claim({
+      campaignId, expectedVersion: 0, clientOrderId: `order-${campaignId}`,
+      callerConnectionId: '33333333-3333-4333-8333-333333333333',
+    });
+    assert.equal(r.code, 'CALLER_NOT_OWNER');
+    const st = readState(target, green, campaignId);
+    assert.deepEqual({ version: st.version, claims: st.claims, intents: st.intents },
+      { version: 0, claims: 0, intents: 0 });
+  });
+
+  test('주인과 연결이 모두 맞으면 통과한다', () => {
+    const conn = '44444444-4444-4444-8444-444444444444';
+    const campaignId = `c-${++seq}-${Date.now().toString(36)}`;
+    assert.equal(psql(target, green, openCampaignSql({
+      campaignId, userId: DEFAULT_OWNER, connectionId: conn,
+      environment: 'TESTNET', startingEquity: 1000,
+    }))[0], 'OPENED|0');
+
+    // 연결을 안 넘기면 캠페인의 연결과 다르다 — 거절해야 한다.
+    assert.equal(claim({
+      campaignId, expectedVersion: 0, clientOrderId: `order-a-${campaignId}`,
+    }).code, 'CALLER_NOT_OWNER');
+
+    const ok = claim({
+      campaignId, expectedVersion: 0, clientOrderId: `order-${campaignId}`,
+      callerConnectionId: conn,
+    });
+    assert.equal(ok.code, 'RESERVATION_AND_INTENT_DURABLE');
+    // 장부에 남는 주인은 **캠페인에서 끌어온 값**이지 호출자가 넘긴 값이 아니다.
+    const [row] = psql(target, green,
+      `SELECT user_id, connection_id FROM live_orders
+        WHERE client_order_id = '${`order-${campaignId}`}'`);
+    assert.equal(String(row), `${DEFAULT_OWNER}|${conn}`);
+  });
+
+  // 없는 캠페인은 주인을 알 수 없다. `CAMPAIGN_MISSING`이 유일하게
+  // 참인 답이다 — 소유권 코드로 바꾸면 주인에게 거짓말을 하게 된다.
+  test('없는 캠페인은 소유권 이전에 CAMPAIGN_MISSING이다', () => {
+    const r = claim({
+      campaignId: `c-none-${Date.now().toString(36)}`, expectedVersion: 0,
+      clientOrderId: 'order-none-0001',
+      callerUserId: '22222222-2222-4222-8222-222222222222',
+    });
+    assert.equal(r.code, 'CAMPAIGN_MISSING');
+  });
+
+  // ── 거부 응답이 **남의 장부를 알려 주지 않는가** ──
+  //
+  //   ①-b 주석은 "아래 검사를 남의 캠페인에 수행하면 그 응답이 남의 장부
+  //   상태를 알려 준다"고 적어 두고, **거부 응답에 `v_campaign.version`을
+  //   그대로 담았다.** 막겠다고 적은 것을 같은 줄에서 흘린 셈이다.
+  //
+  //   **버전을 먼저 1로 올린다.** 버전 0만 시험하면 유출된 0과 비워 둔
+  //   NULL을 구분할 수 없어 이 결함이 숨는다.
+  test('소유권 거부 응답은 남의 버전·슬롯·주문을 알려 주지 않는다', () => {
+    const campaignId = fresh();
+    assert.equal(claim({
+      campaignId, expectedVersion: 0, clientOrderId: `order-own-${campaignId}`,
+    }).code, 'RESERVATION_AND_INTENT_DURABLE');
+
+    const before = readState(target, green, campaignId);
+    assert.equal(before.version, 1, '버전을 올리지 못해 이 시험이 무의미해졌다');
+
+    const cases = [
+      ['다른 사용자', 'CALLER_NOT_OWNER',
+        { callerUserId: '22222222-2222-4222-8222-222222222222' }],
+      ['다른 연결', 'CALLER_NOT_OWNER',
+        { callerConnectionId: '33333333-3333-4333-8333-333333333333' }],
+      ['호출자 없음', 'CALLER_UNKNOWN', { callerUserId: null }],
+    ];
+    for (const [label, expected, extra] of cases) {
+      const r = claim({
+        campaignId, expectedVersion: 1,
+        clientOrderId: `order-probe-${label.length}-${campaignId}`, ...extra,
+      });
+      assert.equal(r.code, expected, `${label}: ${r.code}로 적었다`);
+      // ★ 여기가 RED였다 — 남의 버전 1이 응답에 담겼다.
+      assert.equal(r.version, null, `${label}: 남의 버전 ${r.version}을 알려 줬다`);
+      assert.equal(r.slotIndex, null, `${label}: 슬롯 번호를 알려 줬다`);
+      assert.equal(r.liveOrderId, null, `${label}: 주문 id를 알려 줬다`);
+    }
+
+    // 비인가 요청이 장부를 **한 칸도** 바꾸지 않았다.
+    assert.deepEqual(readState(target, green, campaignId), before,
+      '비인가 요청이 장부를 바꿨다');
   });
 }

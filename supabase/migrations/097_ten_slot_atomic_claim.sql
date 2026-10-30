@@ -155,6 +155,26 @@ AS $$
      AND n < 'Infinity'::NUMERIC
 $$;
 
+-- `DOUBLE PRECISION`에도 같은 선을 긋는다.
+--
+-- 091의 두 칸은 `double precision`이다. `NUMERIC`용 판정에 넘기면 암묵
+-- 변환이 일어나고, 그 변환은 `'NaN'`을 그대로 넘긴다 — 걸러진 것처럼
+-- 보이지만 걸러지지 않는다. **같은 판단을 타입마다 한 줄씩 적는 대신
+-- 함수를 하나 더 둔다.** 식이 두 곳에 흩어지지 않게.
+--
+-- PostgreSQL에서 `'NaN' = 'NaN'`은 참이므로 `<> 'NaN'`이 NaN을 거른다
+-- (IEEE와 다르다 — 여기서 IEEE 습관을 쓰면 통과한다).
+CREATE OR REPLACE FUNCTION public.ten_slot_finite_positive_f8(n DOUBLE PRECISION)
+RETURNS BOOLEAN
+LANGUAGE sql
+IMMUTABLE
+AS $$
+  SELECT n IS NOT NULL
+     AND n <> 'NaN'::DOUBLE PRECISION
+     AND n > 0
+     AND n < 'Infinity'::DOUBLE PRECISION
+$$;
+
 -- ── 이미 있는 캠페인이 **내가 열려던 그 캠페인인가** ──
 --
 -- 판정을 한 곳에만 둔다. 개설 경로에는 "먼저 읽어 보는 자리"와 "동시
@@ -279,6 +299,23 @@ $$;
 --   SLOT_BUSY         활성 슬롯이 이미 있다
 --   EXHAUSTED         FREE 슬롯이 없다
 --   RESERVATION_AND_INTENT_DURABLE  둘 다 커밋됐다 (전송은 아직 아니다)
+-- **옛 서명을 먼저 지운다.**
+--
+-- `CREATE OR REPLACE FUNCTION`은 인자 목록이 다르면 **덮어쓰지 않고
+-- 과적재(overload)한다.** 그러면 같은 이름의 함수가 두 개 남고, 둘 중
+-- 어느 쪽이 불릴지는 호출부가 넘긴 인자 수에 달린다 — "경로가 둘인데
+-- 한쪽만 고침"이 생기는 자리다. 이 마이그레이션을 이미 적용한 DB가
+-- 있다면 그 17인자 함수를 지우고 하나만 남긴다.
+DROP FUNCTION IF EXISTS public.ten_slot_claim(
+  TEXT, BIGINT, TEXT, INT, INT, INT, INT,
+  TEXT, TEXT, TEXT, TEXT, TEXT, NUMERIC, NUMERIC, INT, BOOLEAN, TEXT
+);
+DROP FUNCTION IF EXISTS public.ten_slot_claim(
+  TEXT, BIGINT, TEXT, INT, INT, INT, INT,
+  TEXT, TEXT, TEXT, TEXT, TEXT, NUMERIC, NUMERIC, INT, BOOLEAN, TEXT,
+  NUMERIC, NUMERIC, TEXT, TEXT, TEXT, INT, DOUBLE PRECISION, DOUBLE PRECISION
+);
+
 CREATE OR REPLACE FUNCTION public.ten_slot_claim(
   p_campaign_id              TEXT,
   p_expected_version         BIGINT,
@@ -296,7 +333,43 @@ CREATE OR REPLACE FUNCTION public.ten_slot_claim(
   p_price                    NUMERIC,
   p_leverage                 INT,
   p_reduce_only              BOOLEAN,
-  p_signal_id                TEXT
+  p_signal_id                TEXT,
+  -- ── 의도에 함께 적는 정책·계약·좌표 ──
+  --
+  --   **기본값은 NULL이다.** 078·090·091이 모두 같은 말을 적어 뒀다:
+  --   NULL은 "그런 일이 없었다"가 아니라 **"기록이 없다"**다. 그래서 안
+  --   넘기면 0이나 거짓 기본값으로 채우지 않고 비워 둔다.
+  --
+  --   이 칸을 받지 않던 동안 이 함수가 적는 의도 줄은 `stop_policy`가
+  --   비어 있었다. 그 줄을 전송 단계가 이어받으면 복구 경로는 그것을
+  --   **고정 손절 주문으로 읽는다**(078 주석의 고장). 계약 세 칸이 없으면
+  --   "배율 100이고 손절이 없으니 Exact100X겠지"로 되돌아간다(090이 끝낸
+  --   추론). 적을 수 있어야 그 두 고장이 닫힌다.
+  p_stop_loss                NUMERIC          DEFAULT NULL,
+  p_take_profit              NUMERIC          DEFAULT NULL,
+  p_stop_policy              TEXT             DEFAULT NULL,
+  p_execution_profile_id     TEXT             DEFAULT NULL,
+  p_execution_preset_id      TEXT             DEFAULT NULL,
+  p_execution_contract_version INT            DEFAULT NULL,
+  p_entry_adverse_distance_pct DOUBLE PRECISION DEFAULT NULL,
+  p_entry_liquidation_distance_pct_raw DOUBLE PRECISION DEFAULT NULL,
+  -- ── 호출자의 정체성 ──
+  --
+  --   이 함수는 `service_role`로 불린다. 그 역할은 **모든 줄을 볼 수
+  --   있다** — RLS가 막아 주지 않는다. 그래서 캠페인 id 문자열만 알면
+  --   남의 캠페인에 주문 의도를 커밋할 수 있었다. 장부에 적히는
+  --   `user_id`·`connection_id`는 캠페인에서 끌어오므로 **피해자 이름으로
+  --   주문이 남는다.**
+  --
+  --   **이 검사는 호출부의 인증을 대신하지 않는다.** 인증된 정체성을
+  --   여기까지 들고 오라는 요구다. 들고 오지 않으면 거절한다 —
+  --   모르는 것은 통과가 아니다.
+  --
+  --   기본값이 NULL인 것은 "선택"이라는 뜻이 아니다. 안 넘기면
+  --   `CALLER_UNKNOWN`으로 **막힌다**. 빠뜨린 호출부가 조용히 통과하는
+  --   대신 그 자리에서 드러나게 한다.
+  p_caller_user_id           UUID             DEFAULT NULL,
+  p_caller_connection_id     UUID             DEFAULT NULL
 )
 RETURNS TABLE (code TEXT, slot_index INT, campaign_version BIGINT, live_order_id UUID)
 LANGUAGE plpgsql
@@ -310,6 +383,9 @@ DECLARE
   v_mode       TEXT;
   v_type       TEXT;
   v_reduce     BOOLEAN;
+  v_policy     TEXT;
+  v_profile    TEXT;
+  v_preset     TEXT;
   v_order_id   UUID;
   v_next       BIGINT;
   v_rows       INT;
@@ -322,7 +398,38 @@ BEGIN
      FOR UPDATE;
 
   IF v_campaign.campaign_id IS NULL THEN
+    -- 없는 캠페인은 **주인을 알 수 없다.** 여기서 소유권 코드로 바꾸면
+    -- 진짜 주인에게도 "당신 것이 아니다"라고 말하게 된다. 없는 것은 없다.
     RETURN QUERY SELECT 'CAMPAIGN_MISSING'::TEXT, NULL::INT, NULL::BIGINT, NULL::UUID;
+    RETURN;
+  END IF;
+
+  -- ①-b **이 캠페인이 호출자의 것인가.**
+  --
+  --   가장 먼저 본다. 아래의 어떤 검사도 남의 캠페인에 대해 수행할
+  --   이유가 없고, 수행하면 그 응답이 **남의 장부 상태를 알려 준다**
+  --   (슬롯이 찼는지·버전이 몇인지·중지됐는지).
+  --   **거부 응답에는 캠페인 값을 한 칸도 담지 않는다.**
+  --
+  --     막겠다고 적고 같은 줄에서 흘린 적이 있다 — 이 두 분기는 처음에
+  --     `v_campaign.version`을 돌려줬고, 그러면 남의 캠페인 id만 알면
+  --     **버전이 몇인지 세어 볼 수 있다**(주문이 몇 번 나갔는지와 같다).
+  --     위 주석이 막겠다고 선언한 그 정보다.
+  --
+  --     다른 거부 코드(`STALE_VERSION` 등)가 버전을 돌려주는 것은
+  --     **주인에게 다음 시도를 알려 주기 위해서**다. 주인이 아닌 호출자에게
+  --     그 이유는 성립하지 않는다.
+  IF p_caller_user_id IS NULL THEN
+    RETURN QUERY SELECT 'CALLER_UNKNOWN'::TEXT, NULL::INT, NULL::BIGINT, NULL::UUID;
+    RETURN;
+  END IF;
+
+  --   `IS DISTINCT FROM`을 쓴다. `connection_id`는 NULL일 수 있고 `=`는
+  --   NULL을 만나면 NULL을 돌려줘 **다른 것을 같다고 읽는다**
+  --   (`ten_slot_identity_verdict`가 같은 이유로 쓰는 연산자다).
+  IF v_campaign.user_id IS DISTINCT FROM p_caller_user_id
+     OR v_campaign.connection_id IS DISTINCT FROM p_caller_connection_id THEN
+    RETURN QUERY SELECT 'CALLER_NOT_OWNER'::TEXT, NULL::INT, NULL::BIGINT, NULL::UUID;
     RETURN;
   END IF;
 
@@ -408,6 +515,67 @@ BEGIN
     RETURN;
   END IF;
 
+  -- ③-b **함께 적을 정책·계약·좌표가 말이 되는가.**
+  --
+  --   ③이 "거래소에 보낼 수 있는 모양"을 봤다면 여기서 보는 것은
+  --   **"나중에 읽을 수 있는 기록인가"**다. 반쪽 기록은 읽는 쪽을 추측하게
+  --   만들고, 추측하는 자리가 곧 틀리는 자리다.
+  --
+  --   공백만 있는 값은 **값이 아니다.** `''`나 `'   '`를 그대로 적으면
+  --   090의 CHECK는 "있다"로 읽고 읽는 쪽은 "빈 계약"을 보게 된다.
+  --   비울 것은 NULL로 비운다.
+  v_policy  := NULLIF(btrim(COALESCE(p_stop_policy, '')), '');
+  v_profile := NULLIF(btrim(COALESCE(p_execution_profile_id, '')), '');
+  v_preset  := NULLIF(btrim(COALESCE(p_execution_preset_id, '')), '');
+
+  IF
+     -- 넘겼는데 공백뿐이면 조용히 NULL로 바꾸지 않는다. 호출부가 무엇을
+     -- 의도했는지 알 수 없으므로 거절한다.
+     (p_stop_policy IS NOT NULL AND v_policy IS NULL)
+     -- 078의 CHECK와 같은 집합이다. 제약에 걸리면 **예외**가 나므로 호출부는
+     -- 이유를 코드로 받지 못한다. 그래서 여기서 코드로 거절하고, 제약은
+     -- 마지막 그물로 남긴다.
+     OR (v_policy IS NOT NULL AND v_policy NOT IN ('FIXED_SL', 'NO_FIXED_SL'))
+     -- **모순은 조용히 정리하지 않는다.** 고정 손절을 쓰지 않는 정책인데
+     -- 손절가가 함께 왔다면 둘 중 하나가 틀린 것이고 어느 쪽인지 여기서는
+     -- 알 수 없다. 손절을 버리면 화면에는 손절이 있고 거래소에는 없다.
+     -- (`orderExecutor.ts`가 전송 경계에서 내리는 것과 같은 판단이다.)
+     OR (v_policy = 'NO_FIXED_SL' AND p_stop_loss IS NOT NULL)
+     -- 가격은 가격이다. 0·음수·NaN·Infinity는 어느 거래소에서도 손절가가
+     -- 될 수 없다. 판정은 ③과 같은 함수 한 곳에 있다.
+     OR (p_stop_loss IS NOT NULL AND NOT public.ten_slot_finite_positive(p_stop_loss))
+     OR (p_take_profit IS NOT NULL AND NOT public.ten_slot_finite_positive(p_take_profit))
+     -- ── 실행 계약 세 칸은 전부 있거나 전부 없다 ──
+     --
+     --   `resolveExecutionProfile`의 `INCOMPLETE_SELECTION`, 090의
+     --   `live_orders_execution_identity_complete`, 그리고 실행기의
+     --   "반쪽은 받지 않는다"와 같은 선이다.
+     --
+     --   짝 규칙(`MAX_LEV_100X`는 `EXACT_100X`와만)은 **여기에 적지 않는다.**
+     --   그 표의 정본은 `src/lib/execution/profile.ts`이고, SQL에 베끼면
+     --   같은 판단이 두 곳에 생겨 언젠가 한쪽만 바뀐다(074·CLAUDE.md).
+     OR (v_profile IS NULL) <> (v_preset IS NULL)
+     OR (v_profile IS NULL) <> (p_execution_contract_version IS NULL)
+     OR (p_execution_profile_id IS NOT NULL AND v_profile IS NULL)
+     OR (p_execution_preset_id IS NOT NULL AND v_preset IS NULL)
+     -- 버전 0·음수는 계약 버전이 될 수 없다. 077·090이 숫자 범위를 제약으로
+     -- 걸지 않았으므로 **여기서 막지 않으면 그대로 쌓인다.**
+     OR (p_execution_contract_version IS NOT NULL AND p_execution_contract_version < 1)
+     -- ── 진입 위험 좌표 (091) ──
+     --
+     --   091은 일부러 CHECK를 걸지 않았다 — 두 값은 서로 독립이고 한쪽만
+     --   구해지는 상황이 실제로 있다. 그래서 **반쪽을 받는다.** 다만 있는
+     --   값이 쓸 수 없는 수면 거절한다. 특히 0을 받으면 안 된다: 위험 거리
+     --   0은 "어떤 청산여유든 통과"로 읽힌다(091 주석의 그 숫자다).
+     OR (p_entry_adverse_distance_pct IS NOT NULL
+         AND NOT public.ten_slot_finite_positive_f8(p_entry_adverse_distance_pct))
+     OR (p_entry_liquidation_distance_pct_raw IS NOT NULL
+         AND NOT public.ten_slot_finite_positive_f8(p_entry_liquidation_distance_pct_raw))
+  THEN
+    RETURN QUERY SELECT 'INTENT_INVALID'::TEXT, NULL::INT, v_campaign.version, NULL::UUID;
+    RETURN;
+  END IF;
+
   -- ③-2 **환경 경계. MOCK / TESTNET / LIVE의 장부는 절대 섞이지 않는다.**
   --
   --   예전에는 `live_orders.mode`에 **호출자가 넘긴 `p_mode`를 그대로**
@@ -488,14 +656,22 @@ BEGIN
   INSERT INTO public.live_orders (
     client_order_id, signal_id, user_id, connection_id,
     exchange, mode, symbol, side, order_type,
-    quantity, price, leverage, reduce_only, status
+    quantity, price, leverage, reduce_only, status,
+    -- **검사한 것을 그대로 적는다.** ③-b가 본 값과 다른 값을 적으면
+    -- 그 검사는 아무것도 보장하지 않는다.
+    stop_loss, take_profit, stop_policy,
+    execution_profile_id, execution_preset_id, execution_contract_version,
+    entry_adverse_distance_pct, entry_liquidation_distance_pct_raw
   ) VALUES (
     p_client_order_id, p_signal_id, v_campaign.user_id, v_campaign.connection_id,
     -- **캠페인에서 끌어낸 값을 적는다.** 호출자가 넘긴 p_mode가 아니다.
     -- 주문유형·청산여부는 ③에서 **검사한 그 값**을 쓴다 — 검사한 것과
     -- 적는 것이 다르면 검사는 아무것도 보장하지 않는다.
     p_exchange, v_mode, p_symbol, p_side, v_type,
-    p_quantity, p_price, p_leverage, v_reduce, 'INTENT'
+    p_quantity, p_price, p_leverage, v_reduce, 'INTENT',
+    p_stop_loss, p_take_profit, v_policy,
+    v_profile, v_preset, p_execution_contract_version,
+    p_entry_adverse_distance_pct, p_entry_liquidation_distance_pct_raw
   )
   RETURNING id INTO v_order_id;
 
@@ -594,6 +770,9 @@ $$;
 REVOKE ALL ON FUNCTION public.ten_slot_finite_positive(NUMERIC) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.ten_slot_finite_positive(NUMERIC) TO service_role;
 
+REVOKE ALL ON FUNCTION public.ten_slot_finite_positive_f8(DOUBLE PRECISION) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.ten_slot_finite_positive_f8(DOUBLE PRECISION) TO service_role;
+
 REVOKE ALL ON FUNCTION public.ten_slot_identity_verdict(
   public.ten_slot_campaigns, UUID, UUID, TEXT, NUMERIC) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.ten_slot_identity_verdict(
@@ -604,11 +783,15 @@ GRANT EXECUTE ON FUNCTION public.ten_slot_open_campaign(TEXT, UUID, UUID, TEXT, 
 
 REVOKE ALL ON FUNCTION public.ten_slot_claim(
   TEXT, BIGINT, TEXT, INT, INT, INT, INT,
-  TEXT, TEXT, TEXT, TEXT, TEXT, NUMERIC, NUMERIC, INT, BOOLEAN, TEXT
+  TEXT, TEXT, TEXT, TEXT, TEXT, NUMERIC, NUMERIC, INT, BOOLEAN, TEXT,
+  NUMERIC, NUMERIC, TEXT, TEXT, TEXT, INT, DOUBLE PRECISION, DOUBLE PRECISION,
+  UUID, UUID
 ) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.ten_slot_claim(
   TEXT, BIGINT, TEXT, INT, INT, INT, INT,
-  TEXT, TEXT, TEXT, TEXT, TEXT, NUMERIC, NUMERIC, INT, BOOLEAN, TEXT
+  TEXT, TEXT, TEXT, TEXT, TEXT, NUMERIC, NUMERIC, INT, BOOLEAN, TEXT,
+  NUMERIC, NUMERIC, TEXT, TEXT, TEXT, INT, DOUBLE PRECISION, DOUBLE PRECISION,
+  UUID, UUID
 ) TO service_role;
 
 REVOKE ALL ON FUNCTION public.ten_slot_kill(TEXT) FROM PUBLIC;
@@ -616,11 +799,19 @@ GRANT EXECUTE ON FUNCTION public.ten_slot_kill(TEXT) TO service_role;
 
 COMMENT ON FUNCTION public.ten_slot_claim(
   TEXT, BIGINT, TEXT, INT, INT, INT, INT,
-  TEXT, TEXT, TEXT, TEXT, TEXT, NUMERIC, NUMERIC, INT, BOOLEAN, TEXT
+  TEXT, TEXT, TEXT, TEXT, TEXT, NUMERIC, NUMERIC, INT, BOOLEAN, TEXT,
+  NUMERIC, NUMERIC, TEXT, TEXT, TEXT, INT, DOUBLE PRECISION, DOUBLE PRECISION,
+  UUID, UUID
 ) IS
   '10슬롯 예약과 live_orders INTENT를 한 트랜잭션으로 적는다. 거래소 요청은 '
   '이 안에 없다. 확인하지 못한 노출은 0으로 적지 않고 EXPOSURE_UNKNOWN으로 막는다. '
-  '장부에 적는 mode는 캠페인 환경에서 끌어낸다 — 호출자가 넘긴 값이 아니다.';
+  '장부에 적는 mode는 캠페인 환경에서 끌어낸다 — 호출자가 넘긴 값이 아니다. '
+  '손절 정책·실행 계약 세 칸·진입 위험 좌표 두 칸도 같은 줄에 적는다 — '
+  '계약 세 칸은 반쪽을 받지 않고(INTENT_INVALID), NO_FIXED_SL과 손절가가 '
+  '함께 오면 모순으로 거절한다. NULL은 기록 없음이며 0이 아니다. '
+  '호출자 정체성(p_caller_user_id·p_caller_connection_id)을 캠페인과 대조한다 — '
+  '안 넘기면 CALLER_UNKNOWN, 다르면 CALLER_NOT_OWNER다. 이것은 호출부의 인증을 '
+  '대신하지 않고, 인증된 정체성을 여기까지 들고 오라는 요구다.';
 COMMENT ON FUNCTION public.ten_slot_open_campaign(TEXT, UUID, UUID, TEXT, NUMERIC) IS
   '캠페인 줄과 슬롯 10줄을 한 트랜잭션으로 만든다. 이미 있으면 정체성'
   '(주인·연결·환경·시작 자본)을 대조해 같을 때만 ALREADY_OPEN이다 — '
