@@ -456,7 +456,13 @@ export function canAdoptIntent(
       return { ok: false, reason: `커밋된 의도의 ${col}가 보낼 계약과 다릅니다` };
     }
   }
-  // 배율은 청산 주문에 없을 수 있다. **있는데 다른 것**만 거절한다.
+  // 진입 주문의 예약 배율은 필수다. SQL 097도 진입의 NULL 배율을
+  // 거절한다. 한쪽이 비었는데도 다른 칸만 같다는 이유로 이어받으면
+  // 예약된 위험 계약을 확인하지 않고 거래소로 전송할 수 있다.
+  // 청산(reduce_only)은 배율이 없을 수 있으므로 기존 허용을 유지한다.
+  if (!intent.reduce_only && (intent.leverage == null || prev.leverage == null)) {
+    return { ok: false, reason: '진입 주문의 예약 배율을 확인하지 못했습니다' };
+  }
   if (intent.leverage != null && prev.leverage != null
       && Number(prev.leverage) !== Number(intent.leverage)) {
     return { ok: false, reason: '적힌 의도의 배율이 보낼 주문과 다릅니다' };
