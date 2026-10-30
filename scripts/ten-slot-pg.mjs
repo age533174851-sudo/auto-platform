@@ -143,6 +143,12 @@ export function openCampaignSql(c) {
  * 예약+의도 SQL. 인자 순서를 한 곳에만 적는다 — 시험마다 다시 적으면
  * 언젠가 한쪽만 바뀐다.
  */
+/**
+ * 시험이 쓰는 기본 캠페인 주인. `openCampaignSql`의 `userId`와 같아야
+ * 소유권 검사를 통과한다 — 기본값을 한 곳에만 둔다.
+ */
+export const DEFAULT_OWNER = '11111111-1111-4111-8111-111111111111';
+
 export function claimSql(a) {
   // **`??`로 기본값을 주지 않는다.** 그러면 시험이 일부러 넘긴 null이
   // 기본값으로 바뀌어, 거절해야 하는 경우가 통과로 보인다.
@@ -166,7 +172,8 @@ export function claimSql(a) {
     ${q(fill(a.profileId, null))}, ${q(fill(a.presetId, null))},
     ${n(fill(a.contractVersion, null))},
     ${raw(a.adversePctExpr, n(fill(a.adversePct, null)))},
-    ${raw(a.liqPctRawExpr, n(fill(a.liqPctRaw, null)))})`;
+    ${raw(a.liqPctRawExpr, n(fill(a.liqPctRaw, null)))},
+    ${q(fill(a.callerUserId, DEFAULT_OWNER))}, ${q(fill(a.callerConnectionId, null))})`;
 }
 
 /**

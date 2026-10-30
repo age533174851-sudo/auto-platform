@@ -310,6 +310,11 @@ DROP FUNCTION IF EXISTS public.ten_slot_claim(
   TEXT, BIGINT, TEXT, INT, INT, INT, INT,
   TEXT, TEXT, TEXT, TEXT, TEXT, NUMERIC, NUMERIC, INT, BOOLEAN, TEXT
 );
+DROP FUNCTION IF EXISTS public.ten_slot_claim(
+  TEXT, BIGINT, TEXT, INT, INT, INT, INT,
+  TEXT, TEXT, TEXT, TEXT, TEXT, NUMERIC, NUMERIC, INT, BOOLEAN, TEXT,
+  NUMERIC, NUMERIC, TEXT, TEXT, TEXT, INT, DOUBLE PRECISION, DOUBLE PRECISION
+);
 
 CREATE OR REPLACE FUNCTION public.ten_slot_claim(
   p_campaign_id              TEXT,
@@ -347,7 +352,24 @@ CREATE OR REPLACE FUNCTION public.ten_slot_claim(
   p_execution_preset_id      TEXT             DEFAULT NULL,
   p_execution_contract_version INT            DEFAULT NULL,
   p_entry_adverse_distance_pct DOUBLE PRECISION DEFAULT NULL,
-  p_entry_liquidation_distance_pct_raw DOUBLE PRECISION DEFAULT NULL
+  p_entry_liquidation_distance_pct_raw DOUBLE PRECISION DEFAULT NULL,
+  -- ── 호출자의 정체성 ──
+  --
+  --   이 함수는 `service_role`로 불린다. 그 역할은 **모든 줄을 볼 수
+  --   있다** — RLS가 막아 주지 않는다. 그래서 캠페인 id 문자열만 알면
+  --   남의 캠페인에 주문 의도를 커밋할 수 있었다. 장부에 적히는
+  --   `user_id`·`connection_id`는 캠페인에서 끌어오므로 **피해자 이름으로
+  --   주문이 남는다.**
+  --
+  --   **이 검사는 호출부의 인증을 대신하지 않는다.** 인증된 정체성을
+  --   여기까지 들고 오라는 요구다. 들고 오지 않으면 거절한다 —
+  --   모르는 것은 통과가 아니다.
+  --
+  --   기본값이 NULL인 것은 "선택"이라는 뜻이 아니다. 안 넘기면
+  --   `CALLER_UNKNOWN`으로 **막힌다**. 빠뜨린 호출부가 조용히 통과하는
+  --   대신 그 자리에서 드러나게 한다.
+  p_caller_user_id           UUID             DEFAULT NULL,
+  p_caller_connection_id     UUID             DEFAULT NULL
 )
 RETURNS TABLE (code TEXT, slot_index INT, campaign_version BIGINT, live_order_id UUID)
 LANGUAGE plpgsql
@@ -376,7 +398,28 @@ BEGIN
      FOR UPDATE;
 
   IF v_campaign.campaign_id IS NULL THEN
+    -- 없는 캠페인은 **주인을 알 수 없다.** 여기서 소유권 코드로 바꾸면
+    -- 진짜 주인에게도 "당신 것이 아니다"라고 말하게 된다. 없는 것은 없다.
     RETURN QUERY SELECT 'CAMPAIGN_MISSING'::TEXT, NULL::INT, NULL::BIGINT, NULL::UUID;
+    RETURN;
+  END IF;
+
+  -- ①-b **이 캠페인이 호출자의 것인가.**
+  --
+  --   가장 먼저 본다. 아래의 어떤 검사도 남의 캠페인에 대해 수행할
+  --   이유가 없고, 수행하면 그 응답이 **남의 장부 상태를 알려 준다**
+  --   (슬롯이 찼는지·버전이 몇인지·중지됐는지).
+  IF p_caller_user_id IS NULL THEN
+    RETURN QUERY SELECT 'CALLER_UNKNOWN'::TEXT, NULL::INT, v_campaign.version, NULL::UUID;
+    RETURN;
+  END IF;
+
+  --   `IS DISTINCT FROM`을 쓴다. `connection_id`는 NULL일 수 있고 `=`는
+  --   NULL을 만나면 NULL을 돌려줘 **다른 것을 같다고 읽는다**
+  --   (`ten_slot_identity_verdict`가 같은 이유로 쓰는 연산자다).
+  IF v_campaign.user_id IS DISTINCT FROM p_caller_user_id
+     OR v_campaign.connection_id IS DISTINCT FROM p_caller_connection_id THEN
+    RETURN QUERY SELECT 'CALLER_NOT_OWNER'::TEXT, NULL::INT, v_campaign.version, NULL::UUID;
     RETURN;
   END IF;
 
@@ -731,12 +774,14 @@ GRANT EXECUTE ON FUNCTION public.ten_slot_open_campaign(TEXT, UUID, UUID, TEXT, 
 REVOKE ALL ON FUNCTION public.ten_slot_claim(
   TEXT, BIGINT, TEXT, INT, INT, INT, INT,
   TEXT, TEXT, TEXT, TEXT, TEXT, NUMERIC, NUMERIC, INT, BOOLEAN, TEXT,
-  NUMERIC, NUMERIC, TEXT, TEXT, TEXT, INT, DOUBLE PRECISION, DOUBLE PRECISION
+  NUMERIC, NUMERIC, TEXT, TEXT, TEXT, INT, DOUBLE PRECISION, DOUBLE PRECISION,
+  UUID, UUID
 ) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.ten_slot_claim(
   TEXT, BIGINT, TEXT, INT, INT, INT, INT,
   TEXT, TEXT, TEXT, TEXT, TEXT, NUMERIC, NUMERIC, INT, BOOLEAN, TEXT,
-  NUMERIC, NUMERIC, TEXT, TEXT, TEXT, INT, DOUBLE PRECISION, DOUBLE PRECISION
+  NUMERIC, NUMERIC, TEXT, TEXT, TEXT, INT, DOUBLE PRECISION, DOUBLE PRECISION,
+  UUID, UUID
 ) TO service_role;
 
 REVOKE ALL ON FUNCTION public.ten_slot_kill(TEXT) FROM PUBLIC;
@@ -745,14 +790,18 @@ GRANT EXECUTE ON FUNCTION public.ten_slot_kill(TEXT) TO service_role;
 COMMENT ON FUNCTION public.ten_slot_claim(
   TEXT, BIGINT, TEXT, INT, INT, INT, INT,
   TEXT, TEXT, TEXT, TEXT, TEXT, NUMERIC, NUMERIC, INT, BOOLEAN, TEXT,
-  NUMERIC, NUMERIC, TEXT, TEXT, TEXT, INT, DOUBLE PRECISION, DOUBLE PRECISION
+  NUMERIC, NUMERIC, TEXT, TEXT, TEXT, INT, DOUBLE PRECISION, DOUBLE PRECISION,
+  UUID, UUID
 ) IS
   '10슬롯 예약과 live_orders INTENT를 한 트랜잭션으로 적는다. 거래소 요청은 '
   '이 안에 없다. 확인하지 못한 노출은 0으로 적지 않고 EXPOSURE_UNKNOWN으로 막는다. '
   '장부에 적는 mode는 캠페인 환경에서 끌어낸다 — 호출자가 넘긴 값이 아니다. '
   '손절 정책·실행 계약 세 칸·진입 위험 좌표 두 칸도 같은 줄에 적는다 — '
   '계약 세 칸은 반쪽을 받지 않고(INTENT_INVALID), NO_FIXED_SL과 손절가가 '
-  '함께 오면 모순으로 거절한다. NULL은 기록 없음이며 0이 아니다.';
+  '함께 오면 모순으로 거절한다. NULL은 기록 없음이며 0이 아니다. '
+  '호출자 정체성(p_caller_user_id·p_caller_connection_id)을 캠페인과 대조한다 — '
+  '안 넘기면 CALLER_UNKNOWN, 다르면 CALLER_NOT_OWNER다. 이것은 호출부의 인증을 '
+  '대신하지 않고, 인증된 정체성을 여기까지 들고 오라는 요구다.';
 COMMENT ON FUNCTION public.ten_slot_open_campaign(TEXT, UUID, UUID, TEXT, NUMERIC) IS
   '캠페인 줄과 슬롯 10줄을 한 트랜잭션으로 만든다. 이미 있으면 정체성'
   '(주인·연결·환경·시작 자본)을 대조해 같을 때만 ALREADY_OPEN이다 — '

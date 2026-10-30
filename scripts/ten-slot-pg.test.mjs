@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import {
   PG_URL_ENV, PG_RESTART_ENV, pgTarget, psql, createScratchDb, dropScratchDb,
   openCampaignSql, claimSql, parseClaim, readState, raceClaims, psqlSpawn,
-  migrationPaths, restartCommand, restartCluster, intentRow,
+  migrationPaths, restartCommand, restartCluster, intentRow, DEFAULT_OWNER,
 } from './ten-slot-pg.mjs';
 import { createOfflineLedger, planOfflineClaim } from './ten-slot-offline.mjs';
 
@@ -64,7 +64,7 @@ if (!target.ok) {
   const fresh = (equity = 1000, environment = 'TESTNET') => {
     const campaignId = `c-${++seq}-${Date.now().toString(36)}`;
     const rows = psql(target, green, openCampaignSql({
-      campaignId, userId: '11111111-1111-4111-8111-111111111111',
+      campaignId, userId: DEFAULT_OWNER,
       environment, startingEquity: equity,
     }));
     assert.equal(rows[0], 'OPENED|0');
@@ -849,5 +849,94 @@ if (!target.ok) {
       assert.equal(row.liqPctRaw === '' ? '' : String(Number(row.liqPctRaw)),
         expect.liqPctRaw, `${label}: 청산여유`);
     }
+  });
+
+  // ── 호출자가 이 캠페인의 주인인가 ──
+  //
+  //   `ten_slot_claim`은 `service_role`로 불린다. 그 역할은 **모든 줄을
+  //   볼 수 있다** — RLS가 막아 주지 않는다. 그래서 캠페인 id 문자열만
+  //   알면 남의 캠페인에 주문 의도를 커밋할 수 있었다.
+  //
+  //   장부에 적히는 `user_id`·`connection_id`는 캠페인에서 끌어오므로
+  //   **피해자 이름으로 주문이 남는다.** 라우트가 붙는 순간 그건 남의
+  //   계좌로 나가는 주문이다.
+  //
+  //   그래서 호출자의 정체성을 **인자로 받아 캠페인과 대조한다.** 이것은
+  //   호출부의 인증을 대신하지 않는다 — 인증된 정체성을 여기까지 **들고
+  //   와야 한다**는 요구다. 들고 오지 않으면 거절한다(모르는 것은 통과가
+  //   아니다).
+  test('남의 캠페인에는 의도를 커밋하지 못한다', () => {
+    const campaignId = fresh();
+    const r = claim({
+      campaignId, expectedVersion: 0, clientOrderId: `order-${campaignId}`,
+      callerUserId: '22222222-2222-4222-8222-222222222222',
+    });
+    assert.equal(r.code, 'CALLER_NOT_OWNER');
+    const st = readState(target, green, campaignId);
+    assert.deepEqual({ version: st.version, claims: st.claims, intents: st.intents },
+      { version: 0, claims: 0, intents: 0 }, '남의 캠페인에 무언가 남았다');
+  });
+
+  test('호출자를 모르면 거절한다 — UNKNOWN은 통과가 아니다', () => {
+    const campaignId = fresh();
+    const r = claim({
+      campaignId, expectedVersion: 0, clientOrderId: `order-${campaignId}`,
+      callerUserId: null,
+    });
+    assert.equal(r.code, 'CALLER_UNKNOWN');
+    const st = readState(target, green, campaignId);
+    assert.deepEqual({ version: st.version, claims: st.claims, intents: st.intents },
+      { version: 0, claims: 0, intents: 0 });
+  });
+
+  // 연결도 같은 선이다. 주인은 맞는데 **다른 거래소 연결**로 들어오면
+  // 그 주문은 다른 계좌로 나간다. `IS DISTINCT FROM`으로 본다 — `=`는
+  // NULL을 만나면 NULL을 돌려줘 **다른 것을 같다고 읽는다.**
+  test('연결이 다르면 주인이라도 거절한다', () => {
+    const campaignId = fresh();
+    const r = claim({
+      campaignId, expectedVersion: 0, clientOrderId: `order-${campaignId}`,
+      callerConnectionId: '33333333-3333-4333-8333-333333333333',
+    });
+    assert.equal(r.code, 'CALLER_NOT_OWNER');
+    const st = readState(target, green, campaignId);
+    assert.deepEqual({ version: st.version, claims: st.claims, intents: st.intents },
+      { version: 0, claims: 0, intents: 0 });
+  });
+
+  test('주인과 연결이 모두 맞으면 통과한다', () => {
+    const conn = '44444444-4444-4444-8444-444444444444';
+    const campaignId = `c-${++seq}-${Date.now().toString(36)}`;
+    assert.equal(psql(target, green, openCampaignSql({
+      campaignId, userId: DEFAULT_OWNER, connectionId: conn,
+      environment: 'TESTNET', startingEquity: 1000,
+    }))[0], 'OPENED|0');
+
+    // 연결을 안 넘기면 캠페인의 연결과 다르다 — 거절해야 한다.
+    assert.equal(claim({
+      campaignId, expectedVersion: 0, clientOrderId: `order-a-${campaignId}`,
+    }).code, 'CALLER_NOT_OWNER');
+
+    const ok = claim({
+      campaignId, expectedVersion: 0, clientOrderId: `order-${campaignId}`,
+      callerConnectionId: conn,
+    });
+    assert.equal(ok.code, 'RESERVATION_AND_INTENT_DURABLE');
+    // 장부에 남는 주인은 **캠페인에서 끌어온 값**이지 호출자가 넘긴 값이 아니다.
+    const [row] = psql(target, green,
+      `SELECT user_id, connection_id FROM live_orders
+        WHERE client_order_id = '${`order-${campaignId}`}'`);
+    assert.equal(String(row), `${DEFAULT_OWNER}|${conn}`);
+  });
+
+  // 없는 캠페인은 주인을 알 수 없다. `CAMPAIGN_MISSING`이 유일하게
+  // 참인 답이다 — 소유권 코드로 바꾸면 주인에게 거짓말을 하게 된다.
+  test('없는 캠페인은 소유권 이전에 CAMPAIGN_MISSING이다', () => {
+    const r = claim({
+      campaignId: `c-none-${Date.now().toString(36)}`, expectedVersion: 0,
+      clientOrderId: 'order-none-0001',
+      callerUserId: '22222222-2222-4222-8222-222222222222',
+    });
+    assert.equal(r.code, 'CAMPAIGN_MISSING');
   });
 }
