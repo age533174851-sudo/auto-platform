@@ -1116,6 +1116,35 @@ export async function runGateExecIntegrationTests() {
       eq(row.status, 'UNKNOWN', `5xx인데 ${row.status}로 확정됐다`);
     });
   }
+
+  // ══════════ ④ Gate 전송 후 ACK 기록 실패 — venue POST는 재시도 금지 ══════════
+  // Binance만 있던 ACK 쓰기 실패 통합 회귀를 Gate의 실제 executeOrder로 확장한다.
+  // reduceOnly로 보호주문 경로를 피하되, 주문 전송/ACK/장부 기록은 실제 경로를 탄다.
+  // 이 시험은 오프라인 FakeVenue 전용이며 실제 청산 주문을 보내지 않는다.
+  for (const mode of ['error', 'zero-rows', 'throw'] as const) {
+    const db = new FakeDb({ failAckUpdate: mode });
+    const venue = gateBaseVenue()
+      .on('/api/v4/futures/usdt/orders', { json: {
+        id: 9101, contract: 'BTC_USDT', size: -100, left: 0,
+        status: 'finished', finish_as: 'filled', fill_price: '95000',
+      } }, 'POST');
+    const r = await scenario(venue, () => exec(db, {
+      ...GATE_ARGS, reduceOnly: true, clientOrderId: `GATE-ACK-FAULT-${mode}`,
+    }));
+
+    test(`★ Gate ACK 장부 ${mode} 실패는 POST 1회·SENT 유지·대조 경고`, () => {
+      assert(!(r instanceof Error), `Gate 실행기가 던졌다: ${(r as any)?.message}`);
+      eq(venue.countOf('/api/v4/futures/usdt/orders', 'POST'), 1,
+        'Gate ACK 기록 실패 후 거래소 주문을 재전송했다');
+      const row = db.table('live_orders')[0];
+      assert(row, 'Gate 주문 의도 행이 없다');
+      eq(row.status, 'SENT', 'ACK 기록 실패인데 Gate 장부 상태가 전진했다');
+      assert(/장부에 기록하지 못했습니다/.test(String((r as any).message)),
+        `Gate ACK 기록 실패 경고가 호출자에게 없다: ${(r as any).message}`);
+      assert((r as any).status !== 'FAILED' && (r as any).status !== 'REJECTED',
+        '거래소 전송 후 ACK 기록 실패를 확정 거부로 단정했다');
+    });
+  }
 }
 
 export async function runGateDupIntegrationTests() {
