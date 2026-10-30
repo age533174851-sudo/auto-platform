@@ -1787,8 +1787,10 @@ export async function runPrecisionMatrixTests() {
 /** 097이 커밋해 둔 INTENT 줄. `exec()`가 조립하는 의도와 같은 값이다 */
 const committedIntent = (over: Record<string, any> = {}) => ({
   id: 'claim-1', client_order_id: 'COID-1', status: 'INTENT',
+  user_id: 'u1', connection_id: 'c1', signal_id: 'sig-1',
   exchange: 'binance', mode: 'TESTNET', symbol: 'BTCUSDT', side: 'BUY',
   order_type: 'MARKET', quantity: 0.01, leverage: 100, reduce_only: false,
+  price: null, stop_loss: null, take_profit: null, stop_policy: 'NO_FIXED_SL',
   exchange_order_id: null, sent_at: null, attempt_count: 0,
   ...over,
 });
@@ -1856,6 +1858,16 @@ export async function runAdoptIntentIntegrationTests() {
     ['배율이 다른 줄', { leverage: 10 }],
     ['거래소가 다른 줄', { exchange: 'gate' }],
     ['환경이 다른 줄', { mode: 'LIVE' }],
+    ['다른 사용자 소유 줄', { user_id: 'u2' }],
+    ['다른 거래소 연결 줄', { connection_id: 'c2' }],
+    ['다른 신호 줄', { signal_id: 'sig-2' }],
+    ['소유자 누락 줄', { user_id: null }],
+    ['연결 누락 줄', { connection_id: null }],
+    ['신호 누락 줄', { signal_id: null }],
+    ['손절 정책이 다른 줄', { stop_policy: null }],
+    ['손절가가 다른 줄', { stop_loss: 95000 }],
+    ['익절가가 다른 줄', { take_profit: 110000 }],
+    ['시장가 의도에 임의 가격이 있는 줄', { price: 99999 }],
   ];
   for (const [label, over] of refusals) {
     const db = adoptDb(over);
@@ -1886,9 +1898,11 @@ export async function runAdoptIntentIntegrationTests() {
   // ══════════ ⑤ 판단 함수 자체 ══════════
   {
     const intent = {
-      client_order_id: 'COID-1', exchange: 'binance', mode: 'TESTNET',
+      client_order_id: 'COID-1', user_id: 'u1', connection_id: 'c1',
+      signal_id: 'sig-1', exchange: 'binance', mode: 'TESTNET',
       symbol: 'BTCUSDT', side: 'BUY', order_type: 'MARKET',
       quantity: 0.01, leverage: 100, reduce_only: false,
+      stop_policy: 'NO_FIXED_SL', stop_loss: null, take_profit: null,
     };
     test('canAdoptIntent: 같은 의도만 이어받는다', () => {
       assert(canAdoptIntent(committedIntent(), intent).ok, '같은 의도를 거절했다');
@@ -1904,6 +1918,27 @@ export async function runAdoptIntentIntegrationTests() {
       // 청산 주문은 배율이 없을 수 있다 — **있는데 다른 것**만 거절한다.
       assert(canAdoptIntent(committedIntent({ leverage: null }), intent).ok,
         '배율이 없는 줄을 거절했다');
+      // LIMIT은 SQL이 저장한 price와 실제 전송 가격까지 동일해야 한다.
+      const limit = { ...intent, order_type: 'LIMIT' };
+      const reservedLimit = committedIntent({ order_type: 'LIMIT', price: '50000.00' });
+      assert(canAdoptIntent(reservedLimit, limit, 50000).ok,
+        '같은 지정가의 NUMERIC 문자열 표현을 거절했다');
+      assert(!canAdoptIntent(reservedLimit, limit, 50001).ok,
+        '다른 지정가를 이어받았다');
+      assert(!canAdoptIntent(reservedLimit, limit).ok,
+        '가격이 없는 LIMIT을 이어받았다');
+      assert(!canAdoptIntent(committedIntent({ price: null }), limit, 50000).ok,
+        '가격이 기록되지 않은 LIMIT을 이어받았다');
+      assert(!canAdoptIntent(committedIntent(), { ...intent, user_id: null }).ok,
+        '요청의 사용자 정체성이 없는데 이어받았다');
+      assert(!canAdoptIntent(committedIntent(), { ...intent, connection_id: null }).ok,
+        '요청의 거래소 연결이 없는데 이어받았다');
+      assert(!canAdoptIntent(committedIntent(), { ...intent, signal_id: null }).ok,
+        '요청의 신호 정체성이 없는데 이어받았다');
+      assert(!canAdoptIntent(committedIntent({ id: null }), intent).ok,
+        'DB 행 ID가 없는데 이어받았다');
+      assert(!canAdoptIntent(committedIntent({ stop_policy: null }), intent).ok,
+        '097이 NO_FIXED_SL 정책을 적지 않은 의도를 이어받았다');
     });
   }
 }
