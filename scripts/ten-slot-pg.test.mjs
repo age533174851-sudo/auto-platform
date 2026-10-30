@@ -939,4 +939,45 @@ if (!target.ok) {
     });
     assert.equal(r.code, 'CAMPAIGN_MISSING');
   });
+
+  // ── 거부 응답이 **남의 장부를 알려 주지 않는가** ──
+  //
+  //   ①-b 주석은 "아래 검사를 남의 캠페인에 수행하면 그 응답이 남의 장부
+  //   상태를 알려 준다"고 적어 두고, **거부 응답에 `v_campaign.version`을
+  //   그대로 담았다.** 막겠다고 적은 것을 같은 줄에서 흘린 셈이다.
+  //
+  //   **버전을 먼저 1로 올린다.** 버전 0만 시험하면 유출된 0과 비워 둔
+  //   NULL을 구분할 수 없어 이 결함이 숨는다.
+  test('소유권 거부 응답은 남의 버전·슬롯·주문을 알려 주지 않는다', () => {
+    const campaignId = fresh();
+    assert.equal(claim({
+      campaignId, expectedVersion: 0, clientOrderId: `order-own-${campaignId}`,
+    }).code, 'RESERVATION_AND_INTENT_DURABLE');
+
+    const before = readState(target, green, campaignId);
+    assert.equal(before.version, 1, '버전을 올리지 못해 이 시험이 무의미해졌다');
+
+    const cases = [
+      ['다른 사용자', 'CALLER_NOT_OWNER',
+        { callerUserId: '22222222-2222-4222-8222-222222222222' }],
+      ['다른 연결', 'CALLER_NOT_OWNER',
+        { callerConnectionId: '33333333-3333-4333-8333-333333333333' }],
+      ['호출자 없음', 'CALLER_UNKNOWN', { callerUserId: null }],
+    ];
+    for (const [label, expected, extra] of cases) {
+      const r = claim({
+        campaignId, expectedVersion: 1,
+        clientOrderId: `order-probe-${label.length}-${campaignId}`, ...extra,
+      });
+      assert.equal(r.code, expected, `${label}: ${r.code}로 적었다`);
+      // ★ 여기가 RED였다 — 남의 버전 1이 응답에 담겼다.
+      assert.equal(r.version, null, `${label}: 남의 버전 ${r.version}을 알려 줬다`);
+      assert.equal(r.slotIndex, null, `${label}: 슬롯 번호를 알려 줬다`);
+      assert.equal(r.liveOrderId, null, `${label}: 주문 id를 알려 줬다`);
+    }
+
+    // 비인가 요청이 장부를 **한 칸도** 바꾸지 않았다.
+    assert.deepEqual(readState(target, green, campaignId), before,
+      '비인가 요청이 장부를 바꿨다');
+  });
 }

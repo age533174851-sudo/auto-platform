@@ -409,8 +409,18 @@ BEGIN
   --   가장 먼저 본다. 아래의 어떤 검사도 남의 캠페인에 대해 수행할
   --   이유가 없고, 수행하면 그 응답이 **남의 장부 상태를 알려 준다**
   --   (슬롯이 찼는지·버전이 몇인지·중지됐는지).
+  --   **거부 응답에는 캠페인 값을 한 칸도 담지 않는다.**
+  --
+  --     막겠다고 적고 같은 줄에서 흘린 적이 있다 — 이 두 분기는 처음에
+  --     `v_campaign.version`을 돌려줬고, 그러면 남의 캠페인 id만 알면
+  --     **버전이 몇인지 세어 볼 수 있다**(주문이 몇 번 나갔는지와 같다).
+  --     위 주석이 막겠다고 선언한 그 정보다.
+  --
+  --     다른 거부 코드(`STALE_VERSION` 등)가 버전을 돌려주는 것은
+  --     **주인에게 다음 시도를 알려 주기 위해서**다. 주인이 아닌 호출자에게
+  --     그 이유는 성립하지 않는다.
   IF p_caller_user_id IS NULL THEN
-    RETURN QUERY SELECT 'CALLER_UNKNOWN'::TEXT, NULL::INT, v_campaign.version, NULL::UUID;
+    RETURN QUERY SELECT 'CALLER_UNKNOWN'::TEXT, NULL::INT, NULL::BIGINT, NULL::UUID;
     RETURN;
   END IF;
 
@@ -419,7 +429,7 @@ BEGIN
   --   (`ten_slot_identity_verdict`가 같은 이유로 쓰는 연산자다).
   IF v_campaign.user_id IS DISTINCT FROM p_caller_user_id
      OR v_campaign.connection_id IS DISTINCT FROM p_caller_connection_id THEN
-    RETURN QUERY SELECT 'CALLER_NOT_OWNER'::TEXT, NULL::INT, v_campaign.version, NULL::UUID;
+    RETURN QUERY SELECT 'CALLER_NOT_OWNER'::TEXT, NULL::INT, NULL::BIGINT, NULL::UUID;
     RETURN;
   END IF;
 
