@@ -222,7 +222,7 @@ export async function runOrderPathIntegrationTests() {
     });
   }
 
-  // ══════════ ⑦ 거래소 체결 성공 + DB 기록 실패 ══════════
+  // ══════════ ⑦ DB 선점 실패 — 거래소에 아예 보내지 않는다 ══════════
   {
     const db = new FakeDb({ failUpdatesOn: 'live_orders' });
     const venue = baseVenue()
@@ -230,12 +230,33 @@ export async function runOrderPathIntegrationTests() {
       .on(BN_ORDER, { json: bnOrder({ status: 'FILLED', executedQty: '0.010', avgPrice: '95000' }) }, 'POST');
     const r = await scenario(venue, () => exec(db, {}));
 
-    test('★ 체결 뒤 DB 기록이 실패해도 주문을 다시 보내지 않는다', async () => {
+    test('★ SENT 선점 DB 오류에서는 신규 주문도 POST하지 않는다', () => {
       assert(!(r instanceof Error), String((r as any)?.message));
-      eq(venue.orderSends().length, 1, `주문이 ${venue.orderSends().length}번 나갔다`);
+      eq(venue.orderSends().length, 0, 'SENT 기록 실패인데 거래소에 전송했다');
+      eq((r as any).ok, false);
+      eq((r as any).status, 'UNKNOWN');
+      eq(db.table('live_orders')[0].status, 'INTENT');
+    });
+  }
+
+
+  // ══════════ ⑦-b 전송 뒤 ACK 기록 실패는 주문을 재전송하지 않고 경고 ══════════
+  for (const mode of ['error', 'zero-rows', 'throw'] as const) {
+    const db = new FakeDb({ failAckUpdate: mode });
+    const venue = baseVenue()
+      .on(BN_ORDER, { status: 400, json: { code: -2013, msg: 'Order does not exist.' } }, 'GET')
+      .on(BN_ORDER, { json: bnOrder({ status: 'NEW', executedQty: '0' }) }, 'POST');
+    const r = await scenario(venue, () => exec(db, { clientOrderId: `ACK-FAULT-${mode}` }));
+
+    test(`★ Binance ACK 장부 ${mode} 실패는 POST 1회 유지·대조 경고`, () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 1, 'ACK 기록 실패를 이유로 재전송해서는 안 된다');
       const row = db.table('live_orders')[0];
-      assert((RECONCILE_TARGET_STATUSES as readonly string[]).includes(row.status),
-        `기록 실패로 ${row.status}에 멈춘 줄이 대조 대상이 아니다 — 영구히 방치된다`);
+      eq(row?.status, 'SENT', 'ACK 기록 실패인데 DB 상태가 전진했다');
+      assert(/장부에 기록하지 못했습니다/.test(String((r as any).message)),
+        `ACK 기록 실패가 호출자에게 표시되지 않았다: ${(r as any).message}`);
+      assert((r as any).status !== 'FAILED' && (r as any).status !== 'REJECTED',
+        '이미 거래소에 전송한 주문을 실패·거부로 단정했다');
     });
   }
 
@@ -1095,6 +1116,35 @@ export async function runGateExecIntegrationTests() {
       eq(row.status, 'UNKNOWN', `5xx인데 ${row.status}로 확정됐다`);
     });
   }
+
+  // ══════════ ④ Gate 전송 후 ACK 기록 실패 — venue POST는 재시도 금지 ══════════
+  // Binance만 있던 ACK 쓰기 실패 통합 회귀를 Gate의 실제 executeOrder로 확장한다.
+  // reduceOnly로 보호주문 경로를 피하되, 주문 전송/ACK/장부 기록은 실제 경로를 탄다.
+  // 이 시험은 오프라인 FakeVenue 전용이며 실제 청산 주문을 보내지 않는다.
+  for (const mode of ['error', 'zero-rows', 'throw'] as const) {
+    const db = new FakeDb({ failAckUpdate: mode });
+    const venue = gateBaseVenue()
+      .on('/api/v4/futures/usdt/orders', { json: {
+        id: 9101, contract: 'BTC_USDT', size: -100, left: 0,
+        status: 'finished', finish_as: 'filled', fill_price: '95000',
+      } }, 'POST');
+    const r = await scenario(venue, () => exec(db, {
+      ...GATE_ARGS, reduceOnly: true, clientOrderId: `GATE-ACK-FAULT-${mode}`,
+    }));
+
+    test(`★ Gate ACK 장부 ${mode} 실패는 POST 1회·SENT 유지·대조 경고`, () => {
+      assert(!(r instanceof Error), `Gate 실행기가 던졌다: ${(r as any)?.message}`);
+      eq(venue.countOf('/api/v4/futures/usdt/orders', 'POST'), 1,
+        'Gate ACK 기록 실패 후 거래소 주문을 재전송했다');
+      const row = db.table('live_orders')[0];
+      assert(row, 'Gate 주문 의도 행이 없다');
+      eq(row.status, 'SENT', 'ACK 기록 실패인데 Gate 장부 상태가 전진했다');
+      assert(/장부에 기록하지 못했습니다/.test(String((r as any).message)),
+        `Gate ACK 기록 실패 경고가 호출자에게 없다: ${(r as any).message}`);
+      assert((r as any).status !== 'FAILED' && (r as any).status !== 'REJECTED',
+        '거래소 전송 후 ACK 기록 실패를 확정 거부로 단정했다');
+    });
+  }
 }
 
 export async function runGateDupIntegrationTests() {
@@ -1787,8 +1837,11 @@ export async function runPrecisionMatrixTests() {
 /** 097이 커밋해 둔 INTENT 줄. `exec()`가 조립하는 의도와 같은 값이다 */
 const committedIntent = (over: Record<string, any> = {}) => ({
   id: 'claim-1', client_order_id: 'COID-1', status: 'INTENT',
+  user_id: 'u1', connection_id: 'c1', signal_id: 'sig-1',
   exchange: 'binance', mode: 'TESTNET', symbol: 'BTCUSDT', side: 'BUY',
   order_type: 'MARKET', quantity: 0.01, leverage: 100, reduce_only: false,
+  price: null, stop_loss: null, take_profit: null, stop_policy: 'NO_FIXED_SL',
+  entry_adverse_distance_pct: null, entry_liquidation_distance_pct_raw: null,
   exchange_order_id: null, sent_at: null, attempt_count: 0,
   ...over,
 });
@@ -1840,6 +1893,40 @@ export async function runAdoptIntentIntegrationTests() {
     });
   }
 
+  // ══════════ ②-a 동일 INTENT 동시 실행: POST 단일화 ══════════
+  {
+    const db = adoptDb();
+    const venue = sendableVenue();
+    const results = await scenario(venue, () => Promise.all([
+      exec(db, { adoptIntent: true }),
+      exec(db, { adoptIntent: true }),
+    ]));
+    test('★ 같은 예약 의도를 두 실행기가 동시에 읽어도 venue POST 최대 1회', () => {
+      assert(!(results instanceof Error), String((results as any)?.message));
+      eq(venue.orderSends().length, 1, '동일 INTENT의 중복 POST가 발생했다');
+      eq((results as any[]).filter((r: any) => r.status === 'UNKNOWN').length, 1,
+        'CAS 패자가 UNKNOWN으로 안전하게 중단하지 않았다');
+      const claims = db.writes.filter((w) => w.kind === 'update'
+        && w.patch.status === 'SENT' && w.where?.status === 'INTENT');
+      eq(claims.length, 1, '동일 INTENT의 SENT 선점이 한 번이어야 한다');
+    });
+  }
+
+  // ══════════ ②-b 예약 adoption의 DB 선점 실패: POST 0회 ══════════
+  {
+    const db = new FakeDb({ failUpdatesOn: 'live_orders' })
+      .seed('live_orders', [committedIntent()]);
+    const venue = sendableVenue();
+    const r = await scenario(venue, () => exec(db, { adoptIntent: true }));
+    test('★ 예약된 INTENT라도 DB 선점 오류 시 전송하지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 0, 'DB 오류 후 예약 주문을 전송했다');
+      eq((r as any).ok, false);
+      eq((r as any).status, 'UNKNOWN');
+      eq(db.table('live_orders')[0].status, 'INTENT');
+    });
+  }
+
   // ══════════ ③ 이어받기를 거절해야 하는 경우들 ══════════
   //
   // 하나라도 통과하면 "다른 주문의 의도로 전송" 또는 "이미 나간 주문 재전송"이다.
@@ -1854,8 +1941,21 @@ export async function runAdoptIntentIntegrationTests() {
     ['방향이 다른 줄', { side: 'SELL' }],
     ['청산 여부가 다른 줄', { reduce_only: true }],
     ['배율이 다른 줄', { leverage: 10 }],
+    ['진입 주문의 예약 배율 누락', { leverage: null }],
     ['거래소가 다른 줄', { exchange: 'gate' }],
     ['환경이 다른 줄', { mode: 'LIVE' }],
+    ['다른 사용자 소유 줄', { user_id: 'u2' }],
+    ['다른 거래소 연결 줄', { connection_id: 'c2' }],
+    ['다른 신호 줄', { signal_id: 'sig-2' }],
+    ['소유자 누락 줄', { user_id: null }],
+    ['연결 누락 줄', { connection_id: null }],
+    ['신호 누락 줄', { signal_id: null }],
+    ['손절 정책이 다른 줄', { stop_policy: null }],
+    ['손절가가 다른 줄', { stop_loss: 95000 }],
+    ['익절가가 다른 줄', { take_profit: 110000 }],
+    ['시장가 의도에 임의 가격이 있는 줄', { price: 99999 }],
+    ['저장된 역행 거리만 다른 줄', { entry_adverse_distance_pct: 2.5 }],
+    ['저장된 청산 거리만 다른 줄', { entry_liquidation_distance_pct_raw: 3.5 }],
   ];
   for (const [label, over] of refusals) {
     const db = adoptDb(over);
@@ -1866,6 +1966,110 @@ export async function runAdoptIntentIntegrationTests() {
       assert(!(r instanceof Error), String((r as any)?.message));
       eq(venue.orderSends().length, 0, `${label}인데 주문이 나갔다`);
       eq((r as any).duplicate, true, `${label}을 이어받았다`);
+    });
+  }
+
+  // ══════════ ③-a 091 위험 좌표 대조 — 서로 독립적인 NULL 허용 ══════════
+  // SQL 097은 두 좌표를 독립적으로 적는다. 저장된 좌표와 실제 전송 의도가
+  // 다르면 이미 예약한 위험 계약이 아니므로 거래소 POST 전에 중단한다.
+  const riskCases: Array<[
+    string, Record<string, any>, Record<string, any>, number,
+  ]> = [
+    ['두 좌표가 같은 숫자/NUMERIC 문자열', {
+      entry_adverse_distance_pct: '2.5000',
+      entry_liquidation_distance_pct_raw: '3.500',
+    }, { adverseDistancePct: 2.5, liquidationDistancePctRaw: 3.5 }, 1],
+    ['한 좌표만 있고 나머지는 양쪽 NULL', {
+      entry_adverse_distance_pct: '2.5',
+      entry_liquidation_distance_pct_raw: null,
+    }, { adverseDistancePct: 2.5, liquidationDistancePctRaw: null }, 1],
+    ['역행 거리 불일치', {
+      entry_adverse_distance_pct: 2.5,
+      entry_liquidation_distance_pct_raw: 3.5,
+    }, { adverseDistancePct: 2.6, liquidationDistancePctRaw: 3.5 }, 0],
+    ['청산 거리 불일치', {
+      entry_adverse_distance_pct: 2.5,
+      entry_liquidation_distance_pct_raw: 3.5,
+    }, { adverseDistancePct: 2.5, liquidationDistancePctRaw: 3.6 }, 0],
+    ['한쪽만 NULL', {
+      entry_adverse_distance_pct: null,
+      entry_liquidation_distance_pct_raw: 3.5,
+    }, { adverseDistancePct: 2.5, liquidationDistancePctRaw: 3.5 }, 0],
+    ['저장된 비유한 숫자', {
+      entry_adverse_distance_pct: 'Infinity',
+      entry_liquidation_distance_pct_raw: 3.5,
+    }, { adverseDistancePct: 2.5, liquidationDistancePctRaw: 3.5 }, 0],
+  ];
+  for (const [label, stored, riskSnapshot, expectedPosts] of riskCases) {
+    const db = adoptDb(stored);
+    const venue = sendableVenue();
+    const r = await scenario(venue, () => exec(db, {
+      adoptIntent: true, entryRiskSnapshot: riskSnapshot,
+    }));
+    test(`★ 091 위험 좌표 ${label}: venue POST ${expectedPosts}회`, () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, expectedPosts,
+        `${label}: 다른 위험 좌표의 예약을 전송했다`);
+      if (expectedPosts === 0) {
+        eq((r as any).ok, false);
+        eq((r as any).status, 'UNKNOWN');
+        eq((r as any).duplicate, true);
+        eq(db.table('live_orders')[0].status, 'INTENT');
+      }
+    });
+  }
+
+  // ══════════ ③-b 거절된 adoption을 이전 체결 성공으로 승격하지 않는다 ══════════
+  // 이전에는 canAdoptIntent()가 ACKED/FILLED를 거절해도 아래 duplicate
+  // 응답이 prev.status만 보고 ok:true로 바꾸고 다른 계정의 체결 정보를 노출했다.
+  for (const [status, userId] of [['ACKED', 'u2'], ['FILLED', 'u1']] as const) {
+    const db = adoptDb({
+      status, user_id: userId, exchange_order_id: 'private-venue-id',
+      filled_qty: 0.5, avg_price: 50000,
+    });
+    const venue = sendableVenue();
+    const r = await scenario(venue, () => exec(db, { adoptIntent: true }));
+    test(`★ ${status} 예약 이어받기 거절은 성공도 체결정보 공개도 아니다`, () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 0, '이미 전송된 의도를 다시 보냈다');
+      eq((r as any).duplicate, true);
+      eq((r as any).ok, false, 'adoption 거절을 과거 체결 성공으로 승격했다');
+      eq((r as any).status, 'UNKNOWN', '다른 주문 상태를 신뢰 가능한 결과로 노출했다');
+      eq((r as any).exchangeOrderId, undefined, '다른 주문의 거래소 ID를 노출했다');
+      eq((r as any).filledQty, undefined, '다른 주문의 체결 수량을 노출했다');
+      eq((r as any).avgPrice, undefined, '다른 주문의 체결 가격을 노출했다');
+    });
+  }
+
+  // ══════════ ③-c 예약 없는 이어받기는 절대 새 INTENT를 만들지 않는다 ══════════
+  // 이전 HEAD는 adoptIntent:true여도 INSERT를 먼저 시도해, 빈 DB에서
+  // INSERT가 성공하면 그대로 거래소 주문까지 진행했다. 이 테스트는
+  // 097의 예약 없이도 보내던 fail-open을 실제 executeOrder 경로로 잡는다.
+  {
+    const db = new FakeDb();
+    const venue = sendableVenue();
+    const r = await scenario(venue, () => exec(db, { adoptIntent: true }));
+
+    test('★ 예약이 없는데 adoptIntent:true면 DB INSERT 0 · 거래소 전송 0', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(db.table('live_orders').length, 0, '예약 없는 의도를 새로 만들어 버렸다');
+      eq(venue.orderSends().length, 0, '예약 없는 주문을 거래소로 보냈다');
+      eq((r as any).ok, false);
+      eq((r as any).status, 'UNKNOWN');
+    });
+  }
+
+  {
+    const db = new FakeDb({ failSelectsOn: 'live_orders' });
+    const venue = sendableVenue();
+    const r = await scenario(venue, () => exec(db, { adoptIntent: true }));
+
+    test('★ 예약 조회 실패는 새 의도 작성 없이 fail-closed', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(db.table('live_orders').length, 0, '조회 실패 후 의도를 만들어 버렸다');
+      eq(venue.orderSends().length, 0, '조회 실패 후 주문을 보냈다');
+      eq((r as any).ok, false);
+      eq((r as any).status, 'UNKNOWN');
     });
   }
 
@@ -1886,9 +2090,11 @@ export async function runAdoptIntentIntegrationTests() {
   // ══════════ ⑤ 판단 함수 자체 ══════════
   {
     const intent = {
-      client_order_id: 'COID-1', exchange: 'binance', mode: 'TESTNET',
+      client_order_id: 'COID-1', user_id: 'u1', connection_id: 'c1',
+      signal_id: 'sig-1', exchange: 'binance', mode: 'TESTNET',
       symbol: 'BTCUSDT', side: 'BUY', order_type: 'MARKET',
       quantity: 0.01, leverage: 100, reduce_only: false,
+      stop_policy: 'NO_FIXED_SL', stop_loss: null, take_profit: null,
     };
     test('canAdoptIntent: 같은 의도만 이어받는다', () => {
       assert(canAdoptIntent(committedIntent(), intent).ok, '같은 의도를 거절했다');
@@ -1901,9 +2107,66 @@ export async function runAdoptIntentIntegrationTests() {
       }
       assert(!canAdoptIntent(null, intent).ok, 'null을 이어받았다');
       assert(!canAdoptIntent(undefined, intent).ok, 'undefined를 이어받았다');
-      // 청산 주문은 배율이 없을 수 있다 — **있는데 다른 것**만 거절한다.
-      assert(canAdoptIntent(committedIntent({ leverage: null }), intent).ok,
-        '배율이 없는 줄을 거절했다');
+      // 진입은 예약된 배율이 없으면 전송할 계약을 증명할 수 없다.
+      assert(!canAdoptIntent(committedIntent({ leverage: null }), intent).ok,
+        '진입 예약에 배율이 없는데 이어받았다');
+      assert(!canAdoptIntent(committedIntent(), { ...intent, leverage: null }).ok,
+        '진입 요청에 배율이 없는데 이어받았다');
+      // 청산은 배율이 없을 수 있다. 청산 여부가 양쪽에서 일치해야 한다.
+      assert(canAdoptIntent(committedIntent({ leverage: null, reduce_only: true }),
+        { ...intent, leverage: null, reduce_only: true }).ok,
+        '청산 주문의 양쪽 배율 누락을 거절했다');
+      // LIMIT은 SQL이 저장한 price와 실제 전송 가격까지 동일해야 한다.
+      const limit = { ...intent, order_type: 'LIMIT' };
+      const reservedLimit = committedIntent({ order_type: 'LIMIT', price: '50000.00' });
+      assert(canAdoptIntent(reservedLimit, limit, 50000).ok,
+        '같은 지정가의 NUMERIC 문자열 표현을 거절했다');
+      assert(!canAdoptIntent(reservedLimit, limit, 50001).ok,
+        '다른 지정가를 이어받았다');
+      assert(!canAdoptIntent(reservedLimit, limit).ok,
+        '가격이 없는 LIMIT을 이어받았다');
+      assert(!canAdoptIntent(committedIntent({ price: null }), limit, 50000).ok,
+        '가격이 기록되지 않은 LIMIT을 이어받았다');
+      assert(!canAdoptIntent(committedIntent(), { ...intent, user_id: null }).ok,
+        '요청의 사용자 정체성이 없는데 이어받았다');
+      assert(!canAdoptIntent(committedIntent(), { ...intent, connection_id: null }).ok,
+        '요청의 거래소 연결이 없는데 이어받았다');
+      assert(!canAdoptIntent(committedIntent(), { ...intent, signal_id: null }).ok,
+        '요청의 신호 정체성이 없는데 이어받았다');
+      assert(!canAdoptIntent(committedIntent({ id: null }), intent).ok,
+        'DB 행 ID가 없는데 이어받았다');
+      assert(!canAdoptIntent(committedIntent({ stop_policy: null }), intent).ok,
+        '097이 NO_FIXED_SL 정책을 적지 않은 의도를 이어받았다');
+      // 091은 두 좌표를 독립적으로 NULL 허용한다. 값이 있으면 유한 숫자로 같아야 한다.
+      const riskIntent = { ...intent, entry_adverse_distance_pct: 2.5,
+        entry_liquidation_distance_pct_raw: 3.5 };
+      assert(canAdoptIntent(committedIntent({
+        entry_adverse_distance_pct: '2.5000',
+        entry_liquidation_distance_pct_raw: '3.500',
+      }), riskIntent).ok, '같은 위험 좌표의 NUMERIC 문자열을 거절했다');
+      assert(canAdoptIntent(committedIntent({
+        entry_adverse_distance_pct: null,
+        entry_liquidation_distance_pct_raw: '3.5',
+      }), { ...riskIntent, entry_adverse_distance_pct: null }).ok,
+      '한 좌표만 존재하는 정상 예약을 거절했다');
+      assert(!canAdoptIntent(committedIntent({
+        entry_adverse_distance_pct: 2.6,
+        entry_liquidation_distance_pct_raw: 3.5,
+      }), riskIntent).ok, '다른 역행 거리를 이어받았다');
+      assert(!canAdoptIntent(committedIntent({
+        entry_adverse_distance_pct: 2.5,
+        entry_liquidation_distance_pct_raw: 3.6,
+      }), riskIntent).ok, '다른 청산 거리를 이어받았다');
+      assert(!canAdoptIntent(committedIntent({
+        entry_adverse_distance_pct: null,
+        entry_liquidation_distance_pct_raw: 3.5,
+      }), riskIntent).ok, '저장된 역행 거리 누락을 통과시켰다');
+      for (const invalid of ['NaN', 'Infinity', '-Infinity', 'not-a-number']) {
+        assert(!canAdoptIntent(committedIntent({
+          entry_adverse_distance_pct: invalid,
+        }), { ...intent, entry_adverse_distance_pct: invalid }).ok,
+        `유효하지 않은 위험 좌표 ${invalid}을 이어받았다`);
+      }
     });
   }
 }
