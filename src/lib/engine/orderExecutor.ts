@@ -498,6 +498,9 @@ export function canAdoptIntent(
     ['price', expectedLimitPrice ?? null],
     ['stop_loss', intent.stop_loss ?? null],
     ['take_profit', intent.take_profit ?? null],
+    // 091 위험 좌표는 각각 NULL일 수 있다. 존재하는 값은 저장 INTENT와 정확히 같아야 한다.
+    ['entry_adverse_distance_pct', intent.entry_adverse_distance_pct ?? null],
+    ['entry_liquidation_distance_pct_raw', intent.entry_liquidation_distance_pct_raw ?? null],
   ] as const) {
     if (!sameOptionalNumber(prev[col], expected)) {
       return { ok: false, reason: `커밋된 의도의 ${col}가 보낼 주문과 다릅니다` };

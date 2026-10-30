@@ -1841,6 +1841,7 @@ const committedIntent = (over: Record<string, any> = {}) => ({
   exchange: 'binance', mode: 'TESTNET', symbol: 'BTCUSDT', side: 'BUY',
   order_type: 'MARKET', quantity: 0.01, leverage: 100, reduce_only: false,
   price: null, stop_loss: null, take_profit: null, stop_policy: 'NO_FIXED_SL',
+  entry_adverse_distance_pct: null, entry_liquidation_distance_pct_raw: null,
   exchange_order_id: null, sent_at: null, attempt_count: 0,
   ...over,
 });
@@ -1953,6 +1954,8 @@ export async function runAdoptIntentIntegrationTests() {
     ['손절가가 다른 줄', { stop_loss: 95000 }],
     ['익절가가 다른 줄', { take_profit: 110000 }],
     ['시장가 의도에 임의 가격이 있는 줄', { price: 99999 }],
+    ['저장된 역행 거리만 다른 줄', { entry_adverse_distance_pct: 2.5 }],
+    ['저장된 청산 거리만 다른 줄', { entry_liquidation_distance_pct_raw: 3.5 }],
   ];
   for (const [label, over] of refusals) {
     const db = adoptDb(over);
@@ -1963,6 +1966,56 @@ export async function runAdoptIntentIntegrationTests() {
       assert(!(r instanceof Error), String((r as any)?.message));
       eq(venue.orderSends().length, 0, `${label}인데 주문이 나갔다`);
       eq((r as any).duplicate, true, `${label}을 이어받았다`);
+    });
+  }
+
+  // ══════════ ③-a 091 위험 좌표 대조 — 서로 독립적인 NULL 허용 ══════════
+  // SQL 097은 두 좌표를 독립적으로 적는다. 저장된 좌표와 실제 전송 의도가
+  // 다르면 이미 예약한 위험 계약이 아니므로 거래소 POST 전에 중단한다.
+  const riskCases: Array<[
+    string, Record<string, any>, Record<string, any>, number,
+  ]> = [
+    ['두 좌표가 같은 숫자/NUMERIC 문자열', {
+      entry_adverse_distance_pct: '2.5000',
+      entry_liquidation_distance_pct_raw: '3.500',
+    }, { adverseDistancePct: 2.5, liquidationDistancePctRaw: 3.5 }, 1],
+    ['한 좌표만 있고 나머지는 양쪽 NULL', {
+      entry_adverse_distance_pct: '2.5',
+      entry_liquidation_distance_pct_raw: null,
+    }, { adverseDistancePct: 2.5, liquidationDistancePctRaw: null }, 1],
+    ['역행 거리 불일치', {
+      entry_adverse_distance_pct: 2.5,
+      entry_liquidation_distance_pct_raw: 3.5,
+    }, { adverseDistancePct: 2.6, liquidationDistancePctRaw: 3.5 }, 0],
+    ['청산 거리 불일치', {
+      entry_adverse_distance_pct: 2.5,
+      entry_liquidation_distance_pct_raw: 3.5,
+    }, { adverseDistancePct: 2.5, liquidationDistancePctRaw: 3.6 }, 0],
+    ['한쪽만 NULL', {
+      entry_adverse_distance_pct: null,
+      entry_liquidation_distance_pct_raw: 3.5,
+    }, { adverseDistancePct: 2.5, liquidationDistancePctRaw: 3.5 }, 0],
+    ['저장된 비유한 숫자', {
+      entry_adverse_distance_pct: 'Infinity',
+      entry_liquidation_distance_pct_raw: 3.5,
+    }, { adverseDistancePct: 2.5, liquidationDistancePctRaw: 3.5 }, 0],
+  ];
+  for (const [label, stored, riskSnapshot, expectedPosts] of riskCases) {
+    const db = adoptDb(stored);
+    const venue = sendableVenue();
+    const r = await scenario(venue, () => exec(db, {
+      adoptIntent: true, entryRiskSnapshot: riskSnapshot,
+    }));
+    test(`★ 091 위험 좌표 ${label}: venue POST ${expectedPosts}회`, () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, expectedPosts,
+        `${label}: 다른 위험 좌표의 예약을 전송했다`);
+      if (expectedPosts === 0) {
+        eq((r as any).ok, false);
+        eq((r as any).status, 'UNKNOWN');
+        eq((r as any).duplicate, true);
+        eq(db.table('live_orders')[0].status, 'INTENT');
+      }
     });
   }
 
@@ -2084,6 +2137,36 @@ export async function runAdoptIntentIntegrationTests() {
         'DB 행 ID가 없는데 이어받았다');
       assert(!canAdoptIntent(committedIntent({ stop_policy: null }), intent).ok,
         '097이 NO_FIXED_SL 정책을 적지 않은 의도를 이어받았다');
+      // 091은 두 좌표를 독립적으로 NULL 허용한다. 값이 있으면 유한 숫자로 같아야 한다.
+      const riskIntent = { ...intent, entry_adverse_distance_pct: 2.5,
+        entry_liquidation_distance_pct_raw: 3.5 };
+      assert(canAdoptIntent(committedIntent({
+        entry_adverse_distance_pct: '2.5000',
+        entry_liquidation_distance_pct_raw: '3.500',
+      }), riskIntent).ok, '같은 위험 좌표의 NUMERIC 문자열을 거절했다');
+      assert(canAdoptIntent(committedIntent({
+        entry_adverse_distance_pct: null,
+        entry_liquidation_distance_pct_raw: '3.5',
+      }), { ...riskIntent, entry_adverse_distance_pct: null }).ok,
+      '한 좌표만 존재하는 정상 예약을 거절했다');
+      assert(!canAdoptIntent(committedIntent({
+        entry_adverse_distance_pct: 2.6,
+        entry_liquidation_distance_pct_raw: 3.5,
+      }), riskIntent).ok, '다른 역행 거리를 이어받았다');
+      assert(!canAdoptIntent(committedIntent({
+        entry_adverse_distance_pct: 2.5,
+        entry_liquidation_distance_pct_raw: 3.6,
+      }), riskIntent).ok, '다른 청산 거리를 이어받았다');
+      assert(!canAdoptIntent(committedIntent({
+        entry_adverse_distance_pct: null,
+        entry_liquidation_distance_pct_raw: 3.5,
+      }), riskIntent).ok, '저장된 역행 거리 누락을 통과시켰다');
+      for (const invalid of ['NaN', 'Infinity', '-Infinity', 'not-a-number']) {
+        assert(!canAdoptIntent(committedIntent({
+          entry_adverse_distance_pct: invalid,
+        }), { ...intent, entry_adverse_distance_pct: invalid }).ok,
+        `유효하지 않은 위험 좌표 ${invalid}을 이어받았다`);
+      }
     });
   }
 }
