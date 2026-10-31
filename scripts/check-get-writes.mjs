@@ -36,8 +36,9 @@ const ALLOW = {
     '로그인 직후 프로필 행을 만든다 — 없으면 그 사용자는 아무것도 못 한다. 멱등 upsert다',
   'src/app/api/cron/calendar-sync/route.ts':
     'Vercel Cron이 GET으로 깨운다 — 사람이 여는 화면이 아니다',
-  'src/app/api/cron/cleanup/route.ts':
-    'Vercel Cron이 GET으로 깨운다 — 사람이 여는 화면이 아니다',
+  // cleanup GET은 deleteBoundedCleanupRows에 삭제를 위임한다.
+  // 이 검사는 GET 본문에 직접 등장한 쓰기 호출만 보므로 여기서 면제하면
+  // 나중에 추가되는 직접 .delete/.update까지 놓친다. 따라서 면제하지 않는다.
   'src/app/api/cron/ai-scoring/route.ts':
     'Vercel Cron이 GET으로 깨운다 — 사람이 여는 화면이 아니다',
   'src/app/api/autotrade/my-original-v1/route.ts':

@@ -132,6 +132,8 @@ import { runWalletTruthTests } from './src/lib/portfolio/walletTruth.test';
 import { runWalletTruthViewTests } from './src/lib/portfolio/walletTruthView.test';
 import { runSmokePlanTests } from './src/lib/smoke/smokePlan.test';
 import { runSmokeRunTests } from './src/lib/smoke/smokeRun.test';
+import { runCronAuthTests } from './src/lib/cron/cronAuth.test';
+import { runCronAuthRouteTests } from './src/test/integration/cronAuthRouteIntegration.test';
 import { runCancelRunTests } from './src/lib/smoke/cancelRun.test';
 import { runExitPolicyTests } from './src/lib/strategies/exitPolicy.test';
 import { runRunRequestTests } from './src/lib/strategies/runRequest.test';
@@ -386,6 +388,7 @@ runFuturesExecTests(); runPromotionMapTests(); runTradeModeTests(); runPaperPlan
 runManualOverrideTests();
 runWebhookAuthTests();
 runShortGuardTests();
+runCronAuthTests();
 runEmergencyLevelTests();
 runTradingCapabilityTests(); runCheckOverrideTests(); runMarketHoursTests();
 runFuturesHoursTests();
@@ -421,6 +424,7 @@ runMigrationStatusTests(); runWalletTruthTests(); runSmokePlanTests(); runSmokeR
   await runSmokeStartRouteTests();
   await runHoldExtensionIntegrationTests();
   await runKillCloseIntegrationTests();
+  await runCronAuthRouteTests();
   await flushAsync();
   const s = summary();
   console.log('\\n결과: ' + s.passed + ' 통과 / ' + s.failed + ' 실패');
