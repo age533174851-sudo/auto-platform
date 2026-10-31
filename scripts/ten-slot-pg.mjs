@@ -177,6 +177,53 @@ export function claimSql(a) {
 }
 
 /**
+ * `ten_slot_apply_event` 호출 SQL.
+ *
+ * **`??`로 기본값을 주지 않는다** — 시험이 일부러 넘긴 null이 기본값으로
+ * 바뀌면 거절해야 하는 경우가 통과로 보인다(`claimSql`과 같은 이유).
+ */
+export function applyEventSql(a) {
+  const fill = (v, d) => (v === undefined ? d : v);
+  const raw = (expr, v) => (expr === undefined ? v : expr);
+  return `SELECT code, slot_status, campaign_version FROM ten_slot_apply_event(
+    ${q(a.campaignId)}, ${n(a.expectedVersion)}, ${n(fill(a.slotIndex, 0))},
+    ${a.eventId === null ? 'NULL' : q(a.eventId)},
+    ${q(fill(a.kind, 'ACK'))}, ${q(fill(a.evidence, 'VENUE_ORDER'))},
+    ${q(fill(a.exchangeOrderId, null))},
+    ${raw(a.filledQtyExpr, n(fill(a.filledQty, null)))},
+    ${raw(a.avgPriceExpr, n(fill(a.avgPrice, null)))},
+    ${q(fill(a.callerUserId, DEFAULT_OWNER))}, ${q(fill(a.callerConnectionId, null))})`;
+}
+
+export function parseEvent(rows) {
+  const [line] = rows;
+  if (!line) return { code: null };
+  const [code, status, version] = String(line).split('|');
+  return {
+    code,
+    status: status === '' ? null : status,
+    version: version === '' ? null : Number(version),
+  };
+}
+
+/** 증거 로그를 그대로 읽는다. 쌓인 것만 센다 — 덮어쓰기는 없다 */
+export function eventRows(target, db, campaignId) {
+  return psql(target, db, `SELECT
+      event_id, kind, evidence, from_status, to_status, campaign_version,
+      coalesce(exchange_order_id, ''), coalesce(filled_qty::text, '')
+    FROM ten_slot_events
+   WHERE campaign_id = ${q(campaignId)}
+   ORDER BY created_at, event_id`).map(line => {
+    const f = String(line).split('|');
+    return {
+      eventId: f[0], kind: f[1], evidence: f[2],
+      from: f[3], to: f[4], version: Number(f[5]),
+      exchangeOrderId: f[6], filledQty: f[7],
+    };
+  });
+}
+
+/**
  * 커밋된 **의도 한 줄**을 그대로 읽는다.
  *
  * 예약 줄(`ten_slot_claims`)을 거치지 않고 `live_orders`를 직접 본다 —

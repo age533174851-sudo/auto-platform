@@ -13,6 +13,7 @@ import {
   PG_URL_ENV, PG_RESTART_ENV, pgTarget, psql, createScratchDb, dropScratchDb,
   openCampaignSql, claimSql, parseClaim, readState, raceClaims, psqlSpawn,
   migrationPaths, restartCommand, restartCluster, intentRow, DEFAULT_OWNER,
+  applyEventSql, parseEvent, eventRows,
 } from './ten-slot-pg.mjs';
 import { createOfflineLedger, planOfflineClaim } from './ten-slot-offline.mjs';
 
@@ -54,7 +55,8 @@ if (!target.ok) {
   // 097 **이전**의 실제 스키마다. RED는 여기서 재현한다.
   const red = createScratchDb(target, 'tsred', migrationPaths(root, SCHEMA));
   const green = createScratchDb(target, 'tsgreen',
-    migrationPaths(root, [...SCHEMA, '097_ten_slot_atomic_claim.sql']));
+    migrationPaths(root, [...SCHEMA, '097_ten_slot_atomic_claim.sql',
+      '098_ten_slot_apply_event.sql']));
   process.on('exit', () => {
     try { dropScratchDb(target, red); } catch { /* 정리 실패는 결과를 바꾸지 않는다 */ }
     try { dropScratchDb(target, green); } catch { /* 같음 */ }
@@ -979,5 +981,405 @@ if (!target.ok) {
     // 비인가 요청이 장부를 **한 칸도** 바꾸지 않았다.
     assert.deepEqual(readState(target, green, campaignId), before,
       '비인가 요청이 장부를 바꿨다');
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // 098 — 슬롯 전이를 **증거로만** 움직인다
+  //
+  //   097은 `FREE → RESERVED`까지만 했다. 그 뒤를 움직이는 코드가 DB에
+  //   없었고, 그러면 응용 코드가 `UPDATE`를 직접 쳐야 한다 — 전이 규칙이
+  //   치는 자리마다 하나씩 생긴다. RED는 실제로 그 함수가 없다는 것이다:
+  //
+  //     ERROR:  function ten_slot_apply_event(...) does not exist
+  //     SELECT count(*) FROM pg_proc WHERE proname LIKE 'ten_slot_apply%' → 0
+  // ══════════════════════════════════════════════════════════════════
+
+  const ev = (args) => parseEvent(psql(target, green, applyEventSql(args)));
+
+  /** 슬롯 0을 RESERVED로 만들고 캠페인 버전을 돌려준다 */
+  const reserved = () => {
+    const campaignId = fresh();
+    const r = claim({
+      campaignId, expectedVersion: 0, clientOrderId: `order-${campaignId}`,
+    });
+    assert.equal(r.code, 'RESERVATION_AND_INTENT_DURABLE');
+    return { campaignId, version: r.version, slotIndex: r.slotIndex };
+  };
+
+  test('★ 수명주기: RESERVED → OPEN → CLOSING → SPENT', () => {
+    const { campaignId, version } = reserved();
+    let v = version;
+
+    const steps = [
+      ['ACK', 'VENUE_ORDER', 'OPEN'],
+      ['CLOSE_REQUEST', 'NONE', 'CLOSING'],
+      ['CLOSED', 'VENUE_POSITION', 'SPENT'],
+    ];
+    for (const [kind, evidence, expected] of steps) {
+      const r = ev({
+        campaignId, expectedVersion: v, slotIndex: 0,
+        eventId: `ev-${kind}-${campaignId}`, kind, evidence,
+        exchangeOrderId: kind === 'CLOSE_REQUEST' ? null : '7001',
+      });
+      assert.equal(r.code, 'EVENT_APPLIED', `${kind}: ${r.code}`);
+      assert.equal(r.status, expected, `${kind} 뒤 상태`);
+      assert.equal(r.version, v + 1, `${kind}이 버전을 올리지 않았다`);
+      v = r.version;
+    }
+
+    const st = readState(target, green, campaignId);
+    assert.equal(st.statuses[0], 'SPENT');
+    // SPENT는 활성이 아니다 — 다음 슬롯을 잡을 수 있다.
+    assert.equal(st.active, 0, '소비된 슬롯이 아직 활성으로 세어진다');
+
+    // 증거 로그가 전이의 양쪽을 그대로 갖고 있다.
+    const log = eventRows(target, green, campaignId);
+    assert.deepEqual(log.map(e => [e.from, e.to]),
+      [['RESERVED', 'OPEN'], ['OPEN', 'CLOSING'], ['CLOSING', 'SPENT']]);
+  });
+
+  test('★ 증거가 없으면 OPEN·SPENT로 올리지 않는다', () => {
+    const { campaignId, version } = reserved();
+    // ACK인데 거래소에서 확인하지 못했다 → 올리지 않는다.
+    const a = ev({
+      campaignId, expectedVersion: version, slotIndex: 0,
+      eventId: `ev-noack-${campaignId}`, kind: 'ACK', evidence: 'NONE',
+    });
+    assert.equal(a.code, 'EVIDENCE_MISSING');
+    assert.equal(a.status, 'RESERVED', '상태가 움직였다');
+    assert.equal(a.version, version, '거절인데 버전이 올라갔다');
+
+    // 주문 조회로 접수는 확인했지만, **포지션이 사라진 것은 다른 사실**이다.
+    const ok = ev({
+      campaignId, expectedVersion: version, slotIndex: 0,
+      eventId: `ev-ack-${campaignId}`, kind: 'ACK', evidence: 'VENUE_ORDER',
+      exchangeOrderId: '7001',
+    });
+    assert.equal(ok.code, 'EVENT_APPLIED');
+    const cr = ev({
+      campaignId, expectedVersion: ok.version, slotIndex: 0,
+      eventId: `ev-cr-${campaignId}`, kind: 'CLOSE_REQUEST', evidence: 'NONE',
+    });
+    assert.equal(cr.code, 'EVENT_APPLIED', 'CLOSE_REQUEST는 우리 쪽 의도다');
+    const bad = ev({
+      campaignId, expectedVersion: cr.version, slotIndex: 0,
+      eventId: `ev-badclose-${campaignId}`, kind: 'CLOSED', evidence: 'VENUE_ORDER',
+    });
+    assert.equal(bad.code, 'EVENT_OUT_OF_ORDER',
+      '주문 증거로 포지션이 닫혔다고 적었다');
+    assert.equal(bad.status, 'CLOSING');
+  });
+
+  test('★ UNKNOWN은 FREE로 돌아가지 않고 증거로만 풀린다', () => {
+    for (const [label, resolve, expected] of [
+      ['주문 증거로 OPEN', { kind: 'ACK', evidence: 'VENUE_ORDER', exchangeOrderId: '7001' }, 'OPEN'],
+      ['포지션 증거로 SPENT', { kind: 'CLOSED', evidence: 'VENUE_POSITION' }, 'SPENT'],
+      ['닫기 의도로 CLOSING', { kind: 'CLOSE_REQUEST', evidence: 'NONE' }, 'CLOSING'],
+    ]) {
+      const { campaignId, version } = reserved();
+      const u = ev({
+        campaignId, expectedVersion: version, slotIndex: 0,
+        eventId: `ev-unk-${label.length}-${campaignId}`,
+        kind: 'UNKNOWN_RESPONSE', evidence: 'NONE',
+      });
+      assert.equal(u.code, 'EVENT_APPLIED', label);
+      assert.equal(u.status, 'UNKNOWN', label);
+      // UNKNOWN은 **활성**이다 — 그 자리에 새 주문이 들어가지 않는다.
+      const mid = readState(target, green, campaignId);
+      assert.equal(mid.active, 1, `${label}: UNKNOWN이 활성에서 빠졌다`);
+      assert.equal(claim({
+        campaignId, expectedVersion: u.version,
+        clientOrderId: `order-after-unk-${label.length}-${campaignId}`,
+      }).code, 'SLOT_BUSY', `${label}: UNKNOWN인데 새 예약이 열렸다`);
+
+      const r = ev({
+        campaignId, expectedVersion: u.version, slotIndex: 0,
+        eventId: `ev-res-${label.length}-${campaignId}`, ...resolve,
+      });
+      assert.equal(r.code, 'EVENT_APPLIED', label);
+      assert.equal(r.status, expected, label);
+    }
+  });
+
+  test('★ FREE·SPENT 슬롯에는 어떤 이벤트도 적용되지 않는다', () => {
+    const { campaignId, version } = reserved();
+    // 슬롯 1은 아직 FREE다.
+    const onFree = ev({
+      campaignId, expectedVersion: version, slotIndex: 1,
+      eventId: `ev-free-${campaignId}`, kind: 'ACK', evidence: 'VENUE_ORDER',
+      exchangeOrderId: '7001',
+    });
+    assert.equal(onFree.code, 'EVENT_OUT_OF_ORDER');
+    assert.equal(onFree.status, 'FREE');
+    assert.equal(onFree.version, version, '거절인데 버전이 올라갔다');
+
+    // 슬롯 0을 SPENT까지 보낸 뒤 다시 이벤트를 넣는다.
+    let v = version;
+    for (const [kind, evidence] of [
+      ['ACK', 'VENUE_ORDER'], ['CLOSE_REQUEST', 'NONE'], ['CLOSED', 'VENUE_POSITION'],
+    ]) {
+      v = ev({
+        campaignId, expectedVersion: v, slotIndex: 0,
+        eventId: `ev-sp-${kind}-${campaignId}`, kind, evidence,
+        exchangeOrderId: kind === 'CLOSE_REQUEST' ? null : '7001',
+      }).version;
+    }
+    for (const kind of ['ACK', 'PARTIAL_FILL', 'CLOSE_REQUEST', 'CLOSED', 'UNKNOWN_RESPONSE']) {
+      const r = ev({
+        campaignId, expectedVersion: v, slotIndex: 0,
+        eventId: `ev-dead-${kind}-${campaignId}`, kind,
+        evidence: kind === 'CLOSED' ? 'VENUE_POSITION'
+          : kind === 'CLOSE_REQUEST' || kind === 'UNKNOWN_RESPONSE' ? 'NONE' : 'VENUE_ORDER',
+        exchangeOrderId: '7001',
+      });
+      assert.equal(r.code, 'EVENT_OUT_OF_ORDER', `SPENT에 ${kind}: ${r.code}`);
+      assert.equal(r.status, 'SPENT');
+    }
+  });
+
+  test('★ 부분 체결은 상태를 바꾸지 않고 기록만 남는다', () => {
+    const { campaignId, version } = reserved();
+    const a = ev({
+      campaignId, expectedVersion: version, slotIndex: 0,
+      eventId: `ev-a-${campaignId}`, kind: 'ACK', evidence: 'VENUE_ORDER',
+      exchangeOrderId: '7001',
+    });
+    const p1 = ev({
+      campaignId, expectedVersion: a.version, slotIndex: 0,
+      eventId: `ev-p1-${campaignId}`, kind: 'PARTIAL_FILL', evidence: 'VENUE_ORDER',
+      exchangeOrderId: '7001', filledQty: 0.003, avgPrice: 65000,
+    });
+    assert.equal(p1.code, 'EVENT_APPLIED');
+    assert.equal(p1.status, 'OPEN', '부분 체결이 상태를 바꿨다');
+    const p2 = ev({
+      campaignId, expectedVersion: p1.version, slotIndex: 0,
+      eventId: `ev-p2-${campaignId}`, kind: 'PARTIAL_FILL', evidence: 'VENUE_ORDER',
+      exchangeOrderId: '7001', filledQty: 0.007, avgPrice: 65100,
+    });
+    assert.equal(p2.status, 'OPEN');
+    // **쌓인다.** 두 번째가 첫 번째를 덮어쓰지 않는다.
+    const log = eventRows(target, green, campaignId).filter(e => e.kind === 'PARTIAL_FILL');
+    assert.equal(log.length, 2);
+    assert.deepEqual(log.map(e => Number(e.filledQty)), [0.003, 0.007]);
+  });
+
+  test('★ 같은 event_id 재시도는 멱등이고 버전을 올리지 않는다', () => {
+    const { campaignId, version } = reserved();
+    const args = {
+      campaignId, expectedVersion: version, slotIndex: 0,
+      eventId: `ev-idem-${campaignId}`, kind: 'ACK', evidence: 'VENUE_ORDER',
+      exchangeOrderId: '7001',
+    };
+    const first = ev(args);
+    assert.equal(first.code, 'EVENT_APPLIED');
+    assert.equal(first.version, version + 1);
+
+    // 응답을 못 받고 **같은 버전으로** 다시 보낸다. CAS보다 멱등이 먼저다 —
+    // CAS를 먼저 보면 이 재시도가 STALE_VERSION으로 깨진다.
+    const again = ev(args);
+    assert.equal(again.code, 'EVENT_ALREADY_APPLIED');
+    assert.equal(again.status, 'OPEN');
+    assert.equal(again.version, first.version, '멱등 재시도가 버전을 올렸다');
+
+    // 새 버전으로 보내도 같다.
+    const third = ev({ ...args, expectedVersion: first.version });
+    assert.equal(third.code, 'EVENT_ALREADY_APPLIED');
+
+    assert.equal(eventRows(target, green, campaignId).length, 1,
+      '증거 줄이 두 개가 됐다');
+  });
+
+  test('★ 같은 event_id로 다른 사건이 오면 fail closed', () => {
+    const { campaignId, version } = reserved();
+    const id = `ev-conf-${campaignId}`;
+    assert.equal(ev({
+      campaignId, expectedVersion: version, slotIndex: 0, eventId: id,
+      kind: 'ACK', evidence: 'VENUE_ORDER', exchangeOrderId: '7001',
+    }).code, 'EVENT_APPLIED');
+
+    for (const [label, diff] of [
+      ['다른 종류', { kind: 'UNKNOWN_RESPONSE', evidence: 'NONE' }],
+      ['다른 증거', { kind: 'ACK', evidence: 'VENUE_POSITION' }],
+      ['다른 주문번호', { kind: 'ACK', evidence: 'VENUE_ORDER', exchangeOrderId: '9999' }],
+      ['주문번호 없음', { kind: 'ACK', evidence: 'VENUE_ORDER', exchangeOrderId: null }],
+      ['다른 슬롯', { slotIndex: 1, kind: 'ACK', evidence: 'VENUE_ORDER', exchangeOrderId: '7001' }],
+      ['수량 추가', { kind: 'ACK', evidence: 'VENUE_ORDER', exchangeOrderId: '7001', filledQty: 0.01 }],
+    ]) {
+      const r = ev({ campaignId, expectedVersion: version + 1, slotIndex: 0, eventId: id, ...diff });
+      assert.equal(r.code, 'EVENT_CONFLICT', `${label}: ${r.code}`);
+    }
+    assert.equal(eventRows(target, green, campaignId).length, 1);
+  });
+
+  test('★ 오래된 버전은 거절한다 (멱등 재시도와 구분된다)', () => {
+    const { campaignId, version } = reserved();
+    const a = ev({
+      campaignId, expectedVersion: version, slotIndex: 0,
+      eventId: `ev-s1-${campaignId}`, kind: 'ACK', evidence: 'VENUE_ORDER',
+      exchangeOrderId: '7001',
+    });
+    assert.equal(a.code, 'EVENT_APPLIED');
+    // **다른** event_id인데 옛 버전으로 들어왔다 → CAS 실패.
+    const stale = ev({
+      campaignId, expectedVersion: version, slotIndex: 0,
+      eventId: `ev-s2-${campaignId}`, kind: 'CLOSE_REQUEST', evidence: 'NONE',
+    });
+    assert.equal(stale.code, 'STALE_VERSION');
+    assert.equal(stale.version, a.version, '주인에게 다음 시도를 알려 줘야 한다');
+    assert.equal(readState(target, green, campaignId).statuses[0], 'OPEN');
+  });
+
+  test('★ 동시 두 호출이 같은 event_id면 한쪽만 적용된다', async () => {
+    const { campaignId, version } = reserved();
+    const sql = applyEventSql({
+      campaignId, expectedVersion: version, slotIndex: 0,
+      eventId: `ev-race-${campaignId}`, kind: 'ACK', evidence: 'VENUE_ORDER',
+      exchangeOrderId: '7001',
+    });
+    const out = await raceClaims(target, green, [sql, sql]);
+    // `raceClaims`는 `{ code, out, rows }`를 준다. 배리어 SQL의 출력이
+    // 섞여 있으므로 `|`가 있는 줄만 결과로 읽는다 (동시 예약 시험과 같다).
+    const codes = out.map(r => parseEvent(r.rows.filter(l => l.includes('|'))).code).sort();
+    assert.deepEqual(codes, ['EVENT_ALREADY_APPLIED', 'EVENT_APPLIED'],
+      `동시 결과가 ${JSON.stringify(codes)}다`);
+    assert.equal(eventRows(target, green, campaignId).length, 1);
+    assert.equal(readState(target, green, campaignId).version, version + 1,
+      '버전이 두 번 올라갔다');
+  });
+
+  test('★ 중지된 캠페인도 닫을 수 있다 — 중지는 새 진입만 막는다', () => {
+    const { campaignId, version } = reserved();
+    const a = ev({
+      campaignId, expectedVersion: version, slotIndex: 0,
+      eventId: `ev-k0-${campaignId}`, kind: 'ACK', evidence: 'VENUE_ORDER',
+      exchangeOrderId: '7001',
+    });
+    const [killed] = psql(target, green,
+      `SELECT code FROM ten_slot_kill(${JSON.stringify(campaignId).replace(/"/g, "'")})`);
+    assert.equal(String(killed).split('|')[0], 'KILL_PERSISTED');
+    const v = readState(target, green, campaignId).version;
+
+    // 새 진입은 막힌다.
+    assert.equal(claim({
+      campaignId, expectedVersion: v, clientOrderId: `order-k-${campaignId}`,
+    }).code, 'KILL_SWITCH');
+
+    // 그런데 **닫는 길은 열려 있어야 한다.** 막으면 포지션이 갇힌다.
+    const cr = ev({
+      campaignId, expectedVersion: v, slotIndex: 0,
+      eventId: `ev-k1-${campaignId}`, kind: 'CLOSE_REQUEST', evidence: 'NONE',
+    });
+    assert.equal(cr.code, 'EVENT_APPLIED', '중지가 닫기를 막았다');
+    const done = ev({
+      campaignId, expectedVersion: cr.version, slotIndex: 0,
+      eventId: `ev-k2-${campaignId}`, kind: 'CLOSED', evidence: 'VENUE_POSITION',
+    });
+    assert.equal(done.code, 'EVENT_APPLIED');
+    assert.equal(done.status, 'SPENT');
+    assert.ok(a.version < done.version);
+  });
+
+  test('★ 남의 슬롯은 움직이지 못하고 거부 응답이 장부를 알려 주지 않는다', () => {
+    const { campaignId, version } = reserved();
+    for (const [label, expected, extra] of [
+      ['다른 사용자', 'CALLER_NOT_OWNER',
+        { callerUserId: '22222222-2222-4222-8222-222222222222' }],
+      ['다른 연결', 'CALLER_NOT_OWNER',
+        { callerConnectionId: '33333333-3333-4333-8333-333333333333' }],
+      ['호출자 없음', 'CALLER_UNKNOWN', { callerUserId: null }],
+    ]) {
+      const r = ev({
+        campaignId, expectedVersion: version, slotIndex: 0,
+        eventId: `ev-own-${label.length}-${campaignId}`,
+        kind: 'ACK', evidence: 'VENUE_ORDER', exchangeOrderId: '7001', ...extra,
+      });
+      assert.equal(r.code, expected, `${label}: ${r.code}`);
+      assert.equal(r.version, null, `${label}: 남의 버전 ${r.version}을 알려 줬다`);
+      assert.equal(r.status, null, `${label}: 남의 슬롯 상태를 알려 줬다`);
+    }
+    assert.equal(readState(target, green, campaignId).statuses[0], 'RESERVED');
+    assert.equal(eventRows(target, green, campaignId).length, 0);
+  });
+
+  test('★ 없는 캠페인·없는 슬롯을 구분한다', () => {
+    const { campaignId, version } = reserved();
+    assert.equal(ev({
+      campaignId: `c-none-${Date.now().toString(36)}`, expectedVersion: 0,
+      slotIndex: 0, eventId: 'ev-none-0001', kind: 'ACK', evidence: 'VENUE_ORDER',
+    }).code, 'CAMPAIGN_MISSING');
+    // 097은 슬롯 10개를 만든다. 10번은 없다.
+    assert.equal(ev({
+      campaignId, expectedVersion: version, slotIndex: 10,
+      eventId: `ev-slot10-${campaignId}`, kind: 'ACK', evidence: 'VENUE_ORDER',
+    }).code, 'SLOT_MISSING');
+  });
+
+  test('★ 재시작해도 전이와 증거가 그대로다', { skip: restartCommand() ? false : `${PG_RESTART_ENV}가 없습니다` }, async () => {
+    const { campaignId, version } = reserved();
+    const a = ev({
+      campaignId, expectedVersion: version, slotIndex: 0,
+      eventId: `ev-r1-${campaignId}`, kind: 'ACK', evidence: 'VENUE_ORDER',
+      exchangeOrderId: '7001',
+    });
+    const u = ev({
+      campaignId, expectedVersion: a.version, slotIndex: 0,
+      eventId: `ev-r2-${campaignId}`, kind: 'UNKNOWN_RESPONSE', evidence: 'NONE',
+    });
+    assert.equal(u.status, 'UNKNOWN');
+
+    restartCluster();
+
+    const st = readState(target, green, campaignId);
+    assert.equal(st.statuses[0], 'UNKNOWN', '재시작 뒤 상태가 달라졌다');
+    assert.equal(st.version, u.version);
+    assert.deepEqual(eventRows(target, green, campaignId).map(e => e.to),
+      ['OPEN', 'UNKNOWN']);
+    // 재시작 뒤에도 멱등이고, UNKNOWN 슬롯은 여전히 비지 않는다.
+    assert.equal(ev({
+      campaignId, expectedVersion: u.version, slotIndex: 0,
+      eventId: `ev-r2-${campaignId}`, kind: 'UNKNOWN_RESPONSE', evidence: 'NONE',
+    }).code, 'EVENT_ALREADY_APPLIED');
+    assert.equal(claim({
+      campaignId, expectedVersion: u.version,
+      clientOrderId: `order-restart-${campaignId}`,
+    }).code, 'SLOT_BUSY');
+  });
+
+  test('★ 전이표 전수 — SQL이 표 밖의 길을 만들지 않는다', () => {
+    const FROM = ['FREE', 'RESERVED', 'OPEN', 'CLOSING', 'UNKNOWN', 'SPENT'];
+    const KIND = ['ACK', 'PARTIAL_FILL', 'CLOSE_REQUEST', 'CLOSED', 'UNKNOWN_RESPONSE'];
+    const EVID = ['VENUE_ORDER', 'VENUE_POSITION', 'NONE'];
+    // 시험이 기대하는 표. **SQL과 따로 적는다** — 같은 파일을 읽으면
+    // 틀린 것이 둘 다 틀려서 맞아 보인다.
+    const expect = (from, kind, evidence) => {
+      if (kind === 'ACK' && evidence === 'VENUE_ORDER'
+          && ['RESERVED', 'UNKNOWN'].includes(from)) return 'OPEN';
+      if (kind === 'PARTIAL_FILL' && evidence === 'VENUE_ORDER' && from === 'OPEN') return 'OPEN';
+      if (kind === 'CLOSE_REQUEST' && ['OPEN', 'UNKNOWN'].includes(from)) return 'CLOSING';
+      if (kind === 'CLOSED' && evidence === 'VENUE_POSITION'
+          && ['CLOSING', 'UNKNOWN'].includes(from)) return 'SPENT';
+      if (kind === 'UNKNOWN_RESPONSE'
+          && ['RESERVED', 'OPEN', 'CLOSING', 'UNKNOWN'].includes(from)) return 'UNKNOWN';
+      return '';
+    };
+    let n = 0;
+    const pairs = [];
+    for (const from of FROM) for (const kind of KIND) for (const evidence of EVID) {
+      pairs.push(`('${from}','${kind}','${evidence}')`);
+      n++;
+    }
+    const rows = psql(target, green, `SELECT t.f, t.k, t.e,
+        coalesce(ten_slot_next_status(t.f, t.k, t.e), '')
+      FROM (VALUES ${pairs.join(',')}) AS t(f, k, e)`);
+    assert.equal(rows.length, n, `전수가 ${rows.length}건이다`);
+    for (const line of rows) {
+      const [from, kind, evidence, got] = String(line).split('|');
+      assert.equal(got, expect(from, kind, evidence),
+        `${from} + ${kind}(${evidence}) → SQL은 ${got || '없음'}`);
+    }
+    // **FREE로 돌아가는 길이 표 안에 하나도 없다.**
+    assert.equal(rows.filter(l => String(l).endsWith('|FREE')).length, 0,
+      'FREE로 되돌리는 전이가 있다');
+    assert.equal(n, 90);
   });
 }
