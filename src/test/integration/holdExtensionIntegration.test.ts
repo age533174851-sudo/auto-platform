@@ -120,7 +120,7 @@ function venueFor(nowMs: number, o: VenueOpts = {}): FakeVenue {
       positionAmt: open ? amt : '0',
       entryPrice: open ? '100000' : '0',
       markPrice: o.markPrice ?? '100300',
-      leverage: '100', marginType: 'isolated',
+      leverage: '100', marginType: 'isolated', unRealizedProfit: '0',
       liquidationPrice: open ? (o.liquidationPrice ?? '99400') : '0',
       updateTime: nowMs,
     }];

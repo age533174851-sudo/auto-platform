@@ -5,6 +5,7 @@
 // ⚠️ 출금 권한 없는 키만. 서버에서만 호출. 프론트 노출 금지.
 // ─────────────────────────────────────────────────────────────
 import { createHmac, createHash } from 'crypto';
+import { parseFuturesPositionRows } from './futuresPositionRows';
 import {
   readPositionRiskWithProvenance,
   type PositionRiskProvenance, type SymbolPositionRisk,
@@ -89,18 +90,7 @@ export interface FuturesPosition {
 export async function getFuturesPositions(key: string, secret: string, testnet = true) {
   try {
     const data = await fapiSigned('GET', '/fapi/v2/positionRisk', key, secret, testnet);
-    const positions: FuturesPosition[] = (Array.isArray(data) ? data : [])
-      .filter((p: any) => parseFloat(p.positionAmt) !== 0)
-      .map((p: any) => {
-        const amt = parseFloat(p.positionAmt);
-        return {
-          symbol: p.symbol, side: amt > 0 ? 'LONG' : amt < 0 ? 'SHORT' : 'FLAT',
-          amount: Math.abs(amt), entryPrice: parseFloat(p.entryPrice), markPrice: parseFloat(p.markPrice),
-          unrealizedPnl: parseFloat(p.unRealizedProfit), leverage: parseInt(p.leverage || '1', 10),
-          liquidationPrice: parseFloat(p.liquidationPrice || '0'),
-          marginType: String(p.marginType || '').toLowerCase(),
-        } as FuturesPosition;
-      });
+    const positions = parseFuturesPositionRows(data);
     return { success: true, message: `${positions.length}개 포지션`, positions };
   } catch (e: any) { return { success: false, message: e.message || '포지션 조회 실패' }; }
 }
@@ -731,8 +721,14 @@ export async function readMarketSnapshot(
 export async function cancelAllOpenOrders(key: string, secret: string, testnet = true, symbols?: string[]) {
   let syms = symbols;
   if (!syms) {
-    const { orders } = await getFuturesOpenOrders(key, secret, testnet);
-    const { positions } = await getFuturesPositions(key, secret, testnet);
+    const orderRead = await getFuturesOpenOrders(key, secret, testnet);
+    const positionRead = await getFuturesPositions(key, secret, testnet);
+    if (!orderRead.success || !positionRead.success) {
+      return { success: false, results: [], count: 0,
+        message: '주문 또는 포지션 조회 실패 — 취소 완료 여부를 확인할 수 없습니다' };
+    }
+    const orders = orderRead.orders;
+    const positions = positionRead.positions;
     const set = new Set<string>([
       ...(orders || []).map(o => o.symbol),
       ...((positions || []) as any[]).filter((p: any) => Math.abs(p.amount || 0) > 0).map((p: any) => p.symbol),
@@ -751,7 +747,10 @@ export async function cancelAllOpenOrders(key: string, secret: string, testnet =
 export async function closeAllPositions(key: string, secret: string, testnet = true, maxRetry = 5) {
   const attempts: Array<{ symbol: string; ok: boolean; message?: string }> = [];
   for (let i = 1; i <= maxRetry; i++) {
-    const { positions } = await getFuturesPositions(key, secret, testnet);
+    const read = await getFuturesPositions(key, secret, testnet);
+    if (!read.success) return { success: false, remaining: null, retries: i - 1, attempts,
+      message: read.message || '포지션 조회 실패 — 청산 완료 확인 불가' };
+    const positions = read.positions;
     const open = ((positions || []) as any[]).filter((p: any) => Math.abs(p.amount || 0) > 0);
     if (open.length === 0) return { success: true, remaining: 0, retries: i - 1, attempts };
     for (const p of open) {
@@ -761,7 +760,10 @@ export async function closeAllPositions(key: string, secret: string, testnet = t
     }
     if (i < maxRetry) await new Promise(res => setTimeout(res, 3000));  // 3초 간격 재시도
   }
-  const { positions } = await getFuturesPositions(key, secret, testnet);
+  const finalRead = await getFuturesPositions(key, secret, testnet);
+  if (!finalRead.success) return { success: false, remaining: null, retries: maxRetry, attempts,
+    message: finalRead.message || '최종 포지션 조회 실패 — 청산 완료 확인 불가' };
+  const positions = finalRead.positions;
   const remaining = ((positions || []) as any[]).filter((p: any) => Math.abs(p.amount || 0) > 0).length;
   return { success: remaining === 0, remaining, retries: maxRetry, attempts };
 }
@@ -1481,7 +1483,9 @@ export async function getFuturesOpenOrders(key: string, secret: string, testnet 
  */
 export async function cancelOpenTPSL(key: string, secret: string, symbol: string, testnet = true, only?: 'TP' | 'SL') {
   try {
-    const { orders } = await getFuturesOpenOrders(key, secret, testnet, symbol);
+    const read = await getFuturesOpenOrders(key, secret, testnet, symbol);
+    if (!read.success) return { success: false, message: read.message || 'TP/SL 조회 실패', cancelled: 0 };
+    const orders = read.orders;
     const targets = orders.filter(o => {
       // 분할 익절·남의 주문은 건드리지 않는다
       if (o.closePosition !== true) return false;
@@ -1491,10 +1495,14 @@ export async function cancelOpenTPSL(key: string, secret: string, symbol: string
       if (only === 'SL') return isSL;
       return isTP || isSL;
     });
+    let cancelled = 0;
     for (const o of targets) {
-      try { await cancelFuturesOrder(key, secret, symbol, o.orderId, testnet); } catch { /* 개별 실패 무시 */ }
+      const result = await cancelFuturesOrder(key, secret, symbol, o.orderId, testnet);
+      if (!result.success) return { success: false,
+        message: result.message || 'TP/SL 개별 취소 실패', cancelled };
+      cancelled++;
     }
-    return { success: true, cancelled: targets.length };
+    return { success: true, cancelled };
   } catch (e: any) { return { success: false, message: e.message || '기존 TP/SL 취소 실패', cancelled: 0 }; }
 }
 
