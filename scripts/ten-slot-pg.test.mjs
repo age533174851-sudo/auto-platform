@@ -1906,4 +1906,131 @@ if (!target.ok) {
         WHERE proname = 'ten_slot_kill' ORDER BY 1`),
       ['p_campaign_id text, p_caller_user_id uuid, p_caller_connection_id uuid']);
   });
+
+  // ── 증거 로그가 **정말로** 추가 전용인가 ──
+  //
+  // 098의 표 주석은 '추가만 하고 덮어쓰지 않는다'고 적는다. 그 말을 믿지
+  // 않고 물어본다 — **주석은 강제가 아니다.**
+  //
+  //   왜 `service_role`로 묻는가
+  //   ─────────────────────────
+  //   하네스의 psql은 superuser로 붙는다. 그 권한으로 되는지 안 되는지는
+  //   운영을 대표하지 않는다. 앱이 쓰는 자격증명이 `service_role`이므로
+  //   **그 역할로** 시도해야 실제 위험 경로를 보는 것이다.
+  //
+  //   왜 GRANT를 먼저 주는가
+  //   ──────────────────────
+  //   Supabase 프로젝트는 public 스키마 표에 `service_role` 앞으로 ALL을
+  //   준다. 로컬 스크래치 DB에는 그 GRANT가 없어서, 그대로 두면
+  //   "권한이 없어 막혔다"가 되고 **거짓 GREEN**이 된다. 운영과 같은
+  //   모양을 만들어야 막는 것이 무엇인지 드러난다.
+  function appendOnlyFixture(tag) {
+    psql(target, green, `GRANT ALL ON ALL TABLES IN SCHEMA public TO anon, authenticated, service_role;
+      GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO anon, authenticated, service_role;`);
+    const campaignId = `append-${tag}-${Math.random().toString(16).slice(2, 8)}`;
+    const coid = `coid-${campaignId}`;
+    assert.deepEqual(psql(target, green, openCampaignSql({
+      campaignId, userId: DEFAULT_OWNER, connectionId: CONN_A, environment: 'TESTNET',
+    })), ['OPENED|0']);
+    const claim = parseClaim(psql(target, green, claimSql({
+      campaignId, expectedVersion: 0, clientOrderId: coid,
+      callerUserId: DEFAULT_OWNER, callerConnectionId: CONN_A,
+    })));
+    assert.equal(claim.code, 'RESERVATION_AND_INTENT_DURABLE');
+    const ev = parseEvent(psql(target, green, applyEventSql({
+      campaignId, expectedVersion: claim.version, slotIndex: claim.slotIndex,
+      eventId: `evt-${campaignId}`, kind: 'ACK', evidence: 'VENUE_ORDER',
+      exchangeOrderId: `EX-${tag}`, clientOrderId: coid,
+      callerUserId: DEFAULT_OWNER, callerConnectionId: CONN_A,
+    })));
+    assert.equal(ev.code, 'EVENT_APPLIED');
+    // **빈 표에서의 통과를 세지 않는다.** 줄이 없으면 변조 시도는 0행
+    // UPDATE라 무조건 성공해 보인다 — 빈 배열 `.every()`와 같은 함정이다.
+    assert.equal(eventRows(target, green, campaignId).length, 1,
+      '변조 시험의 전제: 증거 줄이 실제로 있어야 한다');
+    return { campaignId, coid, eventId: `evt-${campaignId}`, slotIndex: claim.slotIndex };
+  }
+
+  test('★★ 증거 로그는 service_role도 덮어쓸 수 없다', () => {
+    const f = appendOnlyFixture('upd');
+    const r = psql(target, green, `SET ROLE service_role;
+      UPDATE ten_slot_events SET evidence = 'NONE' WHERE event_id = '${f.eventId}'`,
+      { expectError: true });
+    assert.match(r.error, /추가만|permission denied|권한/i, '거부 이유가 적혀야 한다');
+    const [row] = eventRows(target, green, f.campaignId);
+    assert.equal(row.evidence, 'VENUE_ORDER', '증거가 그대로 남아 있다');
+  });
+
+  test('★★ 증거 로그는 service_role도 지울 수 없다', () => {
+    const f = appendOnlyFixture('del');
+    const r = psql(target, green, `SET ROLE service_role;
+      DELETE FROM ten_slot_events WHERE event_id = '${f.eventId}'`, { expectError: true });
+    assert.match(r.error, /추가만|permission denied|권한/i);
+    assert.equal(eventRows(target, green, f.campaignId).length, 1, '줄이 남아 있다');
+  });
+
+  test('★★ 증거 로그는 TRUNCATE로도 비울 수 없다', () => {
+    // 행 트리거만 달면 TRUNCATE가 그대로 통과한다 — 한 줄도 안 지나가므로
+    // BEFORE UPDATE OR DELETE는 발사되지 않는다. 문장 트리거가 따로 필요하다.
+    const f = appendOnlyFixture('trunc');
+    const r = psql(target, green, `SET ROLE service_role; TRUNCATE ten_slot_events`,
+      { expectError: true });
+    assert.match(r.error, /추가만|permission denied|권한/i);
+    assert.equal(eventRows(target, green, f.campaignId).length, 1, '줄이 남아 있다');
+  });
+
+  test('★★ 나중에 GRANT ALL을 다시 돌려도 막혀 있다', () => {
+    // **권한만으로 막으면 이 한 줄에 조용히 풀린다.** Supabase 설정 안내에
+    // 나오는 문장이고 실제로 다시 돌리게 된다. 그때 아무 신호도 안 뜬다.
+    const f = appendOnlyFixture('regrant');
+    psql(target, green, `GRANT ALL ON ALL TABLES IN SCHEMA public TO service_role`);
+    const [priv] = psql(target, green,
+      `SELECT has_table_privilege('service_role','ten_slot_events','UPDATE')::text`);
+    assert.equal(priv, 'true', 'GRANT는 실제로 권한을 되돌려 놓는다');
+    const r = psql(target, green, `SET ROLE service_role;
+      DELETE FROM ten_slot_events WHERE event_id = '${f.eventId}'`, { expectError: true });
+    assert.match(r.error, /추가만/, '권한이 아니라 트리거가 막아야 한다');
+    assert.equal(eventRows(target, green, f.campaignId).length, 1);
+  });
+
+  test('★★ 추가는 막지 않는다 — 함수·멱등·감사 조회가 그대로 산다', () => {
+    const f = appendOnlyFixture('insert');
+    // 같은 사건 재시도는 멱등이다.
+    const again = parseEvent(psql(target, green, applyEventSql({
+      campaignId: f.campaignId, expectedVersion: 2, slotIndex: f.slotIndex,
+      eventId: f.eventId, kind: 'ACK', evidence: 'VENUE_ORDER',
+      exchangeOrderId: 'EX-insert', clientOrderId: f.coid,
+      callerUserId: DEFAULT_OWNER, callerConnectionId: CONN_A,
+    })));
+    assert.equal(again.code, 'EVENT_ALREADY_APPLIED', '멱등이 깨지지 않았다');
+    // 다음 사건은 **덧붙는다.**
+    const next = parseEvent(psql(target, green, applyEventSql({
+      campaignId: f.campaignId, expectedVersion: 2, slotIndex: f.slotIndex,
+      eventId: `${f.eventId}-2`, kind: 'PARTIAL_FILL', evidence: 'VENUE_ORDER',
+      exchangeOrderId: `EX-insert`, filledQty: 0.5, avgPrice: 100,
+      clientOrderId: f.coid, callerUserId: DEFAULT_OWNER, callerConnectionId: CONN_A,
+    })));
+    assert.equal(next.code, 'EVENT_APPLIED', '추가는 된다');
+    assert.equal(eventRows(target, green, f.campaignId).length, 2, '두 줄이 쌓였다');
+    // 감사 조회도 살아 있어야 한다. 막으면 로그를 읽을 수가 없다.
+    assert.deepEqual(psql(target, green, `SET ROLE service_role;
+      SELECT count(*)::text FROM ten_slot_events WHERE campaign_id = '${f.campaignId}'`), ['2']);
+  });
+
+  test('★★ 소유자는 명시적으로 끄고서만 바로잡을 수 있다 (복구 경로)', () => {
+    // 완전히 못 고치게 만들면 잘못 적힌 줄을 영영 들고 가야 한다. 소유자가
+    // **일부러 끄는** 한 걸음을 남긴다 — 실수로는 안 되고, 하면 기록에 남는다.
+    const f = appendOnlyFixture('owner');
+    const blocked = psql(target, green,
+      `UPDATE ten_slot_events SET evidence = 'NONE' WHERE event_id = '${f.eventId}'`,
+      { expectError: true });
+    assert.match(blocked.error, /추가만/, '소유자도 그냥은 못 고친다');
+    psql(target, green, `ALTER TABLE ten_slot_events DISABLE TRIGGER ten_slot_events_no_rewrite;
+      UPDATE ten_slot_events SET evidence = 'NONE' WHERE event_id = '${f.eventId}';
+      ALTER TABLE ten_slot_events ENABLE TRIGGER ten_slot_events_no_rewrite;`);
+    assert.equal(eventRows(target, green, f.campaignId)[0].evidence, 'NONE', '끄면 고쳐진다');
+    const reBlocked = psql(target, green,
+      `DELETE FROM ten_slot_events WHERE event_id = '${f.eventId}'`, { expectError: true });
+    assert.match(reBlocked.error, /추가만/, '다시 켜면 또 막힌다');
+  });
 }

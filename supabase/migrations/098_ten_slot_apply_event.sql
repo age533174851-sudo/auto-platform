@@ -144,8 +144,75 @@ DROP POLICY IF EXISTS ten_slot_events_service ON ten_slot_events;
 CREATE POLICY ten_slot_events_service ON ten_slot_events
   FOR ALL TO service_role USING (TRUE) WITH CHECK (TRUE);
 
+-- ── '추가만 한다'를 **DB가 지키게 한다** ──
+--
+--   위 주석은 처음부터 '추가만 하고 덮어쓰지 않는다'고 적었다. 그런데
+--   지키는 것이 아무것도 없었다. 격리된 PostgreSQL 16에서 `service_role`로
+--   물어봤더니 이렇게 됐다:
+--
+--       apply_event → EVENT_APPLIED, 증거 1줄
+--       UPDATE      → 통과
+--       DELETE      → 통과
+--       남은 줄     → 0
+--
+--   `ten_slot_events_service` 정책은 `FOR ALL ... USING(TRUE)`이고, 앱이
+--   쓰는 자격증명이 바로 `service_role`이다. **주석은 강제가 아니다.**
+--
+--   왜 권한(REVOKE)으로 막지 않는가
+--   ───────────────────────────────
+--   처음에는 `REVOKE UPDATE, DELETE, TRUNCATE ... FROM service_role`을
+--   생각했다. 실제로 막힌다. 그런데 **이 한 줄에 조용히 풀린다**:
+--
+--       GRANT ALL ON ALL TABLES IN SCHEMA public TO service_role;
+--
+--   Supabase 설정 안내에 나오는 문장이고, 표를 더 만들면 다시 돌리게 된다.
+--   그때 아무 신호도 안 뜬다 — 보호가 사라진 것을 알 길이 없다. 권한은
+--   **한 시점의 상태**이고 불변식이 아니다. 그래서 트리거로 둔다.
+--   (확인: 트리거는 같은 GRANT를 다시 돌린 뒤에도 막는다.)
+--
+--   왜 소유자까지 막는가
+--   ────────────────────
+--   `REVOKE`는 표 소유자와 superuser를 막지 않는다. 즉 대시보드 SQL
+--   편집기로는 그냥 고쳐진다. 증거 로그가 **그 경로로 조용히** 바뀌면
+--   사후에 되짚을 근거가 없다. 트리거는 소유자도 막는다.
+--
+--   그러면 잘못 적힌 줄은 어떻게 하는가
+--   ──────────────────────────────────
+--   원칙은 **지우지 않고 바로잡는 사건을 덧붙이는 것**이다. 그래도
+--   정말 손대야 하면 소유자가 일부러 한 걸음을 더 밟는다:
+--
+--       ALTER TABLE ten_slot_events DISABLE TRIGGER ten_slot_events_no_rewrite;
+--       -- 고친다
+--       ALTER TABLE ten_slot_events ENABLE TRIGGER ten_slot_events_no_rewrite;
+--
+--   실수로는 안 되고, 하면 그 문장이 기록에 남는다. 그게 요점이다.
+CREATE OR REPLACE FUNCTION public.ten_slot_events_append_only() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION
+    '증거 로그는 추가만 한다 — %는 거부된다. 잘못 적힌 사건은 지우지 않고 바로잡는 사건을 덧붙인다.',
+    TG_OP
+    USING ERRCODE = 'restrict_violation';
+END
+$$;
+
+REVOKE ALL ON FUNCTION public.ten_slot_events_append_only() FROM PUBLIC;
+
+DROP TRIGGER IF EXISTS ten_slot_events_no_rewrite ON ten_slot_events;
+CREATE TRIGGER ten_slot_events_no_rewrite
+  BEFORE UPDATE OR DELETE ON ten_slot_events
+  FOR EACH ROW EXECUTE FUNCTION public.ten_slot_events_append_only();
+
+-- **TRUNCATE는 행 트리거로 막히지 않는다.** 한 줄도 지나가지 않으므로
+-- `BEFORE UPDATE OR DELETE`가 발사되지 않고, 표가 그냥 비워진다.
+-- 문장 트리거가 따로 필요하다.
+DROP TRIGGER IF EXISTS ten_slot_events_no_truncate ON ten_slot_events;
+CREATE TRIGGER ten_slot_events_no_truncate
+  BEFORE TRUNCATE ON ten_slot_events
+  FOR EACH STATEMENT EXECUTE FUNCTION public.ten_slot_events_append_only();
+
 COMMENT ON TABLE ten_slot_events IS
-  '슬롯 전이의 증거 로그. 추가만 하고 덮어쓰지 않는다 — 같은 event_id의 재시도가 멱등해지는 근거다. evidence는 그 말을 무엇을 보고 하는지다(VENUE_ORDER·VENUE_POSITION·NONE).';
+  '슬롯 전이의 증거 로그. 추가만 한다 — UPDATE·DELETE·TRUNCATE는 ten_slot_events_no_rewrite·ten_slot_events_no_truncate 트리거가 거부한다(소유자 포함). 권한이 아니라 트리거로 막는 이유는 GRANT ALL 한 줄에 풀리지 않게 하기 위해서다. 바로잡을 일이 있으면 지우지 않고 사건을 덧붙이고, 정말 필요하면 소유자가 DISABLE TRIGGER로 명시적으로 연다. 같은 event_id의 재시도가 멱등해지는 근거이기도 하다. evidence는 그 말을 무엇을 보고 하는지다(VENUE_ORDER·VENUE_POSITION·NONE).';
 
 -- ── 같은 `event_id`가 **같은 사건인가** ──
 --
