@@ -377,7 +377,76 @@ if (zeroErrors.length > 0) {
   }
 }
 
+// ── 기존 보호주문 취소 결과를 **보고** 새것을 거는가 ──
+//
+// `cancelOpenTPSL`은 기존 TP/SL을 확인하지 못했거나 못 지웠으면
+// `success: false`를 돌려준다. 부르는 쪽이 그 값을 안 보고 바로 새
+// TP/SL을 POST하면 **같은 포지션에 보호주문이 둘**이 된다 — 옛것이 남은
+// 채로 새것이 붙고, 화면에는 `ok: true`가 뜬다.
+//
+// 이 저장소에서 가장 자주 나는 고장 그 자체다: **만들어 놓고 배선을
+// 안 함.** 신호를 만든 쪽만 고치고 부르는 쪽을 안 고치면 그 신호는
+// 아무것도 막지 않는다. 그래서 CI에서 센다.
+//
+// `Cancel All`로 쓸어내는 길은 답이 아니다 — 다른 전략의 보호주문을
+// 지운다(CLAUDE.md 절대 규칙).
+//
+// **목록으로 센다.** `ORDER_ROUTES`와 같은 이유다 — 새로 부르는 곳을
+// 만들면 여기 넣어야 하고, 안 넣으면 이 검사가 그 파일을 못 본다.
+{
+  const CANCEL_FN = 'cancelOpenTPSL(';
+  /** 이 신호를 **판정에 써야 하는** 곳 */
+  const MUST_HONOR = [
+    'src/app/api/binance/futures/tpsl/route.ts',
+  ];
+  /**
+   * 일부러 판정에 쓰지 않는 곳 — **이유가 코드에 적혀 있어야 한다.**
+   *
+   *   `futuresExec.ts`는 `try/catch`로 삼키며 그 선택을 적어 뒀다:
+   *   *"조회 실패 시 건너뛴다 — 남의 주문을 지우는 것보다 중복이 낫다"*.
+   *   그 판단을 이 검사가 뒤집지 않는다. 다만 **적어 둔 이유가 사라지면**
+   *   예외가 아니라 빠뜨린 것이므로 그때는 빨개진다.
+   */
+  const DOCUMENTED_SKIP = [
+    ['src/lib/exchanges/futuresExec.ts', '남의 주문을 지우는 것보다 중복이 낫다'],
+  ];
+
+  const bad = [];
+  for (const F of MUST_HONOR) {
+    if (!existsSync(F)) { bad.push(`${F}이 없습니다 — 목록이 낡았습니다`); continue; }
+    const raw = readFileSync(F, 'utf8');
+    // 주석이 계약을 대신 증명하지 못하게 걷어낸다.
+    const src = raw.split('\n')
+      .filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+    if (!src.includes(CANCEL_FN)) {
+      bad.push(`${F}: \`cancelOpenTPSL\`을 부르지 않습니다 — 목록이 낡았습니다`);
+      continue;
+    }
+    if (!/cancel\w*\s*(\?\.)?\.?\s*success/.test(src)) {
+      bad.push(`${F}: \`cancelOpenTPSL\`을 부르고 그 \`success\`를 보지 않습니다 — `
+        + '기존 보호주문을 못 지운 채로 새것을 겹쳐 걸 수 있습니다');
+    }
+  }
+  for (const [F, reason] of DOCUMENTED_SKIP) {
+    if (!existsSync(F)) { bad.push(`${F}이 없습니다 — 목록이 낡았습니다`); continue; }
+    const raw = readFileSync(F, 'utf8');
+    if (!raw.includes(CANCEL_FN)) continue;   // 더 안 부르면 예외도 필요 없다
+    if (!raw.includes(reason)) {
+      bad.push(`${F}: \`cancelOpenTPSL\` 결과를 안 보는데 **적어 둔 이유가 없습니다** `
+        + `(찾는 문구: "${reason}") — 예외가 아니라 빠뜨린 것입니다`);
+    }
+  }
+  if (bad.length) {
+    console.error('❌ 보호주문 교체가 취소 결과를 보지 않습니다:');
+    for (const b of bad) console.error(`   · ${b}`);
+    console.error('');
+    console.error('   같은 포지션에 보호주문이 둘이 되고, 화면에는 성공이 뜹니다.');
+    process.exit(1);
+  }
+}
+
 console.log(`✅ 실주문 경로 ${ORDER_ROUTES.length}개 · 안전장치 빠진 것 0개`
   + ' · 조회 실패를 0으로 만드는 길 0개'
   + ' · 진입 미확정 노출 방치 경로 0개'
-  + ' · 스모크 주문 관문 구멍 0개');
+  + ' · 스모크 주문 관문 구멍 0개'
+  + ' · 보호주문 교체가 취소 결과를 무시하는 길 0개');

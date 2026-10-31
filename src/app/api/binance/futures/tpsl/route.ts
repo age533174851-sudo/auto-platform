@@ -180,6 +180,41 @@ export async function POST(req: NextRequest) {
     const bf = await import('@/lib/exchanges/binanceFutures');
     cancelled = await bf.cancelOpenTPSL(creds.key!, creds.secret!, want, creds.testnet!);
 
+    // ── 취소 결과를 **보고** 새 주문을 낸다 ──
+    //
+    //   `cancelOpenTPSL`은 기존 보호주문을 확인하지 못했거나 못 지웠으면
+    //   `success: false`를 돌려준다. 그런데 이 라우트는 그 값을 보지 않고
+    //   바로 새 TP/SL을 POST했고, `ok` 계산에서도 제외했다 — **만들어
+    //   놓고 배선을 안 한 자리**다.
+    //
+    //   그러면 같은 포지션에 보호주문이 **둘**이 된다(옛것이 남은 채로
+    //   새것이 붙는다). 그리고 화면에는 `ok: true`가 뜬다.
+    //
+    //   그래서 새 주문을 보내지 않는다:
+    //     · 하나도 못 지웠으면 **옛 보호는 그대로 살아 있다** — 그 상태가
+    //       새것을 겹쳐 거는 것보다 안전하다.
+    //     · 일부만 지웠으면 남은 것이 무엇인지 모른다. 그 위에 겹쳐 걸지
+    //       않고, **보호가 불완전할 수 있다는 사실**을 그대로 돌려준다.
+    //
+    //   `Cancel All`로 쓸어내는 길은 쓰지 않는다 — 다른 전략의 보호주문을
+    //   지우기 때문이다.
+    if (cancelled && cancelled.success !== true) {
+      const partial = Number(cancelled.cancelled) > 0;
+      return NextResponse.json({
+        ok: false, queued: false, executed: false,
+        error: 'existing_protective_unresolved',
+        cancelledExisting: cancelled.cancelled ?? 0,
+        tp: null, sl: null, trailing: null,
+        testnet: creds.testnet, workingType, portionQty: portion.qty,
+        message: partial
+          ? `기존 보호주문을 일부만 지웠습니다 (${cancelled.cancelled}건) — `
+            + '겹쳐 걸지 않고 멈췄습니다. 보호가 불완전할 수 있으니 거래소에서 '
+            + `직접 확인하세요: ${cancelled.message || '사유 미상'}`
+          : '기존 보호주문을 확인·정리하지 못해 새 주문을 보내지 않았습니다 — '
+            + `옛 보호주문이 남아 있을 수 있습니다: ${cancelled.message || '사유 미상'}`,
+      }, { status: 502, headers: { 'Cache-Control': 'no-store' } });
+    }
+
     if (tpPrice != null && Number(tpPrice) > 0) {
       out.tp = await bf.placeFuturesTPSL(creds.key!, creds.secret!, {
         symbol: want, side: exitSide, stopPrice: Number(tpPrice), type: 'TAKE_PROFIT_MARKET',
