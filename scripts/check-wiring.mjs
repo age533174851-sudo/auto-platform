@@ -207,7 +207,107 @@ if (stale.length > 0) {
   bad = true;
 }
 
+/**
+ * 주석을 지운 코드만 본다.
+ *
+ * **처음 쓴 규칙은 주석으로 만족됐다.** 라우트에
+ * `// 판정은 judgeExecutor 한 곳에 있다`라고 적어 둔 것이 있어서,
+ * `judgeExecutor`를 찾는 정규식이 **실제 호출이 아니라 그 문장에**
+ * 걸렸다. 설명을 적었다는 것은 그렇게 했다는 증거가 아니다.
+ *
+ * 문자열 안의 `//`는 주석이 아니다(`https://`). 그래서 인용부호를
+ * 보면서 지운다 — 안 그러면 URL 뒤의 진짜 코드가 같이 날아가고,
+ * **있는 것을 없다고** 한다.
+ */
+function stripComments(text) {
+  let out = '', i = 0;
+  const n = text.length;
+  let quote = null;      // ' " ` 중 지금 열려 있는 것
+  while (i < n) {
+    const c = text[i], d = text[i + 1];
+    if (quote) {
+      out += c;
+      if (c === '\\') { out += d ?? ''; i += 2; continue; }
+      if (c === quote) quote = null;
+      i++; continue;
+    }
+    if (c === '"' || c === "'" || c === '`') { quote = c; out += c; i++; continue; }
+    if (c === '/' && d === '/') { while (i < n && text[i] !== '\n') i++; continue; }
+    if (c === '/' && d === '*') { i += 2; while (i < n && !(text[i] === '*' && text[i + 1] === '/')) i++; i += 2; continue; }
+    out += c; i++;
+  }
+  return out;
+}
+
+// ── 청산 감시 응답에 워커 생존 증거가 실려 있는가 ──
+//
+// 위 검사는 "부르는 곳이 있는가"를 센다. 이 규칙은 그 다음 단계다 —
+// **부르기는 하는데 그 결과가 사람에게 닿는 자리에 실리는가.**
+//
+// `judgeExecutor`는 배선돼 있었다(`/api/worker/status`가 부른다). 그런데
+// 그 라우트는 인증이 필요하고 **아무 자동 회차도 부르지 않는다.** 그래서
+// 워커가 죽어도 사람이 로그인해서 열어 보기 전에는 어디에도 안 적혔고,
+// `CLAUDE.md`가 금지한 "fly logs를 열어 확인해 주세요"가 거기서 나왔다.
+//
+// 청산 감시 라우트는 워커가 5분마다, 백업 회차가 한 시간에 한 번 부르고
+// **응답 본문이 Actions 로그에 그대로 남는다.** 거기 실리면 생존이 사람
+// 손을 타지 않고 기록된다.
+//
+// 이 라우트에는 200 응답 경로가 **넷**이다. 한쪽에만 넣으면 그 경로로
+// 끝난 회차의 로그에는 증거가 없다 — 상습 고장 ② "경로가 둘인데 한쪽만
+// 고침"이다. 그래서 숫자를 세지 않고 **경로를 전수로** 본다.
+//
+// 왜 check-wiring에 넣는가: CI는 검사기를 **글롭이 아니라 명시 목록**으로
+// 돌린다(`.github/workflows/ci.yml`). 새 파일을 만들면 CI가 안 돌리고,
+// 워크플로는 사람 승인 사항이다. **CI가 안 돌리는 검사기는 없는
+// 검사기다** — 그래서 이미 돌고 있는 이 파일에 붙인다.
+const EXIT_MONITOR = 'src/app/api/autotrade/exit-monitor/route.ts';
+const evidenceGaps = [];
+const evidenceSeen = [];
+{
+  const raw = readFileSync(EXIT_MONITOR, 'utf8');
+  const text = stripComments(raw);
+  const NEEDLE = 'NextResponse.json(';
+  for (let i = text.indexOf(NEEDLE); i !== -1; i = text.indexOf(NEEDLE, i + 1)) {
+    // 괄호를 짝 맞춰 인자 전체를 뗀다. 정규식으로 `}`까지 긁으면
+    // 중첩 객체에서 잘려 **있는 것을 없다고** 한다.
+    let depth = 0, j = i + NEEDLE.length - 1;
+    for (; j < text.length; j++) {
+      const c = text[j];
+      if (c === '(') depth++;
+      else if (c === ')') { depth--; if (depth === 0) break; }
+    }
+    const args = text.slice(i + NEEDLE.length, j);
+    const line = text.slice(0, i).split('\n').length;
+    // 4xx·5xx는 면제다. 인증 실패 응답에 운영 상태를 실으면
+    // **인증 전에 상태가 샌다.**
+    if (/status:\s*[45]\d\d/.test(args)) continue;
+    evidenceSeen.push(line);
+    if (!/\bexecutor\b/.test(args)) evidenceGaps.push(`${EXIT_MONITOR}:${line}`);
+  }
+  if (evidenceSeen.length === 0) {
+    evidenceGaps.push(`${EXIT_MONITOR} — 200 응답을 하나도 찾지 못했습니다 (이 규칙이 헛돌고 있습니다)`);
+  }
+  // 임계값을 라우트가 따로 갖지 않는지. 두 곳에 있으면 화면은 '정상'인데
+  // 주문은 막히는 상태가 생긴다.
+  // 산문이 아니라 **import 문**을 본다.
+  if (!/from\s+['"]@\/lib\/runtime\/executorEvidence['"]/.test(text)
+      || !/\breadExecutorEvidence\s*\(/.test(text)) {
+    evidenceGaps.push(`${EXIT_MONITOR} — 생존 판정을 executorEvidence에서 가져와 부르지 않았습니다`
+      + ' (임계값을 라우트에 복제하면 화면과 주문 경로가 갈립니다)');
+  }
+}
+
+if (evidenceGaps.length > 0) {
+  console.error('\n❌ 청산 감시 응답에 워커 생존 증거가 빠진 경로:');
+  for (const g of evidenceGaps) console.error(`   · ${g}`);
+  console.error('\n   그 경로로 끝난 회차의 Actions 로그에는 워커 생존이 적히지 않습니다.');
+  console.error('   `executor: await executorNow()`를 그 응답에도 넣으세요.');
+  bad = true;
+}
+
 if (bad) process.exit(1);
 
 console.log(`✅ 판정 모듈 ${files.length}개 · 배선 안 된 것 0개`
   + (ALLOW.size > 0 ? ` (면제 ${ALLOW.size}개)` : ''));
+console.log(`✅ 청산 감시 200 응답 ${evidenceSeen.length}개 전부 워커 생존 증거를 싣는다`);
