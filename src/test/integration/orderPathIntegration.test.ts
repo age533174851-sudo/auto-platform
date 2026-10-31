@@ -1117,6 +1117,133 @@ function fakeRequest(body: any): any {
   };
 }
 
+// ══════════════════════════════════════════════════════════════════
+// Gate 직접 TPSL 라우트 — **기존 보호주문을 읽고 판단하는가**
+// ══════════════════════════════════════════════════════════════════
+//
+// 검사기는 모양을 세고, 이것은 **행동**을 센다. 둘은 서로 대체하지
+// 않는다(검수 조건 그대로다).
+//
+// 예전 Gate 분기는 `futuresCancelProtection`으로 계약의 조건부 주문을
+// **전부** 지웠다(Cancel All · 절대 규칙 위반) + 그 결과를 보지 않고
+// 새 주문을 걸었다. 지금은 **읽고 판단한다**:
+//
+//   못 읽음(null) → 502 거절 · 새 주문 0
+//   하나라도 있음 → 502 거절 · 새 주문 0
+//   비어 있음     → 그대로 건다
+export async function runGateTpslRouteTests() {
+  console.log('[통합 — Gate 직접 TPSL 라우트 (실제 핸들러)]');
+
+  const adminPath = require.resolve('../../lib/supabase/admin');
+  const routePath = require.resolve('../../app/api/binance/futures/tpsl/route');
+
+  function loadRoute(db: FakeDb) {
+    const prev = require.cache[adminPath];
+    require.cache[adminPath] = {
+      id: adminPath, filename: adminPath, loaded: true, exports: {
+        getSupabaseAdmin: () => db,
+        resolveUserId: async () => 'u1',
+        getUserIdFromRequest: async () => 'u1',
+      },
+    } as any;
+    delete require.cache[routePath];
+    const mod = require(routePath);
+    return {
+      POST: mod.POST as (req: any) => Promise<any>,
+      restore: () => {
+        delete require.cache[routePath];
+        if (prev) require.cache[adminPath] = prev; else delete require.cache[adminPath];
+      },
+    };
+  }
+
+  const PRICE_ORDERS = '/api/v4/futures/usdt/price_orders';
+  const BODY = {
+    connectionId: 'g1', symbol: 'BTCUSDT', positionSide: 'LONG', slPrice: 90000,
+  };
+
+  async function run(priceOrdersReply: any) {
+    const unenv = withCryptoEnv();
+    const db = new FakeDb().seed('exchange_connections', [{
+      id: 'g1', user_id: 'u1', exchange_id: 'gate',
+      api_key: 'K'.repeat(64), api_secret_enc: encryptSecret('S'.repeat(64)),
+      has_withdrawal: false, is_testnet: true, perm_trading: true, is_active: true,
+    }]);
+    unenv();
+    const venue = new FakeVenue()
+      .on('/api/v4/futures/usdt/positions/BTC_USDT', { json: {
+        contract: 'BTC_USDT', size: 1, entry_price: '95000', mark_price: '95000',
+        liq_price: '85000', leverage: '10', mode: 'single',
+      } }, 'GET')
+      // 기준가(마크)를 못 읽으면 라우트가 Gate 분기 **앞에서** 멈춘다.
+      // 처음에 이걸 빼먹어서 세 시험이 전부 **거짓 초록**이었다 —
+      // 변이 확인(옛 동작 복원)에서 똑같이 통과해 들통났다.
+      .on('/api/v4/futures/usdt/tickers', { json: [{
+        contract: 'BTC_USDT', mark_price: '95000', last: '95000',
+      }] }, 'GET')
+      .on('/api/v4/futures/usdt/contracts/BTC_USDT', { json: {
+        name: 'BTC_USDT', quanto_multiplier: '0.0001', order_size_min: 1,
+        order_size_max: 1000000, order_price_round: '0.1', mark_price: '95000',
+      } }, 'GET')
+      .on(PRICE_ORDERS, priceOrdersReply, 'GET')
+      .on(PRICE_ORDERS, { json: { id: 123 } }, 'POST')
+      .on(PRICE_ORDERS, { json: [] }, 'DELETE');
+    const r = await scenario(venue, async () => {
+      const { POST, restore } = loadRoute(db);
+      try {
+        const res = await POST(fakeRequest(BODY));
+        return { status: res.status ?? 200, body: await res.json() };
+      } finally { restore(); }
+    });
+    return { r, venue };
+  }
+
+  const unreadable = await run({ status: 503, json: { label: 'SERVICE_UNAVAILABLE' } });
+  const existing = await run({ json: [{ id: 7, contract: 'BTC_USDT', rule: 1, trigger: {} }] });
+  const empty = await run({ json: [] });
+
+  test('★★ Gate: 기존 보호주문을 못 읽으면 새 주문을 보내지 않는다', () => {
+    const { r, venue } = unreadable;
+    assert(!(r instanceof Error), String((r as any)?.message));
+    const b = (r as any).body;
+    assert(b?.ok !== true, `못 읽었는데 성공으로 적었다: ${JSON.stringify(b).slice(0, 220)}`);
+    assert(b?.executed !== true, '못 읽었는데 executed:true다');
+    eq(b?.error, 'gate_protective_lookup_failed',
+      `사유가 '못 읽음'이 아니다: ${JSON.stringify(b).slice(0, 220)}`);
+    eq((r as any).status, 502);
+    eq(venue.countOf(PRICE_ORDERS, 'POST'), 0, '못 읽었는데 새 보호주문을 보냈다');
+    eq(venue.countOf(PRICE_ORDERS, 'DELETE'), 0, '일괄 취소를 보냈다');
+  });
+
+  test('★★ Gate: 기존 보호주문이 있으면 겹쳐 걸지 않고 지우지도 않는다', () => {
+    const { r, venue } = existing;
+    assert(!(r instanceof Error), String((r as any)?.message));
+    const b = (r as any).body;
+    assert(b?.ok !== true, `이미 있는데 성공으로 적었다: ${JSON.stringify(b).slice(0, 220)}`);
+    eq(b?.error, 'gate_protective_exists',
+      `사유가 '이미 있음'이 아니다: ${JSON.stringify(b).slice(0, 220)}`);
+    eq(b?.existingProtective, 1, '몇 건인지 알려 주지 않았다');
+    eq(venue.countOf(PRICE_ORDERS, 'POST'), 0, '겹쳐 걸었다');
+    // **남의 보호주문을 지우지 않는다** — 절대 규칙.
+    eq(venue.countOf(PRICE_ORDERS, 'DELETE'), 0, '계약 단위 일괄 취소를 보냈다');
+  });
+
+  test('★ Gate: 기존 보호주문이 없으면 그대로 건다 — 과잉 차단하지 않는다', () => {
+    const { r, venue } = empty;
+    assert(!(r instanceof Error), String((r as any)?.message));
+    const b = (r as any).body;
+    // 정상 경로는 막히지 않아야 한다. 주문이 나가거나, 적어도
+    // '기존 보호주문' 사유로 막히지는 않는다.
+    eq(b?.ok, true, `빈 목록인데 막혔다: ${JSON.stringify(b).slice(0, 220)}`);
+    eq(b?.executed, true);
+    eq(b?.sl?.success, true, '손절이 걸리지 않았다');
+    // **주문이 실제로 나갔는지** 센다 — 안 세면 "막지 않았다"가
+    // "걸었다"와 구별되지 않는다.
+    assert(venue.countOf(PRICE_ORDERS, 'POST') >= 1, '정상 경로인데 주문이 0건이다');
+    eq(venue.countOf(PRICE_ORDERS, 'DELETE'), 0, '일괄 취소를 보냈다');
+  });
+}
+
 export async function runCoinMRouteIntegrationTests() {
   console.log('[통합 — COIN-M 라우트 (실제 핸들러 · DB 쓰기)]');
 
