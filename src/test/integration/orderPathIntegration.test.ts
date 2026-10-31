@@ -22,7 +22,7 @@ import { FakeVenue, FakeDb, withCryptoEnv } from './venueHarness';
 //   module"이 난다. 정적으로 가져오면 컴파일되고, 그 파일 안의 `@/`
 //   동적 import는 러너의 해석 shim이 처리한다.
 import { executeOrder, reconcilePendingOrders } from '../../lib/engine/orderExecutor';
-import { closeAllPositions } from '../../lib/exchanges/binanceFutures';
+import { closeAllPositions, cancelAllOpenOrders, cancelOpenTPSL } from '../../lib/exchanges/binanceFutures';
 import { placeSpotOrder } from '../../lib/exchanges/spotOrderExecutor';
 import { RECONCILE_TARGET_STATUSES } from '../../lib/engine/pendingReconcile';
 import { isProvenFill } from '../../lib/engine/holdingEvidence';
@@ -175,6 +175,102 @@ export async function runOrderPathIntegrationTests() {
       eq(o.success, true, `진짜 0인데 성공이 아니다: ${JSON.stringify(o)}`);
       eq(o.remaining, 0);
       eq(venue.countOf(ORDER, 'POST'), 0, '닫을 것이 없는데 주문을 보냈다');
+    });
+
+    // ── HTTP 200인데 **본문이 배열이 아니면** ──
+    //
+    //   조회 함수들이 `(Array.isArray(data) ? data : [])`로 받고
+    //   **`success: true`**를 돌려준다. 즉 200에 엉뚱한 본문이 오면
+    //   "포지션 없음"·"미결 주문 없음"이 **관측으로 적힌다.** 503은
+    //   throw되어 막히지만 이 길은 막히지 않는다.
+    //
+    //   정상 빈 배열(진짜 없음)과 **구분**해야 한다 — 둘을 같게 다루면
+    //   과잉 차단이고, 섞으면 거짓 완료다.
+    const ORDERS = '/fapi/v1/openOrders';
+    const DEL = '/fapi/v1/allOpenOrders';
+
+    const nonArrayClose = await run({ json: { code: 0, unexpected: true } });
+    const nullClose = await run({ json: null });
+
+    test('★★ 200 비배열 본문을 "전부 닫혔다"로 적지 않는다', () => {
+      for (const [label, got] of [['객체', nonArrayClose], ['null', nullClose]] as const) {
+        const { r, venue } = got;
+        assert(!(r instanceof Error), String((r as any)?.message));
+        const o = r as any;
+        assert(o.success !== true,
+          `${label} 본문인데 성공으로 적었다: ${JSON.stringify(o)}`);
+        assert(o.remaining !== 0,
+          `${label} 본문을 남은 0으로 적었다: ${JSON.stringify(o)}`);
+        eq(venue.countOf(ORDER, 'POST'), 0, `${label} 본문인데 주문을 보냈다`);
+      }
+    });
+
+    const cancelOn = async (posReply: any, ordReply: any) => {
+      const venue = new FakeVenue()
+        .on(POS, posReply, 'GET').on(ORDERS, ordReply, 'GET')
+        .on(DEL, { json: { code: 200, msg: 'success' } }, 'DELETE');
+      const r = await scenario(venue,
+        () => cancelAllOpenOrders('K'.repeat(64), 'S'.repeat(64), true) as any);
+      return { r, venue };
+    };
+
+    const cancelBadOrders = await cancelOn({ json: [] }, { json: { code: 0 } });
+    const cancelCleanEmpty = await cancelOn({ json: [] }, { json: [] });
+
+    test('★★ 전체 취소: 200 비배열 미결 본문을 "전부 취소됨"으로 적지 않는다', () => {
+      const { r, venue } = cancelBadOrders;
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const o = r as any;
+      eq(o.success, false, `목록을 못 읽었는데 성공으로 적었다: ${JSON.stringify(o)}`);
+      eq(o.listComplete, false);
+      eq(venue.countOf(DEL, 'DELETE'), 0, '대상을 모르는데 취소를 보냈다');
+    });
+
+    test('★ 전체 취소: 정상 빈 목록은 성공이다 — 과잉 차단하지 않는다', () => {
+      const { r } = cancelCleanEmpty;
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const o = r as any;
+      eq(o.success, true, `정상 빈 목록인데 실패로 적었다: ${JSON.stringify(o)}`);
+      eq(o.listComplete, true);
+    });
+
+    // ── 기존 TP/SL 취소: 못 읽음과 "없음"을 섞지 않는다 ──
+    //
+    //   `cancelOpenTPSL`은 `success`를 보지 않고 `orders.filter(...)`를
+    //   한 뒤 `{ success: true, cancelled: targets.length }`를 돌려준다.
+    //   게다가 개별 취소 예외를 **무시**하고 `targets.length`를 그대로
+    //   센다 — 못 지운 보호주문이 "취소됨"으로 적힌다.
+    const tpsl = async (ordReply: any, delReply: any) => {
+      const venue = new FakeVenue()
+        .on(ORDERS, ordReply, 'GET')
+        .on('/fapi/v1/order', delReply, 'DELETE');
+      const r = await scenario(venue,
+        () => cancelOpenTPSL('K'.repeat(64), 'S'.repeat(64), 'BTCUSDT', true) as any);
+      return { r, venue };
+    };
+    const SL_ROW = {
+      orderId: 11, symbol: 'BTCUSDT', type: 'STOP_MARKET', side: 'SELL',
+      stopPrice: '90000', closePosition: true, reduceOnly: true,
+      origQty: '0', price: '0', workingType: 'MARK_PRICE', time: 1, status: 'NEW',
+    };
+    const tpslBad = await tpsl({ json: { code: 0 } }, { json: { code: 200 } });
+    const tpslDelFails = await tpsl(
+      { json: [SL_ROW] }, { status: 400, json: { code: -2011, msg: 'Unknown order' } });
+
+    test('★★ TP/SL 취소: 미결 목록을 못 읽으면 "없음"으로 적지 않는다', () => {
+      const { r } = tpslBad;
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const o = r as any;
+      assert(!(o.success === true && o.cancelled === 0),
+        `목록을 못 읽었는데 "취소 0건 성공"으로 적었다: ${JSON.stringify(o)}`);
+    });
+
+    test('★★ TP/SL 취소: 못 지운 보호주문을 취소됨으로 세지 않는다', () => {
+      const { r } = tpslDelFails;
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const o = r as any;
+      assert(!(o.success === true && o.cancelled === 1),
+        `취소가 실패했는데 1건 취소됨으로 적었다: ${JSON.stringify(o)}`);
     });
   }
 

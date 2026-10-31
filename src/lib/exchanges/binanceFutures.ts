@@ -89,7 +89,21 @@ export interface FuturesPosition {
 export async function getFuturesPositions(key: string, secret: string, testnet = true) {
   try {
     const data = await fapiSigned('GET', '/fapi/v2/positionRisk', key, secret, testnet);
-    const positions: FuturesPosition[] = (Array.isArray(data) ? data : [])
+    // ── **이해하지 못한 본문을 "포지션 없음"으로 읽지 않는다** ──
+    //
+    //   예전에는 `(Array.isArray(data) ? data : [])`로 받고 그대로
+    //   `success: true`를 돌려줬다. HTTP 200에 엉뚱한 본문(`{code:0,…}`,
+    //   `null`)이 오면 **빈 목록이 관측으로 적힌다.** 503은 throw되어
+    //   막히지만 이 길은 막히지 않았고, `closeAllPositions`는 그걸 보고
+    //   "전부 닫혔다"를 적었다.
+    //
+    //   판정을 **경계 한 곳**에 둔다 — 모든 호출자가 같은 계약을 받는다.
+    if (!Array.isArray(data)) {
+      return { success: false,
+        message: '포지션 응답을 이해하지 못했습니다 (목록이 아닙니다) — '
+               + '포지션 없음으로 읽지 않습니다' };
+    }
+    const positions: FuturesPosition[] = data
       .filter((p: any) => parseFloat(p.positionAmt) !== 0)
       .map((p: any) => {
         const amt = parseFloat(p.positionAmt);
@@ -1599,7 +1613,16 @@ export async function getFuturesOpenOrders(key: string, secret: string, testnet 
     const params: Record<string, string | number> = {};
     if (symbol) params.symbol = symbol.toUpperCase().replace('/', '');
     const data = await fapiSigned('GET', '/fapi/v1/openOrders', key, secret, testnet, params);
-    const orders: FuturesOpenOrder[] = (Array.isArray(data) ? data : []).map((o: any) => ({
+    // `getFuturesPositions`와 **같은 규칙**이다 — 이해하지 못한 본문을
+    // "미결 주문 없음"으로 읽지 않는다. 그 빈 목록이 "전부 취소됨"과
+    // "기존 TP/SL 없음"으로 번진다.
+    if (!Array.isArray(data)) {
+      return { success: false,
+        message: '미결 주문 응답을 이해하지 못했습니다 (목록이 아닙니다) — '
+               + '주문 없음으로 읽지 않습니다',
+        orders: [] as FuturesOpenOrder[] };
+    }
+    const orders: FuturesOpenOrder[] = data.map((o: any) => ({
       orderId: o.orderId, symbol: o.symbol, type: o.type, side: o.side,
       stopPrice: parseFloat(o.stopPrice || '0'),
       closePosition: !!o.closePosition, reduceOnly: !!o.reduceOnly,
@@ -1630,8 +1653,14 @@ export async function getFuturesOpenOrders(key: string, secret: string, testnet 
  */
 export async function cancelOpenTPSL(key: string, secret: string, symbol: string, testnet = true, only?: 'TP' | 'SL') {
   try {
-    const { orders } = await getFuturesOpenOrders(key, secret, testnet, symbol);
-    const targets = orders.filter(o => {
+    const res = await getFuturesOpenOrders(key, secret, testnet, symbol);
+    // **못 읽은 것을 "기존 TP/SL 없음"으로 읽지 않는다.** 그러면 새
+    // 보호주문을 걸면서 **옛것이 남아 있는지 모르는 채로** 성공을 적는다.
+    if (!res.success || !Array.isArray(res.orders)) {
+      return { success: false, cancelled: 0,
+        message: `기존 TP/SL을 확인하지 못했습니다 — ${res.message || '조회 실패'}` };
+    }
+    const targets = res.orders.filter(o => {
       // 분할 익절·남의 주문은 건드리지 않는다
       if (o.closePosition !== true) return false;
       const isTP = o.type === 'TAKE_PROFIT_MARKET';
@@ -1640,10 +1669,30 @@ export async function cancelOpenTPSL(key: string, secret: string, symbol: string
       if (only === 'SL') return isSL;
       return isTP || isSL;
     });
+    // ── **보낸 수가 아니라 지워진 수를 센다** ──
+    //
+    //   예전에는 개별 예외를 무시하고 `cancelled: targets.length`를
+    //   돌려줬다. 못 지운 보호주문이 **"취소됨"으로 적힌다** — 그 위에
+    //   새 TP/SL을 걸면 같은 포지션에 보호주문이 둘이 된다.
+    let cancelled = 0;
+    const failed: string[] = [];
     for (const o of targets) {
-      try { await cancelFuturesOrder(key, secret, symbol, o.orderId, testnet); } catch { /* 개별 실패 무시 */ }
+      //   `cancelFuturesOrder`는 **던지지 않는다** — 실패를
+      //   `{ success: false, message }`로 돌려준다. 그래서 try/catch만
+      //   두면 실패가 그대로 '성공'으로 세어진다. 돌려준 값을 본다.
+      try {
+        const c = await cancelFuturesOrder(key, secret, symbol, o.orderId, testnet);
+        if (c?.success) cancelled++;
+        else failed.push(`${o.orderId}(${o.type}): ${c?.message || '취소 실패'}`);
+      } catch (e: any) {
+        failed.push(`${o.orderId}(${o.type}): ${e?.message || '취소 실패'}`);
+      }
     }
-    return { success: true, cancelled: targets.length };
+    return failed.length > 0
+      ? { success: false, cancelled,
+          message: `기존 TP/SL ${failed.length}건을 못 지웠습니다 — ${failed.join(' · ')}. `
+                 + '거래소에서 직접 확인하세요' }
+      : { success: true, cancelled, message: '' };
   } catch (e: any) { return { success: false, message: e.message || '기존 TP/SL 취소 실패', cancelled: 0 }; }
 }
 
