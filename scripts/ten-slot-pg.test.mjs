@@ -1334,6 +1334,103 @@ if (!target.ok) {
     }).code, 'KILL_SWITCH', '슬롯이 비자 중지가 풀렸다');
   });
 
+  // ── 중지 뒤 어느 상태에서 출발해도 빠져나올 길이 있다 ──
+  //
+  //   위 시험은 **OPEN**에서만 확인했다. 중지된 캠페인에 갇힐 수 있는
+  //   상태는 OPEN만이 아니다 — `RESERVED`(의도는 썼는데 거래소 응답을
+  //   못 받음)와 `CLOSING`(닫기를 보냈는데 포지션 확인 전)도 있다.
+  //
+  //   `RESERVED`에서 `CLOSE_REQUEST`는 **일부러 막혀 있다.** 거래소에
+  //   주문이 올라갔다는 증거가 아직 없으므로, 먼저 그 사실을 확정해야
+  //   한다 — `ACK`(올라갔다)이거나 `UNKNOWN_RESPONSE`(모른다)다.
+  //   그래서 길이 없는 것이 아니라 **증거를 거치는 길**이다. 그 길이
+  //   실제로 SPENT까지 닿는지 센다.
+  test('★ 중지 뒤에도 RESERVED·CLOSING 슬롯이 SPENT까지 갈 수 있다', () => {
+    const step = (campaignId, v, tag, kind, evidence, expect, status) => {
+      const r = ev({
+        campaignId, expectedVersion: v, slotIndex: 0,
+        eventId: `ev-${tag}-${campaignId}`, kind, evidence,
+        exchangeOrderId: evidence === 'NONE' ? null : '7001',
+      });
+      assert.equal(r.code, expect, `${tag}: ${r.code}`);
+      if (status) assert.equal(r.status, status, `${tag} 뒤 상태`);
+      return r;
+    };
+
+    // ① RESERVED에서 중지됐다 — 거래소 응답을 못 받은 채로.
+    {
+      const { campaignId } = reserved();
+      assert.equal(parseKill(psql(target, green, killSql({ campaignId }))).code,
+        'KILL_PERSISTED');
+      let v = readState(target, green, campaignId).version;
+
+      // 바로 닫으려 들면 막힌다. 증거가 없는데 CLOSING으로 적지 않는다.
+      const blocked = step(campaignId, v, 'r0', 'CLOSE_REQUEST', 'NONE',
+        'EVENT_OUT_OF_ORDER', 'RESERVED');
+      assert.equal(blocked.version, v, '거절인데 버전이 올라갔다');
+
+      // 모른다고 적고 나면 닫는 길이 열린다.
+      v = step(campaignId, v, 'r1', 'UNKNOWN_RESPONSE', 'NONE',
+        'EVENT_APPLIED', 'UNKNOWN').version;
+      v = step(campaignId, v, 'r2', 'CLOSE_REQUEST', 'NONE',
+        'EVENT_APPLIED', 'CLOSING').version;
+      step(campaignId, v, 'r3', 'CLOSED', 'VENUE_POSITION',
+        'EVENT_APPLIED', 'SPENT');
+      assert.equal(readState(target, green, campaignId).statuses[0], 'SPENT');
+    }
+
+    // ② CLOSING에서 중지됐다 — 닫기를 보낸 뒤 중지가 들어온 경우다.
+    {
+      const { campaignId, version } = reserved();
+      let v = step(campaignId, version, 'c0', 'ACK', 'VENUE_ORDER',
+        'EVENT_APPLIED', 'OPEN').version;
+      v = step(campaignId, v, 'c1', 'CLOSE_REQUEST', 'NONE',
+        'EVENT_APPLIED', 'CLOSING').version;
+
+      assert.equal(parseKill(psql(target, green, killSql({ campaignId }))).code,
+        'KILL_PERSISTED');
+      v = readState(target, green, campaignId).version;
+
+      // 중지가 포지션 확인을 막으면 CLOSING에 영구히 갇힌다.
+      step(campaignId, v, 'c2', 'CLOSED', 'VENUE_POSITION',
+        'EVENT_APPLIED', 'SPENT');
+      assert.equal(readState(target, green, campaignId).statuses[0], 'SPENT');
+    }
+  });
+
+  // ── 연결(connection)까지 대조한다 ──
+  //
+  //   앞의 소유권 시험은 캠페인의 `connection_id`가 NULL인 상태에서
+  //   돌았다. 그러면 "연결이 다르다"를 거절하는지는 **NULL 대 값**만
+  //   확인한 셈이다. 실제로 연결이 붙은 캠페인에서 값 대 값을 센다.
+  test('★ 맞는 사용자라도 다른 연결이면 멈추지 못한다', () => {
+    const C1 = '44444444-4444-4444-8444-444444444444';
+    const C2 = '55555555-5555-4555-8555-555555555555';
+    const campaignId = `c-conn-${Date.now().toString(36)}`;
+    assert.equal(psql(target, green, openCampaignSql({
+      campaignId, userId: DEFAULT_OWNER, connectionId: C1,
+      environment: 'TESTNET', startingEquity: 1000,
+    }))[0], 'OPENED|0');
+
+    const kill = (a) => parseKill(psql(target, green, killSql({ campaignId, ...a })));
+
+    // 사용자는 맞는데 연결이 다르거나 비어 있으면 **닫힘 쪽으로 실패한다.**
+    for (const [label, conn] of [['다른 연결', C2], ['연결 없음', null]]) {
+      const r = kill({ callerConnectionId: conn });
+      assert.equal(r.code, 'CALLER_NOT_OWNER', `${label}: ${r.code}`);
+      assert.equal(r.version, null, `${label}: 남의 버전을 알려 줬다`);
+    }
+    const [before] = psql(target, green,
+      `SELECT killed, version FROM ten_slot_campaigns WHERE campaign_id = '${campaignId}'`);
+    assert.equal(String(before), 'f|0', '비인가 중지가 장부를 바꿨다');
+
+    // 사용자와 연결이 둘 다 맞을 때만 멈춘다.
+    assert.deepEqual(kill({ callerConnectionId: C1 }),
+      { code: 'KILL_PERSISTED', version: 1 });
+    assert.deepEqual(kill({ callerConnectionId: C1 }),
+      { code: 'KILL_ALREADY_PERSISTED', version: 1 });
+  });
+
   test('★ 남의 슬롯은 움직이지 못하고 거부 응답이 장부를 알려 주지 않는다', () => {
     const { campaignId, version } = reserved();
     for (const [label, expected, extra] of [
