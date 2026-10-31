@@ -207,6 +207,21 @@ export function intentRow(target, db, clientOrderId) {
   };
 }
 
+/** `ten_slot_kill` 호출 SQL. 정체성 기본값은 시험 주인과 같다 */
+export function killSql(a) {
+  const fill = (v, d) => (v === undefined ? d : v);
+  return `SELECT code, campaign_version FROM ten_slot_kill(
+    ${q(a.campaignId)}, ${q(fill(a.callerUserId, DEFAULT_OWNER))},
+    ${q(fill(a.callerConnectionId, null))})`;
+}
+
+export function parseKill(rows) {
+  const [line] = rows;
+  if (!line) return { code: null };
+  const [code, version] = String(line).split('|');
+  return { code, version: version === '' ? null : Number(version) };
+}
+
 export function parseClaim(rows) {
   const [line] = rows;
   if (!line) return { code: null };

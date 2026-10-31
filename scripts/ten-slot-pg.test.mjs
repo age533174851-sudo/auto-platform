@@ -13,6 +13,7 @@ import {
   PG_URL_ENV, PG_RESTART_ENV, pgTarget, psql, createScratchDb, dropScratchDb,
   openCampaignSql, claimSql, parseClaim, readState, raceClaims, psqlSpawn,
   migrationPaths, restartCommand, restartCluster, intentRow, DEFAULT_OWNER,
+  killSql, parseKill,
 } from './ten-slot-pg.mjs';
 import { createOfflineLedger, planOfflineClaim } from './ten-slot-offline.mjs';
 
@@ -253,10 +254,9 @@ if (!target.ok) {
 
   test('중지된 캠페인은 예약하지 않고, 중지 재시도는 버전을 올리지 않는다', () => {
     const campaignId = fresh();
-    assert.deepEqual(psql(target, green,
-      `SELECT code, campaign_version FROM ten_slot_kill('${campaignId}')`), ['KILL_PERSISTED|1']);
-    assert.deepEqual(psql(target, green,
-      `SELECT code, campaign_version FROM ten_slot_kill('${campaignId}')`), ['KILL_ALREADY_PERSISTED|1']);
+    const kill = (a) => parseKill(psql(target, green, killSql({ campaignId, ...a })));
+    assert.deepEqual(kill({}), { code: 'KILL_PERSISTED', version: 1 });
+    assert.deepEqual(kill({}), { code: 'KILL_ALREADY_PERSISTED', version: 1 });
     assert.equal(claim({ campaignId, expectedVersion: 1, clientOrderId: `killed-${campaignId}` }).code,
       'KILL_SWITCH');
     const s = readState(target, green, campaignId);
@@ -979,5 +979,76 @@ if (!target.ok) {
     // 비인가 요청이 장부를 **한 칸도** 바꾸지 않았다.
     assert.deepEqual(readState(target, green, campaignId), before,
       '비인가 요청이 장부를 바꿨다');
+  });
+
+  // ── 중지에도 주인이 있다 ──
+  //
+  //   `ten_slot_claim`에 소유권을 넣을 때 `ten_slot_kill`은 **일부러
+  //   빼 뒀다** — 막으면 열린 포지션을 닫을 수 없게 되는 것이 더 위험하다고
+  //   봤기 때문이다. 그건 두 가지를 섞은 판단이었다:
+  //
+  //     중지 **요청**의 주인은 확인해야 한다 (남의 캠페인을 멈출 수 없다)
+  //     중지 **뒤**의 청산은 계속 허용해야 한다 (098의 apply_event)
+  //
+  //   둘은 양립한다. `ten_slot_apply_event`는 중지를 보지 않으므로 여기에
+  //   소유권을 걸어도 닫는 길은 그대로다.
+  //
+  //   RED는 함수에 인자가 **아예 없었다**는 것이다:
+  //     ERROR: function ten_slot_kill(unknown, uuid, unknown) does not exist
+  //     SELECT code FROM ten_slot_kill('c-kill') → KILL_PERSISTED|1  (주인 아님)
+  test('★ 남의 캠페인은 중지시키지 못하고 장부를 알려 주지도 않는다', () => {
+    const campaignId = fresh();
+    const kill = (a) => parseKill(psql(target, green, killSql({ campaignId, ...a })));
+
+    for (const [label, expected, extra] of [
+      ['다른 사용자', 'CALLER_NOT_OWNER',
+        { callerUserId: '22222222-2222-4222-8222-222222222222' }],
+      ['다른 연결', 'CALLER_NOT_OWNER',
+        { callerConnectionId: '33333333-3333-4333-8333-333333333333' }],
+      ['호출자 없음', 'CALLER_UNKNOWN', { callerUserId: null }],
+    ]) {
+      const r = kill(extra);
+      assert.equal(r.code, expected, `${label}: ${r.code}`);
+      assert.equal(r.version, null, `${label}: 남의 버전 ${r.version}을 알려 줬다`);
+    }
+
+    // 장부는 한 칸도 바뀌지 않았다 — 중지도, 버전도.
+    const [row] = psql(target, green,
+      `SELECT killed, version FROM ten_slot_campaigns WHERE campaign_id = '${campaignId}'`);
+    assert.equal(String(row), 'f|0', '비인가 중지가 장부를 바꿨다');
+
+    // 주인은 정확히 한 번 중지시키고, 재시도는 버전을 올리지 않는다.
+    assert.deepEqual(kill({}), { code: 'KILL_PERSISTED', version: 1 });
+    assert.deepEqual(kill({}), { code: 'KILL_ALREADY_PERSISTED', version: 1 });
+    const [after] = psql(target, green,
+      `SELECT killed, version FROM ten_slot_campaigns WHERE campaign_id = '${campaignId}'`);
+    assert.equal(String(after), 't|1');
+  });
+
+  // 옛 1인자 호출 형태가 **우회 통로가 아닌지** 센다.
+  //
+  //   처음에는 그 호출이 `does not exist`로 깨질 거라고 기대했다. 틀렸다 —
+  //   새 인자에 `DEFAULT NULL`이 있으므로 PostgreSQL이 1인자 호출을
+  //   **3인자 함수로 해석한다.** 그래서 호출은 되지만 `p_caller_user_id`가
+  //   NULL이 되어 `CALLER_UNKNOWN`으로 **거절된다.**
+  //
+  //   오류보다 이쪽이 낫다: 옛 호출부가 남아 있어도 조용히 통과하지 않고
+  //   그 자리에서 막힌다. 중요한 것은 **등록된 서명이 하나**라는 사실이다 —
+  //   과적재가 남아 있으면 그쪽이 소유권 검사 없이 불린다.
+  test('★ 옛 1인자 호출은 통과하지 못하고, 서명은 하나뿐이다', () => {
+    const campaignId = fresh();
+    const [code] = psql(target, green,
+      `SELECT code FROM ten_slot_kill('${campaignId}')`);
+    assert.equal(code, 'CALLER_UNKNOWN', `옛 호출이 ${code}로 끝났다`);
+
+    const [row] = psql(target, green,
+      `SELECT killed, version FROM ten_slot_campaigns WHERE campaign_id = '${campaignId}'`);
+    assert.equal(String(row), 'f|0', '옛 호출 형태로 중지됐다');
+
+    // 등록된 서명이 하나뿐인지 직접 센다. 둘이면 과적재가 남은 것이다.
+    assert.deepEqual(psql(target, green,
+      `SELECT pg_get_function_identity_arguments(oid) FROM pg_proc
+        WHERE proname = 'ten_slot_kill' ORDER BY 1`),
+      ['p_campaign_id text, p_caller_user_id uuid, p_caller_connection_id uuid']);
   });
 }
