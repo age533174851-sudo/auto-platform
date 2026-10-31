@@ -794,7 +794,32 @@ export async function closeAllPositions(key: string, secret: string, testnet = t
 export function closeQuantityFor(
   totalQty: number, percent: number, stepSize: number, minQty: number,
 ): { qty: number; fullClose: boolean; reason: string } {
-  const total = Math.abs(Number(totalQty) || 0);
+  // ── 보유량도 `percent`와 **같은 규칙**이다 ──
+  //
+  //   아래 `percent`에는 이미 이 교훈이 적혀 있다 — "추측해서 청산하지
+  //   않습니다". 그런데 보유량은 `Number(totalQty) || 0`이었다. 같은 함수
+  //   안에서 **한쪽만 고쳐져 있던 것**이다.
+  //
+  //   `Number('bad') || 0`은 0이므로 `total <= 0`에 걸려 **"포지션이
+  //   없습니다"**라고 적혔다. 닫히지는 않으니(qty 0) 거래는 안전한 쪽으로
+  //   실패하지만, 틀린 것은 **사람이 읽는 사실**이다 — 못 읽은 것을
+  //   "없다"고 적으면 그 화면을 보고 포지션이 정리됐다고 판단한다.
+  //
+  //   `Infinity`는 더 나빴다. `|| 0`을 통과하므로 `total <= 0`이 아니고,
+  //   **없는 수량으로 청산 주문을 만들어** 아래까지 내려갔다.
+  //   `null` · `undefined` · `''`는 **거래소가 주지 않은 것**이다. 그런데
+  //   `Number(null)`과 `Number('')`은 둘 다 **0**이라 "포지션이 없다"로
+  //   읽힌다. `positionAmt`를 읽는 다른 두 정본(`positionAmtOrNull`,
+  //   `coinMQtyOrNull`)과 **같은 규칙**을 쓴다 — 안 준 것은 0이 아니다.
+  //   (선언 타입은 `number`지만 이 함수는 `any` 경계에서도 불린다.)
+  const nullish = totalQty == null
+    || (typeof totalQty === 'string' && (totalQty as string).trim() === '');
+  const rawTotal = Number(totalQty);
+  if (nullish || !Number.isFinite(rawTotal)) {
+    return { qty: 0, fullClose: false,
+      reason: `보유 수량을 확인하지 못했습니다 (${String(totalQty)}) — 추측해서 청산하지 않습니다` };
+  }
+  const total = Math.abs(rawTotal);
   if (total <= 0) return { qty: 0, fullClose: false, reason: '포지션이 없습니다' };
 
   // 말이 안 되는 비율이면 **거래하지 않는다.**
@@ -912,6 +937,22 @@ export async function prepareClosePosition(
     .find(p => p.symbol.toUpperCase() === sym);
   if (!pos || Math.abs(pos.amount) === 0) {
     return { ok: true, alreadyFlat: true, prepared: null, message: '이미 포지션이 없습니다' };
+  }
+  // ── **수량 미확인은 방향 불일치가 아니다** ──
+  //
+  //   `getFuturesPositions`는 `parseFloat(p.positionAmt) !== 0`으로
+  //   거른다. `parseFloat('bad')`는 `NaN`이고 `NaN !== 0`은 **true**라
+  //   깨진 줄이 통과하고, 그 줄은 `side: 'FLAT'` · `amount: NaN`으로
+  //   정규화된다. `'FLAT'`은 **지어낸 관측**이다.
+  //
+  //   그래서 아래 방향 비교가 먼저 걸려 "방향 불일치 — 요청 LONG, 실제
+  //   FLAT"이라고 답했다. 상태가 어긋난 것이 아니라 수량을 못 읽은
+  //   것인데, 그 화면을 보면 **없는 불일치를 찾게 된다.** 두 사실을
+  //   섞지 않으려면 이 확인이 방향 비교보다 앞에 있어야 한다.
+  if (!Number.isFinite(pos.amount)) {
+    return { ok: false, alreadyFlat: false, prepared: null,
+      message: '보유 수량을 확인하지 못했습니다 — 추측해서 청산하지 않습니다. '
+             + '거래소에서 직접 확인하세요' };
   }
   if (pos.side !== positionSide) {
     return { ok: false, alreadyFlat: false, prepared: null,
