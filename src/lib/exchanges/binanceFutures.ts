@@ -730,13 +730,35 @@ export async function readMarketSnapshot(
 // ── 전체 오픈주문 취소 (C 옵션) — 심볼별 DELETE allOpenOrders ───────
 export async function cancelAllOpenOrders(key: string, secret: string, testnet = true, symbols?: string[]) {
   let syms = symbols;
+  /** 심볼 목록을 **다 읽었는가.** 못 읽었으면 "대상 없음"이 아니다 */
+  let listComplete = true;
+  const listGaps: string[] = [];
   if (!syms) {
-    const { orders } = await getFuturesOpenOrders(key, secret, testnet);
-    const { positions } = await getFuturesPositions(key, secret, testnet);
+    // 조회 실패를 빈 목록으로 읽으면 **"취소할 것이 없다"**가 되고,
+    // `success: true`가 된다(빈 배열의 `every`는 true다). 남은 보호주문이
+    // 있는데 "전부 취소됨"으로 적히는 자리다.
+    const ores: any = await getFuturesOpenOrders(key, secret, testnet);
+    const pres: any = await getFuturesPositions(key, secret, testnet);
+    if (!ores?.success || !Array.isArray(ores.orders)) {
+      listComplete = false; listGaps.push(`미결 주문 조회: ${ores?.message || '실패'}`);
+    }
+    if (!pres?.success || !Array.isArray(pres.positions)) {
+      listComplete = false; listGaps.push(`포지션 조회: ${pres?.message || '실패'}`);
+    }
+    const posRows = Array.isArray(pres?.positions) ? pres.positions as any[] : [];
+    const unknownQty = posRows.filter((p: any) => qtyEvidence(p?.amount) === null);
+    if (unknownQty.length > 0) {
+      listComplete = false;
+      listGaps.push(`수량 미확인 ${unknownQty.length}건 (${unknownQty.map((p: any) => String(p?.symbol ?? '?')).join(', ')})`);
+    }
     const set = new Set<string>([
-      ...(orders || []).map(o => o.symbol),
-      ...((positions || []) as any[]).filter((p: any) => Math.abs(p.amount || 0) > 0).map((p: any) => p.symbol),
-    ]);
+      ...(Array.isArray(ores?.orders) ? ores.orders : []).map((o: any) => o.symbol),
+      // 수량을 못 읽은 줄도 **대상에 넣는다** — 모르는 쪽으로 기운다.
+      ...posRows.filter((p: any) => {
+        const a = qtyEvidence(p?.amount);
+        return a === null || Math.abs(a) > 0;
+      }).map((p: any) => p.symbol),
+    ].filter(Boolean));
     syms = Array.from(set);
   }
   const results: Array<{ symbol: string; ok: boolean; message?: string }> = [];
@@ -744,26 +766,88 @@ export async function cancelAllOpenOrders(key: string, secret: string, testnet =
     try { await fapiSigned('DELETE', '/fapi/v1/allOpenOrders', key, secret, testnet, { symbol: sym.toUpperCase().replace('/', '') }); results.push({ symbol: sym, ok: true }); }
     catch (e: any) { results.push({ symbol: sym, ok: false, message: e.message || '취소 실패' }); }
   }
-  return { success: results.every(r => r.ok), results, count: syms.length };
+  // 목록을 다 못 읽었으면 **성공이라고 적지 않는다.** 보낸 취소가 전부
+  // 성공했다는 것과 "취소할 것이 더 없다"는 것은 다른 사실이다.
+  return {
+    success: listComplete && results.every(r => r.ok),
+    results, count: syms.length,
+    listComplete,
+    message: listComplete ? ''
+      : `취소 대상 목록을 다 읽지 못했습니다 — ${listGaps.join(' · ')}. `
+        + '전부 취소됐다고 적지 않습니다',
+  };
 }
 
 // ── 전체 포지션 종료 (D 옵션) — reduce-only MARKET, 3초 간격 최대 5회 재시도 ──
 export async function closeAllPositions(key: string, secret: string, testnet = true, maxRetry = 5) {
   const attempts: Array<{ symbol: string; ok: boolean; message?: string }> = [];
+
+  // ── **못 읽은 것을 "전부 닫혔다"로 적지 않는다** ──
+  //
+  //   예전 코드는 조회의 `success`를 보지 않고 이렇게 읽었다:
+  //
+  //       const { positions } = await getFuturesPositions(...);
+  //       const open = ((positions || []) as any[])
+  //         .filter((p) => Math.abs(p.amount || 0) > 0);
+  //       if (open.length === 0) return { success: true, remaining: 0, … };
+  //
+  //   두 길로 **거짓 SUCCESS**가 됐다:
+  //
+  //     · 조회 실패 — `{ success: false, message }`에는 `positions`가
+  //       **아예 없다.** `positions || []`가 빈 배열이 되어 "열린 것 없음"이
+  //       된다. 이 파일의 `prepareClosePosition`은 같은 함정을 이미
+  //       막아 뒀다("못 읽은 것을 flat으로 읽지 않는다").
+  //     · 수량이 깨진 줄 — `amount`가 `NaN`이고 `NaN || 0`은 0이라
+  //       필터에서 **사라진다.**
+  //
+  //   그러면 화면은 "포지션 전체 종료 완료"를 띄운다. 상위 어댑터의
+  //   계약은 이미 맞게 적혀 있었다 — *"남은 포지션 수. 못 읽으면 null이다
+  //   — 0으로 적으면 '전부 닫혔다'가 된다"*. 아래가 그 계약을 어기고
+  //   있었다.
+  const readOpen = async () => {
+    const res: any = await getFuturesPositions(key, secret, testnet);
+    if (!res?.success || !Array.isArray(res.positions)) {
+      return { ok: false as const, open: [] as any[], unknown: [] as any[],
+        message: String(res?.message || '포지션 조회 실패') };
+    }
+    const rows = res.positions as any[];
+    // 수량을 못 읽은 줄은 **'있다·모른다'**다. 0으로 세지 않는다.
+    const unknown = rows.filter((p: any) => qtyEvidence(p?.amount) === null);
+    const open = rows.filter((p: any) => {
+      const a = qtyEvidence(p?.amount);
+      return a !== null && Math.abs(a) > 0;
+    });
+    return { ok: true as const, open, unknown, message: '' };
+  };
+
+  /** 못 읽은 것이 있으면 `remaining`은 **null**이고 성공이 아니다 */
+  const unknownResult = (r: { unknown: any[]; message: string }, retries: number) => ({
+    success: false, remaining: null as number | null, retries, attempts,
+    message: r.message
+      || `수량을 확인하지 못한 포지션이 ${r.unknown.length}건 있습니다 `
+         + `(${r.unknown.map((p: any) => String(p?.symbol ?? '?')).join(', ')}) — `
+         + '전부 닫혔다고 적지 않습니다. 거래소에서 직접 확인하세요',
+  });
+
   for (let i = 1; i <= maxRetry; i++) {
-    const { positions } = await getFuturesPositions(key, secret, testnet);
-    const open = ((positions || []) as any[]).filter((p: any) => Math.abs(p.amount || 0) > 0);
-    if (open.length === 0) return { success: true, remaining: 0, retries: i - 1, attempts };
-    for (const p of open) {
-      const side: 'BUY' | 'SELL' = (p.amount || 0) > 0 ? 'SELL' : 'BUY';
-      const r = await placeFuturesOrderSafe(key, secret, { symbol: p.symbol, side, type: 'MARKET', quantity: Math.abs(p.amount), reduceOnly: true }, testnet);
-      attempts.push({ symbol: p.symbol, ok: r.success, message: r.message });
+    const r = await readOpen();
+    if (!r.ok) return unknownResult({ unknown: [], message: r.message }, i - 1);
+    if (r.unknown.length > 0 && r.open.length === 0) {
+      return unknownResult(r, i - 1);
+    }
+    if (r.open.length === 0) return { success: true, remaining: 0, retries: i - 1, attempts, message: '' };
+    for (const p of r.open) {
+      const amt = qtyEvidence(p.amount) as number;
+      const side: 'BUY' | 'SELL' = amt > 0 ? 'SELL' : 'BUY';
+      const sent = await placeFuturesOrderSafe(key, secret, { symbol: p.symbol, side, type: 'MARKET', quantity: Math.abs(amt), reduceOnly: true }, testnet);
+      attempts.push({ symbol: p.symbol, ok: sent.success, message: sent.message });
     }
     if (i < maxRetry) await new Promise(res => setTimeout(res, 3000));  // 3초 간격 재시도
   }
-  const { positions } = await getFuturesPositions(key, secret, testnet);
-  const remaining = ((positions || []) as any[]).filter((p: any) => Math.abs(p.amount || 0) > 0).length;
-  return { success: remaining === 0, remaining, retries: maxRetry, attempts };
+  const last = await readOpen();
+  if (!last.ok) return unknownResult({ unknown: [], message: last.message }, maxRetry);
+  if (last.unknown.length > 0) return unknownResult(last, maxRetry);
+  return { success: last.open.length === 0, remaining: last.open.length, retries: maxRetry, attempts, message: '' };
 }
 
 // 현재 잔여 포지션/주문 수 (reconciliation용)
@@ -791,6 +875,28 @@ export async function closeAllPositions(key: string, secret: string, testnet = t
  * 여기서 틀리면 조용하다. 조금 더 닫히거나 덜 닫히는 것은 화면에서 알 수 없고,
  * 그 차이가 남은 포지션의 청산가를 바꾼다.
  */
+/**
+ * **수량 증거를 읽는다 — 못 읽으면 `null`이다.**
+ *
+ * `positionAmtOrNull`(`positionRiskRead.ts`)·`coinMQtyOrNull`
+ * (`binanceCoinFutures.ts`)과 **같은 규칙**이다. 세 곳의 규칙이 갈리면
+ * 한쪽만 고쳐지고 그때 두 답이 달라진다.
+ *
+ * `parseFloat`이 아니라 `Number`를 쓴다 — `parseFloat('0.5XYZ')`는 0.5를
+ * 주지만 그건 우리가 이해한 본문이 아니다.
+ */
+function qtyEvidence(raw: unknown): number | null {
+  if (typeof raw === 'number') return Number.isFinite(raw) ? raw : null;
+  if (typeof raw !== 'string') return null;
+  const t = raw.trim();
+  // **10진수로 적힌 수량만 받는다.** `Number('0x10')`은 16이다 — 거래소가
+  // 보내는 본문이 아니고, 16을 수량으로 쓰면 보유량과 무관한 주문이 된다.
+  // 지수 표기(`1e-8`)는 받는다 — 작은 수량에 실제로 쓰인다.
+  if (!/^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$/.test(t)) return null;
+  const n = Number(t);
+  return Number.isFinite(n) ? n : null;
+}
+
 export function closeQuantityFor(
   totalQty: number, percent: number, stepSize: number, minQty: number,
 ): { qty: number; fullClose: boolean; reason: string } {
@@ -807,15 +913,17 @@ export function closeQuantityFor(
   //
   //   `Infinity`는 더 나빴다. `|| 0`을 통과하므로 `total <= 0`이 아니고,
   //   **없는 수량으로 청산 주문을 만들어** 아래까지 내려갔다.
-  //   `null` · `undefined` · `''`는 **거래소가 주지 않은 것**이다. 그런데
-  //   `Number(null)`과 `Number('')`은 둘 다 **0**이라 "포지션이 없다"로
-  //   읽힌다. `positionAmt`를 읽는 다른 두 정본(`positionAmtOrNull`,
-  //   `coinMQtyOrNull`)과 **같은 규칙**을 쓴다 — 안 준 것은 0이 아니다.
+  //   `positionAmt`를 읽는 정본이 세 곳이고(`positionAmtOrNull`,
+  //   `coinMQtyOrNull`, 여기) **규칙이 갈리면 그게 다음 사고다.** 그래서
+  //   세 곳이 같은 입력 계약을 쓴다 — 숫자이거나 숫자로 적힌 문자열만
+  //   수량이고, 나머지는 전부 **모름**이다.
+  //
+  //   `Number()`에 그냥 맡기면 안 되는 것들: `Number(null)`·`Number('')`
+  //   ·`Number([])`·`Number(false)`는 **0**이고 `Number(true)`·
+  //   `Number([1])`은 **1**이다. 하나도 수량 증거가 아니다.
   //   (선언 타입은 `number`지만 이 함수는 `any` 경계에서도 불린다.)
-  const nullish = totalQty == null
-    || (typeof totalQty === 'string' && (totalQty as string).trim() === '');
-  const rawTotal = Number(totalQty);
-  if (nullish || !Number.isFinite(rawTotal)) {
+  const rawTotal = qtyEvidence(totalQty);
+  if (rawTotal === null) {
     return { qty: 0, fullClose: false,
       reason: `보유 수량을 확인하지 못했습니다 (${String(totalQty)}) — 추측해서 청산하지 않습니다` };
   }

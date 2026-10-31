@@ -22,6 +22,7 @@ import { FakeVenue, FakeDb, withCryptoEnv } from './venueHarness';
 //   module"이 난다. 정적으로 가져오면 컴파일되고, 그 파일 안의 `@/`
 //   동적 import는 러너의 해석 shim이 처리한다.
 import { executeOrder, reconcilePendingOrders } from '../../lib/engine/orderExecutor';
+import { closeAllPositions } from '../../lib/exchanges/binanceFutures';
 import { placeSpotOrder } from '../../lib/exchanges/spotOrderExecutor';
 import { RECONCILE_TARGET_STATUSES } from '../../lib/engine/pendingReconcile';
 import { isProvenFill } from '../../lib/engine/holdingEvidence';
@@ -99,6 +100,83 @@ async function scenario<T>(venue: FakeVenue, body: () => Promise<T>): Promise<T 
 
 export async function runOrderPathIntegrationTests() {
   console.log('[통합 — 실제 실행 경로 (fetch·DB만 가짜)]');
+
+  // ══════════ ⓿ 전체 청산: 못 읽은 것을 "전부 닫혔다"로 적지 않는다 ══════════
+  //
+  //   검수 지적이 맞았다. `closeAllPositions`는 조회의 `success`를 보지
+  //   않고 `positions || []`로 읽었고, `Math.abs(p.amount || 0) > 0`으로
+  //   열린 포지션을 셌다. 두 길로 **거짓 SUCCESS**가 됐다:
+  //
+  //     (a) 수량이 깨진 줄 — `NaN || 0`은 0이라 필터에서 사라진다
+  //     (b) 조회 실패 — `{ success: false, message }`에는 `positions`가
+  //         **아예 없다.** `|| []`가 빈 배열이 된다
+  //
+  //   그러면 `open.length === 0` → `{ success: true, remaining: 0 }`이고,
+  //   화면은 "포지션 전체 종료 완료"를 띄운다. 상위 어댑터의 계약은 이미
+  //   맞았다 — *"남은 포지션 수. 못 읽으면 null이다 — 0으로 적으면
+  //   '전부 닫혔다'가 된다"*. **아래가 그 계약을 어기고 있었다.**
+  //
+  //   시험을 여기(통합)에 두는 이유: 전역 `fetch`를 바꾸므로 단위 파일에
+  //   두면 다른 파일의 async 시험과 섞인다. 실제로 그렇게 19건이
+  //   오염됐다.
+  {
+    const POS = '/fapi/v2/positionRisk';
+    const ORDER = '/fapi/v1/order';
+    const ROW = (over: any) => ({
+      symbol: 'BTCUSDT', positionAmt: '0', entryPrice: '95000', markPrice: '95000',
+      unRealizedProfit: '0', leverage: '100', liquidationPrice: '90000',
+      marginType: 'isolated', ...over,
+    });
+
+    const run = async (reply: any) => {
+      const venue = new FakeVenue().on(POS, reply, 'GET')
+        .on(ORDER, { json: { orderId: 1, status: 'FILLED', executedQty: '0.5', avgPrice: '95000' } }, 'POST');
+      const r = await scenario(venue,
+        () => closeAllPositions('K'.repeat(64), 'S'.repeat(64), true, 1) as any);
+      return { r, venue };
+    };
+
+    const broken = await run({ json: [ROW({ positionAmt: 'bad' })] });
+    const downed = await run({ status: 503, json: { code: -1001, msg: 'down' } });
+    const opened = await run({ json: [ROW({ positionAmt: '0.5' })] });
+    const flat = await run({ json: [ROW({ positionAmt: '0' })] });
+
+    test('★★ (a) 수량이 깨진 줄을 "전부 닫혔다"로 적지 않는다', () => {
+      const { r, venue } = broken;
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const o = r as any;
+      assert(!(o.success === true && o.remaining === 0),
+        `수량을 못 읽었는데 전부 닫혔다고 적었다: ${JSON.stringify(o)}`);
+      eq(o.remaining, null, `못 읽은 줄의 remaining이 null이 아니다: ${JSON.stringify(o)}`);
+      eq(venue.countOf(ORDER, 'POST'), 0, '수량을 모르는데 주문을 보냈다');
+      assert(/확인하지 못/.test(String(o.message)), `사유가 없다: ${o.message}`);
+    });
+
+    test('★★ (b) 조회 실패를 "전부 닫혔다"로 적지 않는다', () => {
+      const { r, venue } = downed;
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const o = r as any;
+      eq(o.success, false, `조회 실패인데 성공으로 적었다: ${JSON.stringify(o)}`);
+      eq(o.remaining, null, `조회 실패를 남은 0으로 적었다: ${JSON.stringify(o)}`);
+      eq(venue.countOf(ORDER, 'POST'), 0, '조회 실패인데 주문을 보냈다');
+    });
+
+    test('★ (c) 열린 포지션은 그대로 닫는다 — 과잉 차단하지 않는다', () => {
+      const { r, venue } = opened;
+      assert(!(r instanceof Error), String((r as any)?.message));
+      assert(venue.countOf(ORDER, 'POST') >= 1,
+        `열린 포지션인데 청산 주문이 0건이다: ${JSON.stringify(r)}`);
+    });
+
+    test('★ (d) 진짜 0은 성공이고 남은 0이다', () => {
+      const { r, venue } = flat;
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const o = r as any;
+      eq(o.success, true, `진짜 0인데 성공이 아니다: ${JSON.stringify(o)}`);
+      eq(o.remaining, 0);
+      eq(venue.countOf(ORDER, 'POST'), 0, '닫을 것이 없는데 주문을 보냈다');
+    });
+  }
 
   // ══════════ ① 정상 접수 — 의도 기록이 전송보다 앞인가 ══════════
   {

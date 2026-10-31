@@ -178,4 +178,14 @@ export function runCloseQtyTests() {
     assert(/확인하지 못|유효하지 않/.test(r.message),
       `모른다는 사실이 메시지에 없다: ${r.message}`);
   });
+
+  // 강제 변환이 남은 자리 — #540·#541의 입력 계약과 같은 규칙인가.
+  test('★★ boolean·배열·객체를 수량으로 인정하지 않는다', () => {
+    for (const bad of [true, false, [], {}, [1], '0x10']) {
+      const r = closeQuantityFor(bad as any, 50, 0.001, 0.001);
+      eq(r.qty, 0, `${JSON.stringify(bad)}을 수량으로 읽었다`);
+      assert(/확인하지 못/.test(r.reason),
+        `${JSON.stringify(bad)}의 사유가 "모른다"가 아니다: ${r.reason}`);
+    }
+  });
 }
