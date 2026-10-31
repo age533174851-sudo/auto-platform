@@ -191,7 +191,14 @@ export async function getPriceOrdersGateFutures(
     const rows = await gateReq<any[]>('GET', '/api/v4/futures/usdt/price_orders', {
       key, secret, qs: `status=open&contract=${contract}`, testnet,
     });
-    return Array.isArray(rows) ? rows : [];
+    // **200인데 목록이 아니면 `null`이다.** 주석이 처음부터 그렇게 적혀
+    // 있었는데(`못 읽으면 null — 빈 배열과 구분한다`) 구현은 `[]`를
+    // 돌려줬다. 그러면 Gate가 200에 `{label:'ERROR'}`·`null`·빈 본문을
+    // 줄 때 **"기존 보호주문 없음"이 확정되고** 새 보호주문이 나간다.
+    //
+    // 같은 파일의 `getAllPriceOrdersGateFutures`는 이미 비배열을 `null`로
+    // 돌려준다 — 선례가 옆에 있는데 이 함수만 빠져 있었다.
+    return Array.isArray(rows) ? rows : null;
   } catch { return null; }
 }
 

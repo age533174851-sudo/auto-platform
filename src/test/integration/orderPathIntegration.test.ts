@@ -1199,6 +1199,17 @@ export async function runGateTpslRouteTests() {
   }
 
   const unreadable = await run({ status: 503, json: { label: 'SERVICE_UNAVAILABLE' } });
+  // ── HTTP **200인데 본문이 목록이 아닌** 경우 ──
+  //
+  //   `getPriceOrdersGateFutures`는 `Array.isArray(rows) ? rows : []`다.
+  //   200에 `{label:'UNKNOWN'}`·`null`·빈 본문이 오면 **빈 목록이
+  //   "기존 보호주문 없음"으로 확정**되고 새 보호주문이 나간다.
+  //   503은 throw되어 막히지만 이 길은 막히지 않는다.
+  //
+  //   같은 파일의 `getAllPriceOrdersGateFutures`는 이미 비배열을
+  //   `null`로 돌려준다 — 선례가 옆에 있는데 이 함수만 빠져 있었다.
+  const bad200 = await run({ json: { label: 'UNKNOWN' } });
+  const null200 = await run({ json: null });
   const existing = await run({ json: [{ id: 7, contract: 'BTC_USDT', rule: 1, trigger: {} }] });
   const empty = await run({ json: [] });
 
@@ -1226,6 +1237,19 @@ export async function runGateTpslRouteTests() {
     eq(venue.countOf(PRICE_ORDERS, 'POST'), 0, '겹쳐 걸었다');
     // **남의 보호주문을 지우지 않는다** — 절대 규칙.
     eq(venue.countOf(PRICE_ORDERS, 'DELETE'), 0, '계약 단위 일괄 취소를 보냈다');
+  });
+
+  test('★★ Gate: 200인데 목록이 아니면 "기존 보호주문 없음"으로 확정하지 않는다', () => {
+    for (const [label, got] of [['객체', bad200], ['null', null200]] as const) {
+      const { r, venue } = got;
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const b = (r as any).body;
+      assert(b?.ok !== true,
+        `${label} 본문인데 성공으로 적었다: ${JSON.stringify(b).slice(0, 220)}`);
+      eq(venue.countOf(PRICE_ORDERS, 'POST'), 0,
+        `${label} 본문인데 새 보호주문을 보냈다`);
+      eq(venue.countOf(PRICE_ORDERS, 'DELETE'), 0, '일괄 취소를 보냈다');
+    }
   });
 
   test('★ Gate: 기존 보호주문이 없으면 그대로 건다 — 과잉 차단하지 않는다', () => {
