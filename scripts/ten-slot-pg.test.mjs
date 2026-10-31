@@ -1382,4 +1382,102 @@ if (!target.ok) {
       'FREE로 되돌리는 전이가 있다');
     assert.equal(n, 90);
   });
+
+  // ── 예외 경로도 **같은 정본으로** 판정하는가 ──
+  //
+  //   정상 경로(③)는 기존 `event_id`를 찾으면 payload를 대조하고 다르면
+  //   `EVENT_CONFLICT`를 돌려준다. 그런데 `unique_violation` 핸들러는
+  //   **그 대조가 없었다** — `event_id`만 다시 찾아 `EVENT_ALREADY_APPLIED`와
+  //   그 줄의 `to_status`를 돌려줬다.
+  //
+  //   같은 판단이 두 곳에 있고 한쪽에만 비교가 있었다. 이 저장소의 상습
+  //   고장 ②를 내가 다시 만든 것이다.
+  //
+  //   결과: 서로 다른 사용자가 소유한 **다른 캠페인**에 같은 `event_id`가
+  //   오면, 진 쪽은 "이미 적용됐다"는 거짓 성공과 **남의 캠페인 상태**를
+  //   받는다. 자기 캠페인에는 그 이벤트가 없고 상태도 안 바뀌었는데.
+  //
+  //   ★ 결정적으로 재현한다 (경합에 기대지 않는다):
+  //     A: 한 트랜잭션에서 apply_event를 호출하고 **커밋하지 않은 채** 쉰다
+  //     B: 400ms 뒤 같은 event_id로 호출 → ③은 아무것도 못 보고 INSERT로
+  //        가서 PK 인덱스에서 **대기**한다 → A 커밋 후 unique_violation
+  test('★ 예외 경로가 다른 캠페인의 사건을 멱등 성공으로 적지 않는다', async () => {
+    const stamp = Date.now().toString(36);
+    const idA = `c-xa-${stamp}`;
+    const idB = `c-xb-${stamp}`;
+    const ownerB = '55555555-5555-4555-8555-555555555555';
+
+    // 서로 다른 주인이 소유한 캠페인 둘. 다른 행을 잠그므로 병렬로 진행된다.
+    for (const [cid, owner] of [[idA, DEFAULT_OWNER], [idB, ownerB]]) {
+      assert.equal(psql(target, green, openCampaignSql({
+        campaignId: cid, userId: owner, environment: 'TESTNET', startingEquity: 1000,
+      }))[0], 'OPENED|0');
+      assert.equal(parseClaim(psql(target, green, claimSql({
+        campaignId: cid, expectedVersion: 0, clientOrderId: `order-${cid}`,
+        callerUserId: owner,
+      }))).code, 'RESERVATION_AND_INTENT_DURABLE');
+    }
+
+    const shared = `shared-event-${stamp}`;
+    // A는 커밋을 늦춘다. 한 `-c`에 담으면 psql이 하나의 트랜잭션으로 돈다.
+    const a = psqlSpawn(target, green,
+      `${applyEventSql({
+        campaignId: idA, expectedVersion: 1, slotIndex: 0, eventId: shared,
+        kind: 'ACK', evidence: 'VENUE_ORDER', exchangeOrderId: 'order-A',
+      })}; SELECT pg_sleep(1.5);`);
+
+    await new Promise(r => setTimeout(r, 400));
+
+    // B는 **다른 캠페인·다른 주인·다른 사건**이다.
+    const b = psqlSpawn(target, green, applyEventSql({
+      campaignId: idB, expectedVersion: 1, slotIndex: 0, eventId: shared,
+      kind: 'UNKNOWN_RESPONSE', evidence: 'NONE', callerUserId: ownerB,
+    }));
+
+    const [ra, rb] = await Promise.all([a.done, b.done]);
+    assert.equal(ra.code, 0, `A가 실패했다: ${ra.err.trim()}`);
+    assert.equal(rb.code, 0, `B가 실패했다: ${rb.err.trim()}`);
+
+    const got = parseEvent(rb.out.replace(/\n$/, '').split('\n').filter(l => l.includes('|')));
+    // ★ 여기가 RED였다 — `EVENT_ALREADY_APPLIED`와 A의 `OPEN`이 돌아왔다.
+    assert.equal(got.code, 'EVENT_CONFLICT',
+      `B가 ${got.code}를 받았다 (상태 ${got.status})`);
+    assert.equal(got.status, null, `B가 남의 캠페인 상태 ${got.status}를 받았다`);
+
+    // B의 장부는 아무것도 바뀌지 않았다.
+    const stB = readState(target, green, idB);
+    assert.equal(stB.version, 1, 'B의 버전이 움직였다');
+    assert.equal(stB.statuses[0], 'RESERVED', 'B의 슬롯이 움직였다');
+    assert.equal(eventRows(target, green, idB).length, 0, 'B에 증거가 남았다');
+
+    // A는 정상 적용됐다.
+    assert.equal(readState(target, green, idA).statuses[0], 'OPEN');
+    assert.deepEqual(eventRows(target, green, idA).map(e => [e.eventId, e.to]),
+      [[shared, 'OPEN']]);
+  });
+
+  // 같은 캠페인·같은 사건의 동시 재시도는 **여전히 멱등**이어야 한다.
+  // 위 수정이 이것까지 거절하면 응답 유실 복구가 막힌다.
+  test('★ 예외 경로에서 진짜 같은 사건은 멱등으로 남는다', async () => {
+    const { campaignId, version } = reserved();
+    const shared = `same-event-${Date.now().toString(36)}`;
+    const args = {
+      campaignId, expectedVersion: version, slotIndex: 0, eventId: shared,
+      kind: 'ACK', evidence: 'VENUE_ORDER', exchangeOrderId: '7001',
+    };
+    const a = psqlSpawn(target, green, `${applyEventSql(args)}; SELECT pg_sleep(1.5);`);
+    await new Promise(r => setTimeout(r, 400));
+    const b = psqlSpawn(target, green, applyEventSql(args));
+    const [ra, rb] = await Promise.all([a.done, b.done]);
+    assert.equal(ra.code, 0, ra.err.trim());
+    assert.equal(rb.code, 0, rb.err.trim());
+
+    const got = parseEvent(rb.out.replace(/\n$/, '').split('\n').filter(l => l.includes('|')));
+    assert.equal(got.code, 'EVENT_ALREADY_APPLIED', `B가 ${got.code}를 받았다`);
+    assert.equal(got.status, 'OPEN');
+    assert.equal(got.version, version + 1, '멱등 응답이 엉뚱한 버전을 줬다');
+    assert.equal(eventRows(target, green, campaignId).length, 1);
+    assert.equal(readState(target, green, campaignId).version, version + 1,
+      '버전이 두 번 올라갔다');
+  });
 }

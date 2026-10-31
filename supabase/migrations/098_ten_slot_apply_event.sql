@@ -147,6 +147,51 @@ CREATE POLICY ten_slot_events_service ON ten_slot_events
 COMMENT ON TABLE ten_slot_events IS
   '슬롯 전이의 증거 로그. 추가만 하고 덮어쓰지 않는다 — 같은 event_id의 재시도가 멱등해지는 근거다. evidence는 그 말을 무엇을 보고 하는지다(VENUE_ORDER·VENUE_POSITION·NONE).';
 
+-- ── 같은 `event_id`가 **같은 사건인가** ──
+--
+--   판정을 한 곳에만 둔다. 이 비교가 두 자리에서 필요하다:
+--
+--     ③ 정상 경로           기존 줄을 먼저 읽어서 만났을 때
+--     EXCEPTION 핸들러      동시 호출에 PK로 져서 만났을 때
+--
+--   처음에는 ③에만 비교를 적었고 핸들러는 `event_id`만 보고
+--   `EVENT_ALREADY_APPLIED`를 돌려줬다. 그래서 **다른 사용자가 소유한 다른
+--   캠페인**에 같은 키가 오면 진 쪽이 "이미 적용됐다"는 거짓 성공과
+--   **남의 캠페인 상태**를 받았다. 자기 장부에는 그 이벤트가 없는데.
+--
+--   같은 판단이 두 곳에 있고 한쪽만 고쳐진 상태였다 — 이 저장소의 상습
+--   고장 ②다. 그래서 비교를 함수로 뽑아 **두 자리가 같은 것을 부른다.**
+--
+--   `IS DISTINCT FROM`을 쓴다. `=`는 NULL을 만나면 NULL을 돌려줘
+--   **다른 것을 같다고 읽는다**(097의 `ten_slot_identity_verdict`와 같은 이유).
+CREATE OR REPLACE FUNCTION public.ten_slot_event_same(
+  p_row         public.ten_slot_events,
+  p_campaign_id TEXT,
+  p_slot_index  INT,
+  p_kind        TEXT,
+  p_evidence    TEXT,
+  p_order_id    TEXT,
+  p_qty         NUMERIC,
+  p_price       NUMERIC
+)
+RETURNS BOOLEAN
+LANGUAGE sql
+IMMUTABLE
+AS $$
+  SELECT p_row.campaign_id       IS NOT DISTINCT FROM p_campaign_id
+     AND p_row.slot_index        IS NOT DISTINCT FROM p_slot_index
+     AND p_row.kind              IS NOT DISTINCT FROM p_kind
+     AND p_row.evidence          IS NOT DISTINCT FROM p_evidence
+     AND p_row.exchange_order_id IS NOT DISTINCT FROM p_order_id
+     AND p_row.filled_qty        IS NOT DISTINCT FROM p_qty
+     AND p_row.avg_price         IS NOT DISTINCT FROM p_price
+$$;
+
+COMMENT ON FUNCTION public.ten_slot_event_same(
+  public.ten_slot_events, TEXT, INT, TEXT, TEXT, TEXT, NUMERIC, NUMERIC
+) IS
+  '같은 event_id가 같은 사건인지 판정하는 정본. 정상 경로와 unique_violation 핸들러가 둘 다 이것을 부른다 — 한쪽만 비교하면 다른 캠페인의 사건이 멱등 성공으로 읽힌다.';
+
 -- ── 이벤트를 적용한다 ──
 --
 --   코드:
@@ -186,6 +231,7 @@ DECLARE
   v_prev     public.ten_slot_events;
   v_next     BIGINT;
   v_rows     INT;
+  v_constraint TEXT;
 BEGIN
   -- ① 캠페인 줄을 잠근다. 전이와 버전 증가가 같은 잠금 안에 있어야
   --    동시 두 이벤트가 섞이지 않는다.
@@ -221,13 +267,10 @@ BEGIN
   IF v_prev.event_id IS NOT NULL THEN
     -- 같은 키로 **다른 사건**이 오면 둘 중 하나가 틀린 것이고 어느 쪽인지
     -- 알 수 없다. 조용히 한쪽을 고르지 않는다.
-    IF v_prev.campaign_id IS DISTINCT FROM p_campaign_id
-       OR v_prev.slot_index IS DISTINCT FROM p_slot_index
-       OR v_prev.kind IS DISTINCT FROM p_kind
-       OR v_prev.evidence IS DISTINCT FROM p_evidence
-       OR v_prev.exchange_order_id IS DISTINCT FROM p_exchange_order_id
-       OR v_prev.filled_qty IS DISTINCT FROM p_filled_qty
-       OR v_prev.avg_price IS DISTINCT FROM p_avg_price THEN
+    IF NOT public.ten_slot_event_same(
+         v_prev, p_campaign_id, p_slot_index, p_kind, p_evidence,
+         p_exchange_order_id, p_filled_qty, p_avg_price) THEN
+      -- 상태 칸을 비운다. 그 줄은 **남의 캠페인 것일 수 있다.**
       RETURN QUERY SELECT 'EVENT_CONFLICT'::TEXT, NULL::TEXT, v_campaign.version;
       RETURN;
     END IF;
@@ -313,23 +356,52 @@ BEGIN
 
 EXCEPTION
   -- 동시 두 호출이 같은 `event_id`로 들어오면 늦은 쪽이 PK 충돌로 깨진다.
-  -- 그건 "이미 적용됐다"와 같은 사실이다 — 다시 읽어 그렇게 답한다.
-  -- (097의 캠페인 동시 개설과 같은 모양이다.)
+  -- 그건 "이미 적용됐다"와 **같은 사실일 수도 있고 아닐 수도 있다** —
+  -- 다시 읽어서 ③과 **같은 정본으로** 판정한다.
   WHEN unique_violation THEN
+    -- **어느 제약에서 깨졌는지 확인한다.** `SQLERRM`을 파싱하지 않는다 —
+    -- 문구는 로케일과 판본에 따라 바뀐다. 기대한 제약이 아니면 이 사건을
+    -- 멱등으로 오판하지 않고 그대로 올린다.
+    GET STACKED DIAGNOSTICS v_constraint = CONSTRAINT_NAME;
+    IF v_constraint IS DISTINCT FROM 'ten_slot_events_pkey' THEN
+      RAISE;
+    END IF;
+
     SELECT * INTO v_prev
       FROM public.ten_slot_events AS e
      WHERE e.event_id = p_event_id;
     IF v_prev.event_id IS NULL THEN
       RAISE;
     END IF;
-    RETURN QUERY SELECT 'EVENT_ALREADY_APPLIED'::TEXT, v_prev.to_status,
-                        (SELECT c.version FROM public.ten_slot_campaigns AS c
-                          WHERE c.campaign_id = p_campaign_id);
+
+    -- 버전은 **다시 읽는다.** 이긴 쪽이 올린 값은 다른 트랜잭션에서
+    -- 커밋됐으므로 `v_campaign.version`(경합 전에 읽은 값)은 낡았다.
+    SELECT c.version INTO v_next
+      FROM public.ten_slot_campaigns AS c
+     WHERE c.campaign_id = p_campaign_id;
+
+    IF NOT public.ten_slot_event_same(
+         v_prev, p_campaign_id, p_slot_index, p_kind, p_evidence,
+         p_exchange_order_id, p_filled_qty, p_avg_price) THEN
+      -- 같은 키의 **다른 사건**이다. 상태 칸을 비운다 — 그 줄은 남의
+      -- 캠페인 것일 수 있고, 내 장부에는 이 이벤트가 없다.
+      RETURN QUERY SELECT 'EVENT_CONFLICT'::TEXT, NULL::TEXT, v_next;
+      RETURN;
+    END IF;
+
+    RETURN QUERY SELECT 'EVENT_ALREADY_APPLIED'::TEXT, v_prev.to_status, v_next;
 END;
 $$;
 
 REVOKE ALL ON FUNCTION public.ten_slot_next_status(TEXT, TEXT, TEXT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.ten_slot_next_status(TEXT, TEXT, TEXT) TO service_role;
+
+REVOKE ALL ON FUNCTION public.ten_slot_event_same(
+  public.ten_slot_events, TEXT, INT, TEXT, TEXT, TEXT, NUMERIC, NUMERIC
+) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.ten_slot_event_same(
+  public.ten_slot_events, TEXT, INT, TEXT, TEXT, TEXT, NUMERIC, NUMERIC
+) TO service_role;
 
 REVOKE ALL ON FUNCTION public.ten_slot_apply_event(
   TEXT, BIGINT, INT, TEXT, TEXT, TEXT, TEXT, NUMERIC, NUMERIC, UUID, UUID
@@ -343,6 +415,8 @@ COMMENT ON FUNCTION public.ten_slot_apply_event(
 ) IS
   '슬롯 전이를 증거 로그·슬롯 상태·캠페인 버전과 한 트랜잭션으로 적는다. '
   '같은 event_id의 재시도는 멱등이고 버전을 올리지 않는다. 같은 키의 다른 '
-  '사건은 EVENT_CONFLICT로 막는다. 증거 없이 OPEN·SPENT로 올리지 않고 '
+  '사건은 EVENT_CONFLICT로 막는다 — 정상 경로와 unique_violation 핸들러가 '
+  'ten_slot_event_same 하나로 판정하므로 다른 캠페인의 사건이 멱등 성공으로 '
+  '읽히지 않는다. 증거 없이 OPEN·SPENT로 올리지 않고 '
   'UNKNOWN에서 FREE로 돌아가지 않는다. 중지(kill)는 이 함수를 막지 않는다 — '
   '막으면 열린 포지션을 닫을 수 없다.';
