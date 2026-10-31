@@ -411,6 +411,20 @@ if (zeroErrors.length > 0) {
     ['src/lib/exchanges/futuresExec.ts', '남의 주문을 지우는 것보다 중복이 낫다'],
   ];
 
+  /**
+   * **이 검사가 아직 세지 않는 것 — 적어 두지 않으면 덮인다.**
+   *
+   *   같은 `tpsl/route.ts`의 **Gate 분기**는 `cancelOpenTPSL`이 아니라
+   *   `futuresCancelProtection`을 부르고, 그 결과의 `cancelled: null`
+   *   (조회/취소 실패)을 보지 않은 채 새 보호주문을 보낼 수 있다.
+   *   그 경로는 #365 담당 범위라 여기서 고치지 않았다.
+   *
+   *   그래서 아래 출력은 "보호주문 교체 전부"가 아니라 **이 목록만**
+   *   셌다고 적는다. 검사기가 덮지 않은 것을 덮은 것처럼 말하면,
+   *   그게 가장 비싼 거짓 초록이다.
+   */
+  const NOT_COVERED_YET = ['tpsl/route.ts의 Gate 분기 (futuresCancelProtection)'];
+
   const bad = [];
   for (const F of MUST_HONOR) {
     if (!existsSync(F)) { bad.push(`${F}이 없습니다 — 목록이 낡았습니다`); continue; }
@@ -443,10 +457,16 @@ if (zeroErrors.length > 0) {
     console.error('   같은 포지션에 보호주문이 둘이 되고, 화면에는 성공이 뜹니다.');
     process.exit(1);
   }
+  // `warns`는 이 파일 앞부분에서 이미 출력됐다 — 여기서 밀어 넣으면
+  // 아무도 못 본다. 그 자리에서 적는다.
+  if (NOT_COVERED_YET.length > 0) {
+    console.log('ℹ️  보호주문 교체 — 이 검사가 아직 세지 않는 경로:');
+    for (const n of NOT_COVERED_YET) console.log(`   · ${n}`);
+  }
 }
 
 console.log(`✅ 실주문 경로 ${ORDER_ROUTES.length}개 · 안전장치 빠진 것 0개`
   + ' · 조회 실패를 0으로 만드는 길 0개'
   + ' · 진입 미확정 노출 방치 경로 0개'
   + ' · 스모크 주문 관문 구멍 0개'
-  + ' · 보호주문 교체가 취소 결과를 무시하는 길 0개');
+  + ' · 보호주문 교체(cancelOpenTPSL 호출부 목록)가 취소 결과를 무시하는 길 0개');
