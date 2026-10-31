@@ -994,7 +994,16 @@ if (!target.ok) {
   //     SELECT count(*) FROM pg_proc WHERE proname LIKE 'ten_slot_apply%' → 0
   // ══════════════════════════════════════════════════════════════════
 
-  const ev = (args) => parseEvent(psql(target, green, applyEventSql(args)));
+  // 098은 거래소 증거를 내는 이벤트에 **어느 예약인지**를 요구한다.
+  // `fresh()`+`claim()`이 쓰는 주문 ID 규칙(`order-<캠페인>`)을 기본값으로
+  // 둔다 — 실제 호출부도 자기 예약의 ID를 들고 온다.
+  // **`undefined`만 기본값으로 채운다.** 일부러 넘긴 `null`은 그대로 둬야
+  // 거절해야 하는 경우가 통과로 보이지 않는다(`claimSql`과 같은 이유).
+  const ev = (args) => parseEvent(psql(target, green, applyEventSql({
+    clientOrderId: args.clientOrderId === undefined
+      ? `order-${args.campaignId}` : args.clientOrderId,
+    ...args,
+  })));
 
   /** 슬롯 0을 RESERVED로 만들고 캠페인 버전을 돌려준다 */
   const reserved = () => {
@@ -1234,7 +1243,7 @@ if (!target.ok) {
     const sql = applyEventSql({
       campaignId, expectedVersion: version, slotIndex: 0,
       eventId: `ev-race-${campaignId}`, kind: 'ACK', evidence: 'VENUE_ORDER',
-      exchangeOrderId: '7001',
+      exchangeOrderId: '7001', clientOrderId: `order-${campaignId}`,
     });
     const out = await raceClaims(target, green, [sql, sql]);
     // `raceClaims`는 `{ code, out, rows }`를 준다. 배리어 SQL의 출력이
@@ -1424,6 +1433,7 @@ if (!target.ok) {
       `${applyEventSql({
         campaignId: idA, expectedVersion: 1, slotIndex: 0, eventId: shared,
         kind: 'ACK', evidence: 'VENUE_ORDER', exchangeOrderId: 'order-A',
+        clientOrderId: `order-${idA}`,
       })}; SELECT pg_sleep(1.5);`);
 
     await new Promise(r => setTimeout(r, 400));
@@ -1432,6 +1442,7 @@ if (!target.ok) {
     const b = psqlSpawn(target, green, applyEventSql({
       campaignId: idB, expectedVersion: 1, slotIndex: 0, eventId: shared,
       kind: 'UNKNOWN_RESPONSE', evidence: 'NONE', callerUserId: ownerB,
+      clientOrderId: `order-${idB}`,
     }));
 
     const [ra, rb] = await Promise.all([a.done, b.done]);
@@ -1464,6 +1475,7 @@ if (!target.ok) {
     const args = {
       campaignId, expectedVersion: version, slotIndex: 0, eventId: shared,
       kind: 'ACK', evidence: 'VENUE_ORDER', exchangeOrderId: '7001',
+      clientOrderId: `order-${campaignId}`,
     };
     const a = psqlSpawn(target, green, `${applyEventSql(args)}; SELECT pg_sleep(1.5);`);
     await new Promise(r => setTimeout(r, 400));
@@ -1479,5 +1491,129 @@ if (!target.ok) {
     assert.equal(eventRows(target, green, campaignId).length, 1);
     assert.equal(readState(target, green, campaignId).version, version + 1,
       '버전이 두 번 올라갔다');
+  });
+
+  // ── `evidence` 라벨만으로는 아무것도 증명하지 못한다 ──
+  //
+  //   전이표는 `p_evidence` **문자열**만 봤다. 그래서 호출부가
+  //   `VENUE_ORDER`라고 적으면, 거래소 주문 번호를 **안 넘겨도**
+  //   `RESERVED → OPEN`이 됐다. 번호를 넘기더라도 그것이 이 슬롯의
+  //   예약과 연결된 주문인지 대조하는 코드가 없었다.
+  //
+  //   즉 "증거로만 움직인다"고 적어 두고 **라벨만 보고 움직였다.**
+  //
+  //   ★ DB가 할 수 있는 것과 할 수 없는 것을 분명히 한다:
+  //     할 수 있다 — 증거의 **몸통**이 있는지(주문 번호·체결 수량),
+  //                   그것이 이 슬롯의 예약·장부와 **같은 주문**인지,
+  //                   한 슬롯 안에서 주문 번호가 **흔들리지 않는지**
+  //     할 수 없다 — 그 번호를 **정말 거래소에서 읽었는지**.
+  //                   그건 인증된 서버 어댑터가 보장해야 하고, DB는
+  //                   그것을 검증할 수 없다. 이 공백은 숨기지 않는다.
+  test('★ VENUE_ORDER인데 주문 번호가 없으면 OPEN으로 올리지 않는다', () => {
+    const { campaignId, version } = reserved();
+    for (const [label, extra] of [
+      ['번호 없음', { exchangeOrderId: null }],
+      ['빈 번호', { exchangeOrderId: '' }],
+      ['공백 번호', { exchangeOrderId: '   ' }],
+    ]) {
+      const r = ev({
+        campaignId, expectedVersion: version, slotIndex: 0,
+        eventId: `ev-noid-${label.length}-${campaignId}`,
+        kind: 'ACK', evidence: 'VENUE_ORDER',
+        clientOrderId: `order-${campaignId}`, ...extra,
+      });
+      assert.equal(r.code, 'EVIDENCE_MISSING', `${label}: ${r.code}`);
+      assert.equal(r.status, 'RESERVED', `${label}: 상태가 움직였다`);
+      assert.equal(r.version, version, `${label}: 거절인데 버전이 올라갔다`);
+    }
+    assert.equal(eventRows(target, green, campaignId).length, 0);
+  });
+
+  test('★ 부분 체결인데 수량이 없거나 0이면 받지 않는다', () => {
+    const { campaignId, version } = reserved();
+    const coid = `order-${campaignId}`;
+    const a = ev({
+      campaignId, expectedVersion: version, slotIndex: 0,
+      eventId: `ev-pfa-${campaignId}`, kind: 'ACK', evidence: 'VENUE_ORDER',
+      exchangeOrderId: '7001', clientOrderId: coid,
+    });
+    assert.equal(a.code, 'EVENT_APPLIED');
+    for (const [label, extra] of [
+      ['수량 없음', { filledQty: null }],
+      ['수량 0', { filledQty: 0 }],
+    ]) {
+      const r = ev({
+        campaignId, expectedVersion: a.version, slotIndex: 0,
+        eventId: `ev-pf-${label.length}-${campaignId}`,
+        kind: 'PARTIAL_FILL', evidence: 'VENUE_ORDER',
+        exchangeOrderId: '7001', clientOrderId: coid, ...extra,
+      });
+      assert.equal(r.code, 'EVIDENCE_MISSING', `${label}: ${r.code}`);
+      assert.equal(r.version, a.version, `${label}: 거절인데 버전이 올라갔다`);
+    }
+  });
+
+  test('★ 한 슬롯 안에서 거래소 주문 번호가 흔들리면 거절한다', () => {
+    const { campaignId, version } = reserved();
+    const coid = `order-${campaignId}`;
+    const a = ev({
+      campaignId, expectedVersion: version, slotIndex: 0,
+      eventId: `ev-oa-${campaignId}`, kind: 'ACK', evidence: 'VENUE_ORDER',
+      exchangeOrderId: 'order-A', clientOrderId: coid,
+    });
+    assert.equal(a.code, 'EVENT_APPLIED');
+    // **다른 주문의 번호**로 부분 체결을 적으려 한다.
+    const bad = ev({
+      campaignId, expectedVersion: a.version, slotIndex: 0,
+      eventId: `ev-ob-${campaignId}`, kind: 'PARTIAL_FILL', evidence: 'VENUE_ORDER',
+      exchangeOrderId: 'order-B', filledQty: 0.003, clientOrderId: coid,
+    });
+    assert.equal(bad.code, 'ORDER_ID_MISMATCH', `${bad.code}로 적었다`);
+    assert.equal(bad.version, a.version, '거절인데 버전이 올라갔다');
+    // 같은 번호는 통과한다.
+    assert.equal(ev({
+      campaignId, expectedVersion: a.version, slotIndex: 0,
+      eventId: `ev-oc-${campaignId}`, kind: 'PARTIAL_FILL', evidence: 'VENUE_ORDER',
+      exchangeOrderId: 'order-A', filledQty: 0.003, clientOrderId: coid,
+    }).code, 'EVENT_APPLIED');
+  });
+
+  test('★ 예약·장부와 같은 주문인지 대조한다', () => {
+    const { campaignId, version } = reserved();
+    for (const [label, extra] of [
+      ['주문 ID 없음', { clientOrderId: null }],
+      ['남의 주문 ID', { clientOrderId: 'order-somebody-else' }],
+      ['공백', { clientOrderId: '  ' }],
+    ]) {
+      const r = ev({
+        campaignId, expectedVersion: version, slotIndex: 0,
+        eventId: `ev-cid-${label.length}-${campaignId}`,
+        kind: 'ACK', evidence: 'VENUE_ORDER', exchangeOrderId: '7001', ...extra,
+      });
+      assert.equal(r.code, 'CLAIM_IDENTITY_MISMATCH', `${label}: ${r.code}`);
+      assert.equal(r.version, version, `${label}: 거절인데 버전이 올라갔다`);
+    }
+    assert.equal(eventRows(target, green, campaignId).length, 0);
+  });
+
+  // **모른다고 적는 것은 여전히 언제나 할 수 있다.** 위 요구가
+  // `UNKNOWN_RESPONSE`까지 막으면 모호한 응답을 기록할 길이 사라진다 —
+  // 그게 이 함수가 막으려던 상태다.
+  test('★ 증거 없는 이벤트는 추가 인자를 요구하지 않는다', () => {
+    const { campaignId, version } = reserved();
+    const u = ev({
+      campaignId, expectedVersion: version, slotIndex: 0,
+      eventId: `ev-nou-${campaignId}`, kind: 'UNKNOWN_RESPONSE', evidence: 'NONE',
+      clientOrderId: null, exchangeOrderId: null,
+    });
+    assert.equal(u.code, 'EVENT_APPLIED', 'UNKNOWN을 적을 길이 막혔다');
+    assert.equal(u.status, 'UNKNOWN');
+    const cr = ev({
+      campaignId, expectedVersion: u.version, slotIndex: 0,
+      eventId: `ev-nocr-${campaignId}`, kind: 'CLOSE_REQUEST', evidence: 'NONE',
+      clientOrderId: null, exchangeOrderId: null,
+    });
+    assert.equal(cr.code, 'EVENT_APPLIED', '닫기 의도를 적을 길이 막혔다');
+    assert.equal(cr.status, 'CLOSING');
   });
 }

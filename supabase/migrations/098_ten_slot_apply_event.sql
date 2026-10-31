@@ -199,12 +199,21 @@ COMMENT ON FUNCTION public.ten_slot_event_same(
 --     EVENT_ALREADY_APPLIED   같은 event_id의 같은 사건이다 (멱등 · 버전 불변)
 --     EVENT_CONFLICT          같은 event_id로 **다른 사건**이 왔다 (fail closed)
 --     EVIDENCE_MISSING        그 전이에 필요한 거래소 증거가 없다
+--                             (주문 번호 없는 VENUE_ORDER · 수량 없는 부분 체결)
+--     CLAIM_IDENTITY_MISMATCH 이 슬롯의 예약·장부와 같은 주문이 아니다
+--     ORDER_ID_MISMATCH       한 슬롯 안에서 거래소 주문 번호가 흔들린다
 --     EVENT_OUT_OF_ORDER      그 상태에서 그 사건은 일어날 수 없다
 --     SLOT_MISSING            그 슬롯이 없다
 --     CAMPAIGN_MISSING        그 캠페인이 없다
 --     CALLER_UNKNOWN          호출자 정체성을 넘기지 않았다
 --     CALLER_NOT_OWNER        이 캠페인의 주인이 아니다
 --     STALE_VERSION           CAS 실패
+-- 옛 11인자 서명을 지운다. `CREATE OR REPLACE`는 인자 목록이 다르면
+-- **과적재**하므로, 지우지 않으면 새 검사가 없는 쪽이 계속 불릴 수 있다.
+DROP FUNCTION IF EXISTS public.ten_slot_apply_event(
+  TEXT, BIGINT, INT, TEXT, TEXT, TEXT, TEXT, NUMERIC, NUMERIC, UUID, UUID
+);
+
 CREATE OR REPLACE FUNCTION public.ten_slot_apply_event(
   p_campaign_id          TEXT,
   p_expected_version     BIGINT,
@@ -219,7 +228,16 @@ CREATE OR REPLACE FUNCTION public.ten_slot_apply_event(
   -- 보므로 캠페인 id만 알면 남의 슬롯을 움직일 수 있다. 인증된 정체성을
   -- 여기까지 들고 와야 한다.
   p_caller_user_id       UUID             DEFAULT NULL,
-  p_caller_connection_id UUID             DEFAULT NULL
+  p_caller_connection_id UUID             DEFAULT NULL,
+  -- ── 이 이벤트가 **어느 예약**에 대한 말인가 ──
+  --
+  --   `evidence`가 `VENUE_ORDER`·`VENUE_POSITION`이면 이 값을 요구한다.
+  --   097이 적어 둔 `ten_slot_claims.client_order_id`와 대조해서, 이
+  --   이벤트가 **이 슬롯의 그 주문**에 대한 말임을 확인한다.
+  --
+  --   `evidence = 'NONE'`(모른다·닫겠다)에는 요구하지 않는다. 요구하면
+  --   모호한 응답을 기록할 길이 막히고, 그게 이 함수가 막으려던 상태다.
+  p_client_order_id      TEXT             DEFAULT NULL
 )
 RETURNS TABLE (code TEXT, slot_status TEXT, campaign_version BIGINT)
 LANGUAGE plpgsql
@@ -232,6 +250,11 @@ DECLARE
   v_next     BIGINT;
   v_rows     INT;
   v_constraint TEXT;
+  v_venue      BOOLEAN;
+  v_claim_coid TEXT;
+  v_claim_order UUID;
+  v_seen       TEXT;
+  v_order_id   TEXT;
 BEGIN
   -- ① 캠페인 줄을 잠근다. 전이와 버전 증가가 같은 잠금 안에 있어야
   --    동시 두 이벤트가 섞이지 않는다.
@@ -258,6 +281,10 @@ BEGIN
     RETURN;
   END IF;
 
+  --   주문 번호를 **한 번만 정규화한다.** 저장하는 값과 비교하는 값이
+  --   달라지면 같은 재시도가 다른 사건으로 읽힌다.
+  v_order_id := NULLIF(btrim(COALESCE(p_exchange_order_id, '')), '');
+
   -- ③ **멱등 먼저.** 응답을 못 받고 재시도한 호출자가 가장 먼저 만나야
   --    하는 답이다. 여기서 버전을 올리지 않는다.
   SELECT * INTO v_prev
@@ -269,7 +296,7 @@ BEGIN
     -- 알 수 없다. 조용히 한쪽을 고르지 않는다.
     IF NOT public.ten_slot_event_same(
          v_prev, p_campaign_id, p_slot_index, p_kind, p_evidence,
-         p_exchange_order_id, p_filled_qty, p_avg_price) THEN
+         v_order_id, p_filled_qty, p_avg_price) THEN
       -- 상태 칸을 비운다. 그 줄은 **남의 캠페인 것일 수 있다.**
       RETURN QUERY SELECT 'EVENT_CONFLICT'::TEXT, NULL::TEXT, v_campaign.version;
       RETURN;
@@ -316,6 +343,78 @@ BEGIN
     RETURN;
   END IF;
 
+  -- ⑥-b **라벨이 아니라 증거의 몸통을 본다.**
+  --
+  --   전이표는 `p_evidence` **문자열**만 봤다. 그래서 호출부가
+  --   `VENUE_ORDER`라고 적으면 주문 번호를 안 넘겨도 `OPEN`이 됐다.
+  --   "증거로만 움직인다"고 적어 두고 **라벨만 보고 움직인 것**이다.
+  --
+  --   ★ DB가 할 수 있는 것과 할 수 없는 것 — 숨기지 않고 적는다
+  --   ─────────────────────────────────────────────────────────
+  --     할 수 있다  증거의 **몸통**이 있는가 (주문 번호 · 체결 수량)
+  --                 이 슬롯의 **예약·장부와 같은 주문**인가
+  --                 한 슬롯 안에서 주문 번호가 **흔들리지 않는가**
+  --
+  --     할 수 없다  그 번호를 **정말 거래소에서 읽었는지.**
+  --                 DB는 외부 조회의 진위를 검증할 수 없다. 그것은
+  --                 인증된 서버 어댑터가 거래소 읽기 응답을 확인한 뒤에만
+  --                 이 함수를 부르도록 **배선 단계에서** 보장해야 한다.
+  --                 이 공백을 "검증했다"로 적지 않는다.
+  v_venue := p_evidence IN ('VENUE_ORDER', 'VENUE_POSITION');
+
+  IF v_venue THEN
+    SELECT cl.client_order_id, cl.live_order_id
+      INTO v_claim_coid, v_claim_order
+      FROM public.ten_slot_claims AS cl
+     WHERE cl.campaign_id = p_campaign_id AND cl.slot_index = p_slot_index;
+
+    IF v_claim_coid IS NULL
+       OR p_client_order_id IS NULL
+       OR btrim(p_client_order_id) = ''
+       OR btrim(p_client_order_id) IS DISTINCT FROM v_claim_coid
+       -- 예약 줄과 장부 줄이 **같은 주문**을 가리키는가. 둘이 갈리면 이
+       -- 이벤트가 무엇에 대한 말인지 알 수 없다 (097이 FK로 줄의 존재는
+       -- 지키지만, 같은 주문인지는 지키지 않는다).
+       OR NOT EXISTS (
+            SELECT 1 FROM public.live_orders AS lo
+             WHERE lo.id = v_claim_order
+               AND lo.client_order_id = v_claim_coid) THEN
+      RETURN QUERY SELECT 'CLAIM_IDENTITY_MISMATCH'::TEXT, v_from, v_campaign.version;
+      RETURN;
+    END IF;
+  END IF;
+
+  IF p_evidence = 'VENUE_ORDER' THEN
+    -- "주문 조회로 확인했다"는 말의 몸통은 **주문 번호**다. 없으면 라벨뿐이다.
+    IF v_order_id IS NULL THEN
+      RETURN QUERY SELECT 'EVIDENCE_MISSING'::TEXT, v_from, v_campaign.version;
+      RETURN;
+    END IF;
+
+    -- 한 슬롯 안에서 주문 번호가 흔들리면 **그중 하나는 다른 주문**이다.
+    -- 처음 적힌 번호를 기준으로 삼는다 — 나중 것이 기준을 바꾸면 기준이
+    -- 없는 것과 같다.
+    SELECT e.exchange_order_id INTO v_seen
+      FROM public.ten_slot_events AS e
+     WHERE e.campaign_id = p_campaign_id AND e.slot_index = p_slot_index
+       AND e.evidence = 'VENUE_ORDER' AND e.exchange_order_id IS NOT NULL
+     ORDER BY e.created_at, e.event_id
+     LIMIT 1;
+
+    IF v_seen IS NOT NULL AND v_seen IS DISTINCT FROM v_order_id THEN
+      RETURN QUERY SELECT 'ORDER_ID_MISMATCH'::TEXT, v_from, v_campaign.version;
+      RETURN;
+    END IF;
+  END IF;
+
+  -- 수량 없는 "부분 체결"은 체결이 아니다. 0도 아니다 — 0을 받으면
+  -- "조금 채워졌다"가 "하나도 안 채워졌다"와 같은 기록이 된다.
+  IF p_kind = 'PARTIAL_FILL'
+     AND NOT public.ten_slot_finite_positive(p_filled_qty) THEN
+    RETURN QUERY SELECT 'EVIDENCE_MISSING'::TEXT, v_from, v_campaign.version;
+    RETURN;
+  END IF;
+
   -- ⑦ 증거 줄과 슬롯과 버전이 **같은 트랜잭션**에서 움직인다.
   INSERT INTO public.ten_slot_events (
     event_id, campaign_id, slot_index, kind, evidence,
@@ -323,7 +422,7 @@ BEGIN
     from_status, to_status, campaign_version
   ) VALUES (
     p_event_id, p_campaign_id, p_slot_index, p_kind, p_evidence,
-    p_exchange_order_id, p_filled_qty, p_avg_price,
+    v_order_id, p_filled_qty, p_avg_price,
     v_from, v_to, v_campaign.version + 1
   );
 
@@ -382,7 +481,7 @@ EXCEPTION
 
     IF NOT public.ten_slot_event_same(
          v_prev, p_campaign_id, p_slot_index, p_kind, p_evidence,
-         p_exchange_order_id, p_filled_qty, p_avg_price) THEN
+         v_order_id, p_filled_qty, p_avg_price) THEN
       -- 같은 키의 **다른 사건**이다. 상태 칸을 비운다 — 그 줄은 남의
       -- 캠페인 것일 수 있고, 내 장부에는 이 이벤트가 없다.
       RETURN QUERY SELECT 'EVENT_CONFLICT'::TEXT, NULL::TEXT, v_next;
@@ -404,14 +503,14 @@ GRANT EXECUTE ON FUNCTION public.ten_slot_event_same(
 ) TO service_role;
 
 REVOKE ALL ON FUNCTION public.ten_slot_apply_event(
-  TEXT, BIGINT, INT, TEXT, TEXT, TEXT, TEXT, NUMERIC, NUMERIC, UUID, UUID
+  TEXT, BIGINT, INT, TEXT, TEXT, TEXT, TEXT, NUMERIC, NUMERIC, UUID, UUID, TEXT
 ) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.ten_slot_apply_event(
-  TEXT, BIGINT, INT, TEXT, TEXT, TEXT, TEXT, NUMERIC, NUMERIC, UUID, UUID
+  TEXT, BIGINT, INT, TEXT, TEXT, TEXT, TEXT, NUMERIC, NUMERIC, UUID, UUID, TEXT
 ) TO service_role;
 
 COMMENT ON FUNCTION public.ten_slot_apply_event(
-  TEXT, BIGINT, INT, TEXT, TEXT, TEXT, TEXT, NUMERIC, NUMERIC, UUID, UUID
+  TEXT, BIGINT, INT, TEXT, TEXT, TEXT, TEXT, NUMERIC, NUMERIC, UUID, UUID, TEXT
 ) IS
   '슬롯 전이를 증거 로그·슬롯 상태·캠페인 버전과 한 트랜잭션으로 적는다. '
   '같은 event_id의 재시도는 멱등이고 버전을 올리지 않는다. 같은 키의 다른 '
@@ -419,4 +518,7 @@ COMMENT ON FUNCTION public.ten_slot_apply_event(
   'ten_slot_event_same 하나로 판정하므로 다른 캠페인의 사건이 멱등 성공으로 '
   '읽히지 않는다. 증거 없이 OPEN·SPENT로 올리지 않고 '
   'UNKNOWN에서 FREE로 돌아가지 않는다. 중지(kill)는 이 함수를 막지 않는다 — '
-  '막으면 열린 포지션을 닫을 수 없다.';
+  '막으면 열린 포지션을 닫을 수 없다. VENUE_ORDER는 주문 번호를, 부분 체결은 '
+  '유한 양수 수량을 요구하고, 예약·live_orders와 같은 주문인지 대조한다 — '
+  '다만 그 번호를 정말 거래소에서 읽었는지는 DB가 검증할 수 없다. 그것은 '
+  '인증된 서버 어댑터가 배선 단계에서 보장해야 한다.';

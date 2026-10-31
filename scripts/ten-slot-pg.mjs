@@ -192,7 +192,8 @@ export function applyEventSql(a) {
     ${q(fill(a.exchangeOrderId, null))},
     ${raw(a.filledQtyExpr, n(fill(a.filledQty, null)))},
     ${raw(a.avgPriceExpr, n(fill(a.avgPrice, null)))},
-    ${q(fill(a.callerUserId, DEFAULT_OWNER))}, ${q(fill(a.callerConnectionId, null))})`;
+    ${q(fill(a.callerUserId, DEFAULT_OWNER))}, ${q(fill(a.callerConnectionId, null))},
+    ${q(fill(a.clientOrderId, null))})`;
 }
 
 export function parseEvent(rows) {
