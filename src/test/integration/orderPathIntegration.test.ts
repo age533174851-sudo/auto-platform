@@ -991,6 +991,117 @@ export async function runCoinMRouteIntegrationTests() {
     });
   }
 
+  // ══════════ ⓪-b 경고가 계좌 API 경계에서 소실되던 자리 ══════════
+  //
+  //   검수 지적(#541)이 맞았다. 리더에 `message`를 남긴 것으로는
+  //   **화면이 소비하는 계층**에서 아무 일도 일어나지 않았다:
+  //
+  //       // coinm/account/route.ts — 정상 응답
+  //       positions: pos.success ? positions : null,
+  //       positionsReadable: pos.success,        // ← true
+  //
+  //   `pos.message`는 **잔고와 포지션이 모두 실패한 경우에만** 쓰인다.
+  //   그래서 보유 포지션 한 줄의 수량을 못 읽으면:
+  //
+  //       positions: []            (그 줄이 빠진다)
+  //       positionsReadable: true  ("목록을 다 읽었다"는 주장)
+  //       message: 없음            (경계에서 사라진다)
+  //
+  //   즉 **API가 "포지션 0개를 관측했다"고 단정한다.** 리더만 고친
+  //   것으로는 #541의 목적("조용히 사라지지 않는다")이 미충족이었다.
+  //
+  //   전체 조회 실패(502)·정상 0포지션·일부 수량 불명 **셋을 구분**해야
+  //   한다. 그래서 라우트까지 관통하는 RED를 둔다 — 리더의 `message`만
+  //   단언하면 이 구멍이 다시 열린다.
+  {
+    const acctPath = require.resolve('../../app/api/binance/coinm/account/route');
+
+    function loadAcctRoute(db: FakeDb) {
+      const prevServer = require.cache[serverPath];
+      require.cache[serverPath] = {
+        id: serverPath, filename: serverPath, loaded: true, exports: {
+          getSupabaseAdmin: () => db,
+          resolveUserId: async () => 'u1',
+          getUserIdFromRequest: async () => 'u1',
+          serviceRoleKeyRole: () => 'service_role',
+        },
+      } as any;
+      delete require.cache[acctPath];
+      const mod = require(acctPath);
+      return {
+        GET: mod.GET as (req: any) => Promise<any>,
+        restore: () => {
+          delete require.cache[acctPath];
+          if (prevServer) require.cache[serverPath] = prevServer;
+          else delete require.cache[serverPath];
+        },
+      };
+    }
+
+    const acctRequest = (): any => ({
+      headers: { get: (k: string) => (k.toLowerCase() === 'authorization' ? 'Bearer t' : null) },
+      nextUrl: { searchParams: new URLSearchParams({ connectionId: 'c1' }) },
+    });
+
+    const BALANCE = [{ asset: 'BTC', availableBalance: '1', balance: '1' }];
+
+    async function acctWith(positionRisk: any[]) {
+      const unenv = withCryptoEnv();
+      const db = new FakeDb().seed('exchange_connections', [await connRowCoinM()]);
+      unenv();
+      const venue = new FakeVenue()
+        .on('/dapi/v1/balance', { json: BALANCE })
+        .on('/dapi/v1/positionRisk', { json: positionRisk });
+      return scenario(venue, async () => {
+        const { GET, restore } = loadAcctRoute(db);
+        try {
+          const res = await GET(acctRequest());
+          return { status: res.status ?? 200, body: await res.json() };
+        } finally { restore(); }
+      });
+    }
+
+    const OPEN_ETH = {
+      symbol: 'ETHUSD_PERP', positionAmt: '3', leverage: '20',
+      marginType: 'isolated', liquidationPrice: '1800', entryPrice: '2000',
+    };
+    const BAD_BTC = {
+      symbol: 'BTCUSD_PERP', positionAmt: 'bad', leverage: '20',
+      marginType: 'isolated', liquidationPrice: '90000', entryPrice: '95000',
+    };
+
+    const partial = await acctWith([BAD_BTC, OPEN_ETH]);
+    const cleanZero = await acctWith([{ ...OPEN_ETH, positionAmt: '0' }]);
+
+    test('★★ COIN-M 계좌 API: 한 줄을 못 읽었으면 "목록을 다 읽었다"고 하지 않는다', () => {
+      assert(!(partial instanceof Error), String((partial as any)?.message));
+      const b = (partial as any).body;
+      assert(b?.ok === true, `정상 응답이 아니다: ${JSON.stringify(b).slice(0, 200)}`);
+      // 핵심: 못 읽은 줄이 있는데 "읽었다"고 단정하면 소비자는 빈
+      // 목록을 "포지션 없음"으로 읽는다.
+      eq(b.positionsReadable, false,
+        '수량을 못 읽은 줄이 있는데 목록을 다 읽었다고 단정했다');
+      // 사유가 응답에 실제로 실려 있어야 한다 — 경계에서 사라지지 않는다.
+      const text = JSON.stringify(b);
+      assert(/BTCUSD_PERP/.test(text),
+        `못 읽은 심볼이 응답에 없다: ${text.slice(0, 300)}`);
+      // 멀쩡한 줄은 보존한다 — 과잉 차단하지 않는다.
+      assert(Array.isArray(b.positions)
+        && b.positions.some((p: any) => p.symbol === 'ETHUSD_PERP'),
+        '멀쩡한 포지션까지 버렸다');
+    });
+
+    test('★★ COIN-M 계좌 API: 진짜 0포지션과 일부 수량 불명을 구분한다', () => {
+      assert(!(cleanZero instanceof Error), String((cleanZero as any)?.message));
+      const b = (cleanZero as any).body;
+      assert(b?.ok === true, `정상 응답이 아니다: ${JSON.stringify(b).slice(0, 200)}`);
+      // 전부 멀쩡하게 읽었고 열린 포지션이 없다 — 이건 관측이다.
+      eq(b.positionsReadable, true, '멀쩡한 0포지션 조회를 미확인으로 막았다');
+      eq(Array.isArray(b.positions) ? b.positions.length : -1, 0);
+      assert(!/BTCUSD_PERP/.test(JSON.stringify(b)), '없는 경고를 지어냈다');
+    });
+  }
+
   // ══════════ ① 미체결 접수를 FILLED로 적지 않는다 ══════════
   {
     const unenv = withCryptoEnv();

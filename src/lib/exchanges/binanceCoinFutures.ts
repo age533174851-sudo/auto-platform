@@ -175,7 +175,18 @@ function coinMQtyOrNull(raw: unknown): number | null {
 
 export async function getCoinMPositions(
   key: string, secret: string, testnet = false,
-): Promise<{ success: boolean; positions: CoinMPosition[]; message?: string }> {
+): Promise<{
+  success: boolean; positions: CoinMPosition[]; message?: string;
+  /**
+   * 계약 수를 못 읽어 **목록에서 빠진** 심볼.
+   *
+   *   `message`만 두면 안 된다 — 검수에서 드러난 그대로, 상위 계좌 API는
+   *   성공 응답에 `message`를 싣지 않아 경고가 **경계에서 소실됐다.**
+   *   부르는 쪽이 `positionsReadable`을 내릴 수 있도록 **셀 수 있는
+   *   형태**로 돌려준다. 사람이 읽는 문장과 기계가 보는 값을 분리한다.
+   */
+  unreadable: string[];
+}> {
   try {
     const d = await dapiSigned('GET', '/dapi/v1/positionRisk', key, secret, testnet);
     /** 계약 수를 못 읽은 심볼. **조용히 버리지 않는다** */
@@ -204,12 +215,13 @@ export async function getCoinMPositions(
     // 필터에 걸려 **목록에서 사라졌다.** 보유 중인 포지션이 화면에서
     // 없어지는 것이다. 지우는 것은 같지만 **사유를 남긴다.**
     return unreadable.length > 0
-      ? { success: true, positions,
+      ? { success: true, positions, unreadable,
           message: `계약 수를 읽지 못한 포지션이 있습니다 — ${unreadable.join(', ')} `
                  + '(거래소에서 직접 확인하세요. 목록에 없다고 포지션이 없는 것이 아닙니다)' }
-      : { success: true, positions };
+      : { success: true, positions, unreadable };
   } catch (e: any) {
-    return { success: false, positions: [], message: e?.message || 'COIN-M 포지션 조회 실패' };
+    return { success: false, positions: [], unreadable: [],
+      message: e?.message || 'COIN-M 포지션 조회 실패' };
   }
 }
 
