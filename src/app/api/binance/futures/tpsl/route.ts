@@ -145,10 +145,53 @@ export async function POST(req: NextRequest) {
     const contract = gp.toGateContract(want);
     if (!contract) return reject(`Gate 계약 이름을 만들 수 없습니다 (${want})`, 'gate_contract');
 
-    // 기존 보호 주문을 먼저 지운다. 안 지우면 손절이 두 개 걸린다.
-    const { futuresCancelProtection } = await import('@/lib/exchanges/futuresAdapter');
-    const cp = await futuresCancelProtection(creds.exchange!, creds.key!, creds.secret!, creds.testnet!, want);
-    cancelled = { cancelled: cp.cancelled };
+    // ── 기존 보호주문을 **읽는다. 지우지 않는다** ──
+    //
+    //   예전에는 `futuresCancelProtection`을 불러 Gate의
+    //   `DELETE /price_orders?contract=…`로 **그 계약의 조건부 주문을
+    //   전부** 지웠다. 그건 `Cancel All`이고, CLAUDE.md의 절대 규칙이
+    //   금지하는 자리다 — **다른 전략의 보호주문을 지운다.**
+    //
+    //   그리고 결과를 보지 않았다: `cancelled = { cancelled: cp.cancelled }`
+    //   뒤에 바로 새 주문을 걸었다. `cp.cancelled === null`(조회·취소
+    //   실패)이어도, 200에 비배열 본문이 와서 `cancelled: 0`이 되어도
+    //   `ok: true, executed: true`가 나갔다.
+    //
+    //   안전하게 **내 것만** 골라 지우려면 소유권 분류와 범위 취소가
+    //   필요하고, 그 설계는 #365(`replaceProtectiveScope`)가 들고 있다.
+    //   여기서 복제하지 않는다. 대신 **지우는 일을 아예 하지 않는다**:
+    //
+    //     · 못 읽었으면      → 거절 (무엇이 걸려 있는지 모른다)
+    //     · 하나라도 있으면  → 거절 (남의 것까지 지우지 않는다)
+    //     · 비어 있으면      → 지울 것이 없다 → 그대로 건다
+    //
+    //   세 번째가 정상 경로다. 두 번째는 Gate에서 보호주문 **교체**를
+    //   앱에서 못 하게 만든다 — 그건 기능 후퇴다. 그래도 남의 손절을
+    //   지우는 것보다 낫고, 사용자에게 **무엇을 해야 하는지** 알린다.
+    //   제대로 된 복구는 #365의 범위 취소가 들어온 뒤다.
+    const existing = await gf.getPriceOrdersGateFutures(
+      creds.key!, creds.secret!, contract, creds.testnet!);
+    if (existing == null) {
+      return NextResponse.json({
+        ok: false, queued: false, executed: false,
+        error: 'gate_protective_lookup_failed',
+        message: '기존 보호주문을 확인하지 못해 새 주문을 보내지 않았습니다 — '
+               + '겹쳐 걸면 손절이 둘이 됩니다. 거래소에서 직접 확인하세요',
+      }, { status: 502, headers: { 'Cache-Control': 'no-store' } });
+    }
+    if (existing.length > 0) {
+      return NextResponse.json({
+        ok: false, queued: false, executed: false,
+        error: 'gate_protective_exists',
+        existingProtective: existing.length,
+        message: `이 계약에 조건부 주문이 이미 ${existing.length}건 있습니다 — `
+               + '그것만 골라 지우는 기능이 아직 없어 겹쳐 걸지 않았습니다. '
+               + '거래소에서 기존 주문을 정리한 뒤 다시 시도하세요 '
+               + '(계약 전체를 일괄 취소하면 다른 전략의 보호주문까지 지워집니다)',
+      }, { status: 502, headers: { 'Cache-Control': 'no-store' } });
+    }
+    // 비어 있다 — 지운 것이 없으므로 0이다. '못 읽음'이 아니다.
+    cancelled = { cancelled: 0 };
 
     const spec = await gf.getGateContractSpec(contract, creds.testnet!);
 

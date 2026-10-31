@@ -412,18 +412,19 @@ if (zeroErrors.length > 0) {
   ];
 
   /**
-   * **이 검사가 아직 세지 않는 것 — 적어 두지 않으면 덮인다.**
+   * **Gate 분기 — 계약 단위 일괄 취소가 되돌아오지 않는지 센다.**
    *
-   *   같은 `tpsl/route.ts`의 **Gate 분기**는 `cancelOpenTPSL`이 아니라
-   *   `futuresCancelProtection`을 부르고, 그 결과의 `cancelled: null`
-   *   (조회/취소 실패)을 보지 않은 채 새 보호주문을 보낼 수 있다.
-   *   그 경로는 #365 담당 범위라 여기서 고치지 않았다.
+   *   예전에는 `futuresCancelProtection`이 Gate에서
+   *   `DELETE /price_orders?contract=…`로 그 계약의 조건부 주문을
+   *   **전부** 지웠다. 그건 `Cancel All`이고 절대 규칙이 금지한다 —
+   *   다른 전략의 보호주문을 지운다.
    *
-   *   그래서 아래 출력은 "보호주문 교체 전부"가 아니라 **이 목록만**
-   *   셌다고 적는다. 검사기가 덮지 않은 것을 덮은 것처럼 말하면,
-   *   그게 가장 비싼 거짓 초록이다.
+   *   지금은 **읽고 판단**한다. 그 모양이 유지되는지 센다:
+   *     · 일괄 취소를 다시 부르지 않는가
+   *     · 기존 주문을 읽는가 (`getPriceOrdersGateFutures`)
+   *     · 못 읽음(null)과 '있음'을 각각 거절하는가
    */
-  const NOT_COVERED_YET = ['tpsl/route.ts의 Gate 분기 (futuresCancelProtection)'];
+  const GATE_FILE = 'src/app/api/binance/futures/tpsl/route.ts';
 
   const bad = [];
   for (const F of MUST_HONOR) {
@@ -450,6 +451,27 @@ if (zeroErrors.length > 0) {
         + `(찾는 문구: "${reason}") — 예외가 아니라 빠뜨린 것입니다`);
     }
   }
+  // ── Gate 분기 ──
+  if (!existsSync(GATE_FILE)) {
+    bad.push(`${GATE_FILE}이 없습니다 — 목록이 낡았습니다`);
+  } else {
+    const raw = readFileSync(GATE_FILE, 'utf8');
+    const src = raw.split('\n')
+      .filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+    if (/futuresCancelProtection\s*\(/.test(src)) {
+      bad.push(`${GATE_FILE}: \`futuresCancelProtection\`을 부릅니다 — Gate에서 그 함수는 `
+        + '계약의 조건부 주문을 **전부** 지웁니다(Cancel All). 다른 전략의 보호주문까지 지웁니다');
+    }
+    if (!src.includes('getPriceOrdersGateFutures(')) {
+      bad.push(`${GATE_FILE}: Gate 기존 보호주문을 읽지 않습니다 — `
+        + '무엇이 걸려 있는지 모르는 채로 겹쳐 걸 수 있습니다');
+    }
+    // 못 읽음(null)과 '있음'을 각각 거절하는가.
+    if (!/existing\s*==\s*null/.test(src) || !/existing\.length\s*>\s*0/.test(src)) {
+      bad.push(`${GATE_FILE}: 기존 보호주문을 읽고도 **거절 분기가 없습니다** — `
+        + '못 읽음과 이미 있음을 각각 막아야 합니다');
+    }
+  }
   if (bad.length) {
     console.error('❌ 보호주문 교체가 취소 결과를 보지 않습니다:');
     for (const b of bad) console.error(`   · ${b}`);
@@ -457,16 +479,11 @@ if (zeroErrors.length > 0) {
     console.error('   같은 포지션에 보호주문이 둘이 되고, 화면에는 성공이 뜹니다.');
     process.exit(1);
   }
-  // `warns`는 이 파일 앞부분에서 이미 출력됐다 — 여기서 밀어 넣으면
-  // 아무도 못 본다. 그 자리에서 적는다.
-  if (NOT_COVERED_YET.length > 0) {
-    console.log('ℹ️  보호주문 교체 — 이 검사가 아직 세지 않는 경로:');
-    for (const n of NOT_COVERED_YET) console.log(`   · ${n}`);
-  }
 }
 
 console.log(`✅ 실주문 경로 ${ORDER_ROUTES.length}개 · 안전장치 빠진 것 0개`
   + ' · 조회 실패를 0으로 만드는 길 0개'
   + ' · 진입 미확정 노출 방치 경로 0개'
   + ' · 스모크 주문 관문 구멍 0개'
-  + ' · 보호주문 교체(cancelOpenTPSL 호출부 목록)가 취소 결과를 무시하는 길 0개');
+  + ' · 보호주문 교체가 취소 결과를 무시하는 길 0개 (Binance·Gate 둘 다)'
+  + ' · Gate 계약 단위 일괄 취소 0개');
