@@ -89,12 +89,44 @@ export interface FuturesPosition {
 export async function getFuturesPositions(key: string, secret: string, testnet = true) {
   try {
     const data = await fapiSigned('GET', '/fapi/v2/positionRisk', key, secret, testnet);
-    const positions: FuturesPosition[] = (Array.isArray(data) ? data : [])
-      .filter((p: any) => parseFloat(p.positionAmt) !== 0)
+    // ── **이해하지 못한 본문을 "포지션 없음"으로 읽지 않는다** ──
+    //
+    //   예전에는 `(Array.isArray(data) ? data : [])`로 받고 그대로
+    //   `success: true`를 돌려줬다. HTTP 200에 엉뚱한 본문(`{code:0,…}`,
+    //   `null`)이 오면 **빈 목록이 관측으로 적힌다.** 503은 throw되어
+    //   막히지만 이 길은 막히지 않았고, `closeAllPositions`는 그걸 보고
+    //   "전부 닫혔다"를 적었다.
+    //
+    //   판정을 **경계 한 곳**에 둔다 — 모든 호출자가 같은 계약을 받는다.
+    if (!Array.isArray(data)) {
+      return { success: false,
+        message: '포지션 응답을 이해하지 못했습니다 (목록이 아닙니다) — '
+               + '포지션 없음으로 읽지 않습니다' };
+    }
+    // ── 배열 **모양**만 보고 각 행의 수량 형식을 안 보던 자리 ──
+    //
+    //   예전에는 행마다 `parseFloat(p.positionAmt)`였다. `parseFloat`은
+    //   **앞부분만 숫자여도 값을 준다**:
+    //
+    //       '0junk'    → 0       행이 `!== 0` 필터에서 **사라진다**
+    //       '0x10'     → 0       같음 → "포지션 없음"
+    //       '1.25junk' → 1.25    **증명되지 않은 수량**이 청산 수량이 된다
+    //
+    //   그래서 `NaN`만 잡던 아래 방어를 **지나갔다.** 같은 파일에 엄격
+    //   파서(`qtyEvidence`)를 두고 이 경계에서 부르지 않았던 것이다.
+    //
+    //   ★ 읽을 수 없는 행은 **버리지 않는다.** 버리면 다시 "포지션 없음"이
+    //     된다. `amount`를 `NaN`으로 남겨 `closeAllPositions`·
+    //     `openPositionOf`가 **'있다·모른다'**로 읽게 한다.
+    const positions: FuturesPosition[] = data
+      .filter((p: any) => qtyEvidence(p?.positionAmt) !== 0)
       .map((p: any) => {
-        const amt = parseFloat(p.positionAmt);
+        const ev = qtyEvidence(p?.positionAmt);
+        const amt = ev === null ? NaN : ev;
         return {
-          symbol: p.symbol, side: amt > 0 ? 'LONG' : amt < 0 ? 'SHORT' : 'FLAT',
+          symbol: p.symbol,
+          // 못 읽은 수량에는 방향도 없다. `'FLAT'`은 지어낸 관측이다.
+          side: amt > 0 ? 'LONG' : amt < 0 ? 'SHORT' : 'FLAT',
           amount: Math.abs(amt), entryPrice: parseFloat(p.entryPrice), markPrice: parseFloat(p.markPrice),
           unrealizedPnl: parseFloat(p.unRealizedProfit), leverage: parseInt(p.leverage || '1', 10),
           liquidationPrice: parseFloat(p.liquidationPrice || '0'),
@@ -730,13 +762,39 @@ export async function readMarketSnapshot(
 // ── 전체 오픈주문 취소 (C 옵션) — 심볼별 DELETE allOpenOrders ───────
 export async function cancelAllOpenOrders(key: string, secret: string, testnet = true, symbols?: string[]) {
   let syms = symbols;
+  /** 심볼 목록을 **다 읽었는가.** 못 읽었으면 "대상 없음"이 아니다 */
+  let listComplete = true;
+  const listGaps: string[] = [];
   if (!syms) {
-    const { orders } = await getFuturesOpenOrders(key, secret, testnet);
-    const { positions } = await getFuturesPositions(key, secret, testnet);
+    // 조회 실패를 빈 목록으로 읽으면 **"취소할 것이 없다"**가 되고,
+    // `success: true`가 된다(빈 배열의 `every`는 true다). 남은 보호주문이
+    // 있는데 "전부 취소됨"으로 적히는 자리다.
+    const ores: any = await getFuturesOpenOrders(key, secret, testnet);
+    const pres: any = await getFuturesPositions(key, secret, testnet);
+    if (!ores?.success || !Array.isArray(ores.orders)) {
+      listComplete = false; listGaps.push(`미결 주문 조회: ${ores?.message || '실패'}`);
+    } else if (Number(ores.unaddressable) > 0) {
+      // 취소할 주소가 없는 주문은 **버리지 않고 모른다고 적는다.**
+      listComplete = false;
+      listGaps.push(`취소 주소를 읽지 못한 미결 주문 ${ores.unaddressable}건`);
+    }
+    if (!pres?.success || !Array.isArray(pres.positions)) {
+      listComplete = false; listGaps.push(`포지션 조회: ${pres?.message || '실패'}`);
+    }
+    const posRows = Array.isArray(pres?.positions) ? pres.positions as any[] : [];
+    const unknownQty = posRows.filter((p: any) => qtyEvidence(p?.amount) === null);
+    if (unknownQty.length > 0) {
+      listComplete = false;
+      listGaps.push(`수량 미확인 ${unknownQty.length}건 (${unknownQty.map((p: any) => String(p?.symbol ?? '?')).join(', ')})`);
+    }
     const set = new Set<string>([
-      ...(orders || []).map(o => o.symbol),
-      ...((positions || []) as any[]).filter((p: any) => Math.abs(p.amount || 0) > 0).map((p: any) => p.symbol),
-    ]);
+      ...(Array.isArray(ores?.orders) ? ores.orders : []).map((o: any) => o.symbol),
+      // 수량을 못 읽은 줄도 **대상에 넣는다** — 모르는 쪽으로 기운다.
+      ...posRows.filter((p: any) => {
+        const a = qtyEvidence(p?.amount);
+        return a === null || Math.abs(a) > 0;
+      }).map((p: any) => p.symbol),
+    ].filter(Boolean));
     syms = Array.from(set);
   }
   const results: Array<{ symbol: string; ok: boolean; message?: string }> = [];
@@ -744,26 +802,88 @@ export async function cancelAllOpenOrders(key: string, secret: string, testnet =
     try { await fapiSigned('DELETE', '/fapi/v1/allOpenOrders', key, secret, testnet, { symbol: sym.toUpperCase().replace('/', '') }); results.push({ symbol: sym, ok: true }); }
     catch (e: any) { results.push({ symbol: sym, ok: false, message: e.message || '취소 실패' }); }
   }
-  return { success: results.every(r => r.ok), results, count: syms.length };
+  // 목록을 다 못 읽었으면 **성공이라고 적지 않는다.** 보낸 취소가 전부
+  // 성공했다는 것과 "취소할 것이 더 없다"는 것은 다른 사실이다.
+  return {
+    success: listComplete && results.every(r => r.ok),
+    results, count: syms.length,
+    listComplete,
+    message: listComplete ? ''
+      : `취소 대상 목록을 다 읽지 못했습니다 — ${listGaps.join(' · ')}. `
+        + '전부 취소됐다고 적지 않습니다',
+  };
 }
 
 // ── 전체 포지션 종료 (D 옵션) — reduce-only MARKET, 3초 간격 최대 5회 재시도 ──
 export async function closeAllPositions(key: string, secret: string, testnet = true, maxRetry = 5) {
   const attempts: Array<{ symbol: string; ok: boolean; message?: string }> = [];
+
+  // ── **못 읽은 것을 "전부 닫혔다"로 적지 않는다** ──
+  //
+  //   예전 코드는 조회의 `success`를 보지 않고 이렇게 읽었다:
+  //
+  //       const { positions } = await getFuturesPositions(...);
+  //       const open = ((positions || []) as any[])
+  //         .filter((p) => Math.abs(p.amount || 0) > 0);
+  //       if (open.length === 0) return { success: true, remaining: 0, … };
+  //
+  //   두 길로 **거짓 SUCCESS**가 됐다:
+  //
+  //     · 조회 실패 — `{ success: false, message }`에는 `positions`가
+  //       **아예 없다.** `positions || []`가 빈 배열이 되어 "열린 것 없음"이
+  //       된다. 이 파일의 `prepareClosePosition`은 같은 함정을 이미
+  //       막아 뒀다("못 읽은 것을 flat으로 읽지 않는다").
+  //     · 수량이 깨진 줄 — `amount`가 `NaN`이고 `NaN || 0`은 0이라
+  //       필터에서 **사라진다.**
+  //
+  //   그러면 화면은 "포지션 전체 종료 완료"를 띄운다. 상위 어댑터의
+  //   계약은 이미 맞게 적혀 있었다 — *"남은 포지션 수. 못 읽으면 null이다
+  //   — 0으로 적으면 '전부 닫혔다'가 된다"*. 아래가 그 계약을 어기고
+  //   있었다.
+  const readOpen = async () => {
+    const res: any = await getFuturesPositions(key, secret, testnet);
+    if (!res?.success || !Array.isArray(res.positions)) {
+      return { ok: false as const, open: [] as any[], unknown: [] as any[],
+        message: String(res?.message || '포지션 조회 실패') };
+    }
+    const rows = res.positions as any[];
+    // 수량을 못 읽은 줄은 **'있다·모른다'**다. 0으로 세지 않는다.
+    const unknown = rows.filter((p: any) => qtyEvidence(p?.amount) === null);
+    const open = rows.filter((p: any) => {
+      const a = qtyEvidence(p?.amount);
+      return a !== null && Math.abs(a) > 0;
+    });
+    return { ok: true as const, open, unknown, message: '' };
+  };
+
+  /** 못 읽은 것이 있으면 `remaining`은 **null**이고 성공이 아니다 */
+  const unknownResult = (r: { unknown: any[]; message: string }, retries: number) => ({
+    success: false, remaining: null as number | null, retries, attempts,
+    message: r.message
+      || `수량을 확인하지 못한 포지션이 ${r.unknown.length}건 있습니다 `
+         + `(${r.unknown.map((p: any) => String(p?.symbol ?? '?')).join(', ')}) — `
+         + '전부 닫혔다고 적지 않습니다. 거래소에서 직접 확인하세요',
+  });
+
   for (let i = 1; i <= maxRetry; i++) {
-    const { positions } = await getFuturesPositions(key, secret, testnet);
-    const open = ((positions || []) as any[]).filter((p: any) => Math.abs(p.amount || 0) > 0);
-    if (open.length === 0) return { success: true, remaining: 0, retries: i - 1, attempts };
-    for (const p of open) {
-      const side: 'BUY' | 'SELL' = (p.amount || 0) > 0 ? 'SELL' : 'BUY';
-      const r = await placeFuturesOrderSafe(key, secret, { symbol: p.symbol, side, type: 'MARKET', quantity: Math.abs(p.amount), reduceOnly: true }, testnet);
-      attempts.push({ symbol: p.symbol, ok: r.success, message: r.message });
+    const r = await readOpen();
+    if (!r.ok) return unknownResult({ unknown: [], message: r.message }, i - 1);
+    if (r.unknown.length > 0 && r.open.length === 0) {
+      return unknownResult(r, i - 1);
+    }
+    if (r.open.length === 0) return { success: true, remaining: 0, retries: i - 1, attempts, message: '' };
+    for (const p of r.open) {
+      const amt = qtyEvidence(p.amount) as number;
+      const side: 'BUY' | 'SELL' = amt > 0 ? 'SELL' : 'BUY';
+      const sent = await placeFuturesOrderSafe(key, secret, { symbol: p.symbol, side, type: 'MARKET', quantity: Math.abs(amt), reduceOnly: true }, testnet);
+      attempts.push({ symbol: p.symbol, ok: sent.success, message: sent.message });
     }
     if (i < maxRetry) await new Promise(res => setTimeout(res, 3000));  // 3초 간격 재시도
   }
-  const { positions } = await getFuturesPositions(key, secret, testnet);
-  const remaining = ((positions || []) as any[]).filter((p: any) => Math.abs(p.amount || 0) > 0).length;
-  return { success: remaining === 0, remaining, retries: maxRetry, attempts };
+  const last = await readOpen();
+  if (!last.ok) return unknownResult({ unknown: [], message: last.message }, maxRetry);
+  if (last.unknown.length > 0) return unknownResult(last, maxRetry);
+  return { success: last.open.length === 0, remaining: last.open.length, retries: maxRetry, attempts, message: '' };
 }
 
 // 현재 잔여 포지션/주문 수 (reconciliation용)
@@ -791,10 +911,59 @@ export async function closeAllPositions(key: string, secret: string, testnet = t
  * 여기서 틀리면 조용하다. 조금 더 닫히거나 덜 닫히는 것은 화면에서 알 수 없고,
  * 그 차이가 남은 포지션의 청산가를 바꾼다.
  */
+/**
+ * **수량 증거를 읽는다 — 못 읽으면 `null`이다.**
+ *
+ * `positionAmtOrNull`(`positionRiskRead.ts`)·`coinMQtyOrNull`
+ * (`binanceCoinFutures.ts`)과 **같은 규칙**이다. 세 곳의 규칙이 갈리면
+ * 한쪽만 고쳐지고 그때 두 답이 달라진다.
+ *
+ * `parseFloat`이 아니라 `Number`를 쓴다 — `parseFloat('0.5XYZ')`는 0.5를
+ * 주지만 그건 우리가 이해한 본문이 아니다.
+ */
+function qtyEvidence(raw: unknown): number | null {
+  if (typeof raw === 'number') return Number.isFinite(raw) ? raw : null;
+  if (typeof raw !== 'string') return null;
+  const t = raw.trim();
+  // **10진수로 적힌 수량만 받는다.** `Number('0x10')`은 16이다 — 거래소가
+  // 보내는 본문이 아니고, 16을 수량으로 쓰면 보유량과 무관한 주문이 된다.
+  // 지수 표기(`1e-8`)는 받는다 — 작은 수량에 실제로 쓰인다.
+  if (!/^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$/.test(t)) return null;
+  const n = Number(t);
+  return Number.isFinite(n) ? n : null;
+}
+
 export function closeQuantityFor(
   totalQty: number, percent: number, stepSize: number, minQty: number,
 ): { qty: number; fullClose: boolean; reason: string } {
-  const total = Math.abs(Number(totalQty) || 0);
+  // ── 보유량도 `percent`와 **같은 규칙**이다 ──
+  //
+  //   아래 `percent`에는 이미 이 교훈이 적혀 있다 — "추측해서 청산하지
+  //   않습니다". 그런데 보유량은 `Number(totalQty) || 0`이었다. 같은 함수
+  //   안에서 **한쪽만 고쳐져 있던 것**이다.
+  //
+  //   `Number('bad') || 0`은 0이므로 `total <= 0`에 걸려 **"포지션이
+  //   없습니다"**라고 적혔다. 닫히지는 않으니(qty 0) 거래는 안전한 쪽으로
+  //   실패하지만, 틀린 것은 **사람이 읽는 사실**이다 — 못 읽은 것을
+  //   "없다"고 적으면 그 화면을 보고 포지션이 정리됐다고 판단한다.
+  //
+  //   `Infinity`는 더 나빴다. `|| 0`을 통과하므로 `total <= 0`이 아니고,
+  //   **없는 수량으로 청산 주문을 만들어** 아래까지 내려갔다.
+  //   `positionAmt`를 읽는 정본이 세 곳이고(`positionAmtOrNull`,
+  //   `coinMQtyOrNull`, 여기) **규칙이 갈리면 그게 다음 사고다.** 그래서
+  //   세 곳이 같은 입력 계약을 쓴다 — 숫자이거나 숫자로 적힌 문자열만
+  //   수량이고, 나머지는 전부 **모름**이다.
+  //
+  //   `Number()`에 그냥 맡기면 안 되는 것들: `Number(null)`·`Number('')`
+  //   ·`Number([])`·`Number(false)`는 **0**이고 `Number(true)`·
+  //   `Number([1])`은 **1**이다. 하나도 수량 증거가 아니다.
+  //   (선언 타입은 `number`지만 이 함수는 `any` 경계에서도 불린다.)
+  const rawTotal = qtyEvidence(totalQty);
+  if (rawTotal === null) {
+    return { qty: 0, fullClose: false,
+      reason: `보유 수량을 확인하지 못했습니다 (${String(totalQty)}) — 추측해서 청산하지 않습니다` };
+  }
+  const total = Math.abs(rawTotal);
   if (total <= 0) return { qty: 0, fullClose: false, reason: '포지션이 없습니다' };
 
   // 말이 안 되는 비율이면 **거래하지 않는다.**
@@ -912,6 +1081,22 @@ export async function prepareClosePosition(
     .find(p => p.symbol.toUpperCase() === sym);
   if (!pos || Math.abs(pos.amount) === 0) {
     return { ok: true, alreadyFlat: true, prepared: null, message: '이미 포지션이 없습니다' };
+  }
+  // ── **수량 미확인은 방향 불일치가 아니다** ──
+  //
+  //   `getFuturesPositions`는 `parseFloat(p.positionAmt) !== 0`으로
+  //   거른다. `parseFloat('bad')`는 `NaN`이고 `NaN !== 0`은 **true**라
+  //   깨진 줄이 통과하고, 그 줄은 `side: 'FLAT'` · `amount: NaN`으로
+  //   정규화된다. `'FLAT'`은 **지어낸 관측**이다.
+  //
+  //   그래서 아래 방향 비교가 먼저 걸려 "방향 불일치 — 요청 LONG, 실제
+  //   FLAT"이라고 답했다. 상태가 어긋난 것이 아니라 수량을 못 읽은
+  //   것인데, 그 화면을 보면 **없는 불일치를 찾게 된다.** 두 사실을
+  //   섞지 않으려면 이 확인이 방향 비교보다 앞에 있어야 한다.
+  if (!Number.isFinite(pos.amount)) {
+    return { ok: false, alreadyFlat: false, prepared: null,
+      message: '보유 수량을 확인하지 못했습니다 — 추측해서 청산하지 않습니다. '
+             + '거래소에서 직접 확인하세요' };
   }
   if (pos.side !== positionSide) {
     return { ok: false, alreadyFlat: false, prepared: null,
@@ -1434,6 +1619,14 @@ export async function cancelFuturesOrder(key: string, secret: string, symbol: st
 export interface FuturesOpenOrder {
   orderId: number; symbol: string; type: string; side: string; stopPrice: number;
   closePosition: boolean; reduceOnly: boolean;
+  /**
+   * `closePosition`을 **읽었는가.**
+   *
+   *   매핑이 `!!o.closePosition`이므로 **빠진 값과 `false`가 같아진다.**
+   *   분할 익절(의도적 false)과 "전량 여부를 모름"은 다른 사실이고,
+   *   후자를 false로 읽으면 기존 보호주문을 "없다"고 적게 된다.
+   */
+  closePositionKnown: boolean;
   // ── 아래 넷은 예전에 **읽어 놓고 버렸다** ──
   // 미체결 탭이 수량·가격 칸을 origQty/price로 그리는데 이 매핑이 그 둘을
   // 떨어뜨려서, 화면에는 언제나 빈칸이 떴다. 조회는 성공했고 응답에
@@ -1450,10 +1643,25 @@ export async function getFuturesOpenOrders(key: string, secret: string, testnet 
     const params: Record<string, string | number> = {};
     if (symbol) params.symbol = symbol.toUpperCase().replace('/', '');
     const data = await fapiSigned('GET', '/fapi/v1/openOrders', key, secret, testnet, params);
-    const orders: FuturesOpenOrder[] = (Array.isArray(data) ? data : []).map((o: any) => ({
+    // `getFuturesPositions`와 **같은 규칙**이다 — 이해하지 못한 본문을
+    // "미결 주문 없음"으로 읽지 않는다. 그 빈 목록이 "전부 취소됨"과
+    // "기존 TP/SL 없음"으로 번진다.
+    if (!Array.isArray(data)) {
+      return { success: false,
+        message: '미결 주문 응답을 이해하지 못했습니다 (목록이 아닙니다) — '
+               + '주문 없음으로 읽지 않습니다',
+        orders: [] as FuturesOpenOrder[] };
+    }
+    // 취소에 쓸 **주소(symbol·orderId)**가 없는 행은 "없는 주문"이
+    // 아니다. 버리면 `cancelAllOpenOrders`가 "대상 없음 = 전부 취소됨"을
+    // 적는다. 셀 수 있는 형태로 함께 돌려준다.
+    const unaddressable = data.filter((o: any) =>
+      !o?.symbol || String(o.symbol).trim() === '' || o?.orderId == null).length;
+    const orders: FuturesOpenOrder[] = data.map((o: any) => ({
       orderId: o.orderId, symbol: o.symbol, type: o.type, side: o.side,
       stopPrice: parseFloat(o.stopPrice || '0'),
       closePosition: !!o.closePosition, reduceOnly: !!o.reduceOnly,
+      closePositionKnown: o?.closePosition != null,
       // 0과 없음을 구분한다. 수량 0은 '0개 주문'이 아니라 '못 읽었다'이고,
       // 화면이 그 둘을 같게 그리면 사용자는 없는 수량을 믿는다.
       origQty: Number.isFinite(parseFloat(o.origQty)) ? parseFloat(o.origQty) : null,
@@ -1462,8 +1670,8 @@ export async function getFuturesOpenOrders(key: string, secret: string, testnet 
       time: Number.isFinite(Number(o.time)) ? Number(o.time) : null,
       status: o.status ? String(o.status) : null,
     }));
-    return { success: true, orders };
-  } catch (e: any) { return { success: false, message: e.message || '미체결 조회 실패', orders: [] as FuturesOpenOrder[] }; }
+    return { success: true, orders, unaddressable };
+  } catch (e: any) { return { success: false, message: e.message || '미체결 조회 실패', orders: [] as FuturesOpenOrder[], unaddressable: 0 }; }
 }
 
 /**
@@ -1481,8 +1689,28 @@ export async function getFuturesOpenOrders(key: string, secret: string, testnet 
  */
 export async function cancelOpenTPSL(key: string, secret: string, symbol: string, testnet = true, only?: 'TP' | 'SL') {
   try {
-    const { orders } = await getFuturesOpenOrders(key, secret, testnet, symbol);
-    const targets = orders.filter(o => {
+    const res = await getFuturesOpenOrders(key, secret, testnet, symbol);
+    // **못 읽은 것을 "기존 TP/SL 없음"으로 읽지 않는다.** 그러면 새
+    // 보호주문을 걸면서 **옛것이 남아 있는지 모르는 채로** 성공을 적는다.
+    if (!res.success || !Array.isArray(res.orders)) {
+      return { success: false, cancelled: 0,
+        message: `기존 TP/SL을 확인하지 못했습니다 — ${res.message || '조회 실패'}` };
+    }
+    // ── `closePosition`이 **빠진** TP/SL형 행은 '모름'이다 ──
+    //
+    //   `!!undefined`는 false이므로 예전에는 분할 익절(의도적 false)과
+    //   **같게** 취급돼 "기존 TP/SL 없음"으로 끝났다. 전량 여부를 모르는
+    //   보호주문을 "없다"고 적으면, 그 위에 새 TP/SL을 걸게 된다.
+    const ambiguous = res.orders.filter(o =>
+      (o.type === 'STOP_MARKET' || o.type === 'TAKE_PROFIT_MARKET')
+      && !o.closePositionKnown);
+    if (ambiguous.length > 0) {
+      return { success: false, cancelled: 0,
+        message: `전량 여부를 읽지 못한 보호주문이 ${ambiguous.length}건 있습니다 `
+               + `(${ambiguous.map(o => `${o.orderId}(${o.type})`).join(', ')}) — `
+               + '기존 TP/SL이 없다고 적지 않습니다. 거래소에서 직접 확인하세요' };
+    }
+    const targets = res.orders.filter(o => {
       // 분할 익절·남의 주문은 건드리지 않는다
       if (o.closePosition !== true) return false;
       const isTP = o.type === 'TAKE_PROFIT_MARKET';
@@ -1491,10 +1719,30 @@ export async function cancelOpenTPSL(key: string, secret: string, symbol: string
       if (only === 'SL') return isSL;
       return isTP || isSL;
     });
+    // ── **보낸 수가 아니라 지워진 수를 센다** ──
+    //
+    //   예전에는 개별 예외를 무시하고 `cancelled: targets.length`를
+    //   돌려줬다. 못 지운 보호주문이 **"취소됨"으로 적힌다** — 그 위에
+    //   새 TP/SL을 걸면 같은 포지션에 보호주문이 둘이 된다.
+    let cancelled = 0;
+    const failed: string[] = [];
     for (const o of targets) {
-      try { await cancelFuturesOrder(key, secret, symbol, o.orderId, testnet); } catch { /* 개별 실패 무시 */ }
+      //   `cancelFuturesOrder`는 **던지지 않는다** — 실패를
+      //   `{ success: false, message }`로 돌려준다. 그래서 try/catch만
+      //   두면 실패가 그대로 '성공'으로 세어진다. 돌려준 값을 본다.
+      try {
+        const c = await cancelFuturesOrder(key, secret, symbol, o.orderId, testnet);
+        if (c?.success) cancelled++;
+        else failed.push(`${o.orderId}(${o.type}): ${c?.message || '취소 실패'}`);
+      } catch (e: any) {
+        failed.push(`${o.orderId}(${o.type}): ${e?.message || '취소 실패'}`);
+      }
     }
-    return { success: true, cancelled: targets.length };
+    return failed.length > 0
+      ? { success: false, cancelled,
+          message: `기존 TP/SL ${failed.length}건을 못 지웠습니다 — ${failed.join(' · ')}. `
+                 + '거래소에서 직접 확인하세요' }
+      : { success: true, cancelled, message: '' };
   } catch (e: any) { return { success: false, message: e.message || '기존 TP/SL 취소 실패', cancelled: 0 }; }
 }
 
