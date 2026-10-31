@@ -1269,6 +1269,19 @@ if (!target.ok) {
       '버전이 두 번 올라갔다');
   });
 
+  // 이 시험은 **#536을 당겨온 뒤에야** 제 일을 한다.
+  //
+  //   #539가 098만 들고 있을 때는 `ten_slot_kill(campaign_id)` 1인자
+  //   호출로 중지시켰다. #536이 097에 소유권 인자를 넣은 뒤 그 호출은
+  //   `CALLER_UNKNOWN`으로 거절되므로 **중지되지 않은 캠페인에서
+  //   "닫을 수 있다"를 확인하고 있었던 셈이다.** 병합 직후 실제로 그렇게
+  //   깨졌다:
+  //
+  //     Expected: 'KILL_PERSISTED'  actual: 'CALLER_UNKNOWN'
+  //
+  //   그래서 주인으로 중지시킨다. 그리고 **중지의 주인 확인과 청산 허용이
+  //   양립한다**는 것이 여기서 처음으로 한 트리에서 증명된다 —
+  //   #536 트리에는 098이 없어 확인할 수 없었던 받아들임 조건이다.
   test('★ 중지된 캠페인도 닫을 수 있다 — 중지는 새 진입만 막는다', () => {
     const { campaignId, version } = reserved();
     const a = ev({
@@ -1276,10 +1289,20 @@ if (!target.ok) {
       eventId: `ev-k0-${campaignId}`, kind: 'ACK', evidence: 'VENUE_ORDER',
       exchangeOrderId: '7001',
     });
-    const [killed] = psql(target, green,
-      `SELECT code FROM ten_slot_kill(${JSON.stringify(campaignId).replace(/"/g, "'")})`);
-    assert.equal(String(killed).split('|')[0], 'KILL_PERSISTED');
+
+    // 남이 멈추려 들면 장부가 움직이지 않는다 — 중지에도 주인이 있다.
+    const outsider = parseKill(psql(target, green, killSql({
+      campaignId, callerUserId: '22222222-2222-4222-8222-222222222222',
+    })));
+    assert.equal(outsider.code, 'CALLER_NOT_OWNER');
+    assert.equal(readState(target, green, campaignId).version, a.version,
+      '비인가 중지가 버전을 올렸다');
+
+    // 주인이 멈춘다.
+    const killed = parseKill(psql(target, green, killSql({ campaignId })));
+    assert.equal(killed.code, 'KILL_PERSISTED');
     const v = readState(target, green, campaignId).version;
+    assert.equal(killed.version, v);
 
     // 새 진입은 막힌다.
     assert.equal(claim({
@@ -1299,6 +1322,16 @@ if (!target.ok) {
     assert.equal(done.code, 'EVENT_APPLIED');
     assert.equal(done.status, 'SPENT');
     assert.ok(a.version < done.version);
+
+    // 닫혔다고 중지가 풀리지는 않는다. 닫는 길이 열려 있다는 것과
+    // 캠페인이 멈춰 있다는 것은 **다른 사실**이다.
+    const [row] = psql(target, green,
+      `SELECT killed FROM ten_slot_campaigns WHERE campaign_id = '${campaignId}'`);
+    assert.equal(String(row), 't', '청산이 중지를 되돌렸다');
+    assert.equal(claim({
+      campaignId, expectedVersion: done.version,
+      clientOrderId: `order-k2-${campaignId}`,
+    }).code, 'KILL_SWITCH', '슬롯이 비자 중지가 풀렸다');
   });
 
   test('★ 남의 슬롯은 움직이지 못하고 거부 응답이 장부를 알려 주지 않는다', () => {
