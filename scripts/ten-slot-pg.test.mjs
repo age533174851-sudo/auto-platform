@@ -1112,15 +1112,25 @@ if (!target.ok) {
 
   test('★ FREE·SPENT 슬롯에는 어떤 이벤트도 적용되지 않는다', () => {
     const { campaignId, version } = reserved();
-    // 슬롯 1은 아직 FREE다.
+    // 슬롯 1은 아직 FREE다 — 예약이 없으므로 **거래소 증거를 내는
+    // 이벤트는 정체성에서 먼저 막힌다.** FREE 슬롯에 예약이 없다는 것은
+    // 정의상 참이고, 전이표보다 앞선 사실이다.
     const onFree = ev({
       campaignId, expectedVersion: version, slotIndex: 1,
       eventId: `ev-free-${campaignId}`, kind: 'ACK', evidence: 'VENUE_ORDER',
       exchangeOrderId: '7001',
     });
-    assert.equal(onFree.code, 'EVENT_OUT_OF_ORDER');
+    assert.equal(onFree.code, 'CLAIM_IDENTITY_MISMATCH');
     assert.equal(onFree.status, 'FREE');
     assert.equal(onFree.version, version, '거절인데 버전이 올라갔다');
+
+    // 증거를 내지 않는 이벤트는 전이표가 막는다 — 그 길은 그대로다.
+    const onFreeNone = ev({
+      campaignId, expectedVersion: version, slotIndex: 1,
+      eventId: `ev-freenone-${campaignId}`, kind: 'CLOSE_REQUEST', evidence: 'NONE',
+    });
+    assert.equal(onFreeNone.code, 'EVENT_OUT_OF_ORDER');
+    assert.equal(onFreeNone.status, 'FREE');
 
     // 슬롯 0을 SPENT까지 보낸 뒤 다시 이벤트를 넣는다.
     let v = version;
@@ -1139,7 +1149,7 @@ if (!target.ok) {
         eventId: `ev-dead-${kind}-${campaignId}`, kind,
         evidence: kind === 'CLOSED' ? 'VENUE_POSITION'
           : kind === 'CLOSE_REQUEST' || kind === 'UNKNOWN_RESPONSE' ? 'NONE' : 'VENUE_ORDER',
-        exchangeOrderId: '7001',
+        exchangeOrderId: '7001', filledQty: kind === 'PARTIAL_FILL' ? 0.003 : undefined,
       });
       assert.equal(r.code, 'EVENT_OUT_OF_ORDER', `SPENT에 ${kind}: ${r.code}`);
       assert.equal(r.status, 'SPENT');
@@ -1211,11 +1221,15 @@ if (!target.ok) {
       ['다른 증거', { kind: 'ACK', evidence: 'VENUE_POSITION' }],
       ['다른 주문번호', { kind: 'ACK', evidence: 'VENUE_ORDER', exchangeOrderId: '9999' }],
       ['주문번호 없음', { kind: 'ACK', evidence: 'VENUE_ORDER', exchangeOrderId: null }],
-      ['다른 슬롯', { slotIndex: 1, kind: 'ACK', evidence: 'VENUE_ORDER', exchangeOrderId: '7001' }],
+      // 다른 슬롯은 **정체성에서 먼저** 막힌다(그 슬롯에는 예약이 없다).
+      // 같은 키의 다른 사건이라는 사실보다 "당신 예약이 아니다"가 앞선다.
+      ['다른 슬롯', { slotIndex: 1, kind: 'ACK', evidence: 'VENUE_ORDER',
+        exchangeOrderId: '7001', expect: 'CLAIM_IDENTITY_MISMATCH' }],
       ['수량 추가', { kind: 'ACK', evidence: 'VENUE_ORDER', exchangeOrderId: '7001', filledQty: 0.01 }],
     ]) {
-      const r = ev({ campaignId, expectedVersion: version + 1, slotIndex: 0, eventId: id, ...diff });
-      assert.equal(r.code, 'EVENT_CONFLICT', `${label}: ${r.code}`);
+      const { expect = 'EVENT_CONFLICT', ...rest } = diff;
+      const r = ev({ campaignId, expectedVersion: version + 1, slotIndex: 0, eventId: id, ...rest });
+      assert.equal(r.code, expect, `${label}: ${r.code}`);
     }
     assert.equal(eventRows(target, green, campaignId).length, 1);
   });
@@ -1615,5 +1629,81 @@ if (!target.ok) {
     });
     assert.equal(cr.code, 'EVENT_APPLIED', '닫기 의도를 적을 길이 막혔다');
     assert.equal(cr.status, 'CLOSING');
+  });
+
+  // ── 멱등 재시도가 **예약 정체성 검사를 건너뛰는가** ──
+  //
+  //   ③ 멱등은 `ten_slot_event_same`의 7칸만 보고 `EVENT_ALREADY_APPLIED`를
+  //   돌려주고 끝난다. ⑥-b의 예약 정체성 검사까지 가지 않는다.
+  //
+  //   그래서 올바르게 적용된 뒤 **같은 event_id·같은 7칸에 엉뚱한
+  //   `client_order_id`**를 넣어 다시 부르면 "이미 적용됐다"가 돌아온다.
+  //   장부는 바뀌지 않지만, 호출자는 **자기가 넘긴 정체성이 승인된 것처럼**
+  //   읽을 수 있다.
+  //
+  //   ★ 상태 오염은 아니다 (버전·슬롯·증거 줄 전부 불변). 하지만 이
+  //   저장소는 **거절하는 쪽으로 기울여 두는** 쪽을 택해 왔다 — 자기
+  //   주문 ID를 틀리게 아는 호출부는 어느 슬롯을 다루는지 잘못 알고 있을
+  //   수 있고, 그건 조용히 통과시킬 종류가 아니다.
+  test('★ 멱등 재시도도 예약 정체성을 건너뛰지 않는다', () => {
+    const { campaignId, version } = reserved();
+    const coid = `order-${campaignId}`;
+    const base = {
+      campaignId, slotIndex: 0, eventId: `ev-idid-${campaignId}`,
+      kind: 'ACK', evidence: 'VENUE_ORDER', exchangeOrderId: '7001',
+    };
+    const first = ev({ ...base, expectedVersion: version, clientOrderId: coid });
+    assert.equal(first.code, 'EVENT_APPLIED');
+
+    // 올바른 ID로 다시 보내면 **멱등이어야 한다** — 이 수정이 응답 유실
+    // 복구를 깨뜨리지 않았는지 확인한다.
+    const good = ev({ ...base, expectedVersion: version, clientOrderId: coid });
+    assert.equal(good.code, 'EVENT_ALREADY_APPLIED', '정상 재시도가 깨졌다');
+    assert.equal(good.status, 'OPEN');
+    assert.equal(good.version, first.version);
+
+    // ★ 여기가 RED였다 — 엉뚱한 ID로도 `EVENT_ALREADY_APPLIED`가 돌아왔다.
+    for (const [label, bad] of [
+      ['ID 없음', null],
+      ['남의 ID', 'order-somebody-else'],
+      ['공백', '   '],
+    ]) {
+      const r = ev({ ...base, expectedVersion: version, clientOrderId: bad });
+      assert.equal(r.code, 'CLAIM_IDENTITY_MISMATCH', `${label}: ${r.code}`);
+      assert.equal(r.version, first.version, `${label}: 버전이 움직였다`);
+    }
+
+    // 장부는 한 칸도 바뀌지 않았다.
+    assert.equal(eventRows(target, green, campaignId).length, 1);
+    const st = readState(target, green, campaignId);
+    assert.equal(st.version, first.version);
+    assert.equal(st.statuses[0], 'OPEN');
+  });
+
+  // 동시 경합(PK 충돌 → 예외 핸들러)에서도 엉뚱한 ID가 멱등 성공하지
+  // 않아야 한다. 정상 경로만 고치면 **경로가 둘인데 한쪽만 고침**이다.
+  test('★ 동시 PK 충돌에서도 엉뚱한 예약 ID는 멱등 성공하지 않는다', async () => {
+    const { campaignId, version } = reserved();
+    const coid = `order-${campaignId}`;
+    const shared = `ev-idrace-${Date.now().toString(36)}`;
+    const base = {
+      campaignId, expectedVersion: version, slotIndex: 0, eventId: shared,
+      kind: 'ACK', evidence: 'VENUE_ORDER', exchangeOrderId: '7001',
+    };
+    const a = psqlSpawn(target, green,
+      `${applyEventSql({ ...base, clientOrderId: coid })}; SELECT pg_sleep(1.5);`);
+    await new Promise(r => setTimeout(r, 400));
+    // B는 같은 사건인데 **예약 ID를 틀리게** 들고 왔다.
+    const b = psqlSpawn(target, green,
+      applyEventSql({ ...base, clientOrderId: 'order-somebody-else' }));
+    const [ra, rb] = await Promise.all([a.done, b.done]);
+    assert.equal(ra.code, 0, ra.err.trim());
+    assert.equal(rb.code, 0, rb.err.trim());
+
+    const got = parseEvent(rb.out.replace(/\n$/, '').split('\n').filter(l => l.includes('|')));
+    assert.equal(got.code, 'CLAIM_IDENTITY_MISMATCH', `B가 ${got.code}를 받았다`);
+    assert.equal(eventRows(target, green, campaignId).length, 1);
+    assert.equal(readState(target, green, campaignId).version, version + 1,
+      '버전이 두 번 올라갔다');
   });
 }

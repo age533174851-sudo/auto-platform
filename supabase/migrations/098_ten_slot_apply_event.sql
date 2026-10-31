@@ -201,6 +201,8 @@ COMMENT ON FUNCTION public.ten_slot_event_same(
 --     EVIDENCE_MISSING        그 전이에 필요한 거래소 증거가 없다
 --                             (주문 번호 없는 VENUE_ORDER · 수량 없는 부분 체결)
 --     CLAIM_IDENTITY_MISMATCH 이 슬롯의 예약·장부와 같은 주문이 아니다
+--                             (멱등 재시도보다 **먼저** 본다 — 요청 단위
+--                              인자는 저장된 이벤트와 대조할 수 없다)
 --     ORDER_ID_MISMATCH       한 슬롯 안에서 거래소 주문 번호가 흔들린다
 --     EVENT_OUT_OF_ORDER      그 상태에서 그 사건은 일어날 수 없다
 --     SLOT_MISSING            그 슬롯이 없다
@@ -285,6 +287,62 @@ BEGIN
   --   달라지면 같은 재시도가 다른 사건으로 읽힌다.
   v_order_id := NULLIF(btrim(COALESCE(p_exchange_order_id, '')), '');
 
+  -- ②-a 그 슬롯이 있는가. **정체성보다 먼저 본다** — 없는 슬롯에
+  --     "당신 예약이 아니다"라고 답하면 원인을 가린다.
+  SELECT s.status INTO v_from
+    FROM public.ten_slot_slots AS s
+   WHERE s.campaign_id = p_campaign_id AND s.slot_index = p_slot_index
+     FOR UPDATE;
+
+  IF v_from IS NULL THEN
+    RETURN QUERY SELECT 'SLOT_MISSING'::TEXT, NULL::TEXT, v_campaign.version;
+    RETURN;
+  END IF;
+
+  -- ②-b **이 이벤트가 어느 예약에 대한 말인가 — 멱등보다 먼저 본다.**
+  --
+  --   처음에는 이 검사를 ⑥-b(전이표 뒤)에 뒀다. 그래서 **③ 멱등 재시도가
+  --   이 검사에 닿지 않았다** — 올바르게 적용된 뒤 같은 `event_id`와 같은
+  --   7칸에 엉뚱한 `client_order_id`를 넣어 다시 부르면
+  --   `EVENT_ALREADY_APPLIED`가 돌아왔다. 장부는 안 바뀌지만 호출자는
+  --   **자기가 넘긴 정체성이 승인된 것처럼** 읽는다.
+  --
+  --   `ten_slot_event_same`에 이 칸을 더하는 길도 있었다. 그러면 저장된
+  --   이벤트에 `client_order_id`를 적어야 하고, 그건 **예약에서 끌어올 수
+  --   있는 값을 한 칸 더 복사하는 일**이다(상습 고장 ②의 재료). 대신
+  --   **검사를 앞으로 옮긴다** — 요청 단위 인자는 요청 단위로 본다.
+  --
+  --   여기 두면 정상 경로와 `unique_violation` 핸들러가 **둘 다** 이 검사
+  --   뒤에 있으므로, 한쪽만 고쳐지는 일이 생기지 않는다.
+  --
+  --   `evidence = 'NONE'`에는 요구하지 않는다. 요구하면 모호한 응답을
+  --   기록할 길이 막힌다.
+  v_venue := p_evidence IN ('VENUE_ORDER', 'VENUE_POSITION');
+
+  IF v_venue THEN
+    SELECT cl.client_order_id, cl.live_order_id
+      INTO v_claim_coid, v_claim_order
+      FROM public.ten_slot_claims AS cl
+     WHERE cl.campaign_id = p_campaign_id AND cl.slot_index = p_slot_index;
+
+    IF v_claim_coid IS NULL
+       OR p_client_order_id IS NULL
+       OR btrim(p_client_order_id) = ''
+       OR btrim(p_client_order_id) IS DISTINCT FROM v_claim_coid
+       -- 예약 줄과 장부 줄이 **같은 주문**을 가리키는가. 둘이 갈리면 이
+       -- 이벤트가 무엇에 대한 말인지 알 수 없다 (097이 FK로 줄의 존재는
+       -- 지키지만, 같은 주문인지는 지키지 않는다).
+       OR NOT EXISTS (
+            SELECT 1 FROM public.live_orders AS lo
+             WHERE lo.id = v_claim_order
+               AND lo.client_order_id = v_claim_coid) THEN
+      -- 소유권(②)은 이미 통과했으므로 이 슬롯은 **호출자 자신의 것**이다.
+      -- 상태를 돌려줘도 남의 장부를 알려 주는 것이 아니다.
+      RETURN QUERY SELECT 'CLAIM_IDENTITY_MISMATCH'::TEXT, v_from, v_campaign.version;
+      RETURN;
+    END IF;
+  END IF;
+
   -- ③ **멱등 먼저.** 응답을 못 받고 재시도한 호출자가 가장 먼저 만나야
   --    하는 답이다. 여기서 버전을 올리지 않는다.
   SELECT * INTO v_prev
@@ -314,18 +372,9 @@ BEGIN
     RETURN;
   END IF;
 
-  -- ⑤ 그 슬롯의 현재 상태.
-  SELECT s.status INTO v_from
-    FROM public.ten_slot_slots AS s
-   WHERE s.campaign_id = p_campaign_id AND s.slot_index = p_slot_index
-     FOR UPDATE;
-
-  IF v_from IS NULL THEN
-    RETURN QUERY SELECT 'SLOT_MISSING'::TEXT, NULL::TEXT, v_campaign.version;
-    RETURN;
-  END IF;
-
   -- ⑥ 전이표에 묻는다. **판정은 한 곳에만 있다.**
+  --    멱등(③)보다 **뒤**에 있어야 한다 — 앞에 두면 이미 적용된 ACK의
+  --    재시도가 `OPEN`에서 `EVENT_OUT_OF_ORDER`로 깨진다.
   v_to := public.ten_slot_next_status(v_from, p_kind, p_evidence);
 
   IF v_to IS NULL THEN
@@ -360,30 +409,6 @@ BEGIN
   --                 인증된 서버 어댑터가 거래소 읽기 응답을 확인한 뒤에만
   --                 이 함수를 부르도록 **배선 단계에서** 보장해야 한다.
   --                 이 공백을 "검증했다"로 적지 않는다.
-  v_venue := p_evidence IN ('VENUE_ORDER', 'VENUE_POSITION');
-
-  IF v_venue THEN
-    SELECT cl.client_order_id, cl.live_order_id
-      INTO v_claim_coid, v_claim_order
-      FROM public.ten_slot_claims AS cl
-     WHERE cl.campaign_id = p_campaign_id AND cl.slot_index = p_slot_index;
-
-    IF v_claim_coid IS NULL
-       OR p_client_order_id IS NULL
-       OR btrim(p_client_order_id) = ''
-       OR btrim(p_client_order_id) IS DISTINCT FROM v_claim_coid
-       -- 예약 줄과 장부 줄이 **같은 주문**을 가리키는가. 둘이 갈리면 이
-       -- 이벤트가 무엇에 대한 말인지 알 수 없다 (097이 FK로 줄의 존재는
-       -- 지키지만, 같은 주문인지는 지키지 않는다).
-       OR NOT EXISTS (
-            SELECT 1 FROM public.live_orders AS lo
-             WHERE lo.id = v_claim_order
-               AND lo.client_order_id = v_claim_coid) THEN
-      RETURN QUERY SELECT 'CLAIM_IDENTITY_MISMATCH'::TEXT, v_from, v_campaign.version;
-      RETURN;
-    END IF;
-  END IF;
-
   IF p_evidence = 'VENUE_ORDER' THEN
     -- "주문 조회로 확인했다"는 말의 몸통은 **주문 번호**다. 없으면 라벨뿐이다.
     IF v_order_id IS NULL THEN

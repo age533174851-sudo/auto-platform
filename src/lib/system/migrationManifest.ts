@@ -112,7 +112,7 @@ export const MIGRATION_MANIFEST: ManifestEntry[] = [
   { name: '095_exact100x_observation_acl_hardening.sql', id: 95, risk: 'ADDITIVE', checksum: '32710ae3272dcc57' },
   { name: '096_exchange_connections_environment_identity.sql', id: 96, risk: 'ADDITIVE', checksum: '55008df74e066859' },
   { name: '097_ten_slot_atomic_claim.sql', id: 97, risk: 'DESTRUCTIVE', checksum: '929556741b9dcb62' },
-  { name: '098_ten_slot_apply_event.sql', id: 98, risk: 'DESTRUCTIVE', checksum: '349ee346276af554' },
+  { name: '098_ten_slot_apply_event.sql', id: 98, risk: 'DESTRUCTIVE', checksum: 'b519f02e2cf3f7d7' },
 ];
 
 /** 코드가 요구하는 마이그레이션 파일 이름 (번호 순) */
