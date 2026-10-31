@@ -272,6 +272,87 @@ export async function runOrderPathIntegrationTests() {
       assert(!(o.success === true && o.cancelled === 1),
         `취소가 실패했는데 1건 취소됨으로 적었다: ${JSON.stringify(o)}`);
     });
+
+    // ── 배열 **모양**만 보고 각 행의 수량 형식은 안 봤다 ──
+    //
+    //   비배열 200은 막았지만 `getFuturesPositions`의 **행 파싱**은
+    //   아직 `parseFloat`이다:
+    //
+    //       .filter((p) => parseFloat(p.positionAmt) !== 0)
+    //       .map((p) => { const amt = parseFloat(p.positionAmt); … })
+    //
+    //   같은 파일에 엄격 파서(`qtyEvidence`)를 만들어 놓고 **이 경계에서
+    //   부르지 않았다.** 실제 `parseFloat` 값:
+    //
+    //       '0junk'    → 0       행이 **필터에서 사라진다** → "포지션 없음"
+    //       '0x10'     → 0       같음
+    //       '1.25junk' → 1.25    **증명되지 않은 수량**으로 청산 수량이 된다
+    //       '1e-8oops' → 1e-8    같음
+    //
+    //   앞선 수정이 `NaN`만 잡았던 이유다 — `parseFloat`은 앞부분이
+    //   숫자면 `NaN`을 주지 않는다.
+    for (const bad of ['0junk', '0x10']) {
+      const got = await run({ json: [ROW({ positionAmt: bad })] });
+      test(`★★ 부분 숫자 '${bad}'를 "포지션 없음"으로 읽지 않는다`, () => {
+        const { r, venue } = got;
+        assert(!(r instanceof Error), String((r as any)?.message));
+        const o = r as any;
+        assert(!(o.success === true && o.remaining === 0),
+          `'${bad}'를 전부 닫혔다고 적었다: ${JSON.stringify(o)}`);
+        eq(venue.countOf(ORDER, 'POST'), 0, `'${bad}'인데 주문을 보냈다`);
+      });
+    }
+
+    for (const bad of ['1.25junk', '1e-8oops']) {
+      const got = await run({ json: [ROW({ positionAmt: bad })] });
+      test(`★★ 증명되지 않은 수량 '${bad}'으로 청산 주문을 만들지 않는다`, () => {
+        const { r, venue } = got;
+        assert(!(r instanceof Error), String((r as any)?.message));
+        const o = r as any;
+        eq(venue.countOf(ORDER, 'POST'), 0,
+          `'${bad}'를 수량으로 읽어 주문을 보냈다: ${JSON.stringify(o)}`);
+        assert(o.success !== true, `'${bad}'인데 성공으로 적었다: ${JSON.stringify(o)}`);
+      });
+    }
+
+    test('★ 정상 수량·정상 0은 회귀 없이 유지된다', () => {
+      // (c)(d)가 이미 그것을 센다 — 여기서는 한 번 더 못으로 박는다.
+      const okOpen = opened.r as any;
+      assert(!(okOpen instanceof Error));
+      assert(opened.venue.countOf(ORDER, 'POST') >= 1, '정상 수량이 막혔다');
+      const okFlat = flat.r as any;
+      eq(okFlat.success, true, '정상 0이 막혔다');
+      eq(okFlat.remaining, 0);
+    });
+
+    // ── 미결 주문 행이 **주소를 못 가진** 경우 ──
+    //
+    //   `getFuturesOpenOrders`는 `[{}]`을 `symbol: undefined`로 매핑하고도
+    //   `success: true`를 준다. `cancelAllOpenOrders`는 `.filter(Boolean)`로
+    //   그 행을 **버리고** `listComplete: true`를 적는다 — 취소할 수 없는
+    //   주문이 "없는 것"이 된다.
+    const cancelHeadless = await cancelOn({ json: [] }, { json: [{ orderId: 7 }] });
+
+    test('★★ 취소할 주소가 없는 미결 행을 "대상 없음"으로 적지 않는다', () => {
+      const { r, venue } = cancelHeadless;
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const o = r as any;
+      assert(!(o.success === true && o.listComplete === true),
+        `주소 없는 주문을 버리고 완료로 적었다: ${JSON.stringify(o)}`);
+      eq(venue.countOf(DEL, 'DELETE'), 0, '주소를 모르는데 취소를 보냈다');
+    });
+
+    // `closePosition`이 **빠진** TP/SL형 행 — 분할 익절(false)과 다르다.
+    const tpslNoFlag = await tpsl(
+      { json: [{ ...SL_ROW, closePosition: undefined }] }, { json: { code: 200 } });
+
+    test('★★ closePosition이 없는 손절형 행을 "기존 TP/SL 없음"으로 적지 않는다', () => {
+      const { r } = tpslNoFlag;
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const o = r as any;
+      assert(!(o.success === true && o.cancelled === 0),
+        `전량 여부를 모르는 손절형 행을 "없음"으로 적었다: ${JSON.stringify(o)}`);
+    });
   }
 
   // ══════════ ① 정상 접수 — 의도 기록이 전송보다 앞인가 ══════════

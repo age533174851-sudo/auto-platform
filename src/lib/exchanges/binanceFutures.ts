@@ -103,12 +103,30 @@ export async function getFuturesPositions(key: string, secret: string, testnet =
         message: '포지션 응답을 이해하지 못했습니다 (목록이 아닙니다) — '
                + '포지션 없음으로 읽지 않습니다' };
     }
+    // ── 배열 **모양**만 보고 각 행의 수량 형식을 안 보던 자리 ──
+    //
+    //   예전에는 행마다 `parseFloat(p.positionAmt)`였다. `parseFloat`은
+    //   **앞부분만 숫자여도 값을 준다**:
+    //
+    //       '0junk'    → 0       행이 `!== 0` 필터에서 **사라진다**
+    //       '0x10'     → 0       같음 → "포지션 없음"
+    //       '1.25junk' → 1.25    **증명되지 않은 수량**이 청산 수량이 된다
+    //
+    //   그래서 `NaN`만 잡던 아래 방어를 **지나갔다.** 같은 파일에 엄격
+    //   파서(`qtyEvidence`)를 두고 이 경계에서 부르지 않았던 것이다.
+    //
+    //   ★ 읽을 수 없는 행은 **버리지 않는다.** 버리면 다시 "포지션 없음"이
+    //     된다. `amount`를 `NaN`으로 남겨 `closeAllPositions`·
+    //     `openPositionOf`가 **'있다·모른다'**로 읽게 한다.
     const positions: FuturesPosition[] = data
-      .filter((p: any) => parseFloat(p.positionAmt) !== 0)
+      .filter((p: any) => qtyEvidence(p?.positionAmt) !== 0)
       .map((p: any) => {
-        const amt = parseFloat(p.positionAmt);
+        const ev = qtyEvidence(p?.positionAmt);
+        const amt = ev === null ? NaN : ev;
         return {
-          symbol: p.symbol, side: amt > 0 ? 'LONG' : amt < 0 ? 'SHORT' : 'FLAT',
+          symbol: p.symbol,
+          // 못 읽은 수량에는 방향도 없다. `'FLAT'`은 지어낸 관측이다.
+          side: amt > 0 ? 'LONG' : amt < 0 ? 'SHORT' : 'FLAT',
           amount: Math.abs(amt), entryPrice: parseFloat(p.entryPrice), markPrice: parseFloat(p.markPrice),
           unrealizedPnl: parseFloat(p.unRealizedProfit), leverage: parseInt(p.leverage || '1', 10),
           liquidationPrice: parseFloat(p.liquidationPrice || '0'),
@@ -755,6 +773,10 @@ export async function cancelAllOpenOrders(key: string, secret: string, testnet =
     const pres: any = await getFuturesPositions(key, secret, testnet);
     if (!ores?.success || !Array.isArray(ores.orders)) {
       listComplete = false; listGaps.push(`미결 주문 조회: ${ores?.message || '실패'}`);
+    } else if (Number(ores.unaddressable) > 0) {
+      // 취소할 주소가 없는 주문은 **버리지 않고 모른다고 적는다.**
+      listComplete = false;
+      listGaps.push(`취소 주소를 읽지 못한 미결 주문 ${ores.unaddressable}건`);
     }
     if (!pres?.success || !Array.isArray(pres.positions)) {
       listComplete = false; listGaps.push(`포지션 조회: ${pres?.message || '실패'}`);
@@ -1597,6 +1619,14 @@ export async function cancelFuturesOrder(key: string, secret: string, symbol: st
 export interface FuturesOpenOrder {
   orderId: number; symbol: string; type: string; side: string; stopPrice: number;
   closePosition: boolean; reduceOnly: boolean;
+  /**
+   * `closePosition`을 **읽었는가.**
+   *
+   *   매핑이 `!!o.closePosition`이므로 **빠진 값과 `false`가 같아진다.**
+   *   분할 익절(의도적 false)과 "전량 여부를 모름"은 다른 사실이고,
+   *   후자를 false로 읽으면 기존 보호주문을 "없다"고 적게 된다.
+   */
+  closePositionKnown: boolean;
   // ── 아래 넷은 예전에 **읽어 놓고 버렸다** ──
   // 미체결 탭이 수량·가격 칸을 origQty/price로 그리는데 이 매핑이 그 둘을
   // 떨어뜨려서, 화면에는 언제나 빈칸이 떴다. 조회는 성공했고 응답에
@@ -1622,10 +1652,16 @@ export async function getFuturesOpenOrders(key: string, secret: string, testnet 
                + '주문 없음으로 읽지 않습니다',
         orders: [] as FuturesOpenOrder[] };
     }
+    // 취소에 쓸 **주소(symbol·orderId)**가 없는 행은 "없는 주문"이
+    // 아니다. 버리면 `cancelAllOpenOrders`가 "대상 없음 = 전부 취소됨"을
+    // 적는다. 셀 수 있는 형태로 함께 돌려준다.
+    const unaddressable = data.filter((o: any) =>
+      !o?.symbol || String(o.symbol).trim() === '' || o?.orderId == null).length;
     const orders: FuturesOpenOrder[] = data.map((o: any) => ({
       orderId: o.orderId, symbol: o.symbol, type: o.type, side: o.side,
       stopPrice: parseFloat(o.stopPrice || '0'),
       closePosition: !!o.closePosition, reduceOnly: !!o.reduceOnly,
+      closePositionKnown: o?.closePosition != null,
       // 0과 없음을 구분한다. 수량 0은 '0개 주문'이 아니라 '못 읽었다'이고,
       // 화면이 그 둘을 같게 그리면 사용자는 없는 수량을 믿는다.
       origQty: Number.isFinite(parseFloat(o.origQty)) ? parseFloat(o.origQty) : null,
@@ -1634,8 +1670,8 @@ export async function getFuturesOpenOrders(key: string, secret: string, testnet 
       time: Number.isFinite(Number(o.time)) ? Number(o.time) : null,
       status: o.status ? String(o.status) : null,
     }));
-    return { success: true, orders };
-  } catch (e: any) { return { success: false, message: e.message || '미체결 조회 실패', orders: [] as FuturesOpenOrder[] }; }
+    return { success: true, orders, unaddressable };
+  } catch (e: any) { return { success: false, message: e.message || '미체결 조회 실패', orders: [] as FuturesOpenOrder[], unaddressable: 0 }; }
 }
 
 /**
@@ -1659,6 +1695,20 @@ export async function cancelOpenTPSL(key: string, secret: string, symbol: string
     if (!res.success || !Array.isArray(res.orders)) {
       return { success: false, cancelled: 0,
         message: `기존 TP/SL을 확인하지 못했습니다 — ${res.message || '조회 실패'}` };
+    }
+    // ── `closePosition`이 **빠진** TP/SL형 행은 '모름'이다 ──
+    //
+    //   `!!undefined`는 false이므로 예전에는 분할 익절(의도적 false)과
+    //   **같게** 취급돼 "기존 TP/SL 없음"으로 끝났다. 전량 여부를 모르는
+    //   보호주문을 "없다"고 적으면, 그 위에 새 TP/SL을 걸게 된다.
+    const ambiguous = res.orders.filter(o =>
+      (o.type === 'STOP_MARKET' || o.type === 'TAKE_PROFIT_MARKET')
+      && !o.closePositionKnown);
+    if (ambiguous.length > 0) {
+      return { success: false, cancelled: 0,
+        message: `전량 여부를 읽지 못한 보호주문이 ${ambiguous.length}건 있습니다 `
+               + `(${ambiguous.map(o => `${o.orderId}(${o.type})`).join(', ')}) — `
+               + '기존 TP/SL이 없다고 적지 않습니다. 거래소에서 직접 확인하세요' };
     }
     const targets = res.orders.filter(o => {
       // 분할 익절·남의 주문은 건드리지 않는다
