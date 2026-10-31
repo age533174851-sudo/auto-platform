@@ -56,6 +56,22 @@ export interface ExecuteArgs {
   mode: 'TESTNET' | 'LIVE';
   plan: PositionPlan;
   /**
+   * 이 주문의 의도를 **다른 트랜잭션이 이미 커밋해 두었다.**
+   *
+   * 097의 `ten_slot_claim`은 슬롯 예약과 `live_orders` INTENT를 한
+   * 트랜잭션으로 적는다. 그 뒤에 이 함수가 불리면 같은 `client_order_id`로
+   * INSERT를 또 하게 되고, UNIQUE가 깨져 23505가 난다. 지금까지 그 자리는
+   * **"이미 처리된 주문"으로 끝났다** — 즉 예약은 커밋됐는데 주문은 영원히
+   * 나가지 않는다. 097을 붙이면 그게 기본 동작이 된다.
+   *
+   * 이 값이 `true`면 커밋된 그 줄을 **이어받아** 전송을 계속한다. 다만
+   * 이어받는 조건은 `canAdoptIntent()` 한 곳에만 적는다 — 보낼 주문과
+   * 적힌 의도가 다르면 **다른 주문의 의도로 전송하는 일**이 된다.
+   *
+   * **안 넘기면 지금까지와 똑같다.** 기존 호출부의 바이트는 바뀌지 않는다.
+   */
+  adoptIntent?: boolean;
+  /**
    * 이 주문을 낸 것이 누구인가.
    *
    * 사람이 화면을 보며 누른 것과, 아무도 안 보는 새벽에 크론이 낸 것은
@@ -358,6 +374,51 @@ async function readRemaining(
   }
 }
 
+/**
+ * 커밋된 의도를 이어받아도 되는가.
+ *
+ * **판단을 한 곳에 둔다.** 이 결정이 틀리면 "A 주문의 의도로 B 주문을
+ * 전송"하거나 "이미 나간 주문을 또 보내는" 일이 된다.
+ *
+ * 거절하는 쪽으로 기울여 둔다:
+ *   · 줄을 못 읽었으면 거절한다 (UNKNOWN을 통과로 적지 않는다)
+ *   · `INTENT`가 아니면 거절한다 — 전송이 이미 있었을 수 있다
+ *   · 거래소 주문 번호·전송 시각·시도 횟수가 남아 있으면 거절한다
+ *   · 보낼 주문과 한 칸이라도 다르면 거절한다
+ */
+export function canAdoptIntent(
+  prev: any,
+  intent: Record<string, any>,
+): { ok: boolean; reason: string } {
+  if (!prev || typeof prev !== 'object') {
+    return { ok: false, reason: '커밋된 의도를 읽지 못했습니다' };
+  }
+  if (prev.status !== 'INTENT') {
+    return { ok: false, reason: `장부 상태가 ${prev.status || '알 수 없음'}입니다 — 전송이 이미 있었을 수 있습니다` };
+  }
+  if (prev.exchange_order_id != null || prev.sent_at != null
+      || Number(prev.attempt_count ?? 0) !== 0) {
+    return { ok: false, reason: '전송 흔적이 남아 있습니다 — 다시 보내지 않습니다' };
+  }
+  for (const col of ['client_order_id', 'exchange', 'mode', 'symbol', 'side', 'order_type']) {
+    if (String(prev[col]) !== String(intent[col])) {
+      return { ok: false, reason: `적힌 의도의 ${col}가 보낼 주문과 다릅니다` };
+    }
+  }
+  if (Boolean(prev.reduce_only) !== Boolean(intent.reduce_only)) {
+    return { ok: false, reason: '적힌 의도의 청산 여부가 보낼 주문과 다릅니다' };
+  }
+  if (Number(prev.quantity) !== Number(intent.quantity)) {
+    return { ok: false, reason: '적힌 의도의 수량이 보낼 주문과 다릅니다' };
+  }
+  // 배율은 청산 주문에 없을 수 있다. **있는데 다른 것**만 거절한다.
+  if (intent.leverage != null && prev.leverage != null
+      && Number(prev.leverage) !== Number(intent.leverage)) {
+    return { ok: false, reason: '적힌 의도의 배율이 보낼 주문과 다릅니다' };
+  }
+  return { ok: true, reason: '커밋된 의도를 이어받습니다' };
+}
+
 export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteResult> {
   const { clientOrderId, plan, exchange, mode, apiKey, apiSecret } = args;
   const testnet = mode !== 'LIVE';
@@ -549,25 +610,36 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
   };
 
   const { data: row, error: insErr } = await sb.from('live_orders').insert(intent).select('id, status').single();
+  // 097의 예약 트랜잭션이 먼저 적어 둔 줄. 이어받기로 결정됐을 때만 채운다.
+  let adopted: any = null;
   if (insErr) {
     if (String(insErr.code) === '23505') {
-      // 이미 처리된 주문 — 기존 상태를 그대로 반환 (재시도해도 결과 동일)
       const { data: prev } = await sb.from('live_orders').select('*').eq('client_order_id', clientOrderId).maybeSingle();
-      return {
-        ok: prev?.status === 'ACKED' || prev?.status === 'FILLED',
-        status: (prev?.status as OrderStatus) || 'UNKNOWN',
-        clientOrderId,
-        exchangeOrderId: prev?.exchange_order_id,
-        filledQty: prev?.filled_qty != null ? Number(prev.filled_qty) : undefined,
-        avgPrice: prev?.avg_price != null ? Number(prev.avg_price) : undefined,
-        duplicate: true,
-        message: '이미 처리된 주문입니다 (중복 요청)',
-      };
+      const adopt = args.adoptIntent === true
+        ? canAdoptIntent(prev, intent)
+        : { ok: false, reason: '이어받기를 요청하지 않았습니다' };
+      if (!adopt.ok) {
+        // 이미 처리된 주문 — 기존 상태를 그대로 반환 (재시도해도 결과 동일)
+        return {
+          ok: prev?.status === 'ACKED' || prev?.status === 'FILLED',
+          status: (prev?.status as OrderStatus) || 'UNKNOWN',
+          clientOrderId,
+          exchangeOrderId: prev?.exchange_order_id,
+          filledQty: prev?.filled_qty != null ? Number(prev.filled_qty) : undefined,
+          avgPrice: prev?.avg_price != null ? Number(prev.avg_price) : undefined,
+          duplicate: true,
+          message: args.adoptIntent === true
+            ? `이미 처리된 주문입니다 — 이어받지 않았습니다 (${adopt.reason})`
+            : '이미 처리된 주문입니다 (중복 요청)',
+        };
+      }
+      adopted = prev;
+    } else {
+      return { ok: false, status: 'FAILED', clientOrderId, message: `의도 기록 실패: ${insErr.message}` };
     }
-    return { ok: false, status: 'FAILED', clientOrderId, message: `의도 기록 실패: ${insErr.message}` };
   }
 
-  const orderRowId = row.id;
+  const orderRowId = adopted ? adopted.id : row.id;
 
   // ── 상태 전이 검증 ──
   // 예전에는 update()가 어떤 status든 그대로 덮어썼다. 그러면 이미 FAILED로
