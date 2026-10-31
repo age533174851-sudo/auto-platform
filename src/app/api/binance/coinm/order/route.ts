@@ -269,7 +269,9 @@ export async function POST(req: NextRequest) {
         return q.error ? null : (q.count ?? 0);
       })(),
       // 조회가 실패하면 null이다 — 0으로 적으면 '확인했고 없다'가 된다
-      existingPositionQty: risk ? Math.abs(risk.contracts) : null,
+      // USDⓈ-M 경로와 **같은 모양**으로 둔다. 0은 '없음'이고 null은
+      // '모름'이며, 점검은 0을 PASS로 읽는다 — 둘을 섞으면 안 된다.
+      existingPositionQty: risk?.contracts != null ? Math.abs(risk.contracts) : null,
       margin: marginInput,
       side: side === 'SELL' ? 'SHORT' : 'LONG',
       stopPrice,

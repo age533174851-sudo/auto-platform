@@ -146,24 +146,68 @@ export interface CoinMPosition {
   unrealizedPnlCoin: number;
 }
 
+/**
+ * **계약 수를 못 읽으면 0이 아니라 `null`이다.**
+ *
+ *   `Number('bad')`는 `NaN`이고 `NaN || 0`은 **0**이다. 그래서 깨진 본문이
+ *   "포지션 없음"이라는 **가짜 관측**이 된다. 그 0은 라우트를 거쳐
+ *   `existingPositionQty: 0`이 되고, `preTradeChecklist`는 그걸 보고
+ *   보호 주문 점검을 **PASS로 적는다**:
+ *
+ *       if (existingPositionQty != null && Math.abs(…) === 0) {
+ *         push(PROTECTIVE_ORDER, 'pass', '열린 포지션이 없어 …');
+ *
+ *   열려 있는 포지션에 손절이 하나도 없어도 통과한다. CLAUDE.md의
+ *   "UNKNOWN을 0으로 적지 않는다"와 "증거 없이 PASS를 적지 않는다"를
+ *   한 번에 밟는 자리다.
+ *
+ *   `parseFloat`이 아니라 `Number`를 쓴다 — `parseFloat('3XYZ')`는 3을
+ *   주지만 그건 우리가 이해한 본문이 아니다.
+ */
+function coinMQtyOrNull(raw: unknown): number | null {
+  if (typeof raw === 'number') return Number.isFinite(raw) ? raw : null;
+  if (typeof raw !== 'string') return null;
+  const t = raw.trim();
+  if (t === '') return null;
+  const n = Number(t);
+  return Number.isFinite(n) ? n : null;
+}
+
 export async function getCoinMPositions(
   key: string, secret: string, testnet = false,
 ): Promise<{ success: boolean; positions: CoinMPosition[]; message?: string }> {
   try {
     const d = await dapiSigned('GET', '/dapi/v1/positionRisk', key, secret, testnet);
+    /** 계약 수를 못 읽은 심볼. **조용히 버리지 않는다** */
+    const unreadable: string[] = [];
     const positions = (Array.isArray(d) ? d : [])
-      .map((p: any) => ({
-        symbol: String(p.symbol),
-        contracts: Number(p.positionAmt) || 0,
-        entryPrice: Number(p.entryPrice) || 0,
-        markPrice: Number(p.markPrice) || 0,
-        liquidationPrice: Number(p.liquidationPrice) || 0,
-        leverage: Number(p.leverage) || 0,
-        marginType: String(p.marginType || ''),
-        unrealizedPnlCoin: Number(p.unRealizedProfit) || 0,
-      }))
+      .map((p: any) => {
+        const contracts = coinMQtyOrNull(p.positionAmt);
+        if (contracts === null) {
+          unreadable.push(String(p?.symbol ?? '(심볼 미상)'));
+          return null;
+        }
+        return {
+          symbol: String(p.symbol),
+          contracts,
+          entryPrice: Number(p.entryPrice) || 0,
+          markPrice: Number(p.markPrice) || 0,
+          liquidationPrice: Number(p.liquidationPrice) || 0,
+          leverage: Number(p.leverage) || 0,
+          marginType: String(p.marginType || ''),
+          unrealizedPnlCoin: Number(p.unRealizedProfit) || 0,
+        };
+      })
+      .filter((p): p is CoinMPosition => p != null)
       .filter(p => Math.abs(p.contracts) > 0);
-    return { success: true, positions };
+    // 옛 코드는 못 읽은 줄을 0으로 적었고, 그 0이 `|contracts| > 0`
+    // 필터에 걸려 **목록에서 사라졌다.** 보유 중인 포지션이 화면에서
+    // 없어지는 것이다. 지우는 것은 같지만 **사유를 남긴다.**
+    return unreadable.length > 0
+      ? { success: true, positions,
+          message: `계약 수를 읽지 못한 포지션이 있습니다 — ${unreadable.join(', ')} `
+                 + '(거래소에서 직접 확인하세요. 목록에 없다고 포지션이 없는 것이 아닙니다)' }
+      : { success: true, positions };
   } catch (e: any) {
     return { success: false, positions: [], message: e?.message || 'COIN-M 포지션 조회 실패' };
   }
@@ -187,12 +231,23 @@ export async function getCoinMSymbolRisk(
     const rows = Array.isArray(d) ? d : [d];
     // 헤지 모드에서는 같은 심볼이 LONG/SHORT 두 행으로 온다. 수량이 있는 행을
     // 먼저 고르고, 없으면 첫 행(설정값만 있는 행)을 쓴다.
-    const row = rows.find((p: any) => Math.abs(Number(p?.positionAmt) || 0) > 0)
-      ?? rows.find((p: any) => String(p?.symbol || '').toUpperCase() === symbol.toUpperCase());
+    //
+    // **열린 행은 읽을 수 있는 수량으로만 고른다.** 옛 코드도 결과가
+    // 같았지만 이유가 달랐다 — `Number('bad') || 0`이 0이라 깨진 행이
+    // "닫힌 행"으로 보였고, 그 뒤 심볼 대조에서 **다시 뽑혀** 수량 0으로
+    // 내려왔다.
+    const row = rows.find((p: any) => {
+      const a = coinMQtyOrNull(p?.positionAmt);
+      return a !== null && Math.abs(a) > 0;
+    }) ?? rows.find((p: any) => String(p?.symbol || '').toUpperCase() === symbol.toUpperCase());
     if (!row) return null;
+    const contracts = coinMQtyOrNull(row.positionAmt);
+    // 못 읽었으면 **관측이 아니다.** 호출자는 null을 '모름'으로 읽고
+    // 멈춘다 (이 함수의 주석이 약속한 그대로다).
+    if (contracts === null) return null;
     return {
       symbol: String(row.symbol),
-      contracts: Number(row.positionAmt) || 0,
+      contracts,
       entryPrice: Number(row.entryPrice) || 0,
       markPrice: Number(row.markPrice) || 0,
       // 0은 거래소가 주지 않은 것이다. 0을 청산가로 쓰면 청산거리가 100%로 계산된다.
