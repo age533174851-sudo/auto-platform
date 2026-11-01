@@ -51,9 +51,37 @@
 -- 생긴다. 정본은 `ten_slot_slots.status` 하나다. `phase`를 어떻게 할지는
 -- 별도 판단 사항으로 남긴다.
 --
--- 위험 분류
--- ─────────
--- 표와 함수를 **추가만** 한다. 기존 표·칸·제약을 바꾸지 않는다.
+-- 위험 분류: **DESTRUCTIVE — 사람 승인이 필요하다**
+-- ──────────────────────────────────────────────
+--   기존 **표·칸·제약**은 바꾸지 않는다. 그 말은 맞다. 그런데 이 파일은
+--   객체를 지운다:
+--
+--     143행  DROP POLICY   IF EXISTS ten_slot_events_service
+--     201행  DROP TRIGGER  IF EXISTS ten_slot_events_no_rewrite
+--     209행  DROP TRIGGER  IF EXISTS ten_slot_events_no_truncate
+--     282행  DROP FUNCTION IF EXISTS public.ten_slot_apply_event(...)
+--
+--   넷 다 **바로 뒤에서 다시 만든다.** `CREATE OR REPLACE`는 인자 목록이
+--   다르면 덮어쓰지 않고 과적재하고, `CREATE TRIGGER`·`CREATE POLICY`에는
+--   `OR REPLACE`가 없다 — 그래서 멱등하게 다시 깔려면 먼저 지워야 한다.
+--   재적용해도 이름이 둘로 늘지 않는다.
+--
+--   **그래도 "추가만 한다"고 적지 않는다.** `classifyMigration`이 이 파일을
+--   DESTRUCTIVE로 분류하고(`표를 비웁니다 · 함수를 지웁니다`), 매니페스트도
+--   `risk: 'DESTRUCTIVE'`이며 **자동 파이프라인은 이 파일을 실행하지 않는다.**
+--   승인하는 사람이 매니페스트가 아니라 이 머리말을 읽고 자동 적용 가능한
+--   변경으로 오판하면, 관문이 있어도 사람이 그 관문을 연다.
+--   `scripts/check-migrations.mjs`가 이 선언과 분류가 갈리면 빨개진다.
+--
+--   (분류 근거의 `표를 비웁니다`는 이 파일에 `TRUNCATE`라는 낱말이 있어서다.
+--    실제로 비우는 문장은 없다 — `BEFORE TRUNCATE` 트리거가 **비우기를
+--    거부한다.** 판정기가 안전한 쪽으로 틀린 것이므로 고치지 않는다.
+--    분류를 낮추는 변경은 관문을 약하게 만든다.)
+--
+--   다운타임: `DROP TRIGGER`/`CREATE TRIGGER`는 `ten_slot_events`에
+--   ACCESS EXCLUSIVE 잠금을 잡지만 같은 트랜잭션 안에서 바로 다시 만들고,
+--   이 마이그레이션은 한 트랜잭션으로 돌므로 **중간 상태가 외부에 보이지
+--   않는다.** 커밋 전에는 옛 트리거가, 커밋 후에는 새 트리거가 유효하다.
 
 -- ── 전이표. **판정은 여기 한 곳에만 있다** ──
 --
