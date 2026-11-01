@@ -37,9 +37,12 @@ import { ownedOrderIds, cancelLedger, orderIdOf } from '@/lib/engine/protectionL
 // cancelPlanOf(#554)를 각자 부르면 같은 판단이 두 곳에 생기고, 언젠가
 // 한쪽만 고쳐진다 — 상습 고장 ②.
 import { orderIdEvidence, orphanCancelDecision, asksNothing, IDS_REQUIRED_REASON } from '@/lib/engine/cancelReceipt';
-// **스모크 경로는 테스트넷에서만 — 조회도 포함한다.** `startAttempt`와
-// 같은 기준을 쓴다. 판정은 `smokeEnv` 한 곳에 있다.
-import { smokeEnvGate } from '@/lib/smoke/smokeEnv';
+// **스모크 경로는 확인된 테스트넷 연결에서만 — 조회도 포함한다.**
+// 판정은 이미 `smokePlan.smokeTestnetVerdict` 한 곳에 있고 `startAttempt`가
+// 그것을 쓴다. 여기서 같은 판단을 다시 쓰면 둘이 갈린다 — 실제로 내가
+// 한 번 그렇게 썼고(`smokeEnv.ts`), 정규화된 `testnet`을 받아서
+// **미확인 환경(`is_testnet = null`)을 TESTNET으로 올렸다.**
+import { smokeTestnetVerdict } from '@/lib/smoke/smokePlan';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -91,6 +94,10 @@ async function venueOf(sb: any, userId: string, connectionId: string) {
       exchange: (creds as any).exchange as 'binance' | 'gate',
       apiKey: (creds as any).key, apiSecret: (creds as any).secret,
       testnet: (creds as any).testnet as boolean,
+      // **날것을 잃지 않는다.** `testnet`은 `is_testnet !== false`라서
+      // null·undefined가 true가 된다 — 그 값으로 관문을 세우면
+      // 환경이 확인되지 않은 연결에 signed 조회가 나간다.
+      isTestnetRaw: (creds as any).isTestnetRaw,
     },
   };
 }
@@ -164,11 +171,12 @@ export async function GET(req: NextRequest) {
   if (!v.ok) return NextResponse.json({ ok: false, error: 'creds', message: v.message }, { status: v.status });
 
   // **거래소에 아무것도 묻기 전에 환경을 확인한다.** 실전 연결이면
-  // signed 조회조차 보내지 않는다 — 스모크는 테스트넷 기능이다.
-  const envGet = smokeEnvGate(v.venue);
+  // signed 조회조차 보내지 않고, **확인되지 않은 환경도 마찬가지다.**
+  // `startAttempt`가 주문 앞에서 쓰는 그 판정을 그대로 쓴다.
+  const envGet = smokeTestnetVerdict(v.venue.isTestnetRaw);
   if (!envGet.ok) {
-    return NextResponse.json({ ok: false, mutated: false, error: envGet.code, message: envGet.message },
-      { status: envGet.status, headers: { 'Cache-Control': 'no-store' } });
+    return NextResponse.json({ ok: false, mutated: false, error: envGet.code, message: envGet.reason },
+      { status: 403, headers: { 'Cache-Control': 'no-store' } });
   }
 
   const ops = await import('@/lib/engine/venuePositionOps');
@@ -232,10 +240,10 @@ export async function POST(req: NextRequest) {
 
   // **취소뿐 아니라 조회도 막는다.** 아래 `readProtectiveOrders`가 이미
   // signed 요청이다 — 관문이 그 뒤에 있으면 늦다.
-  const envPost = smokeEnvGate(v.venue);
+  const envPost = smokeTestnetVerdict(v.venue.isTestnetRaw);
   if (!envPost.ok) {
-    return NextResponse.json({ ok: false, mutated: false, error: envPost.code, message: envPost.message },
-      { status: envPost.status, headers: { 'Cache-Control': 'no-store' } });
+    return NextResponse.json({ ok: false, mutated: false, error: envPost.code, message: envPost.reason },
+      { status: 403, headers: { 'Cache-Control': 'no-store' } });
   }
 
   const ops = await import('@/lib/engine/venuePositionOps');

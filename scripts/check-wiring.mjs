@@ -385,21 +385,28 @@ const receiptGaps = [];
     const cut = route.indexOf('export async function POST');
     const parts = cut === -1 ? [['GET+POST', route]] : [['GET', route.slice(0, cut)], ['POST', route.slice(cut)]];
     for (const [who, text] of parts) {
-      const gate = text.indexOf('smokeEnvGate(');
+      const gate = text.indexOf('smokeTestnetVerdict(');
       const calls = [...text.matchAll(VENUE_CALL)].map(m => m.index ?? -1);
       if (calls.length === 0) continue;             // 거래소를 안 부르면 관문도 필요 없다
       if (gate === -1) {
-        receiptGaps.push(`${ORPHANS} ${who} — 거래소를 부르는데 smokeEnvGate가 없습니다`
+        receiptGaps.push(`${ORPHANS} ${who} — 거래소를 부르는데 smokeTestnetVerdict가 없습니다`
           + ' (실전 연결에 signed 조회가 나갑니다)');
         continue;
       }
       const early = calls.filter(ix => ix < gate);
       if (early.length > 0) {
-        receiptGaps.push(`${ORPHANS} ${who} — smokeEnvGate보다 먼저 거래소를 부르는 자리가 ${early.length}개 있습니다`);
+        receiptGaps.push(`${ORPHANS} ${who} — smokeTestnetVerdict보다 먼저 거래소를 부르는 자리가 ${early.length}개 있습니다`);
       }
     }
-    if (!existsSync('src/lib/smoke/smokeEnv.ts')) {
-      receiptGaps.push('src/lib/smoke/smokeEnv.ts — 환경 판정 정본이 없습니다 (이 규칙이 헛돌고 있습니다)');
+    // **날것(`is_testnet`)을 잃지 않고 넘기는가.** 정규화된 `testnet`은
+    // null·undefined를 true로 올리므로, 그 값을 넘기면 미확인 환경이 통과한다.
+    if (!/\bisTestnetRaw\b/.test(route)) {
+      receiptGaps.push(`${ORPHANS} — isTestnetRaw를 venueOf가 싣고 판정에 넘기지 않았습니다`
+        + ' (정규화된 testnet은 미확인 환경을 TESTNET으로 올립니다)');
+    }
+    if (/\bsmokeEnvGate\b/.test(route)) {
+      receiptGaps.push(`${ORPHANS} — smokeEnvGate(복제된 약한 판정)를 아직 부릅니다`
+        + ' — 정본은 smokePlan.smokeTestnetVerdict입니다');
     }
   }
 
