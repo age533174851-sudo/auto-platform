@@ -164,6 +164,8 @@ export interface WriteLog {
 export interface FakeDbOptions {
   /** 이 테이블의 update를 실패시킨다 (DB 기록 실패 재현) */
   failUpdatesOn?: string;
+  /** Post-dispatch ACK write fault; the SENT CAS must still succeed. */
+  failAckUpdate?: 'error' | 'zero-rows' | 'throw';
   /** 이 테이블의 insert를 실패시킨다. '23505'면 유니크 충돌 */
   failInsertCode?: { table: string; code: string };
   /** select를 실패시킨다 */
@@ -205,16 +207,21 @@ export class FakeDb {
     };
 
     const flushUpdate = () => {
-      if (!pending || pending.kind !== 'update') return { error: null };
+      if (!pending || pending.kind !== 'update') return { data: [], error: null };
       if (db.opts.failUpdatesOn === table) {
-        // 거래소는 받았는데 장부에 못 적는 상황이다.
-        return { error: { message: `DB 쓰기 실패 (${table})`, code: 'XX000' } };
+        return { data: [], error: { message: `DB 쓰기 실패 (${table})`, code: 'XX000' } };
+      }
+      if (pending.patch.status === 'ACKED' && db.opts.failAckUpdate) {
+        if (db.opts.failAckUpdate === 'throw') throw new Error('DB ACK 연결 끊김');
+        if (db.opts.failAckUpdate === 'error') return { data: [], error: { code: 'XX000', message: 'DB ACK 쓰기 실패' } };
+        return { data: [], error: null };
       }
       const where: Record<string, any> = {};
       for (const f of filters) where[f.col] = f.vals.length === 1 ? f.vals[0] : f.vals;
-      for (const r of apply()) Object.assign(r, pending.patch);
-      db.writes.push({ table, kind: 'update', patch: { ...pending.patch }, where });
-      return { error: null };
+      const matched = apply();
+      for (const r of matched) Object.assign(r, pending.patch);
+      if (matched.length > 0) db.writes.push({ table, kind: 'update', patch: { ...pending.patch }, where });
+      return { data: matched.map((r) => ({ ...r })), error: null };
     };
 
     const builder: any = {
@@ -248,6 +255,10 @@ export class FakeDb {
       },
       async maybeSingle() {
         if (builder.__selectFails) return { data: null, error: { message: '조회 실패' } };
+        if (pending?.kind === 'update') {
+          const result = flushUpdate();
+          return { data: result.data?.[0] ?? null, error: result.error };
+        }
         const rows = apply();
         return { data: rows[0] ? { ...rows[0] } : null, error: null };
       },

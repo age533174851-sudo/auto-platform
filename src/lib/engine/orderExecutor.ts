@@ -277,17 +277,74 @@ export interface ExecuteResult {
 // 실패하면 새 컬럼만 빼고 다시 쓴다. 마이그레이션이 적용되면 이 경로는 안 돌아간다.
 const RECOVERY_COLS = ['pos_qty_before', 'resolve_attempts', 'last_resolve_at', 'needs_attention'];
 
-async function updateOrderRow(sb: any, id: string, patch: Record<string, any>): Promise<void> {
-  const { error } = await sb.from('live_orders').update(patch).eq('id', id);
-  if (!error) return;
+async function updateOrderRow(
+  sb: any, id: string, patch: Record<string, any>,
+): Promise<{ ok: boolean; reason: string | null }> {
+  const write = async (p: Record<string, any>) => {
+    try {
+      const res: any = await sb.from('live_orders').update(p).eq('id', id).select('id');
+      if (res?.error) {
+        return { ok: false, reason: String(res.error.message || res.error.code || 'DB 오류'),
+          code: String(res.error.code ?? ''), detail: String(res.error.message ?? '') };
+      }
+      // null/undefined는 성공 증거가 아니다. 정확히 대상 id 한 줄만 인정.
+      const rows = res?.data;
+      if (!Array.isArray(rows) || rows.length !== 1 || String(rows[0]?.id) !== String(id)) {
+        return { ok: false, reason: '갱신된 대상 행을 정확히 1개 확인하지 못했습니다',
+          code: '', detail: '' };
+      }
+      return { ok: true, reason: null, code: '', detail: '' };
+    } catch (e: any) {
+      return { ok: false, reason: String(e?.message || e), code: '', detail: '' };
+    }
+  };
+
+  const first = await write(patch);
+  if (first.ok) return first;
+
+  // 복구 전용 칸 누락이 실제로 확인된 경우에만 후퇴한다.
+  // XX000/timeout/RLS 오류나 다른 칼럼 누락은 재시도로 가리지 않는다.
+  const missingRecoveryColumn = (first.code === '42703' || first.code === 'PGRST204')
+    && RECOVERY_COLS.some((col) => first.detail.toLowerCase().includes(col));
+  if (!missingRecoveryColumn) return first;
   const legacy: Record<string, any> = {};
   let stripped = false;
   for (const [k, v] of Object.entries(patch)) {
     if (RECOVERY_COLS.includes(k)) { stripped = true; continue; }
     legacy[k] = v;
   }
-  if (!stripped || Object.keys(legacy).length === 0) return;
-  await sb.from('live_orders').update(legacy).eq('id', id);
+  if (!stripped || Object.keys(legacy).length === 0) return first;
+
+  const second = await write(legacy);
+  if (second.ok) return { ok: true, reason: null };
+  return { ok: false, reason: `${first.reason} · 복구 칸 제외 재시도: ${second.reason}` };
+}
+
+/**
+ * 거래소 POST의 단일 소유권 관문.
+ *
+ * 읽은 INTENT가 여전히 INTENT일 때에만 SENT로 바꾸고, 실제로 변경된
+ * 행 ID를 되읽어 확인한다. 오류·0행·응답 불명은 모두 전송 금지다.
+ * 신규 INSERT와 097 예약 의도 adoption 모두 반드시 이 관문을 통과한다.
+ *
+ * SENT 선점 후 POST 전에 프로세스가 종료되면 주문이 전송되지 않았을 수도
+ * 있다. 자동 재전송하지 않고 대조/사람 확인을 기다리는 보수적 선택이다.
+ * 복구 컬럼(018)은 선점의 필수 조건에 포함하지 않는다.
+ */
+async function claimOrderDispatch(
+  sb: any, id: string, patch: Record<string, any>,
+): Promise<boolean> {
+  try {
+    const { data, error } = await sb.from('live_orders')
+      .update({ ...patch, status: 'SENT' })
+      .eq('id', id)
+      .eq('status', 'INTENT')
+      .select('id')
+      .maybeSingle();
+    return !error && data?.id === id;
+  } catch {
+    return false;
+  }
 }
 
 // 수량 정밀도 보정 — 거래소는 정해진 소수점만 받는다
@@ -389,6 +446,7 @@ async function readRemaining(
 export function canAdoptIntent(
   prev: any,
   intent: Record<string, any>,
+  expectedLimitPrice?: number | null,
 ): { ok: boolean; reason: string } {
   if (!prev || typeof prev !== 'object') {
     return { ok: false, reason: '커밋된 의도를 읽지 못했습니다' };
@@ -396,9 +454,22 @@ export function canAdoptIntent(
   if (prev.status !== 'INTENT') {
     return { ok: false, reason: `장부 상태가 ${prev.status || '알 수 없음'}입니다 — 전송이 이미 있었을 수 있습니다` };
   }
+  if (typeof prev.id !== 'string' || prev.id.length === 0) {
+    return { ok: false, reason: '커밋된 의도의 DB 행 ID를 확인하지 못했습니다' };
+  }
   if (prev.exchange_order_id != null || prev.sent_at != null
       || Number(prev.attempt_count ?? 0) !== 0) {
     return { ok: false, reason: '전송 흔적이 남아 있습니다 — 다시 보내지 않습니다' };
+  }
+  // 예약된 INTENT는 service_role로 읽힌다. client_order_id만으로 소유자를
+  // 증명할 수 없으므로 인증된 호출자가 넘긴 정체성과 저장된 정체성을
+  // 모두 요구한다. 어느 쪽이 비었어도 다른 주문을 이어받지 않는다.
+  for (const col of ['user_id', 'connection_id', 'signal_id']) {
+    if (typeof prev[col] !== 'string' || !prev[col].trim()
+        || typeof intent[col] !== 'string' || !intent[col].trim()
+        || prev[col] !== intent[col]) {
+      return { ok: false, reason: `커밋된 의도의 ${col} 정체성을 확인하지 못했습니다` };
+    }
   }
   for (const col of ['client_order_id', 'exchange', 'mode', 'symbol', 'side', 'order_type']) {
     if (String(prev[col]) !== String(intent[col])) {
@@ -411,7 +482,47 @@ export function canAdoptIntent(
   if (Number(prev.quantity) !== Number(intent.quantity)) {
     return { ok: false, reason: '적힌 의도의 수량이 보낼 주문과 다릅니다' };
   }
-  // 배율은 청산 주문에 없을 수 있다. **있는데 다른 것**만 거절한다.
+  // SQL 097은 price를 따로 저장한다. LIMIT의 가격을 대조하지 않으면
+  // 같은 주문 ID/수량으로 다른 지정가를 보내는 것이 가능하다.
+  // NULL과 0을 같은 값으로 취급하지 않는다.
+  const sameOptionalNumber = (a: unknown, b: unknown): boolean => {
+    if (a == null || b == null) return a == null && b == null;
+    const x = Number(a), y = Number(b);
+    return Number.isFinite(x) && Number.isFinite(y) && x === y;
+  };
+  if (intent.order_type === 'LIMIT'
+      && (expectedLimitPrice == null || !Number.isFinite(Number(expectedLimitPrice)))) {
+    return { ok: false, reason: '지정가 주문의 가격을 확인하지 못했습니다' };
+  }
+  for (const [col, expected] of [
+    ['price', expectedLimitPrice ?? null],
+    ['stop_loss', intent.stop_loss ?? null],
+    ['take_profit', intent.take_profit ?? null],
+    // 091 위험 좌표는 각각 NULL일 수 있다. 존재하는 값은 저장 INTENT와 정확히 같아야 한다.
+    ['entry_adverse_distance_pct', intent.entry_adverse_distance_pct ?? null],
+    ['entry_liquidation_distance_pct_raw', intent.entry_liquidation_distance_pct_raw ?? null],
+  ] as const) {
+    if (!sameOptionalNumber(prev[col], expected)) {
+      return { ok: false, reason: `커밋된 의도의 ${col}가 보낼 주문과 다릅니다` };
+    }
+  }
+  // NO_FIXED_SL/실행 계약은 주문 후 복구의 정체성이다. SQL이 해당 칸을
+  // 아직 저장하지 않는다면 이어받기를 거절하고, 조용히 누락하지 않는다.
+  for (const col of [
+    'stop_policy', 'execution_profile_id', 'execution_preset_id',
+    'execution_contract_version',
+  ]) {
+    if (String(prev[col] ?? '') !== String(intent[col] ?? '')) {
+      return { ok: false, reason: `커밋된 의도의 ${col}가 보낼 계약과 다릅니다` };
+    }
+  }
+  // 진입 주문의 예약 배율은 필수다. SQL 097도 진입의 NULL 배율을
+  // 거절한다. 한쪽이 비었는데도 다른 칸만 같다는 이유로 이어받으면
+  // 예약된 위험 계약을 확인하지 않고 거래소로 전송할 수 있다.
+  // 청산(reduce_only)은 배율이 없을 수 있으므로 기존 허용을 유지한다.
+  if (!intent.reduce_only && (intent.leverage == null || prev.leverage == null)) {
+    return { ok: false, reason: '진입 주문의 예약 배율을 확인하지 못했습니다' };
+  }
   if (intent.leverage != null && prev.leverage != null
       && Number(prev.leverage) !== Number(intent.leverage)) {
     return { ok: false, reason: '적힌 의도의 배율이 보낼 주문과 다릅니다' };
@@ -609,17 +720,34 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       ? { entry_liquidation_distance_pct_raw: riskSnap.liquidationDistancePctRaw } : {}),
   };
 
-  const { data: row, error: insErr } = await sb.from('live_orders').insert(intent).select('id, status').single();
-  // 097의 예약 트랜잭션이 먼저 적어 둔 줄. 이어받기로 결정됐을 때만 채운다.
+  // 097이 이미 커밋한 INTENT를 이어받을 때는 새 INTENT를 만들지 않는다.
+  // 이전에는 먼저 INSERT하고 23505가 나야만 예약 의도를 읽었다.
+  // 예약이 없거나 UNIQUE 제약이 없는 DB에서는 adoptIntent:true가 오히려
+  // 새 INTENT를 만들어 거래소에 전송하는 fail-open 경로가 됐다.
+  let row: any = null;
   let adopted: any = null;
-  if (insErr) {
-    if (String(insErr.code) === '23505') {
-      const { data: prev } = await sb.from('live_orders').select('*').eq('client_order_id', clientOrderId).maybeSingle();
-      const adopt = args.adoptIntent === true
-        ? canAdoptIntent(prev, intent)
-        : { ok: false, reason: '이어받기를 요청하지 않았습니다' };
-      if (!adopt.ok) {
-        // 이미 처리된 주문 — 기존 상태를 그대로 반환 (재시도해도 결과 동일)
+  if (args.adoptIntent === true) {
+    const { data: prev, error: readErr } = await sb.from('live_orders')
+      .select('*').eq('client_order_id', clientOrderId).maybeSingle();
+    const adopt = readErr
+      ? { ok: false, reason: '커밋된 의도의 DB 조회가 실패했습니다' }
+      : canAdoptIntent(prev, intent, args.limitPrice);
+    if (!adopt.ok) {
+      // 다른 사용자의 과거 체결·거래소 ID도 노출하지 않는다.
+      return {
+        ok: false, status: 'UNKNOWN', clientOrderId, duplicate: true,
+        message: `커밋된 주문 의도를 안전하게 이어받지 못했습니다 (${adopt.reason})`,
+      };
+    }
+    adopted = prev;
+  } else {
+    // 레거시 비-adoption 경로의 INSERT 및 중복 응답 의미는 유지한다.
+    const { data: inserted, error: insErr } = await sb.from('live_orders')
+      .insert(intent).select('id, status').single();
+    if (insErr) {
+      if (String(insErr.code) === '23505') {
+        const { data: prev } = await sb.from('live_orders')
+          .select('*').eq('client_order_id', clientOrderId).maybeSingle();
         return {
           ok: prev?.status === 'ACKED' || prev?.status === 'FILLED',
           status: (prev?.status as OrderStatus) || 'UNKNOWN',
@@ -628,15 +756,12 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
           filledQty: prev?.filled_qty != null ? Number(prev.filled_qty) : undefined,
           avgPrice: prev?.avg_price != null ? Number(prev.avg_price) : undefined,
           duplicate: true,
-          message: args.adoptIntent === true
-            ? `이미 처리된 주문입니다 — 이어받지 않았습니다 (${adopt.reason})`
-            : '이미 처리된 주문입니다 (중복 요청)',
+          message: '이미 처리된 주문입니다 (중복 요청)',
         };
       }
-      adopted = prev;
-    } else {
       return { ok: false, status: 'FAILED', clientOrderId, message: `의도 기록 실패: ${insErr.message}` };
     }
+    row = inserted;
   }
 
   const orderRowId = adopted ? adopted.id : row.id;
@@ -653,8 +778,16 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
 
   let currentStatus: OrderStatus = 'INTENT';
 
-  const update = async (patch: Record<string, any>) => {
+  /**
+   * 장부에 **적히지 않은** 기록들. 전송 뒤의 실패는 주문을 되돌리지
+   * 못하므로 막는 대신 **크게 남긴다** — 조용히 지나가면 화면의 상태와
+   * 거래소의 상태가 갈린 채로 아무도 모른다.
+   */
+  const persistWarn: string[] = [];
+
+  const update = async (patch: Record<string, any>): Promise<{ ok: boolean; reason: string | null }> => {
     const next = patch.status as OrderStatus | undefined;
+    let advance: OrderStatus | null = null;
     if (next && next !== currentStatus) {
       const t = applyTransition(toLifecycle(currentStatus), toLifecycle(next));
       if (!t.ok) {
@@ -665,15 +798,35 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
           log.warn('order-executor', `${clientOrderId}: ${t.reason}`);
         } catch { /* 로거 실패가 주문을 막지 않는다 */ }
         const { status: _drop, ...rest } = patch;
-        if (Object.keys(rest).length === 0) return;
+        if (Object.keys(rest).length === 0) return { ok: true, reason: null };
         patch = rest;
       } else {
-        currentStatus = next;
+        advance = next;
       }
     }
-    try { await updateOrderRow(sb, orderRowId, { ...patch, updated_at: new Date().toISOString() }); } catch {}
+    const w = await updateOrderRow(sb, orderRowId, { ...patch, updated_at: new Date().toISOString() });
+    // **쓰기를 확인한 뒤에만 메모리 상태를 전진시킨다.**
+    //
+    // 예전에는 DB보다 먼저 전진했다. 그러면 DB는 INTENT인데 메모리는
+    // SENT가 되고, 다음 전이 판정이 **장부에 없는 상태**를 기준으로
+    // 내려진다. 두 상태가 갈리는 바로 그 자리다.
+    if (w.ok && advance) currentStatus = advance;
+    if (!w.ok) {
+      persistWarn.push(`${next ?? '갱신'}: ${w.reason}`);
+      try {
+        const { log } = await import('@/lib/log/logger');
+        log.warn('order-executor', `${clientOrderId}: 장부 기록 실패 — ${w.reason}`);
+      } catch { /* 로거 실패가 주문을 막지 않는다 */ }
+    }
+    return w;
   };
 
+  /** 전송 뒤 기록 실패를 사용자에게 보이는 말에 붙인다 */
+  const withPersistNote = (msg: string) =>
+    persistWarn.length === 0 ? msg
+      : `${msg} · ⚠ 장부에 기록하지 못했습니다 (${persistWarn.join(' · ')}) — 화면과 거래소가 다를 수 있으니 대조가 필요합니다`;
+
+  const result = await (async (): Promise<ExecuteResult> => {
   try {
     if (exchange === 'binance') {
       const bf = await import('@/lib/exchanges/binanceFutures');
@@ -872,14 +1025,21 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       const sendQty = qz.quantity as number;
       const sendPrice = orderType === 'LIMIT' ? (qz.price ?? args.limitPrice) : undefined;
 
-      // ── 5) 주문 전송 ──
-      await update({
-        status: 'SENT', sent_at: new Date().toISOString(), attempt_count: 1,
-        pos_qty_before: posQtyBefore,
-        // 규격에 맞추며 깎인 수량을 장부에 남긴다. 요청 수량만 남기면
-        // 체결 수량과 비교할 기준이 틀어진다.
+      // ── 5) 원자적 전송 선점 → 주문 전송 ──
+      // INTENT를 읽은 실행기가 여럿이어도 DB에서 단 한 실행기만
+      // SENT를 선점할 수 있다. 오류·0행이면 거래소 POST는 0회다.
+      const claimed = await claimOrderDispatch(sb, orderRowId, {
+        sent_at: new Date().toISOString(), attempt_count: 1,
+        // 규격에 맞춘 수량을 실제 전송 전에 같은 원자적 쓰기로 기록한다.
         ...(qz.changed ? { quantity: sendQty } : {}),
       });
+      if (!claimed) {
+        return { ok: false, status: 'UNKNOWN', clientOrderId,
+          message: '주문 전송 권한을 DB에서 확정하지 못했습니다. 전송하지 않고 대조가 필요합니다.' };
+      }
+      currentStatus = 'SENT';
+      // 018 복구 컬럼은 구형 DB에서도 선택 사항. 선점과 분리해 적는다.
+      if (posQtyBefore !== null) await update({ pos_qty_before: posQtyBefore });
 
       let res: any;
       try {
@@ -1426,10 +1586,16 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       gatePosBefore = before ? Number(before.size) || 0 : 0;
     } catch { /* 조회 실패 시 null — 교차 확인 없이 판단하게 된다 */ }
 
-    await update({
-      status: 'SENT', sent_at: new Date().toISOString(), attempt_count: 1,
-      pos_qty_before: gatePosBefore,
+    // Gate도 Binance와 동일한 INTENT → SENT 원자적 전송 선점을 통과한다.
+    const claimed = await claimOrderDispatch(sb, orderRowId, {
+      sent_at: new Date().toISOString(), attempt_count: 1,
     });
+    if (!claimed) {
+      return { ok: false, status: 'UNKNOWN', clientOrderId,
+        message: 'Gate 주문 전송 권한을 DB에서 확정하지 못했습니다. 전송하지 않고 대조가 필요합니다.' };
+    }
+    currentStatus = 'SENT';
+    if (gatePosBefore !== null) await update({ pos_qty_before: gatePosBefore });
 
     let gres: any;
     try {
@@ -1821,6 +1987,8 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
     await update({ status: 'FAILED', error_message: e?.message || String(e) });
     return { ok: false, status: 'FAILED', clientOrderId, message: e?.message || '주문 실패' };
   }
+  })();
+  return { ...result, message: withPersistNote(result.message) };
 }
 
 // ── 재시작 복구: UNKNOWN/SENT 상태 주문을 거래소와 대조 ──
