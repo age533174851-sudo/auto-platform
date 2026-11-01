@@ -17,7 +17,7 @@
 //   7. 공식 Supabase 재생 워크플로가 운영과 연결되지 않는가
 import { readFileSync, existsSync, globSync } from 'node:fs';
 import { join } from 'node:path';
-import { buildManifest, renderManifest, OUT, LEGACY, loadPlan, MIG_DIR } from './gen-migration-manifest.mjs';
+import { buildManifest, renderManifest, OUT, LEGACY, loadPlan, MIG_DIR, readMigrationFiles } from './gen-migration-manifest.mjs';
 
 let bad = 0;
 const err = (m) => { console.error(`::error::${m}`); bad += 1; };
@@ -155,6 +155,36 @@ const CHORE_PHRASES = [
   ];
 
   const plan = await loadPlan();
+
+  // ── 파일이 **자기 위험도를 스스로 거짓으로 적지 않는가** ──
+  //
+  //   097은 머리말에 이렇게 적어 뒀다:
+  //
+  //       -- ADDITIVE 전용이다. 기존 표·칸을 만들지도 지우지도 고치지도 않는다.
+  //
+  //   그런데 같은 파일에 `DROP FUNCTION` 3개와 `DROP POLICY` 4개가 있고,
+  //   판정기는 그 파일을 **DESTRUCTIVE**로 분류한다. 관문은 이미 막고
+  //   있으니 **코드가 위험한 것이 아니다 — 문서가 거짓인 것이다.**
+  //
+  //   왜 그게 위험한가: 승인하는 사람이 매니페스트가 아니라 SQL 머리말을
+  //   읽고 "자동 적용 가능한 ADDITIVE"로 오판할 수 있다. 이 저장소에서
+  //   주석이 코드와 갈린 자리는 전부 사고가 됐다 —
+  //   `getPriceOrdersGateFutures`의 "못 읽으면 null"(구현은 `[]`),
+  //   `ten_slot_events`의 "추가만 한다"(아무것도 강제하지 않았다).
+  //
+  //   판정을 여기서 다시 적지 않는다. **위 `plan.classifyMigration`이
+  //   정본이다** — "DROP이 있으면 DESTRUCTIVE"로 세면 086(DROP TRIGGER)·
+  //   093(DROP CONSTRAINT)처럼 정당한 ADDITIVE가 오탐으로 걸린다.
+  //   실제로 그 둘은 DROP을 갖고도 ADDITIVE로 분류된다.
+  const ADDITIVE_CLAIM = /ADDITIVE\s*전용/;
+  for (const f of readMigrationFiles()) {
+    const cls = plan.classifyMigration(f.sql);
+    if (cls.risk === 'ADDITIVE') continue;
+    if (!ADDITIVE_CLAIM.test(f.sql)) continue;
+    err(`${f.name}은 ${cls.risk}로 분류되는데 파일 안에 "ADDITIVE 전용"이라고 적혀 있습니다`);
+    console.error('   → 승인하는 사람이 머리말만 읽으면 자동 적용 가능한 변경으로 오판합니다.');
+    console.error(`   → 분류 근거: ${cls.reasons.join(' · ')}`);
+  }
 
   for (const c of CONTRACTS) {
     let sql = null;
