@@ -33,6 +33,7 @@
 // 명시적으로 켜야 돌고, 켜지지 않으면 거래소를 부르지도 않는다.
 
 import { executeOrder, type ExecuteResult } from './orderExecutor';
+import { executionIdentityComplete } from '../execution/profile';
 
 /** 예약이 실제로 커밋됐을 때 SQL이 돌려주는 코드. 이 하나만 전송을 연다 */
 export const CLAIM_DURABLE = 'RESERVATION_AND_INTENT_DURABLE';
@@ -139,6 +140,17 @@ export interface TenSlotDispatchArgs {
   stopLoss?: number | null;
   /** 익절가. 없으면 비운다 — 0으로 바꾸지 않는다 */
   takeProfit?: number | null;
+  /**
+   * 실행 계약(프로필·프리셋·버전).
+   *
+   * **주면 예약과 전송 양쪽에 같이 간다.** 전에는 이 칸을 받지도, 넘기지도
+   * 않았다 — 계약을 준 호출부의 값이 **조용히 사라졌다.** 그러면
+   * `live_orders`에 계약 세 칸이 비고, 나중 복구가 "배율 100이고 손절이
+   * 없으니 Exact100X겠지"로 되돌아간다. 090이 끝낸 추론이다.
+   */
+  executionIdentity?: { profileId?: string; presetId?: string; contractVersion?: number | string } | null;
+  /** 진입 위험 좌표(091). 주면 예약과 전송 양쪽에 같이 간다 */
+  entryRiskSnapshot?: { adverseDistancePct?: number | null; liquidationDistancePctRaw?: number | null } | null;
   stopPolicy?: string | null;
   takeProfitPolicy?: string | null;
   protectionPolicy?: string | null;
@@ -295,6 +307,16 @@ export async function dispatchTenSlot(
       claimVerdictOf(null, new Error('no-fixed-tp with take profit')));
   }
 
+  // ── 불완전한 실행 계약으로 예약하지 않는다 ──
+  //
+  // 실행기는 계약이 **있는데 짝이 안 맞으면** 거절한다
+  // (`ident && !identOk` → "실행 계약이 불완전합니다"). 그 거절은 전송
+  // 직전에 나므로 예약은 이미 커밋돼 있다. 같은 검사를 예약 전에 한다.
+  if (a.executionIdentity != null && !executionIdentityComplete(a.executionIdentity)) {
+    return off('실행 계약이 불완전합니다 — 나머지를 추측하지 않고 예약하지 않습니다',
+      claimVerdictOf(null, new Error('execution identity incomplete')));
+  }
+
   // 이어받을 수 없는 예약을 만들지 않는다. 예약 뒤에 알면 슬롯이 묶인다.
   if (typeof a.signalId !== 'string' || a.signalId.trim().length === 0) {
     return off('신호 id가 없습니다 — 이어받을 수 없는 예약을 만들지 않습니다',
@@ -326,6 +348,15 @@ export async function dispatchTenSlot(
       // **전송에 넘기는 값과 같은 값이다.** 한 곳에서 받아 양쪽에 같이 넘긴다.
       p_stop_loss: a.stopLoss ?? null,
       p_take_profit: a.takeProfit ?? null,
+      // **계약과 위험 좌표도 같은 값으로 양쪽에 간다.**
+      // 097이 받을 수 있는 칸인데 넘기지 않으면 장부에 비고, 그 공백이
+      // 나중에 "배율로 계약을 추론하는" 자리로 되돌아간다.
+      p_execution_profile_id: a.executionIdentity?.profileId ?? null,
+      p_execution_preset_id: a.executionIdentity?.presetId ?? null,
+      p_execution_contract_version: a.executionIdentity?.contractVersion == null
+        ? null : Number(a.executionIdentity.contractVersion),
+      p_entry_adverse_distance_pct: a.entryRiskSnapshot?.adverseDistancePct ?? null,
+      p_entry_liquidation_distance_pct_raw: a.entryRiskSnapshot?.liquidationDistancePctRaw ?? null,
       // **호출자의 정체성을 들고 간다.** 안 넘기면 SQL이 CALLER_UNKNOWN으로
       // 막는다 — 그 검사가 옳으므로 우회하지 않고 값을 넘긴다.
       p_caller_user_id: a.userId,
@@ -367,6 +398,9 @@ export async function dispatchTenSlot(
     // 예약에 적힌 그 값이다. 다르면 `canAdoptIntent()`가 거절한다.
     stopLoss: a.stopLoss ?? undefined,
     takeProfit: a.takeProfit ?? undefined,
+    // 예약에 적힌 그 값이다. 한쪽만 넘기면 `canAdoptIntent`가 거절한다.
+    executionIdentity: a.executionIdentity ?? undefined,
+    entryRiskSnapshot: a.entryRiskSnapshot ?? undefined,
     takeProfitPolicy: a.takeProfitPolicy,
     protectionPolicy: a.protectionPolicy,
     orderType: a.orderType,

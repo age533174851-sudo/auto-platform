@@ -470,6 +470,67 @@ export async function runTenSlotDispatchIntegrationTests() {
     });
   }
 
+  // ══════════ ⑤-j 실행 계약·위험 좌표는 **양쪽에 같이 간다** ══════════
+  //
+  // 전에는 이 경로가 그 칸을 **받지도, 넘기지도 않았다.** 계약을 준
+  // 호출부의 값이 조용히 사라지고, 주문은 계약 없이 나갔다:
+  //
+  //   executionIdentity 지정 → rpc 1 · sends 1 · ACKED   ← 계약이 사라진 채
+  //
+  // 그러면 `live_orders`의 계약 세 칸이 비고, 나중 복구가 "배율 100이고
+  // 손절이 없으니 Exact100X겠지"로 되돌아간다 — 090이 끝낸 추론이다.
+  {
+    const IDENT = { profileId: 'exact100x', presetId: 'exact100x-v3', contractVersion: 3 };
+    const RISK = { adverseDistancePct: 1.5, liquidationDistancePctRaw: 0.9 };
+    const db = claimedDb(undefined, {
+      execution_profile_id: IDENT.profileId,
+      execution_preset_id: IDENT.presetId,
+      execution_contract_version: IDENT.contractVersion,
+      entry_adverse_distance_pct: RISK.adverseDistancePct,
+      entry_liquidation_distance_pct_raw: RISK.liquidationDistancePctRaw,
+    });
+    const venue = sendableVenue();
+    const r = await scenario(venue, () => dispatch(db, ENV_ON,
+      { executionIdentity: IDENT, entryRiskSnapshot: RISK }));
+
+    test('★★ 계약과 위험 좌표가 예약에 적히고, 그 예약을 이어받아 보낸다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(db.rpcCalls.length, 1);
+      const args = db.rpcCalls[0].args;
+      eq(args.p_execution_profile_id, IDENT.profileId, '예약에 프로필이 가지 않았다');
+      eq(args.p_execution_preset_id, IDENT.presetId, '예약에 프리셋이 가지 않았다');
+      eq(args.p_execution_contract_version, IDENT.contractVersion, '예약에 계약 버전이 가지 않았다');
+      eq(args.p_entry_adverse_distance_pct, RISK.adverseDistancePct);
+      eq(args.p_entry_liquidation_distance_pct_raw, RISK.liquidationDistancePctRaw);
+      // 양쪽이 같아야 이어받기가 열린다 — 한쪽만 넘기면 거절된다.
+      eq((r as any).claim.durable, true, (r as any).claim.reason);
+      eq((r as any).exec?.status, 'ACKED', (r as any).exec?.message);
+      eq(venue.orderSends().length, 1);
+    });
+  }
+
+  // ══════════ ⑤-k 불완전한 계약으로는 예약하지 않는다 ══════════
+  //
+  // 실행기는 계약이 있는데 짝이 안 맞으면 전송 직전에 거절한다. 그때
+  // 예약은 이미 커밋돼 있다 — 슬롯만 남는다.
+  for (const [label, ident] of [
+    ['프리셋 없음', { profileId: 'exact100x', contractVersion: 3 }],
+    ['프로필 없음', { presetId: 'exact100x-v3', contractVersion: 3 }],
+    ['버전 없음', { profileId: 'exact100x', presetId: 'exact100x-v3' }],
+    ['버전이 숫자가 아님', { profileId: 'exact100x', presetId: 'exact100x-v3', contractVersion: 'x' }],
+    ['빈 프로필', { profileId: '  ', presetId: 'exact100x-v3', contractVersion: 3 }],
+  ] as Array<[string, any]>) {
+    const db = claimedDb();
+    const venue = sendableVenue();
+    const r = await scenario(venue, () => dispatch(db, ENV_ON, { executionIdentity: ident }));
+    test(`★★ 불완전한 계약(${label})이면 예약조차 하지 않는다`, () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(db.rpcCalls.length, 0, '불완전한 계약으로 예약했다 — 슬롯이 묶인다');
+      eq(venue.orderSends().length, 0);
+      eq((r as any).ok, false);
+    });
+  }
+
   // ══════════ ⑥ 같은 예약을 두 실행기가 동시에 집어도 전송은 한 번 ══════════
   //
   // 새 잠금을 만들지 않았다. `orderExecutor`의 전송 직전 CAS
