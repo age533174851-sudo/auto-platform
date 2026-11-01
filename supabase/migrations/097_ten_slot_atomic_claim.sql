@@ -43,7 +43,29 @@
 --   부분 UNIQUE 인덱스다. 미래의 어떤 경로가 FOR UPDATE를 빼먹어도 DB가
 --   거절한다. 잠금은 순서를 세우는 수단이고, 불변식은 제약이 지킨다.
 --
--- ADDITIVE 전용이다. 기존 표·칸을 만들지도 지우지도 고치지도 않는다.
+-- ■ 위험 분류: **DESTRUCTIVE — 사람 승인이 필요하다**
+--
+--   기존 **표·칸**은 만들지도 지우지도 고치지도 않는다. 그 말은 맞다.
+--   그런데 이 파일은 **옛 함수 서명과 정책을 지운다**:
+--
+--     DROP FUNCTION IF EXISTS public.ten_slot_claim(...)   309 · 313행
+--     DROP FUNCTION IF EXISTS public.ten_slot_kill(TEXT)   737행
+--     DROP POLICY   IF EXISTS ...                          122 · 125 · 129 · 133행
+--
+--   일부러 지운다. `CREATE OR REPLACE`는 인자 목록이 다르면 덮어쓰지 않고
+--   **과적재**하므로, 지우지 않으면 같은 이름의 함수가 둘 남고 어느 쪽이
+--   불릴지는 호출부의 인자 수에 달린다 — 이 저장소의 상습 고장
+--   "경로가 둘인데 한쪽만 고침"이 생기는 자리다. 일곱 개 전부 바로 뒤에서
+--   다시 만든다.
+--
+--   그래서 `classifyMigration`은 이 파일을 DESTRUCTIVE로 분류하고
+--   (`함수를 지웁니다`), 매니페스트도 `risk: 'DESTRUCTIVE'`이며 **자동
+--   파이프라인은 이 파일을 실행하지 않는다.**
+--
+--   **여기에 "ADDITIVE"라고 적지 않는다.** 승인하는 사람이 매니페스트가
+--   아니라 이 머리말을 읽고 자동 적용 가능한 변경으로 오판하면, 관문이
+--   있어도 사람이 그 관문을 열어 버린다. `scripts/check-migrations.mjs`가
+--   이 문구와 분류가 갈리면 빨개진다.
 
 CREATE TABLE IF NOT EXISTS ten_slot_campaigns (
   campaign_id     TEXT PRIMARY KEY,
@@ -731,8 +753,31 @@ $$;
 --
 -- 이미 중지돼 있으면 버전을 올리지 않는다. 애매한 커밋 뒤의 재시도가
 -- 전이를 하나 더 만들면, 그 뒤의 모든 CAS가 어긋난다.
+-- **옛 1인자 서명을 지운다.** 남겨 두면 그것이 우회 통로다 — 소유권
+-- 검사가 없는 쪽을 계속 부를 수 있다. `CREATE OR REPLACE`는 인자 목록이
+-- 다르면 덮어쓰지 않고 과적재한다.
+DROP FUNCTION IF EXISTS public.ten_slot_kill(TEXT);
+
 CREATE OR REPLACE FUNCTION public.ten_slot_kill(
-  p_campaign_id TEXT
+  p_campaign_id TEXT,
+  -- ── 호출자의 정체성 ──
+  --
+  --   `ten_slot_claim`과 **같은 요구**다. 처음에는 중지에 이 검사를 넣지
+  --   않았다 — 막으면 **열린 포지션을 닫을 수 없게 되는 것**이 더 위험하다고
+  --   봤기 때문이다. 그건 두 가지를 섞은 판단이었다:
+  --
+  --     중지 **요청**의 주인은 확인해야 한다 (남의 캠페인을 멈출 수 없다)
+  --     중지 **뒤**의 청산은 계속 허용해야 한다 (098이 그렇게 돼 있다)
+  --
+  --   둘은 양립한다. `ten_slot_apply_event`는 중지를 보지 않으므로, 여기에
+  --   소유권을 걸어도 이미 열린 포지션을 닫는 길은 그대로다.
+  --
+  --   ★ **호출자가 임의로 넣은 UUID를 믿는 것은 보안 보증이 아니다.**
+  --   이 검사가 보장하는 것은 "인증된 정체성을 여기까지 들고 와야 한다"는
+  --   요구뿐이다. 실제 보증은 인증된 서버 어댑터가 세션의 사용자·연결을
+  --   넘길 때 성립한다. 이 공백을 "검증했다"로 적지 않는다.
+  p_caller_user_id       UUID DEFAULT NULL,
+  p_caller_connection_id UUID DEFAULT NULL
 )
 RETURNS TABLE (code TEXT, campaign_version BIGINT)
 LANGUAGE plpgsql
@@ -740,14 +785,30 @@ AS $$
 DECLARE
   v_version BIGINT;
   v_killed  BOOLEAN;
+  v_user    UUID;
+  v_conn    UUID;
 BEGIN
-  SELECT c.version, c.killed INTO v_version, v_killed
+  SELECT c.version, c.killed, c.user_id, c.connection_id
+    INTO v_version, v_killed, v_user, v_conn
     FROM public.ten_slot_campaigns AS c
    WHERE c.campaign_id = p_campaign_id
      FOR UPDATE;
 
   IF v_version IS NULL THEN
     RETURN QUERY SELECT 'CAMPAIGN_MISSING'::TEXT, NULL::BIGINT;
+    RETURN;
+  END IF;
+
+  -- 소유권. **거부 응답에 캠페인 값을 담지 않는다** — 담으면 남의 캠페인
+  -- id만 알고도 버전을 세어 볼 수 있다(`ten_slot_claim`에서 같은 것을 고쳤다).
+  IF p_caller_user_id IS NULL THEN
+    RETURN QUERY SELECT 'CALLER_UNKNOWN'::TEXT, NULL::BIGINT;
+    RETURN;
+  END IF;
+
+  IF v_user IS DISTINCT FROM p_caller_user_id
+     OR v_conn IS DISTINCT FROM p_caller_connection_id THEN
+    RETURN QUERY SELECT 'CALLER_NOT_OWNER'::TEXT, NULL::BIGINT;
     RETURN;
   END IF;
 
@@ -794,8 +855,8 @@ GRANT EXECUTE ON FUNCTION public.ten_slot_claim(
   UUID, UUID
 ) TO service_role;
 
-REVOKE ALL ON FUNCTION public.ten_slot_kill(TEXT) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.ten_slot_kill(TEXT) TO service_role;
+REVOKE ALL ON FUNCTION public.ten_slot_kill(TEXT, UUID, UUID) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.ten_slot_kill(TEXT, UUID, UUID) TO service_role;
 
 COMMENT ON FUNCTION public.ten_slot_claim(
   TEXT, BIGINT, TEXT, INT, INT, INT, INT,

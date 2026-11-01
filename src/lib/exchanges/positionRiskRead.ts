@@ -25,7 +25,12 @@ import { monotonicNowMs, monotonicSpanMs } from '../system/monotonicClock';
 
 export interface SymbolPositionRisk {
   symbol: string;
-  /** 부호 있는 수량. 0이면 포지션 없음 */
+  /**
+   * 부호 있는 수량. 0이면 **포지션이 없다는 관측**이다.
+   *
+   * ★ 읽지 못한 수량이 이 자리에 0으로 들어오지 않는다. 깨진 증거는
+   *   `risk: null`로 돌려보낸다 — 아래 `positionAmtOrNull` 참고.
+   */
   positionAmt: number;
   /** 'isolated' | 'cross' */
   marginType: string;
@@ -139,12 +144,38 @@ export async function readPositionRiskWithProvenance(
   const span = monotonicSpanMs;
   const helperT0 = monotonicMs();
 
+  /**
+   * **못 읽은 수량을 0으로 적지 않는다.**
+   *
+   *   `parseFloat('bad') || 0`은 `NaN || 0`이므로 **0**이다. 그러면
+   *   거래소가 깨진 본문을 줬을 때 앱은 "포지션 없음"을 관측한 것으로
+   *   읽는다. 그 뒤 손절 복구는 `수량 0 → 보호할 것이 없다`로 조용히
+   *   끝나고, **경고도 남지 않는다.** 실제로 그 자리가 비어 있었다.
+   *
+   *   그래서 읽을 수 없으면 `null`이고, 부르는 쪽은 그 관측을
+   *   **쓰지 않는다**(`risk: null`).
+   *
+   *   `Number`를 쓰는 이유: `parseFloat('0.003XYZ')`는 0.003을 주지만
+   *   그건 우리가 이해한 본문이 아니다. 앞부분만 맞는 쓰레기를
+   *   수량으로 인정하지 않는다.
+   */
+  const positionAmtOrNull = (raw: unknown): number | null => {
+    if (typeof raw === 'number') return Number.isFinite(raw) ? raw : null;
+    if (typeof raw !== 'string') return null;
+    const t = raw.trim();
+    if (t === '') return null;
+    const n = Number(t);
+    return Number.isFinite(n) ? n : null;
+  };
+
   const shape = (row: any, extra?: { marginType?: string; leverage?: number | null }) => {
     const liq = parseFloat(row.liquidationPrice ?? '0');
     const lev = extra?.leverage != null ? extra.leverage : parseInt(row.leverage ?? '0', 10);
+    const amt = positionAmtOrNull(row.positionAmt);
+    if (amt === null) return null;
     return {
       symbol: String(row.symbol ?? sym),
-      positionAmt: parseFloat(row.positionAmt ?? '0') || 0,
+      positionAmt: amt,
       marginType: String(extra?.marginType ?? row.marginType ?? '').toLowerCase(),
       // 0은 값이 아니라 '못 받았음'이다
       leverage: Number.isFinite(lev as any) && Number(lev) > 0 ? Number(lev) : null,
@@ -162,7 +193,13 @@ export async function readPositionRiskWithProvenance(
   // 고르고, 둘 다 0이면 첫 줄(설정값은 같다)을 쓴다.
   const pick = (data: any) => {
     const rows = Array.isArray(data) ? data : [data];
-    return rows.find((r: any) => parseFloat(r?.positionAmt ?? '0') !== 0) ?? rows[0];
+    // 열려 있는 쪽을 **읽을 수 있는 수량으로만** 고른다. 깨진 줄을
+    // `NaN !== 0`으로 "열려 있음"이라고 고르면, 멀쩡한 반대쪽 줄이
+    // 있어도 깨진 줄이 이긴다.
+    return rows.find((r: any) => {
+      const a = positionAmtOrNull(r?.positionAmt);
+      return a !== null && a !== 0;
+    }) ?? rows[0];
   };
 
   let v2Err = '';
@@ -177,9 +214,16 @@ export async function readPositionRiskWithProvenance(
     const v2Received = nowMs();
     const v2T1 = monotonicMs();
     const row = pick(raw);
-    if (row && row.marginType != null) {
+    const shaped = row ? shape(row) : null;
+    // 수량을 못 읽었으면 **v2를 관측으로 쓰지 않는다.** v3가 멀쩡한
+    // 본문을 줄 수 있으므로 버리지 않고 넘어가고, 둘 다 못 읽으면
+    // 아래에서 `risk: null`로 끝난다.
+    if (row && row.marginType != null && !shaped) {
+      v2Err = '수량 증거가 유효하지 않습니다';
+    }
+    if (shaped && row.marginType != null) {
       return {
-        risk: shape(row), error: null,
+        risk: shaped, error: null,
         provenance: {
           ...prov, positionRiskSource: 'V2',
           positionRiskRequestStartedAtMs: v2Started,
@@ -233,8 +277,18 @@ export async function readPositionRiskWithProvenance(
     } catch { /* marginType은 빈 값 → 검사가 '확인 못 함'으로 잡는다 */ }
 
     p3.helperElapsedMs = span(helperT0, monotonicMs());
+    const shaped3 = shape(row, { marginType, leverage });
+    if (!shaped3) {
+      // 못 읽은 수량은 **관측이 아니다.** 0으로 적으면 손절 복구가
+      // "보호할 것 없음"으로 조용히 끝난다.
+      return {
+        risk: null,
+        error: `포지션 수량 증거가 유효하지 않습니다 (v2: ${v2Err || '없음'})`,
+        provenance: p3,
+      };
+    }
     return {
-      risk: shape(row, { marginType, leverage }),
+      risk: shaped3,
       // 마진 모드를 못 채웠으면 그 사실을 남긴다. 값만 비워 두면 또
       // "왜 확인 못 했지"가 된다.
       error: marginType ? null : `마진 모드를 계정 조회에서 못 찾았습니다 (v2: ${v2Err || '없음'})`,
