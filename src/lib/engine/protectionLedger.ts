@@ -138,6 +138,12 @@ export function cancelLedger(i: {
   const present = readable
     ? (i.leftover as any[]).map(orderIdOf).filter(Boolean)
     : null;
+  // **목록을 읽었다**와 **각 행의 주문 번호를 읽었다**는 다르다.
+  // 숫자 정밀도 손실이나 Algo 전용 필드 때문에 한 행이라도 번호를
+  // 못 읽으면, 그 행이 요청한 주문일 수 있다. 없는 것으로 세지 않는다.
+  const unreadableRows = readable
+    ? (i.leftover as any[]).filter(row => !orderIdOf(row)).length
+    : 0;
 
   const entries: CancelEntry[] = ids.map(id => {
     const a = attemptOf(id);
@@ -150,6 +156,10 @@ export function cancelLedger(i: {
       return { id, state: 'STILL_PRESENT',
         note: `${id}: 취소 뒤에도 거래소에 남아 있습니다`
           + (a?.httpOk ? ' — 거래소는 성공을 줬지만 실제로는 안 지워졌습니다' : a ? ` (${a.response || '취소 실패'})` : ' (취소를 요청하지 않았습니다)') };
+    }
+    if (unreadableRows > 0) {
+      return { id, state: 'CANCEL_UNKNOWN',
+        note: `${id}: 취소 뒤 목록에 주문 번호를 읽지 못한 행이 ${unreadableRows}건 있어 사라졌는지 확인하지 못했습니다` };
     }
     if (!a || !a.requested) {
       // 요청도 안 했는데 없다. 이미 발동했거나 다른 경로가 지웠다.
