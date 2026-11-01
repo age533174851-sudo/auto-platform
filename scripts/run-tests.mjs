@@ -156,6 +156,7 @@ import { runCredentialExposureTests } from './src/lib/security/credentialExposur
 import {
   runOrderPathIntegrationTests, runReconcileIntegrationTests, runSpotIntegrationTests,
   runCloseIntegrationTests, runTransitionIntegrationTests, runCoinMRouteIntegrationTests,
+  runGateTpslRouteTests,
   runGateExecIntegrationTests, runGateDupIntegrationTests, runNoFixedTpIntegrationTests,
   runPrecisionIntegrationTests,
   runPrecisionMatrixTests,
@@ -413,6 +414,7 @@ runMigrationStatusTests(); runWalletTruthTests(); runSmokePlanTests(); runSmokeR
   await runCloseIntegrationTests();
   await runTransitionIntegrationTests();
   await runCoinMRouteIntegrationTests();
+  await runGateTpslRouteTests();
   await runGateExecIntegrationTests();
   await runGateDupIntegrationTests();
   await runNoFixedTpIntegrationTests();
