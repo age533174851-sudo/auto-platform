@@ -235,6 +235,66 @@ export async function dispatchTenSlot(
     }
   }
 
+  // ── 실행기가 거절할 계획으로 예약하지 않는다 ──
+  //
+  // `executeOrder`는 사전 안전 검사를 **전송 직전**에 한다. 그 자리에서
+  // 거절되면 예약은 이미 커밋돼 있고 슬롯은 RESERVED로 남는다. 아래는
+  // 전부 실제로 돌려서 본 모양이다(예약 1회 · 전송 0회):
+  //
+  //   plan.approved=false  → REJECTED "승인되지 않은 계획은 주문할 수 없습니다"
+  //   plan.leverage=0      → REJECTED "레버리지를 확인하지 못했습니다 (0)"
+  //   plan.leverage=NaN    → REJECTED "레버리지를 확인하지 못했습니다 (NaN)"
+  //   NO_FIXED_SL + 손절가 → REJECTED "고정 손절을 쓰지 않는 프로필인데 …"
+  //
+  // 그래서 같은 검사를 **예약 전에** 한 번 한다. 실행기의 검사를 없애는
+  // 것이 아니다 — 그쪽은 모든 경로의 마지막 방어선으로 그대로 둔다.
+  if (a.plan?.approved !== true) {
+    return off('승인되지 않은 계획입니다 — 예약하지 않습니다',
+      claimVerdictOf(null, new Error('plan not approved')));
+  }
+
+  // ── 방향: `LONG`·`SHORT`만 받는다 ──
+  //
+  // 이 파일은 `p_side`를 `plan.side === 'SHORT' ? 'SELL' : 'BUY'`로 보내고,
+  // `orderExecutor`는 `plan.side !== 'LONG' ? 'SELL' : 'BUY'`로 읽는다.
+  // 두 식은 `LONG`·`SHORT`에서만 같은 답을 준다 — `'HOLD'`나 `null`이면
+  // **예약에는 BUY가 적히고 전송은 SELL을 기대한다.** 그러면
+  // `canAdoptIntent`가 거절하고 슬롯만 남는다(상습 고장 ②).
+  //
+  // 식을 한 곳으로 합치는 것이 더 낫지만 그 판단은 `orderExecutor`의
+  // 것이고 이 PR이 건드리지 않는 파일이다. 대신 **두 식이 일치하는
+  // 범위만** 받는다. 모르는 방향은 통과가 아니다.
+  if (a.plan?.side !== 'LONG' && a.plan?.side !== 'SHORT') {
+    return off(`방향이 LONG·SHORT가 아닙니다 (${String(a.plan?.side)})`
+      + ' — 예약과 전송이 서로 다른 방향을 보게 되어 예약하지 않습니다',
+      claimVerdictOf(null, new Error('side not directional')));
+  }
+
+  // 배율은 유한 양의 정수여야 한다. **범위 정책은 여기서 정하지 않는다** —
+  // 전략의 배율을 코드가 조용히 좁히지 않는다(`CLAUDE.md`). 실행기는
+  // 거래소에서 배율을 되읽어 대조하고, 어긋나면 전송하지 않는다.
+  const lev = a.plan?.leverage;
+  if (!(typeof lev === 'number' && Number.isInteger(lev) && lev > 0)) {
+    return off(`배율을 확인하지 못했습니다 (${String(lev)}) — 예약하지 않습니다`,
+      claimVerdictOf(null, new Error('leverage unreadable')));
+  }
+
+  // ── `NO_FIXED_SL`에 손절가·익절가를 같이 보내지 않는다 ──
+  //
+  // 실행기는 그 모순을 **조용히 정리하지 않고 거절한다** — 둘 중 어느
+  // 쪽이 맞는지 알 수 없기 때문이다. 그 판정이 옳다. 그렇다면 그 조합으로
+  // 예약해서도 안 된다.
+  if (a.stopPolicy === 'NO_FIXED_SL' && a.stopLoss != null) {
+    return off('고정 손절을 쓰지 않는 계약인데 손절가가 함께 왔습니다'
+      + ` (${a.stopLoss}) — 어느 쪽이 맞는지 알 수 없어 예약하지 않습니다`,
+      claimVerdictOf(null, new Error('no-fixed-sl with stop loss')));
+  }
+  if (a.takeProfitPolicy === 'NO_FIXED_TP' && a.takeProfit != null) {
+    return off('고정 익절을 쓰지 않는 계약인데 익절가가 함께 왔습니다'
+      + ` (${a.takeProfit}) — 어느 쪽이 맞는지 알 수 없어 예약하지 않습니다`,
+      claimVerdictOf(null, new Error('no-fixed-tp with take profit')));
+  }
+
   // 이어받을 수 없는 예약을 만들지 않는다. 예약 뒤에 알면 슬롯이 묶인다.
   if (typeof a.signalId !== 'string' || a.signalId.trim().length === 0) {
     return off('신호 id가 없습니다 — 이어받을 수 없는 예약을 만들지 않습니다',

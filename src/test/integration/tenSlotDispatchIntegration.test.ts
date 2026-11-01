@@ -417,6 +417,59 @@ export async function runTenSlotDispatchIntegrationTests() {
     }
   }
 
+  // ══════════ ⑤-h 실행기가 거절할 계획으로 **예약하지 않는다** ══════════
+  //
+  // 전부 실제로 돌려서 본 모양이다. 고치기 전에는 **예약 1회 · 전송 0회**로
+  // 끝났다 — 슬롯은 RESERVED, 주문은 없음:
+  //
+  //   approved=false  → REJECTED "승인되지 않은 계획은 주문할 수 없습니다"
+  //   leverage 0      → REJECTED "레버리지를 확인하지 못했습니다 (0)"
+  //   leverage NaN    → REJECTED "레버리지를 확인하지 못했습니다 (NaN)"
+  //   NO_FIXED_SL+손절 → REJECTED "고정 손절을 쓰지 않는 프로필인데 …"
+  //
+  // **각 시험은 나머지 입력이 전부 유효하다.** 안 그러면 다른 관문이
+  // 대신 막아 가짜 GREEN이 된다 — 이 파일에서 실제로 한 번 당했다.
+  const badPlans: Array<[string, any]> = [
+    ['승인되지 않은 계획', { plan: plan({ approved: false }) }],
+    ['방향이 HOLD', { plan: plan({ side: 'HOLD' }) }],
+    ['방향이 null', { plan: plan({ side: null }) }],
+    ['방향이 빈 문자열', { plan: plan({ side: '' }) }],
+    ['배율 0', { plan: plan({ leverage: 0 }) }],
+    ['배율 음수', { plan: plan({ leverage: -10 }) }],
+    ['배율 NaN', { plan: plan({ leverage: Number.NaN }) }],
+    ['배율이 소수', { plan: plan({ leverage: 12.5 }) }],
+    ['배율 없음', { plan: plan({ leverage: null }) }],
+    ['NO_FIXED_SL인데 손절가', { stopPolicy: 'NO_FIXED_SL', stopLoss: 95000 }],
+    ['NO_FIXED_TP인데 익절가', { stopPolicy: 'NO_FIXED_SL', takeProfitPolicy: 'NO_FIXED_TP', takeProfit: 120000 }],
+  ];
+  for (const [label, over] of badPlans) {
+    const db = claimedDb();
+    const venue = sendableVenue();
+    const r = await scenario(venue, () => dispatch(db, ENV_ON, over));
+    test(`★★ ${label}이면 예약조차 하지 않는다`, () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(db.rpcCalls.length, 0, '실행기가 거절할 계획으로 예약했다 — 슬롯이 묶인다');
+      eq(venue.orderSends().length, 0);
+      eq((r as any).ok, false);
+      eq((r as any).exec, null, '전송하지 않았는데 전송 결과를 적었다');
+    });
+  }
+
+  // ══════════ ⑤-i 방향은 **예약과 전송이 같은 것을 봐야 한다** ══════════
+  //
+  // 이 파일은 `p_side`를 `side === 'SHORT' ? 'SELL' : 'BUY'`로 보내고
+  // `orderExecutor`는 `side !== 'LONG' ? 'SELL' : 'BUY'`로 읽는다.
+  // 두 식은 LONG·SHORT에서만 같다 — 그 범위만 받는 것을 고정한다.
+  for (const [side, expected] of [['LONG', 'BUY'], ['SHORT', 'SELL']] as Array<[string, string]>) {
+    const db = claimedDb(undefined, { side: expected });
+    const venue = sendableVenue();
+    await scenario(venue, () => dispatch(db, ENV_ON, { plan: plan({ side }) }));
+    test(`★ ${side} 예약에 가는 방향은 ${expected}다 — 실행기가 읽는 것과 같다`, () => {
+      eq(db.rpcCalls.length, 1);
+      eq(db.rpcCalls[0].args.p_side, expected);
+    });
+  }
+
   // ══════════ ⑥ 같은 예약을 두 실행기가 동시에 집어도 전송은 한 번 ══════════
   //
   // 새 잠금을 만들지 않았다. `orderExecutor`의 전송 직전 CAS
