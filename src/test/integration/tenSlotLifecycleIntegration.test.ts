@@ -124,21 +124,100 @@ export async function runTenSlotLifecycleTests() {
   });
 
   test('★★ 남아 있으면 닫힘으로 적지 않는다', () => {
-    const v: any = slotEventForCloseConfirm({ ok: true, remainingQty: 0.004 });
+    const v: any = slotEventForCloseConfirm({ ok: true, remainingQty: 0.004, openEntryOrders: 0 });
     eq(v.kind, null, '남아 있는데 닫힘으로 적었다');
     eq(v.needsHuman, false);
   });
 
-  test('★★ 포지션 0을 **조회로 확인**했을 때만 CLOSED / VENUE_POSITION', () => {
-    const v: any = slotEventForCloseConfirm({ ok: true, remainingQty: 0 });
+  test('★★ 포지션 0 **그리고** 진입 주문 0을 확인했을 때만 CLOSED / VENUE_POSITION', () => {
+    const v: any = slotEventForCloseConfirm({ ok: true, remainingQty: 0, openEntryOrders: 0 });
     eq(v.kind, 'CLOSED');
     eq(v.evidence, 'VENUE_POSITION');
   });
+
+  // ══════════ ④-a 수량을 **숫자로** 받아들일 수 없으면 닫힘이 아니다 ══════════
+  //
+  // 처음 쓴 조건은 `left == null` · `left > 0` · 그 밖에는 CLOSED였다.
+  // 그러면 `'invalid' > 0`이 거짓이 되어 **닫힘으로 떨어진다.** 조건을
+  // 그대로 떼어 돌려 확인한 모양:
+  //
+  //   -1 · NaN · '0' · 'invalid'  → 전부 CLOSED
+  //
+  // 변환은 여기서 하지 않는다. 문자열이 왔다는 것은 거래소 어댑터가
+  // 파싱하지 않았다는 뜻이고, 그 파싱을 추측으로 대신하면 정본이
+  // 두 곳이 된다.
+  for (const [label, q] of [
+    ['음수', -1], ['NaN', Number.NaN], ['무한', Number.POSITIVE_INFINITY],
+    ["문자열 '0'", '0' as any], ["문자열 'invalid'", 'invalid' as any],
+    ['참', true as any], ['객체', {} as any],
+  ] as Array<[string, number]>) {
+    test(`★★ 남은 수량이 ${label}이면 닫힘으로 적지 않는다`, () => {
+      const v: any = slotEventForCloseConfirm({ ok: true, remainingQty: q, openEntryOrders: 0 });
+      eq(v.kind, 'UNKNOWN_RESPONSE', `${label}을 0으로 읽어 닫힘으로 적었다`);
+      eq(v.evidence, 'NONE');
+    });
+  }
+
+  // ══════════ ④-b 포지션 0만으로는 닫힘 증거가 아니다 ══════════
+  //
+  // 미체결 진입 주문이 살아 있으면 지금 0이어도 **나중에 체결된다.**
+  // 098은 `CLOSED/VENUE_POSITION`을 받으면 `CLOSING→SPENT`로 넘기므로,
+  // 그 슬롯은 닫힌 것으로 적힌 뒤에 포지션이 생긴다.
+  test('★★ 살아 있는 진입 주문을 세지 못했으면 닫힘으로 적지 않는다', () => {
+    const v: any = slotEventForCloseConfirm({ ok: true, remainingQty: 0 });
+    eq(v.kind, 'UNKNOWN_RESPONSE', '진입 주문을 세지 않고 닫힘으로 적었다');
+  });
+
+  test('★★ 진입 주문이 살아 있으면 포지션 0이어도 닫힘으로 적지 않는다', () => {
+    const v: any = slotEventForCloseConfirm({ ok: true, remainingQty: 0, openEntryOrders: 1 });
+    eq(v.kind, null, '나중에 체결될 수 있는데 닫힘으로 적었다');
+    eq(v.needsHuman, false);
+  });
+
+  for (const [label, n] of [
+    ['NaN', Number.NaN], ['음수', -1], ["문자열 '0'", '0' as any],
+  ] as Array<[string, number]>) {
+    test(`★ 진입 주문 수가 ${label}이면 닫힘으로 적지 않는다`, () => {
+      const v: any = slotEventForCloseConfirm({ ok: true, remainingQty: 0, openEntryOrders: n });
+      eq(v.kind, 'UNKNOWN_RESPONSE', `${label}을 0으로 읽었다`);
+    });
+  }
 
   // ══════════ ⑤ 응답 해석: 커밋만 ok다 ══════════
   test('EVENT_APPLIED와 멱등 재적용은 커밋이다', () => {
     eq(eventResultOf([{ code: 'EVENT_APPLIED', slot_status: 'OPEN', campaign_version: 2 }]).ok, true);
     eq(eventResultOf([{ code: 'EVENT_ALREADY_APPLIED', slot_status: 'OPEN', campaign_version: 2 }]).ok, true);
+  });
+
+  // ══════════ ⑤-a **잘린 성공 응답**을 커밋으로 읽지 않는다 ══════════
+  //
+  // 098은 코드·상태·버전 셋을 돌려준다. 코드만 있고 상태나 버전이 없으면
+  // 응답을 끝까지 읽지 못한 것이다. 그걸 커밋으로 적으면 다음 단계가
+  // `null` 버전을 들고 CAS에 간다.
+  for (const [label, row] of [
+    ['상태 없음', { code: 'EVENT_APPLIED', campaign_version: 2 }],
+    ['버전 없음', { code: 'EVENT_APPLIED', slot_status: 'OPEN' }],
+    ['둘 다 없음', { code: 'EVENT_APPLIED' }],
+    ['상태가 빈 문자열', { code: 'EVENT_APPLIED', slot_status: '  ', campaign_version: 2 }],
+    ['버전이 소수', { code: 'EVENT_APPLIED', slot_status: 'OPEN', campaign_version: 1.5 }],
+    ['버전이 음수', { code: 'EVENT_APPLIED', slot_status: 'OPEN', campaign_version: -1 }],
+    ['버전이 NaN', { code: 'EVENT_APPLIED', slot_status: 'OPEN', campaign_version: Number.NaN }],
+    ['버전이 안전 정수 초과', { code: 'EVENT_APPLIED', slot_status: 'OPEN', campaign_version: 9007199254740993 }],
+    ['버전이 숫자 아닌 문자열', { code: 'EVENT_APPLIED', slot_status: 'OPEN', campaign_version: 'x' }],
+  ] as Array<[string, any]>) {
+    test(`★★ 성공 코드인데 ${label}이면 커밋으로 적지 않는다`, () => {
+      const r = eventResultOf([row]);
+      eq(r.ok, false, `잘린 성공 응답(${label})을 커밋으로 읽었다`);
+      assert(typeof r.reason === 'string' && r.reason.length > 0, '왜 아닌지 적지 않았다');
+    });
+  }
+
+  test('버전이 문자열 숫자로 와도 받는다 — PostgREST의 BIGINT 직렬화', () => {
+    // BIGINT는 직렬화에 따라 문자열로 올 수 있다. 자릿수가 정수 범위
+    // 안이면 받고, 그 밖이면 위 시험들이 막는다.
+    const r = eventResultOf([{ code: 'EVENT_APPLIED', slot_status: 'OPEN', campaign_version: '7' }]);
+    eq(r.ok, true);
+    eq(r.campaignVersion, 7);
   });
 
   for (const code of ['EVENT_OUT_OF_ORDER', 'EVENT_CONFLICT', 'EVIDENCE_MISSING',
@@ -240,7 +319,7 @@ export async function runTenSlotLifecycleTests() {
     const r2 = await applySlotEvent(db as any, partial, args({ eventId: 'ev-part', expectedVersion: 2 }));
     // 닫겠다 → 포지션 0 확인 → 닫힘
     const r3 = await applySlotEvent(db as any, slotEventForCloseRequest(), args({ eventId: 'ev-close', expectedVersion: 3 }));
-    const closed: any = slotEventForCloseConfirm({ ok: true, remainingQty: 0 });
+    const closed: any = slotEventForCloseConfirm({ ok: true, remainingQty: 0, openEntryOrders: 0 });
     const r4 = await applySlotEvent(db as any, closed, args({ eventId: 'ev-closed', expectedVersion: 4 }));
 
     test('★★ 한 슬롯이 ACK → 부분체결 → 닫기요청 → 닫힘확인 순서로 적힌다', () => {

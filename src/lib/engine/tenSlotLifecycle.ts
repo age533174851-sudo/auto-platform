@@ -135,7 +135,35 @@ export interface PositionRead {
   ok: boolean;
   /** 남은 수량. 못 읽었으면 null — 0으로 바꾸지 않는다 */
   remainingQty: number | null;
+  /**
+   * **이 슬롯의 진입 주문이 몇 개 살아 있는가.**
+   *
+   * 포지션이 0인 것만으로는 닫혔다는 증거가 못 된다 — 미체결 진입
+   * 주문이 살아 있으면 **지금 0이어도 나중에 체결된다.** 그러면 098은
+   * 이미 `SPENT`로 넘어가 있고, 그 슬롯은 닫힌 것으로 적힌 채 포지션이
+   * 생긴다.
+   *
+   * 그래서 닫힘 증거는 둘을 **같이** 요구한다: 포지션 0 **그리고**
+   * 살아 있는 진입 주문 0. 세지 못했으면 `null`이고, 그때는 닫혔다고
+   * 적지 않는다 — 확인하지 못한 것은 통과가 아니다.
+   */
+  openEntryOrders?: number | null;
 }
+
+/**
+ * 거래소에서 읽은 수량을 **숫자로 받아들일지** 판단한다.
+ *
+ * 문자열·`NaN`·음수를 그대로 비교에 넣으면 `'invalid' > 0`이 `false`가
+ * 되어 **"닫혔다"로 떨어진다.** 실제로 그 모양이었다(지적 P0-1):
+ *
+ *   -1 · NaN · '0' · 'invalid'  → 전부 CLOSED
+ *
+ * 변환은 여기서 하지 않는다. 문자열이 왔다는 것은 거래소 어댑터가
+ * 파싱하지 않았다는 뜻이고, 그 파싱을 여기서 추측으로 대신하면
+ * 어느 쪽이 정본인지 모르게 된다.
+ */
+const qty = (v: unknown): number | null =>
+  (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null);
 
 /**
  * 닫겠다는 **의도**를 적는 사건. 거래소 증거가 필요하지 않다.
@@ -165,14 +193,18 @@ export function slotEventForCloseConfirm(pos: PositionRead): SlotEventVerdict {
       exchangeOrderId: null, filledQty: null, avgPrice: null,
     };
   }
-  const left = pos.remainingQty;
+  const unknown = (reason: string): SlotEventPlan => ({
+    kind: 'UNKNOWN_RESPONSE', evidence: 'NONE', reason,
+    exchangeOrderId: null, filledQty: null, avgPrice: null,
+  });
+
+  const left = qty(pos.remainingQty);
   if (left == null) {
-    // **읽었다는데 수량이 없다.** 0으로 바꾸지 않는다.
-    return {
-      kind: 'UNKNOWN_RESPONSE', evidence: 'NONE',
-      reason: '조회는 됐지만 남은 수량을 읽지 못했습니다 — 0으로 적지 않습니다',
-      exchangeOrderId: null, filledQty: null, avgPrice: null,
-    };
+    // **읽었다는데 수량을 숫자로 받아들일 수 없다.** 0으로 바꾸지 않는다.
+    // 음수·NaN·문자열이 전부 여기로 온다 — 그대로 비교에 넣으면
+    // `'invalid' > 0`이 거짓이 되어 닫힘으로 떨어진다.
+    return unknown('조회는 됐지만 남은 수량을 숫자로 읽지 못했습니다'
+      + ` (${JSON.stringify(pos.remainingQty)}) — 0으로 적지 않습니다`);
   }
   if (left > 0) {
     return {
@@ -181,9 +213,28 @@ export function slotEventForCloseConfirm(pos: PositionRead): SlotEventVerdict {
       needsHuman: false,
     };
   }
+
+  // ── 포지션 0만으로는 닫힘 증거가 아니다 ──
+  //
+  // 미체결 진입 주문이 살아 있으면 지금 0이어도 나중에 체결된다.
+  // 그 슬롯은 `SPENT`로 적힌 뒤에 포지션이 생긴다 — 장부가 거짓이 된다.
+  const open = qty(pos.openEntryOrders);
+  if (open == null) {
+    return unknown('포지션은 0인데 살아 있는 진입 주문을 세지 못했습니다'
+      + ' — 나중에 체결될 수 있어 닫힘으로 적지 않습니다');
+  }
+  if (open > 0) {
+    return {
+      kind: null,
+      reason: `포지션은 0이지만 진입 주문 ${open}건이 살아 있습니다`
+        + ' — 나중에 체결될 수 있어 닫힘으로 적지 않습니다',
+      needsHuman: false,
+    };
+  }
+
   return {
     kind: 'CLOSED', evidence: 'VENUE_POSITION',
-    reason: '포지션이 0인 것을 조회로 확인했습니다',
+    reason: '포지션 0과 살아 있는 진입 주문 0을 조회로 확인했습니다',
     exchangeOrderId: null, filledQty: null, avgPrice: null,
   };
 }
@@ -224,15 +275,32 @@ export function eventResultOf(data: unknown, error?: unknown): SlotEventResult {
   const r = rows[0] as Record<string, unknown>;
   const code = str(r.code);
   if (code == null) return miss('사건 기록 결과에 코드가 없습니다');
-  const version = num(r.campaign_version);
+  // **버전은 안전 정수여야 한다.** 098은 `BIGINT`를 돌려주고, 직렬화에
+  // 따라 소수나 정수 범위를 넘는 값이 올 수 있다. `1.5` 같은 값을
+  // 버전으로 받아들이면 다음 CAS가 그 값을 들고 가서 조용히 어긋난다.
+  const raw = r.campaign_version;
+  const version = typeof raw === 'number' && Number.isSafeInteger(raw) && raw >= 0
+    ? raw
+    : typeof raw === 'string' && /^\d{1,15}$/.test(raw) ? Number(raw) : null;
+  const slotStatus = str(r.slot_status);
+  const committed = code === EVENT_APPLIED || code === 'EVENT_ALREADY_APPLIED';
+  // ── 잘린 성공 응답을 커밋으로 읽지 않는다 ──
+  //
+  // 098은 코드·상태·버전 **셋을** 돌려준다. 코드만 있고 상태나 버전이
+  // 없으면 응답을 끝까지 읽지 못한 것이다. 그걸 커밋으로 적으면 다음
+  // 단계가 `null` 버전을 들고 CAS에 간다.
+  const missing = !committed ? null
+    : slotStatus == null ? '상태(slot_status)'
+      : version == null ? `버전(campaign_version: ${JSON.stringify(raw)})` : null;
   return {
-    // **코드가 커밋을 뜻할 때만 ok다.** 멱등 재적용도 커밋이다.
-    ok: code === EVENT_APPLIED || code === 'EVENT_ALREADY_APPLIED',
+    // **코드가 커밋을 뜻하고, 응답이 온전할 때만 ok다.** 멱등 재적용도 커밋이다.
+    ok: committed && missing == null,
     code,
-    slotStatus: str(r.slot_status),
+    slotStatus,
     campaignVersion: version,
-    reason: code === EVENT_APPLIED || code === 'EVENT_ALREADY_APPLIED'
-      ? null : `사건이 적히지 않았습니다 (${code})`,
+    reason: !committed ? `사건이 적히지 않았습니다 (${code})`
+      : missing != null ? `${code}인데 ${missing}를 읽지 못했습니다 — 커밋으로 적지 않습니다`
+        : null,
   };
 }
 
