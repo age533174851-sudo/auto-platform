@@ -51,7 +51,6 @@ jobs:
     env:
       # Deliberately local disposable database. Never pass Supabase secrets.
       TEN_SLOT_PG_URL: postgres://postgres:local_test_only@127.0.0.1:5432/postgres
-      PG_SERVICE_ID: ${{ job.services.postgres.id }}
       # Restart only this disposable Docker service, then wait for readiness.
       # The restart test must not be silently skipped.
       TEN_SLOT_PG_RESTART: 'docker restart "$PG_SERVICE_ID" >/dev/null && for i in $(seq 1 30); do pg_isready -h 127.0.0.1 -p 5432 -U postgres >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1'
@@ -80,6 +79,9 @@ jobs:
 
       - name: Real PostgreSQL ten-slot RED/GREEN and restart proof
         shell: bash
+        env:
+          # job.services is available in a step, not at job-level env.
+          PG_SERVICE_ID: ${{ job.services.postgres.id }}
         run: |
           set -euo pipefail
           echo "TARGET_SHA: $(git rev-parse HEAD)"
