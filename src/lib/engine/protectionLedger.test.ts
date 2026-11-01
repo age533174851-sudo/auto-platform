@@ -9,7 +9,7 @@
 
 import { test, eq, assert } from '../../test/harness';
 import {
-  ownedOrderIds, cancelLedger, rollbackTargets, rollbackNote, orderIdOf,
+  ownedOrderIds, cancelLedger, rollbackTargets, rollbackNote, orderIdOf, orphanCancelGate,
   type CancelAttempt,
 } from './protectionLedger';
 
@@ -131,6 +131,47 @@ export function runProtectionLedgerTests() {
       eq(l.entries[0].state, 'CANCEL_UNKNOWN', `httpOk=${httpOk}`);
       eq(l.ok, false, `httpOk=${httpOk}`);
     }
+  });
+
+
+  console.log('[고아 주문 취소 — 포지션·소유권·namespace 관문]');
+  const target = { id: '77', ownership: 'MINE', namespace: 'GATE_PRICE' };
+  const flat = { ok: true, found: false, qty: 0 };
+  const check = (over: Partial<Parameters<typeof orphanCancelGate>[0]> = {}) =>
+    orphanCancelGate({ position: flat, ledgerReadable: true, orders: [target], asked: ['77'], ...over });
+  test('포지션 0 + 정확한 Gate 주문 1건만 취소 대상으로 허용', () => {
+    const v = check(); eq(v.ok, true); eq(v.targets.join(','), '77');
+  });
+  test('포지션이 열려 있으면 보호주문 취소 금지', () => {
+    const v = check({ position: { ok: true, found: true, qty: 1 } });
+    eq(v.code, 'POSITION_NOT_FLAT'); eq(v.targets.length, 0);
+  });
+  test('조회 실패에 qty 0이 있어도 취소 금지', () => {
+    eq(check({ position: { ok: false, found: false, qty: 0 } }).code, 'POSITION_NOT_FLAT');
+  });
+  test('포지션 수량이 null이면 found false여도 취소 금지', () => {
+    eq(check({ position: { ok: true, found: false, qty: null } }).code, 'POSITION_NOT_FLAT');
+  });
+  test('장부 또는 주문 목록 조회 실패는 취소 금지', () => {
+    eq(check({ ledgerReadable: false }).code, 'LEDGER_UNREADABLE');
+    eq(check({ orders: null }).code, 'ORDERS_UNREADABLE');
+  });
+  test('FOREIGN과 UNKNOWN 주문은 취소 금지', () => {
+    for (const ownership of ['FOREIGN', 'UNKNOWN']) {
+      eq(check({ orders: [{ ...target, ownership }] }).code, 'OWNERSHIP_NOT_PROVEN');
+    }
+  });
+  test('Binance Algo ID는 일반 주문 DELETE로 보내지 않는다', () => {
+    eq(check({ orders: [{ ...target, namespace: 'BINANCE_ALGO' }] }).code, 'UNSUPPORTED_NAMESPACE');
+    eq(check({ orders: [{ ...target, namespace: 'UNKNOWN' }] }).code, 'UNSUPPORTED_NAMESPACE');
+  });
+  test('Binance 일반 주문은 명확한 ID일 때만 허용', () => {
+    eq(check({ orders: [{ ...target, namespace: 'BINANCE_REGULAR' }] }).ok, true);
+  });
+  test('번호 없음·목록 누락·중복 번호는 취소 금지', () => {
+    eq(check({ asked: [] }).code, 'IDS_REQUIRED');
+    eq(check({ orders: [] }).code, 'TARGET_NOT_UNIQUE');
+    eq(check({ orders: [target, target] }).code, 'TARGET_NOT_UNIQUE');
   });
 
   test('지울 것이 없으면 되돌리기 문구만 남는다', () => {
