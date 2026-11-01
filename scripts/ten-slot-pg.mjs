@@ -95,6 +95,26 @@ GRANT anon, authenticated, service_role TO CURRENT_USER;
 CREATE SCHEMA IF NOT EXISTS auth;
 CREATE OR REPLACE FUNCTION auth.uid() RETURNS UUID LANGUAGE sql STABLE AS 'SELECT NULL::UUID';
 GRANT USAGE ON SCHEMA public TO authenticated, service_role;
+
+-- ── Supabase 프로젝트의 **기본 권한**을 그대로 재현한다 ──
+--
+-- 운영 카탈로그의 pg_default_acl에는 schema public · objtype function에
+-- anon·authenticated의 EXECUTE가, objtype table에도 두 역할의 권한이
+-- 기본으로 들어 있다. 즉 **객체가 생기는 순간** 두 역할이 자기 이름으로
+-- 직접 GRANT를 받는다.
+--
+-- 이것을 재현하지 않으면 시험이 **거짓 초록**이 된다. REVOKE ... FROM
+-- PUBLIC만 적은 마이그레이션도 깨끗한 DB에서는 "anon에 권한 없음"으로
+-- 보이기 때문이다 — 운영에서는 남아 있는데.
+--
+-- service_role에도 Supabase가 주는 그대로 넣는다. 안 넣으면 반대쪽
+-- 거짓 빨강이 된다(서버가 못 읽는 것으로 보인다).
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT EXECUTE ON FUNCTIONS TO anon, authenticated, service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT ALL ON TABLES TO anon, authenticated, service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT ALL ON SEQUENCES TO anon, authenticated, service_role;
 `;
 
 /**
