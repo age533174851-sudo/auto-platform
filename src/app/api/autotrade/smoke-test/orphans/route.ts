@@ -32,17 +32,24 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { SMOKE_STRATEGY_ID } from '@/lib/smoke/smokePlan';
 import { classifyOrder, ownershipTextOf } from '@/lib/engine/orderOwnership';
-import { ownedOrderIds, cancelLedger, orderIdOf } from '@/lib/engine/protectionLedger';
+import { ownedOrderIds, cancelLedger, orderIdOf, orphanCancelGate } from '@/lib/engine/protectionLedger';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
 /** 거래소 응답 한 줄을 **비밀 없이** 사람이 읽을 모양으로 */
-function describe(row: any, myIds: string[]) {
+function describe(row: any, myIds: string[], exchange: 'binance' | 'gate') {
   const initial = row?.initial ?? row ?? {};
   const trigger = row?.trigger ?? {};
   const cls = classifyOrder(row, SMOKE_STRATEGY_ID, myIds);
+  // Binance Algo의 algoId는 일반 orderId와 다른 취소 API를 사용한다.
+  const namespace = exchange === 'gate'
+    ? (row?.id != null && orderIdOf(row) ? 'GATE_PRICE' : 'UNKNOWN')
+    : row?.algoId != null || row?.clientAlgoId != null
+      ? 'BINANCE_ALGO'
+      : row?.orderId != null && orderIdOf(row) ? 'BINANCE_REGULAR' : 'UNKNOWN';
   return {
+    namespace,
     id: orderIdOf(row),
     text: ownershipTextOf(row) || null,
     // Gate: initial.contract · 바이낸스: symbol
@@ -77,11 +84,14 @@ async function venueOf(sb: any, userId: string, connectionId: string) {
 /** 이 사용자의 스모크 줄이 들고 있는 주문 번호 */
 async function smokeIds(sb: any, userId: string, symbol: string) {
   try {
-    const { data } = await (sb as any).from('smoke_tests')
+    const { data, error } = await (sb as any).from('smoke_tests')
       .select('id, symbol, side, state, verdict, sl_order_id, tp_order_id, entry_order_id, client_order_id, created_at, closed_at')
       .eq('user_id', userId).eq('symbol', symbol)
       .order('created_at', { ascending: false }).limit(20);
-    const rows = Array.isArray(data) ? data : [];
+    if (error || !Array.isArray(data)) {
+      return { rows: [], ids: [] as string[], error: 'smoke_rows_unreadable' };
+    }
+    const rows = data;
     return {
       rows: rows.map((r: any) => ({
         id: r.id, symbol: r.symbol, side: r.side, state: r.state, verdict: r.verdict,
@@ -134,7 +144,7 @@ export async function GET(req: NextRequest) {
     position: { ok: position.ok, found: position.found, qty: position.qty, side: position.side, error: position.error },
     // **null은 '못 읽음'이고 []는 '없음'이다.**
     ordersReadable: orders != null,
-    orders: (orders ?? []).map(o => describe(o, mine.ids)),
+    orders: (orders ?? []).map(o => describe(o, mine.ids, v.venue.exchange)),
     smoke: { rows: mine.rows, ids: mine.ids, error: mine.error },
     note: orders == null
       ? '조건부 주문 목록을 읽지 못했습니다 — 0건과 다릅니다'
@@ -183,26 +193,24 @@ export async function POST(req: NextRequest) {
     }, { status: 503 });
   }
 
-  const mine = await smokeIds(sb, userId, symbol);
-  const seen = before.map(o => describe(o, mine.ids));
-
-  // **남의 전략 주문은 번호를 줘도 안 지운다.**
-  const foreign = seen.filter(o => asked.includes(o.id) && o.ownership === 'FOREIGN');
-  if (foreign.length > 0) {
-    return NextResponse.json({ ok: false, error: 'foreign_order',
-      message: `${foreign.map(o => o.id).join(', ')}은 다른 전략의 주문으로 판별됩니다 — 지우지 않습니다`,
-      orders: seen,
-    }, { status: 409 });
+  const [mine, positionBefore] = await Promise.all([
+    smokeIds(sb, userId, symbol), ops.readOpenPosition(v.venue, symbol),
+  ]);
+  const seen = before.map(o => describe(o, mine.ids, v.venue.exchange));
+  // 실제 취소 전에 거래소 포지션 0, 장부 조회, 소유권, 주문 namespace를 모두 확인한다.
+  const gate = orphanCancelGate({
+    position: positionBefore, ledgerReadable: mine.error == null,
+    orders: seen, asked,
+  });
+  if (!gate.ok) {
+    return NextResponse.json({
+      ok: false, mutated: false, error: gate.code, message: gate.reason,
+      orders: seen, position: { ok: positionBefore.ok, found: positionBefore.found, qty: positionBefore.qty },
+    }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
   }
-
-  const missing = asked.filter(id => !seen.some(o => o.id === id));
-  const targets = asked.filter(id => seen.some(o => o.id === id));
-
-  const cx = targets.length
-    ? await ops.cancelExact(v.venue, symbol, targets, { attempts: 3 })
-    : { attempts: [] as any[], leftover: before, rounds: 0 };
+  const targets = gate.targets;
+  const cx = await ops.cancelExact(v.venue, symbol, targets, { attempts: 3 });
   const ledger = cancelLedger({ ids: targets, attempts: cx.attempts, leftover: cx.leftover });
-
   const position = await ops.readOpenPosition(v.venue, symbol);
 
   return NextResponse.json({
@@ -213,13 +221,13 @@ export async function POST(req: NextRequest) {
     symbol,
     requested: asked,
     // 번호는 줬는데 거래소 목록에 없던 것. 이미 사라진 것이다.
-    notFound: missing,
+    notFound: [],
     // **요청 → 응답 → 재조회**의 기록. "왜 안 지워졌나"에 이걸로 답한다.
     ledger,
     attempts: cx.attempts,
     rounds: cx.rounds,
     leftoverReadable: cx.leftover != null,
-    leftover: (cx.leftover ?? []).map(o => describe(o, mine.ids)),
+    leftover: (cx.leftover ?? []).map(o => describe(o, mine.ids, v.venue.exchange)),
     position: { ok: position.ok, found: position.found, qty: position.qty },
     note: ledger.ok
       ? '요청한 번호가 거래소에서 사라진 것을 재조회로 확인했습니다'
