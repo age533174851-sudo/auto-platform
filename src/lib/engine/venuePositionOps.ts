@@ -455,6 +455,19 @@ export async function cancelProtectiveOrders(
  * `cancelAll`은 쓰지 않는다. 같은 계좌의 다른 전략이 걸어 둔 손절까지
  * 지운다 — 호출부가 내 것이라고 확인한 id만 온다.
  */
+/**
+ * 재조회한 목록에서 **지금 거래소에 남아 있는 주문 번호**를 뽑는다.
+ *
+ * **전사 단계 — 아직 고치지 않았다.** `cancelExact` 안에 인라인으로
+ * 있던 식을 그대로 옮겼다. 바로 고치면 "원래 뭐였는지"가 사라져서 RED를
+ * 실제로 돌려 보일 수 없다. 다음 커밋에서 고친다.
+ */
+export function presentIdsOf(rows: any[]): string[] {
+  return (Array.isArray(rows) ? rows : [])
+    .map(row => String((row as any)?.id ?? (row as any)?.orderId ?? ''))
+    .filter(Boolean);
+}
+
 export async function cancelExact(
   c: VenueCreds, symbol: string, ids: string[],
   opts: { attempts?: number } = {},
@@ -499,7 +512,7 @@ export async function cancelExact(
     // **여기가 핵심이다.** 요청 결과가 아니라 목록을 다시 읽어 확인한다.
     leftover = await readProtectiveOrders(c, symbol);
     if (leftover == null) break;   // 못 읽었다 — 더 지워도 확인할 수 없다
-    const present = leftover.map(row => String((row as any)?.id ?? (row as any)?.orderId ?? '')).filter(Boolean);
+    const present = presentIdsOf(leftover);
     pending = pending.filter(id => present.includes(id));
   }
 
