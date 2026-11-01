@@ -181,6 +181,88 @@ export function runPositionRiskProvenanceTests() {
     }
   });
 
+  // ── 못 읽은 수량을 0으로 적지 않는다 ──
+  //
+  //   RED는 이랬다. `shape()`가 수량을 이렇게 읽었다:
+  //
+  //       positionAmt: parseFloat(row.positionAmt ?? '0') || 0
+  //
+  //   `parseFloat('bad')`는 `NaN`이고 `NaN || 0`은 **0**이다. 그래서
+  //   거래소가 깨진 본문을 주면 앱은 **"포지션 없음"을 관측한 것으로
+  //   읽었다.** 그 뒤 손절 복구는 `수량 0 → 보호할 것 없음`으로 조용히
+  //   끝나고 경고도 attention도 남지 않았다:
+  //
+  //       FAIL: ★★ Binance malformed: 손절 복구 조회 미확인은
+  //             경고·attention이고 주문 0건 — 손절 복구 미확인이
+  //             경고 없이 사라졌다
+  //
+  //   CLAUDE.md의 절대 규칙 그 자리다 — **UNKNOWN을 0으로 적지 않는다.**
+  test('★★ 깨진 수량은 0이 아니라 미확인이다 (v2)', async () => {
+    for (const bad of ['bad', '', '   ', 'NaN', 'Infinity', '-Infinity', null, undefined, {}, true]) {
+      const r = await readPositionRiskWithProvenance('BTCUSDT',
+        async () => [{ ...ROW, positionAmt: bad }], clock());
+      eq(r.risk, null, `깨진 수량(${String(bad)})을 관측으로 인정했다`);
+      assert(r.error != null, `미확인인데 원인이 비어 있다 (${String(bad)})`);
+      // 0을 적었다면 여기가 0으로 잡힌다 — 그게 RED였다.
+      assert(r.risk?.positionAmt !== 0, `깨진 수량을 0으로 적었다 (${String(bad)})`);
+    }
+  });
+
+  test('★★ 앞부분만 숫자인 쓰레기를 수량으로 인정하지 않는다', async () => {
+    // `parseFloat('0.003XYZ')`는 0.003을 준다. 그건 우리가 이해한
+    // 본문이 아니다 — 이해하지 못한 것을 수량으로 쓰지 않는다.
+    const r = await readPositionRiskWithProvenance('BTCUSDT',
+      async () => [{ ...ROW, positionAmt: '0.003XYZ' }], clock());
+    eq(r.risk, null, '앞부분만 맞는 본문을 수량으로 읽었다');
+  });
+
+  test('★★ 진짜 0과 음수는 그대로 관측이다 — 과잉 차단하지 않는다', async () => {
+    for (const [raw, want] of [['0', 0], [0, 0], ['-0.2', -0.2], [0.2, 0.2], ['0.2', 0.2]] as const) {
+      const r = await readPositionRiskWithProvenance('BTCUSDT',
+        async () => [{ ...ROW, positionAmt: raw }], clock());
+      assert(r.risk != null, `멀쩡한 수량(${String(raw)})을 미확인으로 막았다`);
+      eq(r.risk!.positionAmt, want);
+    }
+  });
+
+  test('★★ v2가 깨졌으면 v3로 넘어가고, 둘 다 깨지면 미확인이다', async () => {
+    // v2 본문이 깨졌어도 v3가 멀쩡하면 그 관측을 쓴다 — 버리지 않는다.
+    const calls: string[] = [];
+    const ok = await readPositionRiskWithProvenance('BTCUSDT',
+      async (path) => {
+        calls.push(path);
+        if (path === '/fapi/v2/positionRisk') return [{ ...ROW, positionAmt: 'bad' }];
+        if (path === '/fapi/v3/positionRisk') return [ROW3];
+        return ACCT;
+      }, clock());
+    eq(ok.provenance.positionRiskSource, 'V3', 'v2가 깨졌는데 v3로 가지 않았다');
+    eq(ok.risk?.positionAmt, 0.2);
+    assert(calls.includes('/fapi/v3/positionRisk'), 'v3를 부르지 않았다');
+
+    // 둘 다 깨졌으면 관측이 없다.
+    const bad = await readPositionRiskWithProvenance('BTCUSDT',
+      async (path) => {
+        if (path === '/fapi/v3/account') return ACCT;
+        return [{ ...ROW, positionAmt: 'bad' }];
+      }, clock());
+    eq(bad.risk, null, '양쪽이 다 깨졌는데 관측을 만들어냈다');
+    assert(/수량 증거가 유효하지 않습니다/.test(bad.error || ''),
+      `원인이 수량 때문이라고 적혀 있지 않다: ${bad.error}`);
+  });
+
+  test('★★ 헤지 모드에서 깨진 줄이 멀쩡한 줄을 이기지 않는다', async () => {
+    // 예전 `pick`은 `parseFloat(r.positionAmt) !== 0`으로 골랐다.
+    // 깨진 줄은 `NaN !== 0`이므로 **먼저 뽑혔고**, 바로 뒤의 열린
+    // 포지션을 가렸다.
+    const r = await readPositionRiskWithProvenance('BTCUSDT',
+      async () => [
+        { ...ROW, positionAmt: 'bad' },
+        { ...ROW, positionAmt: '-0.5' },
+      ], clock());
+    assert(r.risk != null, '깨진 줄이 멀쩡한 줄을 가렸다');
+    eq(r.risk!.positionAmt, -0.5);
+  });
+
   test('★ 이 정본은 네트워크도 crypto도 모른다 — 검사기가 돌릴 수 있어야 한다', async () => {
     const src = await import('./positionRiskRead');
     eq(typeof src.readPositionRiskWithProvenance, 'function');
