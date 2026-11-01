@@ -26,10 +26,10 @@ import { A } from '@/lib/theme/colors';
 import { errorTextOf } from '@/lib/http/errorText';
 import { HOLD_CHOICES, SMOKE_SYMBOLS, DEFAULT_HOLD_MIN, type StepState } from '@/lib/smoke/smokePlan';
 import {
-import { cancelReceiptOf } from '@/lib/engine/cancelReceipt';
   ATTEMPT_CHOICES, MAX_ATTEMPTS, DEFAULT_ATTEMPTS,
   type DirectionMode, type FailurePolicy, type StepMark,
 } from '@/lib/smoke/smokeRun';
+import { cancelReceiptOf } from '@/lib/engine/cancelReceipt';
 
 /** 단계 색. **PENDING은 회색이다** — 초록으로 그리면 안 한 것이 한 것처럼 보인다 */
 const STEP_TONE: Record<StepState, string> = {
