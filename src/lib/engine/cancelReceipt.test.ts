@@ -165,6 +165,16 @@ export function runCancelReceiptTests() {
     }
   });
 
+  test('HTTP 없는 자리(저장된 정리 증거)도 같은 규칙을 쓴다', () => {
+    // 스모크가 남긴 장부에는 HTTP가 없다. 그래도 "모름"은 모름이다.
+    const r = cancelReceiptOf({ body: { code: 'NOTHING_TO_CANCEL' } });
+    eq(r.rounds, null);
+    eq(r.reread, 'NONE');
+    assert(!r.line.includes('HTTP'), r.line);
+    assert(!r.line.includes('재조회 성공'), r.line);
+    assert(r.line.includes('안 함(모름)'), r.line);
+  });
+
   test('본문이 아예 없으면 전부 모름이다', () => {
     const r = cancelReceiptOf({ httpStatus: 0, body: null });
     eq(r.rounds, null);

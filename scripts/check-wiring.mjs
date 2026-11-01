@@ -306,8 +306,62 @@ if (evidenceGaps.length > 0) {
   bad = true;
 }
 
+
+// ── #552: 취소 영수증은 "모름"을 0·성공으로 적지 않는다 ──
+//
+// 2026-11-02 00:36(KST) 화면이 `HTTP 400 · 0바퀴 · 재조회 성공`이라고
+// 적었다. 재조회는 일어나지 않았다 — 응답에 없는 필드를 `?? 0`과
+// `=== false`로 읽은 결과다. 그 한 줄 때문에 "바이낸스가 400을 줬다"는
+// 추측이 생기고 회차 하나가 그 위에서 돌았다.
+//
+// 판단은 `cancelReceipt.ts` 한 곳에 있다. 이 규칙은 **그 한 곳을 실제로
+// 쓰고 있는가**를 본다 — 화면이 다시 자기 손으로 읽기 시작하면 같은
+// 거짓말이 돌아온다(상습 고장 ② 경로가 둘인데 한쪽만 고침).
+const RECEIPT = 'src/lib/engine/cancelReceipt.ts';
+const PANEL = 'src/components/SmokeTestPanel.tsx';
+const ORPHANS = 'src/app/api/autotrade/smoke-test/orphans/route.ts';
+const receiptGaps = [];
+{
+  const panel = stripComments(readFileSync(PANEL, 'utf8'));
+  const route = stripComments(readFileSync(ORPHANS, 'utf8'));
+
+  if (!/from\s+['"]@\/lib\/engine\/cancelReceipt['"]/.test(panel) || !/\bcancelReceiptOf\s*\(/.test(panel)) {
+    receiptGaps.push(`${PANEL} — 취소 응답 문구를 cancelReceiptOf로 만들지 않았습니다`);
+  }
+  // 화면이 응답 필드를 직접 읽어 "모름"을 0·성공으로 바꾸던 그 모양.
+  if (/rounds\s*\?\?\s*0/.test(panel)) {
+    receiptGaps.push(`${PANEL} — \`rounds ?? 0\`이 돌아왔습니다 (없는 필드를 0바퀴로 적습니다)`);
+  }
+  if (/leftoverReadable\s*===\s*false/.test(panel)) {
+    receiptGaps.push(`${PANEL} — \`leftoverReadable === false\`가 돌아왔습니다 (필드가 없으면 '성공'이 됩니다)`);
+  }
+  // 번호를 못 읽은 주문에 취소 버튼을 주지 않는가.
+  if (!/\bidReadable\b/.test(panel)) {
+    receiptGaps.push(`${PANEL} — idReadable을 보지 않습니다 (번호 못 읽은 주문에 취소 버튼이 달립니다)`);
+  }
+  if (!/from\s+['"]@\/lib\/engine\/cancelReceipt['"]/.test(route)
+      || !/\bcancelPlanOf\s*\(/.test(route) || !/\borderIdEvidence\s*\(/.test(route)) {
+    receiptGaps.push(`${ORPHANS} — 취소 대상·번호 판단을 cancelReceipt에서 가져와 부르지 않았습니다`);
+  }
+  if (!/\bidReadable\b/.test(route)) {
+    receiptGaps.push(`${ORPHANS} — 응답에 idReadable을 싣지 않습니다 (화면이 못 읽은 번호를 구분할 수 없습니다)`);
+  }
+  // 이 규칙이 헛돌지 않는지. 판정 정본이 사라졌으면 그것이 RED다.
+  if (!existsSync(RECEIPT)) {
+    receiptGaps.push(`${RECEIPT} — 판정 정본이 없습니다 (이 규칙이 헛돌고 있습니다)`);
+  }
+}
+
+if (receiptGaps.length > 0) {
+  console.error('\n❌ 취소 영수증 배선이 끊겼습니다:');
+  for (const g of receiptGaps) console.error(`   · ${g}`);
+  console.error('\n   못 읽은 것을 0바퀴·재조회 성공으로 적으면 앱의 거절이 거래소 거부로 읽힙니다.');
+  bad = true;
+}
+
 if (bad) process.exit(1);
 
 console.log(`✅ 판정 모듈 ${files.length}개 · 배선 안 된 것 0개`
   + (ALLOW.size > 0 ? ` (면제 ${ALLOW.size}개)` : ''));
 console.log(`✅ 청산 감시 200 응답 ${evidenceSeen.length}개 전부 워커 생존 증거를 싣는다`);
+console.log('✅ 취소 영수증 판정이 화면·경로 양쪽에 배선돼 있다 (#552)');
