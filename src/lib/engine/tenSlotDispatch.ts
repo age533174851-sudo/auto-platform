@@ -129,6 +129,16 @@ export interface TenSlotDispatchArgs {
    * 영원히 나가지 않는다. 그래서 예약 **전에** 막는다.
    */
   signalId: string;
+  /**
+   * 손절가. **`NO_FIXED_SL`이 아니면 비울 수 없다.**
+   *
+   * 예약과 전송에 **같은 값**이 들어가야 한다 — `canAdoptIntent()`가
+   * `live_orders.stop_loss`와 보낼 주문의 값을 대조한다. 그래서 한 곳에서
+   * 받아 양쪽에 같이 넘긴다. 양쪽에 따로 적으면 언젠가 갈린다.
+   */
+  stopLoss?: number | null;
+  /** 익절가. 없으면 비운다 — 0으로 바꾸지 않는다 */
+  takeProfit?: number | null;
   stopPolicy?: string | null;
   takeProfitPolicy?: string | null;
   protectionPolicy?: string | null;
@@ -166,6 +176,65 @@ export async function dispatchTenSlot(
       claimVerdictOf(null, new Error('not enabled')));
   }
 
+  // ── 이어받을 수 있는 것만 예약한다 ──
+  //
+  // **예약 뒤에 알면 늦다.** 커밋된 의도를 이어받지 못하면 슬롯은
+  // RESERVED로 남고 주문은 영원히 나가지 않는다. 그래서 이어받기가
+  // 거절할 조건을 **예약 전에** 본다.
+  //
+  // 아래 관문들은 모두 같은 모양의 실측에서 나왔다. 검수 지적을 받아
+  // 실제로 돌려 보고 확인한 출력:
+  //
+  //   stopPolicy: 'FIXED_SL'
+  //   → sends 0 · UNKNOWN · "커밋된 의도의 stop_policy가 보낼 계약과 다릅니다"
+  //
+  // 097은 `FIXED_SL`을 유효하게 받아 `live_orders.stop_policy='FIXED_SL'`로
+  // 커밋하는데, `orderExecutor`는 **`NO_FIXED_SL`일 때만** 의도에 그 칸을
+  // 넣는다(078이 아직인 DB에서 모든 주문이 실패하지 않게). 그래서 저장값은
+  // `'FIXED_SL'`, 예상값은 없음이 되어 대조가 깨진다.
+  //
+  // 그 비대칭을 `orderExecutor`에서 고치지 않는다 — 그 판단은 078의 이유가
+  // 있고 다른 경로가 전부 그것에 의존한다. **이 경로가 예약하지 않는다.**
+  if (a.stopPolicy != null && a.stopPolicy !== 'NO_FIXED_SL') {
+    return off(`이 경로는 stopPolicy=${a.stopPolicy}를 예약하지 않습니다`
+      + ' — 커밋된 의도를 이어받을 수 없어 슬롯만 묶입니다'
+      + ' (비우거나 NO_FIXED_SL만 가능합니다)',
+      claimVerdictOf(null, new Error('stop policy not adoptable')));
+  }
+
+  // ── 보호 없는 진입을 열지 않는다 ──
+  //
+  // 실측(검수 지적 B): 손절가를 넘기지 않으면 진입이 **나가고**
+  // `slOrderId`는 null이다 — 보호되지 않은 포지션이다.
+  //
+  //   sends 1 · ACKED · slOrderId null
+  //
+  // `NO_FIXED_SL`은 고정 손절을 **일부러** 걸지 않는 계약이다(Exact100X).
+  // 그 경우만 손절 없이 열린다. 그 밖에는 손절가를 요구한다. 전략의
+  // 손절을 **낮추는 것이 아니라**, 손절 없이 보내지 않는 것이다.
+  const sl = a.stopLoss;
+  if (a.stopPolicy !== 'NO_FIXED_SL') {
+    if (!(typeof sl === 'number' && Number.isFinite(sl) && sl > 0)) {
+      return off('손절가가 없습니다 — 보호 없는 진입을 열지 않습니다'
+        + ' (고정 손절을 일부러 걸지 않는 계약이면 stopPolicy=NO_FIXED_SL을 넘기세요)',
+        claimVerdictOf(null, new Error('no stop loss')));
+    }
+    // **손절가를 주는 것만으로는 보호되지 않는다.** 실측:
+    //
+    //   stopLoss 95000 · protectionPolicy 'NONE'
+    //   → sends 1 · ACKED · slOrderId null · unprotected true
+    //
+    // `orderExecutor:564`가 `noFixedSl ? 'NONE' : (args.protectionPolicy ?? 'REQUIRED')`
+    // 로 정하므로, `'NONE'`을 넘기면 손절가를 줘도 부착 분기가 돌지 않는다.
+    // 그래서 이 경로는 `'NONE'`을 **거절한다** — 호출부의 요청을 조용히
+    // 바꾸지 않고, 보호 없이 열릴 조합을 받지 않는다.
+    if (a.protectionPolicy === 'NONE') {
+      return off('protectionPolicy=NONE은 손절을 걸지 않습니다 — 보호 없는 진입을 열지 않습니다'
+        + ' (비우면 REQUIRED로 걸립니다)',
+        claimVerdictOf(null, new Error('protection none')));
+    }
+  }
+
   // 이어받을 수 없는 예약을 만들지 않는다. 예약 뒤에 알면 슬롯이 묶인다.
   if (typeof a.signalId !== 'string' || a.signalId.trim().length === 0) {
     return off('신호 id가 없습니다 — 이어받을 수 없는 예약을 만들지 않습니다',
@@ -194,6 +263,9 @@ export async function dispatchTenSlot(
       p_reduce_only: false,
       p_signal_id: a.signalId,
       p_stop_policy: a.stopPolicy ?? null,
+      // **전송에 넘기는 값과 같은 값이다.** 한 곳에서 받아 양쪽에 같이 넘긴다.
+      p_stop_loss: a.stopLoss ?? null,
+      p_take_profit: a.takeProfit ?? null,
       // **호출자의 정체성을 들고 간다.** 안 넘기면 SQL이 CALLER_UNKNOWN으로
       // 막는다 — 그 검사가 옳으므로 우회하지 않고 값을 넘긴다.
       p_caller_user_id: a.userId,
@@ -232,6 +304,9 @@ export async function dispatchTenSlot(
     apiKey: a.apiKey,
     apiSecret: a.apiSecret,
     stopPolicy: a.stopPolicy,
+    // 예약에 적힌 그 값이다. 다르면 `canAdoptIntent()`가 거절한다.
+    stopLoss: a.stopLoss ?? undefined,
+    takeProfit: a.takeProfit ?? undefined,
     takeProfitPolicy: a.takeProfitPolicy,
     protectionPolicy: a.protectionPolicy,
     orderType: a.orderType,

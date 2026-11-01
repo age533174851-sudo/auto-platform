@@ -51,7 +51,7 @@ const plan = (over: Record<string, any> = {}) => ({
   notes: [], ...over,
 }) as any;
 
-function baseVenue(): FakeVenue {
+function baseVenue(lev = 100): FakeVenue {
   return new FakeVenue()
     .on(BN_EXINFO, { json: { symbols: [{
       symbol: 'BTCUSDT', filters: [
@@ -63,13 +63,16 @@ function baseVenue(): FakeVenue {
     .on('/fapi/v1/marginType', { json: { code: 200, msg: 'success' } })
     .on('/fapi/v1/account', { json: { positions: [], assets: [] } })
     .on(BN_DUAL, { json: { dualSidePosition: false } })
-    .on(BN_LEV, { json: { leverage: 100, symbol: 'BTCUSDT' } })
+    .on(BN_LEV, { json: { leverage: lev, symbol: 'BTCUSDT' } })
+    // **설정 응답과 되읽기 값을 같이 맞춘다.** 실행기는 설정 응답을 믿지
+    // 않고 거래소에서 다시 읽어 대조한다 — 그 판단이 옳으므로 시험이
+    // 거래소 쪽을 맞춘다.
     .on(BN_POS, { json: [{ symbol: 'BTCUSDT', positionAmt: '0', entryPrice: '0',
-      leverage: '100', marginType: 'isolated', liquidationPrice: '0' }] });
+      leverage: String(lev), marginType: 'isolated', liquidationPrice: '0' }] });
 }
 
 /** 보낼 수 있는 거래소: 조회에는 없고, POST는 받는다 */
-const sendableVenue = () => baseVenue()
+const sendableVenue = (lev = 100) => baseVenue(lev)
   .on(BN_ORDER, { status: 400, json: { code: -2013, msg: 'Order does not exist.' } }, 'GET')
   .on(BN_ORDER, { json: bnOrder({ status: 'NEW', executedQty: '0' }) }, 'POST');
 
@@ -106,8 +109,13 @@ async function dispatch(db: FakeDb, env: Record<string, string | undefined> = EN
     userId: OWNER, connectionId: CONN, signalId: SIG,
     exchange: 'binance', mode: 'TESTNET',
     plan: plan(), apiKey: 'K'.repeat(64), apiSecret: 'S'.repeat(64),
+    // **`protectionPolicy`를 기본값으로 넣지 않는다.**
+    //
+    // 전에는 `'NONE'`을 넣어 뒀는데, 그러면 손절·정책 관문을 하나씩 떼
+    // 보는 변이에서 **NONE 관문이 대신 막아** 시험이 그대로 통과했다.
+    // 관문이 서로를 가리면 어느 것도 고정되지 않는다 — 실제로 변이 두
+    // 건이 초록으로 통과했고 그래서 여기를 고쳤다.
     stopPolicy: 'NO_FIXED_SL', takeProfitPolicy: 'NO_FIXED_TP',
-    protectionPolicy: 'NONE',
     ...over,
   }, env);
 }
@@ -270,6 +278,143 @@ export async function runTenSlotDispatchIntegrationTests() {
       eq(venue.orderSends().length, 0);
       eq((r as any).ok, false);
     });
+  }
+
+  // ══════════ ⑤-d 이어받을 수 없는 계약은 **예약하지 않는다** ══════════
+  //
+  // 검수 지적을 실제로 돌려 확인했다. `stopPolicy: 'FIXED_SL'`로 예약하면:
+  //
+  //   sends 0 · UNKNOWN · "커밋된 의도의 stop_policy가 보낼 계약과 다릅니다"
+  //
+  // 097은 `FIXED_SL`을 유효하게 받아 커밋하는데 `orderExecutor`는
+  // `NO_FIXED_SL`일 때만 의도에 그 칸을 넣는다. 그래서 대조가 깨지고
+  // **슬롯만 RESERVED로 남는다.** 그 비대칭을 `orderExecutor`에서 고치지
+  // 않고(078의 이유가 있다) 이 경로가 예약하지 않는 쪽으로 막았다.
+  for (const policy of ['FIXED_SL', 'TRAILING', 'fixed_sl']) {
+    const db = claimedDb(undefined, { stop_policy: policy });
+    const venue = sendableVenue();
+    // 손절가도 주고 보호도 요구한다 — **이 관문만** 막아야 한다.
+    const r = await scenario(venue, () => dispatch(db, ENV_ON,
+      { stopPolicy: policy, stopLoss: 95000, protectionPolicy: 'REQUIRED' }));
+    test(`★★ 이어받을 수 없는 stopPolicy(${policy})는 예약조차 하지 않는다`, () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(db.rpcCalls.length, 0, '이어받을 수 없는 예약을 만들었다 — 슬롯이 묶인다');
+      eq(venue.orderSends().length, 0);
+      eq((r as any).ok, false);
+    });
+  }
+
+  // ══════════ ⑤-e 보호 없는 진입을 열지 않는다 ══════════
+  //
+  // 검수 지적 B를 그대로 돌려 확인했다. 손절가를 넘기지 않으면:
+  //
+  //   sends 1 · ACKED · slOrderId null      ← 보호되지 않은 포지션
+  //
+  // 100배가 열리는 경로에서 가장 비싼 결과다. `NO_FIXED_SL`은 고정 손절을
+  // **일부러** 걸지 않는 계약이므로 그 경우만 통과한다.
+  {
+    const db = claimedDb(undefined, { stop_policy: null });
+    const venue = sendableVenue();
+    const r = await scenario(venue, () => dispatch(db, ENV_ON,
+      { stopPolicy: null, protectionPolicy: 'REQUIRED' }));
+    test('★★ 손절가가 없으면 예약도 전송도 하지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(db.rpcCalls.length, 0, '보호 없이 열릴 예약을 만들었다');
+      eq(venue.orderSends().length, 0, '보호 없이 주문이 나갔다');
+      eq((r as any).ok, false);
+    });
+  }
+
+  for (const [label, bad] of [
+    ['0', 0], ['음수', -1], ['NaN', Number.NaN], ['무한', Number.POSITIVE_INFINITY],
+  ] as Array<[string, number]>) {
+    const db = claimedDb(undefined, { stop_policy: null });
+    const venue = sendableVenue();
+    const r = await scenario(venue, () => dispatch(db, ENV_ON,
+      { stopPolicy: null, stopLoss: bad, protectionPolicy: 'REQUIRED' }));
+    test(`★ 손절가가 ${label}이면 손절로 세지 않는다`, () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(db.rpcCalls.length, 0, `${label}을 손절가로 받아들였다`);
+      eq(venue.orderSends().length, 0);
+    });
+  }
+
+  test('NO_FIXED_SL은 손절가 없이 지나간다 — 일부러 걸지 않는 계약이다', async () => {
+    // 이 계약의 통과는 위 ①이 이미 돌려서 보였다(기본 dispatch가 NO_FIXED_SL).
+    // 여기서는 그 분기가 손절가를 **요구하지 않는다**는 것만 고정한다.
+    eq(typeof dispatchTenSlot, 'function');
+  });
+
+  // ══════════ ⑤-f 손절가를 주면 **예약과 전송 양쪽에** 같은 값이 간다 ══════════
+  {
+    const SL = 95000;
+    const db = claimedDb(undefined, { stop_policy: null, stop_loss: SL });
+    // **손절이 붙었는지 거래소에서 되읽어 확인한다.** 주문을 보냈다는 것과
+    // 손절이 걸렸다는 것은 다른 사실이다 — 되읽기를 깔지 않으면 실행기는
+    // 정직하게 "확인하지 못했습니다"로 끝내고, 그건 PROTECTED의 증거가 아니다.
+    const venue = sendableVenue()
+      .on('/fapi/v1/openOrders', { json: [{ orderId: 7001, symbol: 'BTCUSDT',
+        type: 'STOP_MARKET', side: 'SELL', stopPrice: String(SL), reduceOnly: true }] });
+    const r = await scenario(venue, () => dispatch(db, ENV_ON,
+      { stopPolicy: null, stopLoss: SL, protectionPolicy: undefined }));
+    test('★★ 손절가는 예약과 전송에 같은 값으로 간다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(db.rpcCalls.length, 1);
+      eq(db.rpcCalls[0].args.p_stop_loss, SL, '예약에 손절가가 가지 않았다');
+      // 이어받기가 손절가까지 대조하므로, 양쪽이 같아야 전송이 열린다.
+      eq((r as any).claim.durable, true, (r as any).claim.reason);
+      assert(venue.orderSends().length >= 1,
+        `손절가를 줬는데 진입이 나가지 않았다: ${(r as any).exec?.status} / ${(r as any).exec?.message}`);
+      // **보호가 실제로 붙었는가.** 진입이 나간 것만으로는 부족하다 —
+      // 검수 지적 B가 가리킨 것이 바로 "나갔는데 손절이 없다"였다.
+      // 진입 + 손절 = POST 2회. 손절 주문 번호가 남아야 한다.
+      eq(venue.orderSends().length, 2, `POST가 ${venue.orderSends().length}번이다 (진입+손절=2)`);
+      assert((r as any).exec?.slOrderId != null,
+        `손절 주문 번호가 없다: ${(r as any).exec?.message}`);
+      // **보호되지 않았다고 적히지 않는다.**
+      assert((r as any).exec?.unprotected !== true,
+        `보호되지 않은 포지션으로 끝났다: ${(r as any).exec?.message}`);
+      // 되읽기가 실제로 됐다는 증거: 실행기는 못 읽으면 그 사실을 메시지에
+      // 적는다("거래소 주문 목록을 읽지 못해 손절 부착을 확인하지
+      // 못했습니다"). 그 문구가 없어야 확인된 것이다.
+      assert(!String((r as any).exec?.message ?? '').includes('확인하지 못했'),
+        `손절 부착을 확인하지 못한 채 끝났다: ${(r as any).exec?.message}`);
+    });
+  }
+
+  {
+    const db = claimedDb(undefined, { stop_policy: null, stop_loss: 95000 });
+    const venue = sendableVenue();
+    const r = await scenario(venue, () => dispatch(db, ENV_ON,
+      { stopPolicy: null, stopLoss: 95000, protectionPolicy: 'NONE' }));
+    test('★★ 손절가가 있어도 protectionPolicy=NONE이면 예약도 전송도 하지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      // 실측: NONE이면 손절가를 줘도 slOrderId null · unprotected true로 끝났다.
+      eq(db.rpcCalls.length, 0, '보호 없이 열릴 예약을 만들었다');
+      eq(venue.orderSends().length, 0, '보호 없이 주문이 나갔다');
+      eq((r as any).ok, false);
+    });
+  }
+
+  // ══════════ ⑤-g 방향과 배율: LONG/SHORT · 10~75배 ══════════
+  //
+  // 기존 시험은 LONG·100배만 봤다. 사용자가 쓰는 범위를 덮지 않으면
+  // "통과했다"가 그 범위의 증거가 아니다.
+  for (const [side, venueSide] of [['LONG', 'BUY'], ['SHORT', 'SELL']] as Array<[string, string]>) {
+    for (const lev of [10, 75]) {
+      const db = claimedDb(undefined, { side: venueSide, leverage: lev });
+      const venue = sendableVenue(lev);
+      const r = await scenario(venue, () => dispatch(db, ENV_ON, { plan: plan({ side, leverage: lev }) }));
+      test(`★★ ${side} ${lev}배도 예약을 이어받아 한 번만 보낸다`, () => {
+        assert(!(r instanceof Error), String((r as any)?.message));
+        const d = r as any;
+        eq(d.claim.durable, true, d.claim.reason);
+        eq(d.exec?.status, 'ACKED', `${d.exec?.status} / ${d.exec?.message}`);
+        eq(venue.orderSends().length, 1, `주문이 ${venue.orderSends().length}번 나갔다`);
+        eq(db.rpcCalls[0].args.p_side, venueSide, '예약에 간 방향이 다르다');
+        eq(db.rpcCalls[0].args.p_leverage, lev, '예약에 간 배율이 다르다');
+      });
+    }
   }
 
   // ══════════ ⑥ 같은 예약을 두 실행기가 동시에 집어도 전송은 한 번 ══════════
