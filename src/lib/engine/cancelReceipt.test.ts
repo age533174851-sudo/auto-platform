@@ -131,8 +131,10 @@ export function runCancelReceiptTests() {
 
   const FLAT = { ok: true, found: false, qty: 0 };
   const MINE_ROW = { id: '123456789', ownership: 'MINE', namespace: 'GATE_PRICE', idReadable: true };
+  // `ownedIds`는 **이 연결·이 환경의 장부**에 적힌 거래소 번호다.
   const D = (over: any = {}) => orphanCancelDecision({
-    position: FLAT, ledgerReadable: true, orders: [MINE_ROW], asked: ['123456789'], ...over,
+    position: FLAT, ledgerReadable: true, orders: [MINE_ROW], asked: ['123456789'],
+    ownedIds: ['123456789'], ...over,
   });
 
   test('모두 확인되면 그 한 건만 보낸다', () => {
@@ -240,6 +242,14 @@ export function runCancelReceiptTests() {
       ['asked absent', { asked: ['999'] }],
       ['unreadable row + asked absent', {
         asked: ['999'], orders: [{ id: '', ownership: 'MINE', namespace: 'UNKNOWN', idReadable: false }] }],
+      ['prefix only (장부에 번호 없음)', { ownedIds: [] }],
+      ['장부 번호가 다른 연결의 것', { ownedIds: ['999999'] }],
+      ['두 건 요청', {
+        asked: ['77', '88'], ownedIds: ['77', '88'],
+        orders: [
+          { id: '77', ownership: 'MINE', namespace: 'GATE_PRICE', idReadable: true },
+          { id: '88', ownership: 'MINE', namespace: 'GATE_PRICE', idReadable: true },
+        ] }],
     ];
     for (const [name, over] of mutations) {
       const d = D(over);
@@ -247,6 +257,68 @@ export function runCancelReceiptTests() {
       eq(d.targets.length, 0, `${name}: targets가 비어 있지 않습니다`);
       eq(d.notFound.length, 0, `${name}: notFound로 "없다"고 적었습니다`);
     }
+  });
+
+  console.log('[취소 영수증 — 연결·환경·단건 (#552 추가 감사)]');
+
+  test('한 번에 두 건을 요청하면 거절한다 — 버튼은 "이 주문만 취소"다', () => {
+    const d = D({
+      asked: ['77', '88'],
+      orders: [
+        { id: '77', ownership: 'MINE', namespace: 'GATE_PRICE', idReadable: true },
+        { id: '88', ownership: 'MINE', namespace: 'GATE_PRICE', idReadable: true },
+      ],
+      ownedIds: ['77', '88'],
+    });
+    eq(d.allowed, false, '두 건을 통째로 허용했습니다');
+    eq(d.code, 'TOO_MANY_IDS');
+    eq(d.targets.length, 0);
+  });
+
+  test('같은 번호를 두 번 적은 것은 한 건이다', () => {
+    const d = D({ asked: ['123456789', '123456789'] });
+    eq(d.allowed, true);
+    eq(d.targets.join(','), '123456789');
+  });
+
+  test('전략 이름만 같은 주문은 취소하지 않는다 — 다른 연결의 것일 수 있다', () => {
+    // 거래소 목록에는 MINE으로 보이지만, 이 연결의 장부에 그 번호가 없다.
+    const d = D({ ownedIds: [] });
+    eq(d.allowed, false);
+    eq(d.code, 'OWNERSHIP_PREFIX_ONLY');
+    eq(d.targets.length, 0);
+  });
+
+  test('다른 연결의 장부 번호로는 취소 권한이 생기지 않는다', () => {
+    // A 연결의 번호만 장부에 있고, 지우려는 것은 B의 번호다.
+    const d = D({ asked: ['999'], orders: [{ id: '999', ownership: 'MINE', namespace: 'GATE_PRICE', idReadable: true }],
+      ownedIds: ['123456789'] });
+    eq(d.allowed, false);
+    eq(d.code, 'OWNERSHIP_PREFIX_ONLY');
+  });
+
+  test('장부를 다 읽지 못했으면 "장부에 없다"를 그렇게 말한다', () => {
+    const d = D({ ownedIds: [], ledgerTruncated: true });
+    eq(d.allowed, false);
+    eq(d.code, 'OWNERSHIP_PREFIX_ONLY');
+    assert(d.reason.includes('다 읽지 못'), d.reason);
+    assert(d.reason.includes('없다는 뜻이 아닙니다'), d.reason);
+  });
+
+  test('장부 증거 검사가 거래소 상태 판정을 가리지 않는다 — 원인이 바뀌면 안 된다', () => {
+    // **순서가 계약이다.** 포지션이 열려 있는데 "장부에 없다"로 보고하면
+    // 사람이 엉뚱한 곳을 본다. 내가 이 순서를 한 번 틀렸고 시험이 잡았다.
+    eq(D({ position: { ok: true, found: true, qty: 1 }, ownedIds: [] }).code, 'POSITION_NOT_FLAT');
+    eq(D({ ledgerReadable: false, ownedIds: [] }).code, 'LEDGER_UNREADABLE');
+    eq(D({ orders: null, ownedIds: [] }).code, 'ORDERS_UNREADABLE');
+    eq(D({ orders: [{ ...MINE_ROW, ownership: 'UNKNOWN' }], ownedIds: [] }).code, 'OWNERSHIP_NOT_PROVEN');
+    eq(D({ orders: [{ ...MINE_ROW, namespace: 'BINANCE_ALGO' }], ownedIds: [] }).code, 'UNSUPPORTED_NAMESPACE');
+  });
+
+  test('요청 자체가 틀린 것은 거래소 상태보다 먼저 말한다', () => {
+    // 번호가 없거나 너무 많은 것은 거래소를 보지 않아도 아는 사실이다.
+    eq(D({ asked: [''], position: null }).code, 'NOTHING_ASKED');
+    eq(D({ asked: ['77', '88'], position: null }).code, 'TOO_MANY_IDS');
   });
 
   console.log('[취소 영수증 — 못 읽은 것을 성공으로 적지 않는다]');

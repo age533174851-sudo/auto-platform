@@ -92,15 +92,34 @@ async function venueOf(sb: any, userId: string, connectionId: string) {
   };
 }
 
-/** 이 사용자의 스모크 줄이 들고 있는 주문 번호 */
-async function smokeIds(sb: any, userId: string, symbol: string) {
+/** 장부를 한 번에 몇 줄까지 읽는가. **채워서 오면 잘렸을 수 있다** */
+const SMOKE_LEDGER_LIMIT = 20;
+
+/**
+ * 이 사용자의 스모크 줄이 들고 있는 주문 번호.
+ *
+ * **같은 사용자라도 연결과 환경이 다르면 다른 계좌다.** 그 줄의 주문
+ * 번호를 소유 증거로 가져오면, 거래소 번호가 우연히 겹칠 때 다른
+ * 연결의 주문이 "내 것"이 된다. `CLAUDE.md`: symbol만 보고 주문 소유권을
+ * 판단하지 않는다 — 연결과 환경도 symbol과 같은 지위다.
+ *
+ * `smoke_tests`에는 `connection_id`와 `mode`가 있다(052). `mode`는
+ * `CHECK (mode = 'TESTNET')`이므로 **LIVE 연결에서는 한 줄도 맞지 않고**,
+ * 그러면 소유 증거가 없어 관문이 막는다 — 그것이 맞는 방향이다.
+ */
+async function smokeIds(
+  sb: any, userId: string, symbol: string,
+  connectionId: string, mode: 'TESTNET' | 'LIVE',
+) {
   try {
     const { data, error } = await (sb as any).from('smoke_tests')
       .select('id, symbol, side, state, verdict, sl_order_id, tp_order_id, entry_order_id, client_order_id, created_at, closed_at')
       .eq('user_id', userId).eq('symbol', symbol)
-      .order('created_at', { ascending: false }).limit(20);
+      // **이 연결·이 환경의 줄만 소유 증거다.**
+      .eq('connection_id', connectionId).eq('mode', mode)
+      .order('created_at', { ascending: false }).limit(SMOKE_LEDGER_LIMIT);
     if (error || !Array.isArray(data)) {
-      return { rows: [], ids: [] as string[], error: 'smoke_rows_unreadable' };
+      return { rows: [], ids: [] as string[], error: 'smoke_rows_unreadable', truncated: false };
     }
     const rows = data;
     return {
@@ -112,11 +131,14 @@ async function smokeIds(sb: any, userId: string, symbol: string) {
       })),
       ids: ownedOrderIds({ placed: rows.flatMap((r: any) => [r.sl_order_id, r.tp_order_id]) }),
       error: null as string | null,
+      // **꽉 채워서 왔으면 더 있을 수 있다.** 잘린 목록을 장부 전체로
+      // 읽으면 "내 주문이 없다"가 사실이 아닐 수 있다.
+      truncated: rows.length >= SMOKE_LEDGER_LIMIT,
     };
   } catch (e: any) {
     // **못 읽은 것을 빈 목록으로 두지 않는다.** 빈 목록이면 "내 주문이
     // 하나도 없다"가 되어 남은 것이 전부 남의 것으로 보인다.
-    return { rows: [], ids: [] as string[], error: String(e?.message || e) };
+    return { rows: [], ids: [] as string[], error: String(e?.message || e), truncated: false };
   }
 }
 
@@ -142,7 +164,7 @@ export async function GET(req: NextRequest) {
   const [position, orders, mine] = await Promise.all([
     ops.readOpenPosition(v.venue, symbol),
     ops.readProtectiveOrders(v.venue, symbol),
-    smokeIds(sb, userId, symbol),
+    smokeIds(sb, userId, symbol, connectionId, v.venue.testnet ? 'TESTNET' : 'LIVE'),
   ]);
 
   return NextResponse.json({
@@ -156,7 +178,10 @@ export async function GET(req: NextRequest) {
     // **null은 '못 읽음'이고 []는 '없음'이다.**
     ordersReadable: orders != null,
     orders: (orders ?? []).map(o => describe(o, mine.ids, v.venue.exchange)),
-    smoke: { rows: mine.rows, ids: mine.ids, error: mine.error },
+    // **무엇을 근거로 소유를 판단했는지 화면이 볼 수 있게 한다.**
+    smoke: { rows: mine.rows, ids: mine.ids, error: mine.error,
+      scopedTo: { connectionId, mode: v.venue.testnet ? 'TESTNET' : 'LIVE' },
+      truncated: mine.truncated === true },
     note: orders == null
       ? '조건부 주문 목록을 읽지 못했습니다 — 0건과 다릅니다'
       : `조건부 주문 ${orders.length}건. 지우려면 POST에 지울 번호(ids)를 명시하세요 — `
@@ -205,7 +230,8 @@ export async function POST(req: NextRequest) {
   }
 
   const [mine, positionBefore] = await Promise.all([
-    smokeIds(sb, userId, symbol), ops.readOpenPosition(v.venue, symbol),
+    smokeIds(sb, userId, symbol, connectionId, v.venue.testnet ? 'TESTNET' : 'LIVE'),
+    ops.readOpenPosition(v.venue, symbol),
   ]);
   const seen = before.map(o => describe(o, mine.ids, v.venue.exchange));
 
@@ -215,6 +241,10 @@ export async function POST(req: NextRequest) {
   const decision = orphanCancelDecision({
     position: positionBefore, ledgerReadable: mine.error == null,
     orders: seen, asked: askedRaw,
+    // **취소는 거래소가 준 번호가 이 연결의 장부에 있는 주문만.**
+    // 전략 prefix만 맞는 주문은 다른 연결·다른 회차의 것일 수 있다.
+    ownedIds: mine.ids,
+    ledgerTruncated: mine.truncated === true,
   });
   if (!decision.allowed) {
     return NextResponse.json({

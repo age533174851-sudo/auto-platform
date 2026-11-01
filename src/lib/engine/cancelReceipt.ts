@@ -197,9 +197,15 @@ export interface OrphanCancelDecision {
  *
  * 순서가 계약이다:
  *   ① 번호를 하나도 받지 못했다           → NOTHING_ASKED
- *   ② 포지션 0 · 장부 · 목록 · 단건 · 소유권 · namespace (#553 관문)
- *   ③ 관문이 단건 일치에서 막혔고 번호를 못 읽은 줄이 있다 →
+ *   ② 한 번에 두 건 이상을 요청했다         → TOO_MANY_IDS
+ *   ③ 포지션 0 · 장부 · 목록 · 단건 · 소유권 · namespace (#553 관문)
+ *   ④ 관문이 단건 일치에서 막혔고 번호를 못 읽은 줄이 있다 →
  *      ASKED_UNREADABLE (왜 못 찾았는지를 "없다"로 적지 않는다)
+ *   ⑤ 거래소 번호가 **이 연결·이 환경의 장부**에 없다 →
+ *      OWNERSHIP_PREFIX_ONLY (전략 이름만 같은 주문은 취소하지 않는다)
+ *
+ * ⑤를 ③보다 뒤에 두는 것도 계약이다. 앞에 두면 포지션이 열려 있는
+ * 경우까지 "장부에 없다"로 보고되어 **실제 원인이 가려진다.**
  *
  * `allowed`가 false면 **거래소로 나가는 호출은 없다.**
  */
@@ -208,6 +214,14 @@ export function orphanCancelDecision(i: {
   ledgerReadable: boolean;
   orders: Array<{ id: string; ownership: string; namespace: string; idReadable?: boolean }> | null;
   asked: Array<string | null | undefined>;
+  /**
+   * 이 **연결·환경**의 장부에 적힌 주문 번호. 거래소가 걸 때 준 번호다 —
+   * `CLAUDE.md`가 말하는 가장 강한 소유 증거. 주지 않으면 빈 목록으로
+   * 본다(= prefix만으로는 취소하지 않는다).
+   */
+  ownedIds?: string[] | null;
+  /** 장부를 다 읽지 못했는가(LIMIT에 꽉 차서 왔는가) */
+  ledgerTruncated?: boolean;
 }): OrphanCancelDecision {
   const unreadableRows = Array.isArray(i?.orders)
     ? i.orders.filter(o => o?.idReadable === false).length : 0;
@@ -218,6 +232,17 @@ export function orphanCancelDecision(i: {
   }
 
   const asked = ownedOrderIds({ placed: i.asked });
+
+  // **한 번에 한 건만 취소한다.** 화면의 버튼은 '이 주문만 취소'이고
+  // 관문의 문구도 '단건'인데, 배열을 그대로 넘기면 번호를 여러 개 적은
+  // 요청이 통째로 통과한다 — 적어 둔 계약과 코드가 갈린 자리다.
+  // 여러 건을 지워야 하면 한 건씩 눌러서 매번 재조회로 확인한다.
+  if (asked.length > 1) {
+    return { allowed: false, code: 'TOO_MANY_IDS', targets: [], notFound: [], unreadableRows,
+      reason: `한 번에 한 건만 취소합니다 — ${asked.length}건을 받았습니다`
+        + ' (여러 건은 한 건씩, 매번 재조회로 확인합니다)' };
+  }
+
   const gate = orphanCancelGate({
     position: i?.position ?? null,
     ledgerReadable: i?.ledgerReadable === true,
@@ -237,6 +262,18 @@ export function orphanCancelDecision(i: {
     }
     return { allowed: false, code: gate.code, targets: [], notFound: [], unreadableRows,
       reason: gate.reason };
+  }
+
+  // **전략 prefix만 맞는 주문은 취소하지 않는다.** 그 주문은 같은
+  // 사용자의 **다른 연결·다른 회차**의 것일 수 있고, prefix는 그것을
+  // 구분하지 못한다. 취소에는 거래소가 준 번호가 장부에 있어야 한다.
+  const owned = (Array.isArray(i?.ownedIds) ? i.ownedIds : []).map(v => String(v ?? '').trim()).filter(Boolean);
+  const unproven = asked.filter(id => !owned.includes(id));
+  if (unproven.length > 0) {
+    return { allowed: false, code: 'OWNERSHIP_PREFIX_ONLY', targets: [], notFound: [], unreadableRows,
+      reason: `${unproven.join(', ')}은 이 연결·이 환경의 장부에 적힌 주문 번호가 아닙니다`
+        + ' — 전략 이름만 같은 주문은 취소하지 않습니다'
+        + (i?.ledgerTruncated === true ? ' (장부를 다 읽지 못했습니다 — 없다는 뜻이 아닙니다)' : '') };
   }
 
   return { allowed: true, code: gate.code, targets: gate.targets, notFound: [], unreadableRows,

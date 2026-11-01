@@ -361,6 +361,19 @@ const receiptGaps = [];
   if (!/\bidReadable\b/.test(route)) {
     receiptGaps.push(`${ORPHANS} — 응답에 idReadable을 싣지 않습니다 (화면이 못 읽은 번호를 구분할 수 없습니다)`);
   }
+  // **소유 증거 장부는 연결과 환경으로 좁혀서 읽는다.**
+  // 같은 사용자라도 연결·환경이 다르면 다른 계좌다. 좁히지 않으면 다른
+  // 연결의 주문 번호가 소유 근거로 들어온다(#552 추가 감사). 이 질의는
+  // 라우트 안에 있어 유닛 시험이 닿지 않는다 — 실제로 이 범위를 지워 보니
+  // 시험 7295개가 전부 통과했다. 그래서 글자로 고정한다.
+  if (!/\.eq\(\s*['"]connection_id['"]/.test(route) || !/\.eq\(\s*['"]mode['"]/.test(route)) {
+    receiptGaps.push(`${ORPHANS} — smoke_tests 조회를 connection_id·mode로 좁히지 않았습니다`
+      + ' (다른 연결·다른 환경의 주문 번호가 소유 근거가 됩니다)');
+  }
+  // 좁혀 읽은 번호를 판정에 실제로 넘기는가. 넘기지 않으면 좁힌 의미가 없다.
+  if (!/\bownedIds\s*:/.test(route)) {
+    receiptGaps.push(`${ORPHANS} — 좁혀 읽은 장부 번호(ownedIds)를 판정에 넘기지 않았습니다`);
+  }
   // 이 규칙이 헛돌지 않는지. 판정 정본이 사라졌으면 그것이 RED다.
   if (!existsSync(RECEIPT)) {
     receiptGaps.push(`${RECEIPT} — 판정 정본이 없습니다 (이 규칙이 헛돌고 있습니다)`);
