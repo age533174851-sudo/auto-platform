@@ -32,7 +32,17 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { SMOKE_STRATEGY_ID } from '@/lib/smoke/smokePlan';
 import { classifyOrder, ownershipTextOf } from '@/lib/engine/orderOwnership';
-import { ownedOrderIds, cancelLedger, orderIdOf, orphanCancelGate } from '@/lib/engine/protectionLedger';
+import { ownedOrderIds, cancelLedger, orderIdOf } from '@/lib/engine/protectionLedger';
+// **관문과 영수증은 한 번만 합성한다.** 라우트가 orphanCancelGate(#553)와
+// cancelPlanOf(#554)를 각자 부르면 같은 판단이 두 곳에 생기고, 언젠가
+// 한쪽만 고쳐진다 — 상습 고장 ②.
+import { orderIdEvidence, orphanCancelDecision, asksNothing, IDS_REQUIRED_REASON } from '@/lib/engine/cancelReceipt';
+// **스모크 경로는 확인된 테스트넷 연결에서만 — 조회도 포함한다.**
+// 판정은 이미 `smokePlan.smokeTestnetVerdict` 한 곳에 있고 `startAttempt`가
+// 그것을 쓴다. 여기서 같은 판단을 다시 쓰면 둘이 갈린다 — 실제로 내가
+// 한 번 그렇게 썼고(`smokeEnv.ts`), 정규화된 `testnet`을 받아서
+// **미확인 환경(`is_testnet = null`)을 TESTNET으로 올렸다.**
+import { smokeTestnetVerdict } from '@/lib/smoke/smokePlan';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -42,15 +52,22 @@ function describe(row: any, myIds: string[], exchange: 'binance' | 'gate') {
   const initial = row?.initial ?? row ?? {};
   const trigger = row?.trigger ?? {};
   const cls = classifyOrder(row, SMOKE_STRATEGY_ID, myIds);
+  const ev = orderIdEvidence(row);
   // Binance Algo의 algoId는 일반 orderId와 다른 취소 API를 사용한다.
+  // **번호를 읽었는지(ev.readable)와 어느 namespace인지는 다른 질문이다.**
   const namespace = exchange === 'gate'
-    ? (row?.id != null && orderIdOf(row) ? 'GATE_PRICE' : 'UNKNOWN')
+    ? (row?.id != null && ev.readable ? 'GATE_PRICE' : 'UNKNOWN')
     : row?.algoId != null || row?.clientAlgoId != null
       ? 'BINANCE_ALGO'
-      : row?.orderId != null && orderIdOf(row) ? 'BINANCE_REGULAR' : 'UNKNOWN';
+      : row?.orderId != null && ev.readable ? 'BINANCE_REGULAR' : 'UNKNOWN';
   return {
     namespace,
-    id: orderIdOf(row),
+    id: ev.id,
+    // **번호를 못 읽은 것과 번호가 없는 것은 다르다.** 화면이 이 둘을
+    // 섞으면 못 읽은 주문에 취소 버튼이 달리고, 앱이 자기 400을 돌려준다.
+    idReadable: ev.readable,
+    idSource: ev.source,
+    idReason: ev.reason || null,
     text: ownershipTextOf(row) || null,
     // Gate: initial.contract · 바이낸스: symbol
     contract: initial.contract ?? row?.symbol ?? null,
@@ -77,19 +94,42 @@ async function venueOf(sb: any, userId: string, connectionId: string) {
       exchange: (creds as any).exchange as 'binance' | 'gate',
       apiKey: (creds as any).key, apiSecret: (creds as any).secret,
       testnet: (creds as any).testnet as boolean,
+      // **날것을 잃지 않는다.** `testnet`은 `is_testnet !== false`라서
+      // null·undefined가 true가 된다 — 그 값으로 관문을 세우면
+      // 환경이 확인되지 않은 연결에 signed 조회가 나간다.
+      isTestnetRaw: (creds as any).isTestnetRaw,
     },
   };
 }
 
-/** 이 사용자의 스모크 줄이 들고 있는 주문 번호 */
-async function smokeIds(sb: any, userId: string, symbol: string) {
+/** 장부를 한 번에 몇 줄까지 읽는가. **채워서 오면 잘렸을 수 있다** */
+const SMOKE_LEDGER_LIMIT = 20;
+
+/**
+ * 이 사용자의 스모크 줄이 들고 있는 주문 번호.
+ *
+ * **같은 사용자라도 연결과 환경이 다르면 다른 계좌다.** 그 줄의 주문
+ * 번호를 소유 증거로 가져오면, 거래소 번호가 우연히 겹칠 때 다른
+ * 연결의 주문이 "내 것"이 된다. `CLAUDE.md`: symbol만 보고 주문 소유권을
+ * 판단하지 않는다 — 연결과 환경도 symbol과 같은 지위다.
+ *
+ * `smoke_tests`에는 `connection_id`와 `mode`가 있다(052). `mode`는
+ * `CHECK (mode = 'TESTNET')`이므로 **LIVE 연결에서는 한 줄도 맞지 않고**,
+ * 그러면 소유 증거가 없어 관문이 막는다 — 그것이 맞는 방향이다.
+ */
+async function smokeIds(
+  sb: any, userId: string, symbol: string,
+  connectionId: string, mode: 'TESTNET' | 'LIVE',
+) {
   try {
     const { data, error } = await (sb as any).from('smoke_tests')
       .select('id, symbol, side, state, verdict, sl_order_id, tp_order_id, entry_order_id, client_order_id, created_at, closed_at')
       .eq('user_id', userId).eq('symbol', symbol)
-      .order('created_at', { ascending: false }).limit(20);
+      // **이 연결·이 환경의 줄만 소유 증거다.**
+      .eq('connection_id', connectionId).eq('mode', mode)
+      .order('created_at', { ascending: false }).limit(SMOKE_LEDGER_LIMIT);
     if (error || !Array.isArray(data)) {
-      return { rows: [], ids: [] as string[], error: 'smoke_rows_unreadable' };
+      return { rows: [], ids: [] as string[], error: 'smoke_rows_unreadable', truncated: false };
     }
     const rows = data;
     return {
@@ -101,11 +141,14 @@ async function smokeIds(sb: any, userId: string, symbol: string) {
       })),
       ids: ownedOrderIds({ placed: rows.flatMap((r: any) => [r.sl_order_id, r.tp_order_id]) }),
       error: null as string | null,
+      // **꽉 채워서 왔으면 더 있을 수 있다.** 잘린 목록을 장부 전체로
+      // 읽으면 "내 주문이 없다"가 사실이 아닐 수 있다.
+      truncated: rows.length >= SMOKE_LEDGER_LIMIT,
     };
   } catch (e: any) {
     // **못 읽은 것을 빈 목록으로 두지 않는다.** 빈 목록이면 "내 주문이
     // 하나도 없다"가 되어 남은 것이 전부 남의 것으로 보인다.
-    return { rows: [], ids: [] as string[], error: String(e?.message || e) };
+    return { rows: [], ids: [] as string[], error: String(e?.message || e), truncated: false };
   }
 }
 
@@ -127,11 +170,20 @@ export async function GET(req: NextRequest) {
   const v = await venueOf(sb, userId, connectionId);
   if (!v.ok) return NextResponse.json({ ok: false, error: 'creds', message: v.message }, { status: v.status });
 
+  // **거래소에 아무것도 묻기 전에 환경을 확인한다.** 실전 연결이면
+  // signed 조회조차 보내지 않고, **확인되지 않은 환경도 마찬가지다.**
+  // `startAttempt`가 주문 앞에서 쓰는 그 판정을 그대로 쓴다.
+  const envGet = smokeTestnetVerdict(v.venue.isTestnetRaw);
+  if (!envGet.ok) {
+    return NextResponse.json({ ok: false, mutated: false, error: envGet.code, message: envGet.reason },
+      { status: 403, headers: { 'Cache-Control': 'no-store' } });
+  }
+
   const ops = await import('@/lib/engine/venuePositionOps');
   const [position, orders, mine] = await Promise.all([
     ops.readOpenPosition(v.venue, symbol),
     ops.readProtectiveOrders(v.venue, symbol),
-    smokeIds(sb, userId, symbol),
+    smokeIds(sb, userId, symbol, connectionId, v.venue.testnet ? 'TESTNET' : 'LIVE'),
   ]);
 
   return NextResponse.json({
@@ -145,7 +197,10 @@ export async function GET(req: NextRequest) {
     // **null은 '못 읽음'이고 []는 '없음'이다.**
     ordersReadable: orders != null,
     orders: (orders ?? []).map(o => describe(o, mine.ids, v.venue.exchange)),
-    smoke: { rows: mine.rows, ids: mine.ids, error: mine.error },
+    // **무엇을 근거로 소유를 판단했는지 화면이 볼 수 있게 한다.**
+    smoke: { rows: mine.rows, ids: mine.ids, error: mine.error,
+      scopedTo: { connectionId, mode: v.venue.testnet ? 'TESTNET' : 'LIVE' },
+      truncated: mine.truncated === true },
     note: orders == null
       ? '조건부 주문 목록을 읽지 못했습니다 — 0건과 다릅니다'
       : `조건부 주문 ${orders.length}건. 지우려면 POST에 지울 번호(ids)를 명시하세요 — `
@@ -166,22 +221,30 @@ export async function POST(req: NextRequest) {
 
   const connectionId = String(body?.connectionId || '').trim();
   const symbol = String(body?.symbol || '').trim().toUpperCase();
-  const asked = ownedOrderIds({ placed: Array.isArray(body?.ids) ? body.ids : [] });
+  const askedRaw = Array.isArray(body?.ids) ? body.ids : [];
+  const asked = ownedOrderIds({ placed: askedRaw });
 
   if (!connectionId || !symbol) {
     return NextResponse.json({ ok: false, error: 'bad_request',
       message: 'connectionId와 symbol이 필요합니다' }, { status: 400 });
   }
-  if (asked.length === 0) {
-    // **"전부"라는 입력을 두지 않는다.** 두면 언젠가 눌리고, 그때
-    // 다른 전략의 손절이 같이 사라진다.
+  // **"전부"라는 입력을 두지 않는다.** 두면 언젠가 눌리고, 그때
+  // 다른 전략의 손절이 같이 사라진다.
+  if (asksNothing(askedRaw)) {
     return NextResponse.json({ ok: false, error: 'ids_required',
-      message: '지울 주문 번호(ids)를 명시하세요 — 전체 취소는 지원하지 않습니다',
-    }, { status: 400 });
+      message: IDS_REQUIRED_REASON }, { status: 400 });
   }
 
   const v = await venueOf(sb, userId, connectionId);
   if (!v.ok) return NextResponse.json({ ok: false, error: 'creds', message: v.message }, { status: v.status });
+
+  // **취소뿐 아니라 조회도 막는다.** 아래 `readProtectiveOrders`가 이미
+  // signed 요청이다 — 관문이 그 뒤에 있으면 늦다.
+  const envPost = smokeTestnetVerdict(v.venue.isTestnetRaw);
+  if (!envPost.ok) {
+    return NextResponse.json({ ok: false, mutated: false, error: envPost.code, message: envPost.reason },
+      { status: 403, headers: { 'Cache-Control': 'no-store' } });
+  }
 
   const ops = await import('@/lib/engine/venuePositionOps');
   const before = await ops.readProtectiveOrders(v.venue, symbol);
@@ -194,21 +257,31 @@ export async function POST(req: NextRequest) {
   }
 
   const [mine, positionBefore] = await Promise.all([
-    smokeIds(sb, userId, symbol), ops.readOpenPosition(v.venue, symbol),
+    smokeIds(sb, userId, symbol, connectionId, v.venue.testnet ? 'TESTNET' : 'LIVE'),
+    ops.readOpenPosition(v.venue, symbol),
   ]);
   const seen = before.map(o => describe(o, mine.ids, v.venue.exchange));
-  // 실제 취소 전에 거래소 포지션 0, 장부 조회, 소유권, 주문 namespace를 모두 확인한다.
-  const gate = orphanCancelGate({
+
+  // **취소를 보내기 전에 전부 확인한다** — 포지션 0 · 장부 읽힘 · 번호
+  // 읽힘 · 단건 일치 · 소유권 MINE · 취소 가능한 namespace.
+  // 하나라도 확인되지 않으면 `cancelExact`는 호출되지 않는다.
+  const decision = orphanCancelDecision({
     position: positionBefore, ledgerReadable: mine.error == null,
-    orders: seen, asked,
+    orders: seen, asked: askedRaw,
+    // **취소는 거래소가 준 번호가 이 연결의 장부에 있는 주문만.**
+    // 전략 prefix만 맞는 주문은 다른 연결·다른 회차의 것일 수 있다.
+    ownedIds: mine.ids,
+    ledgerTruncated: mine.truncated === true,
   });
-  if (!gate.ok) {
+  if (!decision.allowed) {
     return NextResponse.json({
-      ok: false, mutated: false, error: gate.code, message: gate.reason,
-      orders: seen, position: { ok: positionBefore.ok, found: positionBefore.found, qty: positionBefore.qty },
-    }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+      ok: false, mutated: false, error: decision.code, message: decision.reason,
+      orders: seen, unreadableRows: decision.unreadableRows,
+      position: { ok: positionBefore.ok, found: positionBefore.found, qty: positionBefore.qty },
+    }, { status: decision.code === 'ORDERS_UNREADABLE' ? 503 : 409,
+         headers: { 'Cache-Control': 'no-store' } });
   }
-  const targets = gate.targets;
+  const targets = decision.targets;
   const cx = await ops.cancelExact(v.venue, symbol, targets, { attempts: 3 });
   const ledger = cancelLedger({ ids: targets, attempts: cx.attempts, leftover: cx.leftover });
   const position = await ops.readOpenPosition(v.venue, symbol);
@@ -220,8 +293,9 @@ export async function POST(req: NextRequest) {
     env: v.venue.testnet ? 'TESTNET' : 'LIVE',
     symbol,
     requested: asked,
-    // 번호는 줬는데 거래소 목록에 없던 것. 이미 사라진 것이다.
-    notFound: [],
+    // **"목록에 없으니 사라졌다"는 관문을 통과한 뒤에도 말하지 않는다.**
+    // 관문이 단건 일치를 요구하므로 허용된 요청에 '없던 번호'는 없다.
+    notFound: decision.notFound,
     // **요청 → 응답 → 재조회**의 기록. "왜 안 지워졌나"에 이걸로 답한다.
     ledger,
     attempts: cx.attempts,
