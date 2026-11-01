@@ -205,3 +205,45 @@ export function rollbackNote(i: {
   if (led.ok) return `${pos} · 걸어 둔 보호주문 ${led.entries.length}건도 취소 확인`;
   return `${pos} · ⚠ ${led.reason}`;
 }
+
+/**
+ * HTTP 고아 주문 단건 취소의 마지막 fail-closed 관문.
+ * 일반 주문 ID와 Binance Algo ID는 다른 namespace다. Algo를 일반 DELETE에 넘기지 않는다.
+ * 요청 직전 포지션 0, 조회된 소유권, 정확한 ID를 모두 증명해야 한다.
+ * 이 관문은 실제 거래소에 취소를 보내지 않는다.
+ */
+export function orphanCancelGate(i: {
+  position: { ok: boolean; found: boolean; qty: number | null } | null;
+  ledgerReadable: boolean;
+  orders: Array<{ id: string; ownership: string; namespace: string }> | null;
+  asked: string[];
+}): { ok: boolean; code: string; targets: string[]; reason: string } {
+  const blocked = (code: string, reason: string) =>
+    ({ ok: false, code, targets: [] as string[], reason });
+  if (!i.position || i.position.ok !== true || i.position.found !== false ||
+      i.position.qty !== 0) {
+    return blocked('POSITION_NOT_FLAT', '포지션 0을 확인하지 못했습니다 — 보호주문을 취소하지 않습니다');
+  }
+  if (!i.ledgerReadable) {
+    return blocked('LEDGER_UNREADABLE', '소유 주문 장부를 읽지 못했습니다 — 취소하지 않습니다');
+  }
+  if (!Array.isArray(i.orders)) {
+    return blocked('ORDERS_UNREADABLE', '거래소 주문 목록을 읽지 못했습니다 — 취소하지 않습니다');
+  }
+  const asked = ownedOrderIds({ placed: i.asked });
+  if (asked.length === 0) return blocked('IDS_REQUIRED', '취소할 주문 번호가 없습니다');
+  for (const id of asked) {
+    const matches = i.orders.filter(row => row.id === id);
+    if (matches.length !== 1) {
+      return blocked('TARGET_NOT_UNIQUE', '거래소에서 요청한 주문 번호를 정확히 한 건 확인하지 못했습니다');
+    }
+    const row = matches[0];
+    if (row.ownership !== 'MINE') {
+      return blocked('OWNERSHIP_NOT_PROVEN', '이 전략의 주문이라는 증거가 없습니다 — 취소하지 않습니다');
+    }
+    if (row.namespace !== 'GATE_PRICE' && row.namespace !== 'BINANCE_REGULAR') {
+      return blocked('UNSUPPORTED_NAMESPACE', 'Algo 주문을 일반 주문 취소 API로 지울 수 없습니다');
+    }
+  }
+  return { ok: true, code: 'AUTHORIZED', targets: asked, reason: '단건 소유권·포지션 0·주문 종류 확인' };
+}
