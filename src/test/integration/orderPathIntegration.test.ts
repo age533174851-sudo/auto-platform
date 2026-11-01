@@ -22,6 +22,7 @@ import { FakeVenue, FakeDb, withCryptoEnv } from './venueHarness';
 //   module"이 난다. 정적으로 가져오면 컴파일되고, 그 파일 안의 `@/`
 //   동적 import는 러너의 해석 shim이 처리한다.
 import { executeOrder, reconcilePendingOrders, canAdoptIntent } from '../../lib/engine/orderExecutor';
+import { closeAllPositions, cancelAllOpenOrders, cancelOpenTPSL } from '../../lib/exchanges/binanceFutures';
 import { placeSpotOrder } from '../../lib/exchanges/spotOrderExecutor';
 import { RECONCILE_TARGET_STATUSES } from '../../lib/engine/pendingReconcile';
 import { isProvenFill } from '../../lib/engine/holdingEvidence';
@@ -99,6 +100,260 @@ async function scenario<T>(venue: FakeVenue, body: () => Promise<T>): Promise<T 
 
 export async function runOrderPathIntegrationTests() {
   console.log('[통합 — 실제 실행 경로 (fetch·DB만 가짜)]');
+
+  // ══════════ ⓿ 전체 청산: 못 읽은 것을 "전부 닫혔다"로 적지 않는다 ══════════
+  //
+  //   검수 지적이 맞았다. `closeAllPositions`는 조회의 `success`를 보지
+  //   않고 `positions || []`로 읽었고, `Math.abs(p.amount || 0) > 0`으로
+  //   열린 포지션을 셌다. 두 길로 **거짓 SUCCESS**가 됐다:
+  //
+  //     (a) 수량이 깨진 줄 — `NaN || 0`은 0이라 필터에서 사라진다
+  //     (b) 조회 실패 — `{ success: false, message }`에는 `positions`가
+  //         **아예 없다.** `|| []`가 빈 배열이 된다
+  //
+  //   그러면 `open.length === 0` → `{ success: true, remaining: 0 }`이고,
+  //   화면은 "포지션 전체 종료 완료"를 띄운다. 상위 어댑터의 계약은 이미
+  //   맞았다 — *"남은 포지션 수. 못 읽으면 null이다 — 0으로 적으면
+  //   '전부 닫혔다'가 된다"*. **아래가 그 계약을 어기고 있었다.**
+  //
+  //   시험을 여기(통합)에 두는 이유: 전역 `fetch`를 바꾸므로 단위 파일에
+  //   두면 다른 파일의 async 시험과 섞인다. 실제로 그렇게 19건이
+  //   오염됐다.
+  {
+    const POS = '/fapi/v2/positionRisk';
+    const ORDER = '/fapi/v1/order';
+    const ROW = (over: any) => ({
+      symbol: 'BTCUSDT', positionAmt: '0', entryPrice: '95000', markPrice: '95000',
+      unRealizedProfit: '0', leverage: '100', liquidationPrice: '90000',
+      marginType: 'isolated', ...over,
+    });
+
+    const run = async (reply: any) => {
+      const venue = new FakeVenue().on(POS, reply, 'GET')
+        .on(ORDER, { json: { orderId: 1, status: 'FILLED', executedQty: '0.5', avgPrice: '95000' } }, 'POST');
+      const r = await scenario(venue,
+        () => closeAllPositions('K'.repeat(64), 'S'.repeat(64), true, 1) as any);
+      return { r, venue };
+    };
+
+    const broken = await run({ json: [ROW({ positionAmt: 'bad' })] });
+    const downed = await run({ status: 503, json: { code: -1001, msg: 'down' } });
+    const opened = await run({ json: [ROW({ positionAmt: '0.5' })] });
+    const flat = await run({ json: [ROW({ positionAmt: '0' })] });
+
+    test('★★ (a) 수량이 깨진 줄을 "전부 닫혔다"로 적지 않는다', () => {
+      const { r, venue } = broken;
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const o = r as any;
+      assert(!(o.success === true && o.remaining === 0),
+        `수량을 못 읽었는데 전부 닫혔다고 적었다: ${JSON.stringify(o)}`);
+      eq(o.remaining, null, `못 읽은 줄의 remaining이 null이 아니다: ${JSON.stringify(o)}`);
+      eq(venue.countOf(ORDER, 'POST'), 0, '수량을 모르는데 주문을 보냈다');
+      assert(/확인하지 못/.test(String(o.message)), `사유가 없다: ${o.message}`);
+    });
+
+    test('★★ (b) 조회 실패를 "전부 닫혔다"로 적지 않는다', () => {
+      const { r, venue } = downed;
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const o = r as any;
+      eq(o.success, false, `조회 실패인데 성공으로 적었다: ${JSON.stringify(o)}`);
+      eq(o.remaining, null, `조회 실패를 남은 0으로 적었다: ${JSON.stringify(o)}`);
+      eq(venue.countOf(ORDER, 'POST'), 0, '조회 실패인데 주문을 보냈다');
+    });
+
+    test('★ (c) 열린 포지션은 그대로 닫는다 — 과잉 차단하지 않는다', () => {
+      const { r, venue } = opened;
+      assert(!(r instanceof Error), String((r as any)?.message));
+      assert(venue.countOf(ORDER, 'POST') >= 1,
+        `열린 포지션인데 청산 주문이 0건이다: ${JSON.stringify(r)}`);
+    });
+
+    test('★ (d) 진짜 0은 성공이고 남은 0이다', () => {
+      const { r, venue } = flat;
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const o = r as any;
+      eq(o.success, true, `진짜 0인데 성공이 아니다: ${JSON.stringify(o)}`);
+      eq(o.remaining, 0);
+      eq(venue.countOf(ORDER, 'POST'), 0, '닫을 것이 없는데 주문을 보냈다');
+    });
+
+    // ── HTTP 200인데 **본문이 배열이 아니면** ──
+    //
+    //   조회 함수들이 `(Array.isArray(data) ? data : [])`로 받고
+    //   **`success: true`**를 돌려준다. 즉 200에 엉뚱한 본문이 오면
+    //   "포지션 없음"·"미결 주문 없음"이 **관측으로 적힌다.** 503은
+    //   throw되어 막히지만 이 길은 막히지 않는다.
+    //
+    //   정상 빈 배열(진짜 없음)과 **구분**해야 한다 — 둘을 같게 다루면
+    //   과잉 차단이고, 섞으면 거짓 완료다.
+    const ORDERS = '/fapi/v1/openOrders';
+    const DEL = '/fapi/v1/allOpenOrders';
+
+    const nonArrayClose = await run({ json: { code: 0, unexpected: true } });
+    const nullClose = await run({ json: null });
+
+    test('★★ 200 비배열 본문을 "전부 닫혔다"로 적지 않는다', () => {
+      for (const [label, got] of [['객체', nonArrayClose], ['null', nullClose]] as const) {
+        const { r, venue } = got;
+        assert(!(r instanceof Error), String((r as any)?.message));
+        const o = r as any;
+        assert(o.success !== true,
+          `${label} 본문인데 성공으로 적었다: ${JSON.stringify(o)}`);
+        assert(o.remaining !== 0,
+          `${label} 본문을 남은 0으로 적었다: ${JSON.stringify(o)}`);
+        eq(venue.countOf(ORDER, 'POST'), 0, `${label} 본문인데 주문을 보냈다`);
+      }
+    });
+
+    const cancelOn = async (posReply: any, ordReply: any) => {
+      const venue = new FakeVenue()
+        .on(POS, posReply, 'GET').on(ORDERS, ordReply, 'GET')
+        .on(DEL, { json: { code: 200, msg: 'success' } }, 'DELETE');
+      const r = await scenario(venue,
+        () => cancelAllOpenOrders('K'.repeat(64), 'S'.repeat(64), true) as any);
+      return { r, venue };
+    };
+
+    const cancelBadOrders = await cancelOn({ json: [] }, { json: { code: 0 } });
+    const cancelCleanEmpty = await cancelOn({ json: [] }, { json: [] });
+
+    test('★★ 전체 취소: 200 비배열 미결 본문을 "전부 취소됨"으로 적지 않는다', () => {
+      const { r, venue } = cancelBadOrders;
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const o = r as any;
+      eq(o.success, false, `목록을 못 읽었는데 성공으로 적었다: ${JSON.stringify(o)}`);
+      eq(o.listComplete, false);
+      eq(venue.countOf(DEL, 'DELETE'), 0, '대상을 모르는데 취소를 보냈다');
+    });
+
+    test('★ 전체 취소: 정상 빈 목록은 성공이다 — 과잉 차단하지 않는다', () => {
+      const { r } = cancelCleanEmpty;
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const o = r as any;
+      eq(o.success, true, `정상 빈 목록인데 실패로 적었다: ${JSON.stringify(o)}`);
+      eq(o.listComplete, true);
+    });
+
+    // ── 기존 TP/SL 취소: 못 읽음과 "없음"을 섞지 않는다 ──
+    //
+    //   `cancelOpenTPSL`은 `success`를 보지 않고 `orders.filter(...)`를
+    //   한 뒤 `{ success: true, cancelled: targets.length }`를 돌려준다.
+    //   게다가 개별 취소 예외를 **무시**하고 `targets.length`를 그대로
+    //   센다 — 못 지운 보호주문이 "취소됨"으로 적힌다.
+    const tpsl = async (ordReply: any, delReply: any) => {
+      const venue = new FakeVenue()
+        .on(ORDERS, ordReply, 'GET')
+        .on('/fapi/v1/order', delReply, 'DELETE');
+      const r = await scenario(venue,
+        () => cancelOpenTPSL('K'.repeat(64), 'S'.repeat(64), 'BTCUSDT', true) as any);
+      return { r, venue };
+    };
+    const SL_ROW = {
+      orderId: 11, symbol: 'BTCUSDT', type: 'STOP_MARKET', side: 'SELL',
+      stopPrice: '90000', closePosition: true, reduceOnly: true,
+      origQty: '0', price: '0', workingType: 'MARK_PRICE', time: 1, status: 'NEW',
+    };
+    const tpslBad = await tpsl({ json: { code: 0 } }, { json: { code: 200 } });
+    const tpslDelFails = await tpsl(
+      { json: [SL_ROW] }, { status: 400, json: { code: -2011, msg: 'Unknown order' } });
+
+    test('★★ TP/SL 취소: 미결 목록을 못 읽으면 "없음"으로 적지 않는다', () => {
+      const { r } = tpslBad;
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const o = r as any;
+      assert(!(o.success === true && o.cancelled === 0),
+        `목록을 못 읽었는데 "취소 0건 성공"으로 적었다: ${JSON.stringify(o)}`);
+    });
+
+    test('★★ TP/SL 취소: 못 지운 보호주문을 취소됨으로 세지 않는다', () => {
+      const { r } = tpslDelFails;
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const o = r as any;
+      assert(!(o.success === true && o.cancelled === 1),
+        `취소가 실패했는데 1건 취소됨으로 적었다: ${JSON.stringify(o)}`);
+    });
+
+    // ── 배열 **모양**만 보고 각 행의 수량 형식은 안 봤다 ──
+    //
+    //   비배열 200은 막았지만 `getFuturesPositions`의 **행 파싱**은
+    //   아직 `parseFloat`이다:
+    //
+    //       .filter((p) => parseFloat(p.positionAmt) !== 0)
+    //       .map((p) => { const amt = parseFloat(p.positionAmt); … })
+    //
+    //   같은 파일에 엄격 파서(`qtyEvidence`)를 만들어 놓고 **이 경계에서
+    //   부르지 않았다.** 실제 `parseFloat` 값:
+    //
+    //       '0junk'    → 0       행이 **필터에서 사라진다** → "포지션 없음"
+    //       '0x10'     → 0       같음
+    //       '1.25junk' → 1.25    **증명되지 않은 수량**으로 청산 수량이 된다
+    //       '1e-8oops' → 1e-8    같음
+    //
+    //   앞선 수정이 `NaN`만 잡았던 이유다 — `parseFloat`은 앞부분이
+    //   숫자면 `NaN`을 주지 않는다.
+    for (const bad of ['0junk', '0x10']) {
+      const got = await run({ json: [ROW({ positionAmt: bad })] });
+      test(`★★ 부분 숫자 '${bad}'를 "포지션 없음"으로 읽지 않는다`, () => {
+        const { r, venue } = got;
+        assert(!(r instanceof Error), String((r as any)?.message));
+        const o = r as any;
+        assert(!(o.success === true && o.remaining === 0),
+          `'${bad}'를 전부 닫혔다고 적었다: ${JSON.stringify(o)}`);
+        eq(venue.countOf(ORDER, 'POST'), 0, `'${bad}'인데 주문을 보냈다`);
+      });
+    }
+
+    for (const bad of ['1.25junk', '1e-8oops']) {
+      const got = await run({ json: [ROW({ positionAmt: bad })] });
+      test(`★★ 증명되지 않은 수량 '${bad}'으로 청산 주문을 만들지 않는다`, () => {
+        const { r, venue } = got;
+        assert(!(r instanceof Error), String((r as any)?.message));
+        const o = r as any;
+        eq(venue.countOf(ORDER, 'POST'), 0,
+          `'${bad}'를 수량으로 읽어 주문을 보냈다: ${JSON.stringify(o)}`);
+        assert(o.success !== true, `'${bad}'인데 성공으로 적었다: ${JSON.stringify(o)}`);
+      });
+    }
+
+    test('★ 정상 수량·정상 0은 회귀 없이 유지된다', () => {
+      // (c)(d)가 이미 그것을 센다 — 여기서는 한 번 더 못으로 박는다.
+      const okOpen = opened.r as any;
+      assert(!(okOpen instanceof Error));
+      assert(opened.venue.countOf(ORDER, 'POST') >= 1, '정상 수량이 막혔다');
+      const okFlat = flat.r as any;
+      eq(okFlat.success, true, '정상 0이 막혔다');
+      eq(okFlat.remaining, 0);
+    });
+
+    // ── 미결 주문 행이 **주소를 못 가진** 경우 ──
+    //
+    //   `getFuturesOpenOrders`는 `[{}]`을 `symbol: undefined`로 매핑하고도
+    //   `success: true`를 준다. `cancelAllOpenOrders`는 `.filter(Boolean)`로
+    //   그 행을 **버리고** `listComplete: true`를 적는다 — 취소할 수 없는
+    //   주문이 "없는 것"이 된다.
+    const cancelHeadless = await cancelOn({ json: [] }, { json: [{ orderId: 7 }] });
+
+    test('★★ 취소할 주소가 없는 미결 행을 "대상 없음"으로 적지 않는다', () => {
+      const { r, venue } = cancelHeadless;
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const o = r as any;
+      assert(!(o.success === true && o.listComplete === true),
+        `주소 없는 주문을 버리고 완료로 적었다: ${JSON.stringify(o)}`);
+      eq(venue.countOf(DEL, 'DELETE'), 0, '주소를 모르는데 취소를 보냈다');
+    });
+
+    // `closePosition`이 **빠진** TP/SL형 행 — 분할 익절(false)과 다르다.
+    const tpslNoFlag = await tpsl(
+      { json: [{ ...SL_ROW, closePosition: undefined }] }, { json: { code: 200 } });
+
+    test('★★ closePosition이 없는 손절형 행을 "기존 TP/SL 없음"으로 적지 않는다', () => {
+      const { r } = tpslNoFlag;
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const o = r as any;
+      assert(!(o.success === true && o.cancelled === 0),
+        `전량 여부를 모르는 손절형 행을 "없음"으로 적었다: ${JSON.stringify(o)}`);
+    });
+  }
 
   // ══════════ ① 정상 접수 — 의도 기록이 전송보다 앞인가 ══════════
   {
@@ -862,6 +1117,157 @@ function fakeRequest(body: any): any {
   };
 }
 
+// ══════════════════════════════════════════════════════════════════
+// Gate 직접 TPSL 라우트 — **기존 보호주문을 읽고 판단하는가**
+// ══════════════════════════════════════════════════════════════════
+//
+// 검사기는 모양을 세고, 이것은 **행동**을 센다. 둘은 서로 대체하지
+// 않는다(검수 조건 그대로다).
+//
+// 예전 Gate 분기는 `futuresCancelProtection`으로 계약의 조건부 주문을
+// **전부** 지웠다(Cancel All · 절대 규칙 위반) + 그 결과를 보지 않고
+// 새 주문을 걸었다. 지금은 **읽고 판단한다**:
+//
+//   못 읽음(null) → 502 거절 · 새 주문 0
+//   하나라도 있음 → 502 거절 · 새 주문 0
+//   비어 있음     → 그대로 건다
+export async function runGateTpslRouteTests() {
+  console.log('[통합 — Gate 직접 TPSL 라우트 (실제 핸들러)]');
+
+  const adminPath = require.resolve('../../lib/supabase/admin');
+  const routePath = require.resolve('../../app/api/binance/futures/tpsl/route');
+
+  function loadRoute(db: FakeDb) {
+    const prev = require.cache[adminPath];
+    require.cache[adminPath] = {
+      id: adminPath, filename: adminPath, loaded: true, exports: {
+        getSupabaseAdmin: () => db,
+        resolveUserId: async () => 'u1',
+        getUserIdFromRequest: async () => 'u1',
+      },
+    } as any;
+    delete require.cache[routePath];
+    const mod = require(routePath);
+    return {
+      POST: mod.POST as (req: any) => Promise<any>,
+      restore: () => {
+        delete require.cache[routePath];
+        if (prev) require.cache[adminPath] = prev; else delete require.cache[adminPath];
+      },
+    };
+  }
+
+  const PRICE_ORDERS = '/api/v4/futures/usdt/price_orders';
+  const BODY = {
+    connectionId: 'g1', symbol: 'BTCUSDT', positionSide: 'LONG', slPrice: 90000,
+  };
+
+  async function run(priceOrdersReply: any) {
+    const unenv = withCryptoEnv();
+    const db = new FakeDb().seed('exchange_connections', [{
+      id: 'g1', user_id: 'u1', exchange_id: 'gate',
+      api_key: 'K'.repeat(64), api_secret_enc: encryptSecret('S'.repeat(64)),
+      has_withdrawal: false, is_testnet: true, perm_trading: true, is_active: true,
+    }]);
+    unenv();
+    const venue = new FakeVenue()
+      .on('/api/v4/futures/usdt/positions/BTC_USDT', { json: {
+        contract: 'BTC_USDT', size: 1, entry_price: '95000', mark_price: '95000',
+        liq_price: '85000', leverage: '10', mode: 'single',
+      } }, 'GET')
+      // 기준가(마크)를 못 읽으면 라우트가 Gate 분기 **앞에서** 멈춘다.
+      // 처음에 이걸 빼먹어서 세 시험이 전부 **거짓 초록**이었다 —
+      // 변이 확인(옛 동작 복원)에서 똑같이 통과해 들통났다.
+      .on('/api/v4/futures/usdt/tickers', { json: [{
+        contract: 'BTC_USDT', mark_price: '95000', last: '95000',
+      }] }, 'GET')
+      .on('/api/v4/futures/usdt/contracts/BTC_USDT', { json: {
+        name: 'BTC_USDT', quanto_multiplier: '0.0001', order_size_min: 1,
+        order_size_max: 1000000, order_price_round: '0.1', mark_price: '95000',
+      } }, 'GET')
+      .on(PRICE_ORDERS, priceOrdersReply, 'GET')
+      .on(PRICE_ORDERS, { json: { id: 123 } }, 'POST')
+      .on(PRICE_ORDERS, { json: [] }, 'DELETE');
+    const r = await scenario(venue, async () => {
+      const { POST, restore } = loadRoute(db);
+      try {
+        const res = await POST(fakeRequest(BODY));
+        return { status: res.status ?? 200, body: await res.json() };
+      } finally { restore(); }
+    });
+    return { r, venue };
+  }
+
+  const unreadable = await run({ status: 503, json: { label: 'SERVICE_UNAVAILABLE' } });
+  // ── HTTP **200인데 본문이 목록이 아닌** 경우 ──
+  //
+  //   `getPriceOrdersGateFutures`는 `Array.isArray(rows) ? rows : []`다.
+  //   200에 `{label:'UNKNOWN'}`·`null`·빈 본문이 오면 **빈 목록이
+  //   "기존 보호주문 없음"으로 확정**되고 새 보호주문이 나간다.
+  //   503은 throw되어 막히지만 이 길은 막히지 않는다.
+  //
+  //   같은 파일의 `getAllPriceOrdersGateFutures`는 이미 비배열을
+  //   `null`로 돌려준다 — 선례가 옆에 있는데 이 함수만 빠져 있었다.
+  const bad200 = await run({ json: { label: 'UNKNOWN' } });
+  const null200 = await run({ json: null });
+  const existing = await run({ json: [{ id: 7, contract: 'BTC_USDT', rule: 1, trigger: {} }] });
+  const empty = await run({ json: [] });
+
+  test('★★ Gate: 기존 보호주문을 못 읽으면 새 주문을 보내지 않는다', () => {
+    const { r, venue } = unreadable;
+    assert(!(r instanceof Error), String((r as any)?.message));
+    const b = (r as any).body;
+    assert(b?.ok !== true, `못 읽었는데 성공으로 적었다: ${JSON.stringify(b).slice(0, 220)}`);
+    assert(b?.executed !== true, '못 읽었는데 executed:true다');
+    eq(b?.error, 'gate_protective_lookup_failed',
+      `사유가 '못 읽음'이 아니다: ${JSON.stringify(b).slice(0, 220)}`);
+    eq((r as any).status, 502);
+    eq(venue.countOf(PRICE_ORDERS, 'POST'), 0, '못 읽었는데 새 보호주문을 보냈다');
+    eq(venue.countOf(PRICE_ORDERS, 'DELETE'), 0, '일괄 취소를 보냈다');
+  });
+
+  test('★★ Gate: 기존 보호주문이 있으면 겹쳐 걸지 않고 지우지도 않는다', () => {
+    const { r, venue } = existing;
+    assert(!(r instanceof Error), String((r as any)?.message));
+    const b = (r as any).body;
+    assert(b?.ok !== true, `이미 있는데 성공으로 적었다: ${JSON.stringify(b).slice(0, 220)}`);
+    eq(b?.error, 'gate_protective_exists',
+      `사유가 '이미 있음'이 아니다: ${JSON.stringify(b).slice(0, 220)}`);
+    eq(b?.existingProtective, 1, '몇 건인지 알려 주지 않았다');
+    eq(venue.countOf(PRICE_ORDERS, 'POST'), 0, '겹쳐 걸었다');
+    // **남의 보호주문을 지우지 않는다** — 절대 규칙.
+    eq(venue.countOf(PRICE_ORDERS, 'DELETE'), 0, '계약 단위 일괄 취소를 보냈다');
+  });
+
+  test('★★ Gate: 200인데 목록이 아니면 "기존 보호주문 없음"으로 확정하지 않는다', () => {
+    for (const [label, got] of [['객체', bad200], ['null', null200]] as const) {
+      const { r, venue } = got;
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const b = (r as any).body;
+      assert(b?.ok !== true,
+        `${label} 본문인데 성공으로 적었다: ${JSON.stringify(b).slice(0, 220)}`);
+      eq(venue.countOf(PRICE_ORDERS, 'POST'), 0,
+        `${label} 본문인데 새 보호주문을 보냈다`);
+      eq(venue.countOf(PRICE_ORDERS, 'DELETE'), 0, '일괄 취소를 보냈다');
+    }
+  });
+
+  test('★ Gate: 기존 보호주문이 없으면 그대로 건다 — 과잉 차단하지 않는다', () => {
+    const { r, venue } = empty;
+    assert(!(r instanceof Error), String((r as any)?.message));
+    const b = (r as any).body;
+    // 정상 경로는 막히지 않아야 한다. 주문이 나가거나, 적어도
+    // '기존 보호주문' 사유로 막히지는 않는다.
+    eq(b?.ok, true, `빈 목록인데 막혔다: ${JSON.stringify(b).slice(0, 220)}`);
+    eq(b?.executed, true);
+    eq(b?.sl?.success, true, '손절이 걸리지 않았다');
+    // **주문이 실제로 나갔는지** 센다 — 안 세면 "막지 않았다"가
+    // "걸었다"와 구별되지 않는다.
+    assert(venue.countOf(PRICE_ORDERS, 'POST') >= 1, '정상 경로인데 주문이 0건이다');
+    eq(venue.countOf(PRICE_ORDERS, 'DELETE'), 0, '일괄 취소를 보냈다');
+  });
+}
+
 export async function runCoinMRouteIntegrationTests() {
   console.log('[통합 — COIN-M 라우트 (실제 핸들러 · DB 쓰기)]');
 
@@ -926,6 +1332,181 @@ export async function runCoinMRouteIntegrationTests() {
     symbol: 'BTCUSD_PERP', side: 'BUY', type: 'MARKET', contracts: 1,
     leverage: 20, stopPrice: 90000,
   };
+
+  // ══════════ ⓪ COIN-M 포지션 수량: 못 읽음 ≠ 0 ══════════
+  //
+  //   `preTradeChecklist`의 계약은 명시돼 있다 (`existingPositionQty`):
+  //
+  //       /** 지금 열려 있는 포지션 수량. 0이면 없음, null이면 모름 */
+  //
+  //   그리고 0은 **보호 주문 점검을 통과시킨다**:
+  //
+  //       if (existingPositionQty != null && Math.abs(...) === 0) {
+  //         push(PROTECTIVE_ORDER, 'pass', '열린 포지션이 없어 …');
+  //
+  //   그런데 COIN-M 리더는 수량을 `Number(row.positionAmt) || 0`으로
+  //   읽는다. `Number('bad')`는 `NaN`이고 `NaN || 0`은 **0**이다. 즉
+  //   **모름이 0으로 적히고**, 그 0이 라우트를 거쳐
+  //   `existingPositionQty: 0`이 되어 **보호 주문 점검을 PASS로 만든다.**
+  //   실제로 포지션이 열려 있고 손절이 하나도 없어도 그렇다.
+  //
+  //   CLAUDE.md의 두 줄을 한 번에 밟는다 — "UNKNOWN을 0으로 적지
+  //   않는다"와 "실제 거래소 증거 없이 PASS를 적지 않는다".
+  //
+  //   USDⓈ-M 경로는 같은 자리를 이미 막아 뒀다 (`futures/order/route.ts`):
+  //       existingPositionQty: risk?.positionAmt != null ? Math.abs(…) : null
+  //   COIN-M만 `risk ? Math.abs(risk.contracts) : null`이라 0을 통과시킨다.
+  {
+    const dapi = require('../../lib/exchanges/binanceCoinFutures');
+    const BAD_ROW = {
+      symbol: 'BTCUSD_PERP', positionAmt: 'bad', leverage: '20',
+      marginType: 'isolated', liquidationPrice: '90000', entryPrice: '95000',
+    };
+
+    const one = await scenario(
+      new FakeVenue().on('/dapi/v1/positionRisk', { json: [BAD_ROW] }),
+      () => dapi.getCoinMSymbolRisk('K'.repeat(64), 'S'.repeat(64), 'BTCUSD_PERP', true));
+
+    test('★★ COIN-M 단건: 못 읽은 수량은 0이 아니라 모름(null)이다', () => {
+      assert(!(one instanceof Error), String((one as any)?.message));
+      // 0을 적었다면 여기서 잡힌다 — 그 0이 보호 주문 점검을 통과시킨다.
+      assert((one as any)?.contracts !== 0,
+        '못 읽은 수량을 0으로 적었다 — 보호 주문 점검이 PASS가 된다');
+      eq(one, null, '깨진 수량을 관측으로 인정했다');
+    });
+
+    const list = await scenario(
+      new FakeVenue().on('/dapi/v1/positionRisk', { json: [
+        BAD_ROW,
+        { ...BAD_ROW, symbol: 'ETHUSD_PERP', positionAmt: '3' },
+      ] }),
+      () => dapi.getCoinMPositions('K'.repeat(64), 'S'.repeat(64), true));
+
+    test('★★ COIN-M 목록: 못 읽은 줄을 조용히 지우지 않는다', () => {
+      assert(!(list instanceof Error), String((list as any)?.message));
+      const l = list as any;
+      // 멀쩡한 줄은 그대로 보인다.
+      eq(l.positions.filter((p: any) => p.symbol === 'ETHUSD_PERP').length, 1,
+        '멀쩡한 포지션이 사라졌다');
+      // 깨진 줄은 0으로 적혀 `|contracts| > 0` 필터에 걸려 **목록에서
+      // 사라졌다.** 보유 중인 포지션이 화면에서 없어지는 것이다.
+      assert(!l.positions.some((p: any) => p.symbol === 'BTCUSD_PERP' && p.contracts === 0),
+        '못 읽은 수량을 0으로 적어 목록에 남겼다');
+      assert(typeof l.message === 'string' && /BTCUSD_PERP/.test(l.message),
+        `못 읽은 줄을 조용히 버렸다 — 사유가 없다 (message: ${String(l.message)})`);
+    });
+  }
+
+  // ══════════ ⓪-b 경고가 계좌 API 경계에서 소실되던 자리 ══════════
+  //
+  //   검수 지적(#541)이 맞았다. 리더에 `message`를 남긴 것으로는
+  //   **화면이 소비하는 계층**에서 아무 일도 일어나지 않았다:
+  //
+  //       // coinm/account/route.ts — 정상 응답
+  //       positions: pos.success ? positions : null,
+  //       positionsReadable: pos.success,        // ← true
+  //
+  //   `pos.message`는 **잔고와 포지션이 모두 실패한 경우에만** 쓰인다.
+  //   그래서 보유 포지션 한 줄의 수량을 못 읽으면:
+  //
+  //       positions: []            (그 줄이 빠진다)
+  //       positionsReadable: true  ("목록을 다 읽었다"는 주장)
+  //       message: 없음            (경계에서 사라진다)
+  //
+  //   즉 **API가 "포지션 0개를 관측했다"고 단정한다.** 리더만 고친
+  //   것으로는 #541의 목적("조용히 사라지지 않는다")이 미충족이었다.
+  //
+  //   전체 조회 실패(502)·정상 0포지션·일부 수량 불명 **셋을 구분**해야
+  //   한다. 그래서 라우트까지 관통하는 RED를 둔다 — 리더의 `message`만
+  //   단언하면 이 구멍이 다시 열린다.
+  {
+    const acctPath = require.resolve('../../app/api/binance/coinm/account/route');
+
+    function loadAcctRoute(db: FakeDb) {
+      const prevServer = require.cache[serverPath];
+      require.cache[serverPath] = {
+        id: serverPath, filename: serverPath, loaded: true, exports: {
+          getSupabaseAdmin: () => db,
+          resolveUserId: async () => 'u1',
+          getUserIdFromRequest: async () => 'u1',
+          serviceRoleKeyRole: () => 'service_role',
+        },
+      } as any;
+      delete require.cache[acctPath];
+      const mod = require(acctPath);
+      return {
+        GET: mod.GET as (req: any) => Promise<any>,
+        restore: () => {
+          delete require.cache[acctPath];
+          if (prevServer) require.cache[serverPath] = prevServer;
+          else delete require.cache[serverPath];
+        },
+      };
+    }
+
+    const acctRequest = (): any => ({
+      headers: { get: (k: string) => (k.toLowerCase() === 'authorization' ? 'Bearer t' : null) },
+      nextUrl: { searchParams: new URLSearchParams({ connectionId: 'c1' }) },
+    });
+
+    const BALANCE = [{ asset: 'BTC', availableBalance: '1', balance: '1' }];
+
+    async function acctWith(positionRisk: any[]) {
+      const unenv = withCryptoEnv();
+      const db = new FakeDb().seed('exchange_connections', [await connRowCoinM()]);
+      unenv();
+      const venue = new FakeVenue()
+        .on('/dapi/v1/balance', { json: BALANCE })
+        .on('/dapi/v1/positionRisk', { json: positionRisk });
+      return scenario(venue, async () => {
+        const { GET, restore } = loadAcctRoute(db);
+        try {
+          const res = await GET(acctRequest());
+          return { status: res.status ?? 200, body: await res.json() };
+        } finally { restore(); }
+      });
+    }
+
+    const OPEN_ETH = {
+      symbol: 'ETHUSD_PERP', positionAmt: '3', leverage: '20',
+      marginType: 'isolated', liquidationPrice: '1800', entryPrice: '2000',
+    };
+    const BAD_BTC = {
+      symbol: 'BTCUSD_PERP', positionAmt: 'bad', leverage: '20',
+      marginType: 'isolated', liquidationPrice: '90000', entryPrice: '95000',
+    };
+
+    const partial = await acctWith([BAD_BTC, OPEN_ETH]);
+    const cleanZero = await acctWith([{ ...OPEN_ETH, positionAmt: '0' }]);
+
+    test('★★ COIN-M 계좌 API: 한 줄을 못 읽었으면 "목록을 다 읽었다"고 하지 않는다', () => {
+      assert(!(partial instanceof Error), String((partial as any)?.message));
+      const b = (partial as any).body;
+      assert(b?.ok === true, `정상 응답이 아니다: ${JSON.stringify(b).slice(0, 200)}`);
+      // 핵심: 못 읽은 줄이 있는데 "읽었다"고 단정하면 소비자는 빈
+      // 목록을 "포지션 없음"으로 읽는다.
+      eq(b.positionsReadable, false,
+        '수량을 못 읽은 줄이 있는데 목록을 다 읽었다고 단정했다');
+      // 사유가 응답에 실제로 실려 있어야 한다 — 경계에서 사라지지 않는다.
+      const text = JSON.stringify(b);
+      assert(/BTCUSD_PERP/.test(text),
+        `못 읽은 심볼이 응답에 없다: ${text.slice(0, 300)}`);
+      // 멀쩡한 줄은 보존한다 — 과잉 차단하지 않는다.
+      assert(Array.isArray(b.positions)
+        && b.positions.some((p: any) => p.symbol === 'ETHUSD_PERP'),
+        '멀쩡한 포지션까지 버렸다');
+    });
+
+    test('★★ COIN-M 계좌 API: 진짜 0포지션과 일부 수량 불명을 구분한다', () => {
+      assert(!(cleanZero instanceof Error), String((cleanZero as any)?.message));
+      const b = (cleanZero as any).body;
+      assert(b?.ok === true, `정상 응답이 아니다: ${JSON.stringify(b).slice(0, 200)}`);
+      // 전부 멀쩡하게 읽었고 열린 포지션이 없다 — 이건 관측이다.
+      eq(b.positionsReadable, true, '멀쩡한 0포지션 조회를 미확인으로 막았다');
+      eq(Array.isArray(b.positions) ? b.positions.length : -1, 0);
+      assert(!/BTCUSD_PERP/.test(JSON.stringify(b)), '없는 경고를 지어냈다');
+    });
+  }
 
   // ══════════ ① 미체결 접수를 FILLED로 적지 않는다 ══════════
   {
