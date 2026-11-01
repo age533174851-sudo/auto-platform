@@ -43,7 +43,29 @@
 --   부분 UNIQUE 인덱스다. 미래의 어떤 경로가 FOR UPDATE를 빼먹어도 DB가
 --   거절한다. 잠금은 순서를 세우는 수단이고, 불변식은 제약이 지킨다.
 --
--- ADDITIVE 전용이다. 기존 표·칸을 만들지도 지우지도 고치지도 않는다.
+-- ■ 위험 분류: **DESTRUCTIVE — 사람 승인이 필요하다**
+--
+--   기존 **표·칸**은 만들지도 지우지도 고치지도 않는다. 그 말은 맞다.
+--   그런데 이 파일은 **옛 함수 서명과 정책을 지운다**:
+--
+--     DROP FUNCTION IF EXISTS public.ten_slot_claim(...)   309 · 313행
+--     DROP FUNCTION IF EXISTS public.ten_slot_kill(TEXT)   737행
+--     DROP POLICY   IF EXISTS ...                          122 · 125 · 129 · 133행
+--
+--   일부러 지운다. `CREATE OR REPLACE`는 인자 목록이 다르면 덮어쓰지 않고
+--   **과적재**하므로, 지우지 않으면 같은 이름의 함수가 둘 남고 어느 쪽이
+--   불릴지는 호출부의 인자 수에 달린다 — 이 저장소의 상습 고장
+--   "경로가 둘인데 한쪽만 고침"이 생기는 자리다. 일곱 개 전부 바로 뒤에서
+--   다시 만든다.
+--
+--   그래서 `classifyMigration`은 이 파일을 DESTRUCTIVE로 분류하고
+--   (`함수를 지웁니다`), 매니페스트도 `risk: 'DESTRUCTIVE'`이며 **자동
+--   파이프라인은 이 파일을 실행하지 않는다.**
+--
+--   **여기에 "ADDITIVE"라고 적지 않는다.** 승인하는 사람이 매니페스트가
+--   아니라 이 머리말을 읽고 자동 적용 가능한 변경으로 오판하면, 관문이
+--   있어도 사람이 그 관문을 열어 버린다. `scripts/check-migrations.mjs`가
+--   이 문구와 분류가 갈리면 빨개진다.
 
 CREATE TABLE IF NOT EXISTS ten_slot_campaigns (
   campaign_id     TEXT PRIMARY KEY,

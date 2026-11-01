@@ -80,7 +80,18 @@ export async function GET(req: NextRequest) {
       balances: bal.success ? bal.balances : null,
       balancesReadable: bal.success,
       positions: pos.success ? positions : null,
-      positionsReadable: pos.success,
+      // ── "다 읽었다"는 주장은 **다 읽었을 때만** 한다 ──
+      //
+      //   조회가 성공해도 계약 수를 못 읽은 줄이 있으면 그 줄은 목록에서
+      //   빠진다. 그때 `positionsReadable: true`를 보내면 소비자는 빈
+      //   목록을 **"포지션 없음"으로 읽는다** — 못 읽은 것을 0으로 적는
+      //   일이고, 보호 없는 포지션이 화면에서 사라진다.
+      //
+      //   멀쩡하게 읽은 줄은 그대로 보낸다(과잉 차단하지 않는다). 다만
+      //   그 목록이 **전부가 아니라는 사실**을 셀 수 있게 함께 보낸다.
+      positionsReadable: pos.success && pos.unreadable.length === 0,
+      positionsUnreadable: pos.unreadable,
+      positionsMessage: pos.unreadable.length > 0 ? pos.message ?? null : null,
       note: 'COIN-M 잔고·손익은 코인 단위입니다. USDⓈ-M 증거금이나 현물 잔고와 합산하지 마세요.',
     }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (e: any) {
