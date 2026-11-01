@@ -148,6 +148,25 @@ export interface PositionRead {
    * 적지 않는다 — 확인하지 못한 것은 통과가 아니다.
    */
   openEntryOrders?: number | null;
+  /**
+   * **이 슬롯에 남은 보호주문(손절·익절·조건부)이 몇 개인가.**
+   *
+   * 포지션 0 · 진입 주문 0이어도 보호주문이 살아 있으면 그 슬롯은
+   * 끝난 것이 아니다. `CLAUDE.md`가 적어 둔 고장이 바로 이것이다 —
+   * *"나가는 주문에 보호주문을 걸면 포지션이 없어진 뒤에 남아서,
+   * 다음 진입을 예상치 못하게 닫는다."*
+   *
+   * 098은 `CLOSED/VENUE_POSITION`을 받으면 `CLOSING→SPENT`로 넘기고,
+   * **SQL은 보호주문을 보지 않는다.** 그래서 장부는 "끝났다"고 적히는데
+   * 거래소에는 그 슬롯의 주문이 살아 있는 상태가 된다.
+   *
+   * 세지 못했으면 `null`이고, 그때는 닫혔다고 적지 않는다.
+   *
+   * **이 값은 취소 정책이 아니다.** 여기서 아무것도 취소하지 않는다
+   * (`Cancel All 금지` — 다른 전략의 보호주문을 지우지 않는다).
+   * 남아 있으면 적지 않고 멈추는 것뿐이다.
+   */
+  openProtectiveOrders?: number | null;
 }
 
 /**
@@ -232,9 +251,32 @@ export function slotEventForCloseConfirm(pos: PositionRead): SlotEventVerdict {
     };
   }
 
+  // ── 남은 보호주문도 0이어야 한다 ──
+  //
+  // 실측(지적): 보호주문이 1개·5개여도, 세지 못했어도 `CLOSED`가 나왔다.
+  //
+  //   {openProtectiveOrders:1}    → CLOSED / VENUE_POSITION
+  //   {openProtectiveOrders:5}    → CLOSED / VENUE_POSITION
+  //   {openProtectiveOrders:null} → CLOSED / VENUE_POSITION
+  //
+  // 여기서 취소하지 않는다 — 남아 있으면 **적지 않고 멈춘다.**
+  const prot = qty(pos.openProtectiveOrders);
+  if (prot == null) {
+    return unknown('포지션·진입 주문은 0인데 남은 보호주문을 세지 못했습니다'
+      + ' — 거래소에 살아 있는 주문이 있을 수 있어 닫힘으로 적지 않습니다');
+  }
+  if (prot > 0) {
+    return {
+      kind: null,
+      reason: `포지션은 0이지만 보호주문 ${prot}건이 남아 있습니다`
+        + ' — 그 슬롯은 끝난 것이 아니므로 닫힘으로 적지 않습니다',
+      needsHuman: false,
+    };
+  }
+
   return {
     kind: 'CLOSED', evidence: 'VENUE_POSITION',
-    reason: '포지션 0과 살아 있는 진입 주문 0을 조회로 확인했습니다',
+    reason: '포지션 0 · 진입 주문 0 · 보호주문 0을 모두 조회로 확인했습니다',
     exchangeOrderId: null, filledQty: null, avgPrice: null,
   };
 }

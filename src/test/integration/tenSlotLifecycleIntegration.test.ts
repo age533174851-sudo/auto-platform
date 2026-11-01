@@ -124,13 +124,13 @@ export async function runTenSlotLifecycleTests() {
   });
 
   test('★★ 남아 있으면 닫힘으로 적지 않는다', () => {
-    const v: any = slotEventForCloseConfirm({ ok: true, remainingQty: 0.004, openEntryOrders: 0 });
+    const v: any = slotEventForCloseConfirm({ ok: true, remainingQty: 0.004, openEntryOrders: 0, openProtectiveOrders: 0 });
     eq(v.kind, null, '남아 있는데 닫힘으로 적었다');
     eq(v.needsHuman, false);
   });
 
   test('★★ 포지션 0 **그리고** 진입 주문 0을 확인했을 때만 CLOSED / VENUE_POSITION', () => {
-    const v: any = slotEventForCloseConfirm({ ok: true, remainingQty: 0, openEntryOrders: 0 });
+    const v: any = slotEventForCloseConfirm({ ok: true, remainingQty: 0, openEntryOrders: 0, openProtectiveOrders: 0 });
     eq(v.kind, 'CLOSED');
     eq(v.evidence, 'VENUE_POSITION');
   });
@@ -152,7 +152,7 @@ export async function runTenSlotLifecycleTests() {
     ['참', true as any], ['객체', {} as any],
   ] as Array<[string, number]>) {
     test(`★★ 남은 수량이 ${label}이면 닫힘으로 적지 않는다`, () => {
-      const v: any = slotEventForCloseConfirm({ ok: true, remainingQty: q, openEntryOrders: 0 });
+      const v: any = slotEventForCloseConfirm({ ok: true, remainingQty: q, openEntryOrders: 0, openProtectiveOrders: 0 });
       eq(v.kind, 'UNKNOWN_RESPONSE', `${label}을 0으로 읽어 닫힘으로 적었다`);
       eq(v.evidence, 'NONE');
     });
@@ -169,7 +169,7 @@ export async function runTenSlotLifecycleTests() {
   });
 
   test('★★ 진입 주문이 살아 있으면 포지션 0이어도 닫힘으로 적지 않는다', () => {
-    const v: any = slotEventForCloseConfirm({ ok: true, remainingQty: 0, openEntryOrders: 1 });
+    const v: any = slotEventForCloseConfirm({ ok: true, remainingQty: 0, openEntryOrders: 1, openProtectiveOrders: 0 });
     eq(v.kind, null, '나중에 체결될 수 있는데 닫힘으로 적었다');
     eq(v.needsHuman, false);
   });
@@ -178,10 +178,54 @@ export async function runTenSlotLifecycleTests() {
     ['NaN', Number.NaN], ['음수', -1], ["문자열 '0'", '0' as any],
   ] as Array<[string, number]>) {
     test(`★ 진입 주문 수가 ${label}이면 닫힘으로 적지 않는다`, () => {
-      const v: any = slotEventForCloseConfirm({ ok: true, remainingQty: 0, openEntryOrders: n });
+      const v: any = slotEventForCloseConfirm({ ok: true, remainingQty: 0, openEntryOrders: n, openProtectiveOrders: 0 });
       eq(v.kind, 'UNKNOWN_RESPONSE', `${label}을 0으로 읽었다`);
     });
   }
+
+  // ══════════ ④-c 남은 보호주문이 있으면 닫힘이 아니다 ══════════
+  //
+  // 실측으로 확인했다 — 보호주문이 1개·5개여도, 세지 못했어도 `CLOSED`가
+  // 나왔다. 098은 그걸 받으면 `CLOSING→SPENT`로 넘기고 **SQL은 보호주문을
+  // 보지 않는다.** 장부에는 "끝났다"고 적히는데 거래소에는 그 슬롯의
+  // 주문이 살아 있다.
+  //
+  // `CLAUDE.md`가 적어 둔 고장이 이것이다 — "포지션이 없어진 뒤에 남아서,
+  // 다음 진입을 예상치 못하게 닫는다."
+  //
+  // **여기서 취소하지 않는다**(`Cancel All 금지`). 남아 있으면 적지 않고 멈춘다.
+  test('★★ 남은 보호주문을 세지 못했으면 닫힘으로 적지 않는다', () => {
+    const v: any = slotEventForCloseConfirm({ ok: true, remainingQty: 0, openEntryOrders: 0 });
+    eq(v.kind, 'UNKNOWN_RESPONSE', '보호주문을 세지 않고 닫힘으로 적었다');
+    eq(v.evidence, 'NONE');
+  });
+
+  for (const n of [1, 5]) {
+    test(`★★ 보호주문 ${n}건이 남아 있으면 닫힘으로 적지 않는다`, () => {
+      const v: any = slotEventForCloseConfirm({
+        ok: true, remainingQty: 0, openEntryOrders: 0, openProtectiveOrders: n });
+      eq(v.kind, null, '거래소에 주문이 살아 있는데 닫힘으로 적었다');
+      eq(v.needsHuman, false);
+    });
+  }
+
+  for (const [label, n] of [
+    ['NaN', Number.NaN], ['음수', -1], ["문자열 '0'", '0' as any],
+  ] as Array<[string, number]>) {
+    test(`★ 보호주문 수가 ${label}이면 닫힘으로 적지 않는다`, () => {
+      const v: any = slotEventForCloseConfirm({
+        ok: true, remainingQty: 0, openEntryOrders: 0, openProtectiveOrders: n });
+      eq(v.kind, 'UNKNOWN_RESPONSE', `${label}을 0으로 읽었다`);
+    });
+  }
+
+  test('★★ 셋을 모두 0으로 확인했을 때만 CLOSED다', () => {
+    const v: any = slotEventForCloseConfirm({
+      ok: true, remainingQty: 0, openEntryOrders: 0, openProtectiveOrders: 0 });
+    eq(v.kind, 'CLOSED');
+    eq(v.evidence, 'VENUE_POSITION');
+    assert(String(v.reason).includes('보호주문 0'), '무엇을 확인했는지 적지 않았다');
+  });
 
   // ══════════ ⑤ 응답 해석: 커밋만 ok다 ══════════
   test('EVENT_APPLIED와 멱등 재적용은 커밋이다', () => {
@@ -319,7 +363,7 @@ export async function runTenSlotLifecycleTests() {
     const r2 = await applySlotEvent(db as any, partial, args({ eventId: 'ev-part', expectedVersion: 2 }));
     // 닫겠다 → 포지션 0 확인 → 닫힘
     const r3 = await applySlotEvent(db as any, slotEventForCloseRequest(), args({ eventId: 'ev-close', expectedVersion: 3 }));
-    const closed: any = slotEventForCloseConfirm({ ok: true, remainingQty: 0, openEntryOrders: 0 });
+    const closed: any = slotEventForCloseConfirm({ ok: true, remainingQty: 0, openEntryOrders: 0, openProtectiveOrders: 0 });
     const r4 = await applySlotEvent(db as any, closed, args({ eventId: 'ev-closed', expectedVersion: 4 }));
 
     test('★★ 한 슬롯이 ACK → 부분체결 → 닫기요청 → 닫힘확인 순서로 적힌다', () => {
