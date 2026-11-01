@@ -1,0 +1,106 @@
+# Proves the ten-slot SQL contract against an isolated PostgreSQL 16 service.
+# No Supabase/production credentials, no remote database, no venue calls.
+# The test harness refuses non-loopback TEN_SLOT_PG_URL and only creates
+# temporary scratch databases inside this disposable CI service.
+name: ten-slot-postgresql-proof
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/ten-slot-pg.mjs'
+      - 'scripts/ten-slot-pg.test.mjs'
+      - 'supabase/migrations/097_ten_slot_atomic_claim.sql'
+      - 'supabase/migrations/098_ten_slot_apply_event.sql'
+      - '.github/workflows/ten-slot-postgres-ci.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/ten-slot-pg.mjs'
+      - 'scripts/ten-slot-pg.test.mjs'
+      - 'supabase/migrations/097_ten_slot_atomic_claim.sql'
+      - 'supabase/migrations/098_ten_slot_apply_event.sql'
+      - '.github/workflows/ten-slot-postgres-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ten-slot-pg-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  postgres-proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: local_test_only
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 20
+
+    env:
+      # Deliberately local disposable database. Never pass Supabase secrets.
+      TEN_SLOT_PG_URL: postgres://postgres:local_test_only@127.0.0.1:5432/postgres
+      PG_SERVICE_ID: ${{ job.services.postgres.id }}
+      # Restart only this disposable Docker service, then wait for readiness.
+      # The restart test must not be silently skipped.
+      TEN_SLOT_PG_RESTART: 'docker restart "$PG_SERVICE_ID" >/dev/null && for i in $(seq 1 30); do pg_isready -h 127.0.0.1 -p 5432 -U postgres >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1'
+
+    steps:
+      - name: Checkout the exact PR HEAD or push SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: PostgreSQL client
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y postgresql-client
+          fi
+          psql --version
+
+      - name: Real PostgreSQL ten-slot RED/GREEN and restart proof
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "TARGET_SHA: $(git rev-parse HEAD)"
+          test -n "$PG_SERVICE_ID"
+          psql "$TEN_SLOT_PG_URL" -At -c 'SELECT current_database();'
+          node --test scripts/ten-slot-pg.test.mjs | tee ten-slot-pg.tap
+
+          # Node's test runner exits zero for fully skipped suites; that is
+          # NOT evidence of PostgreSQL correctness. Require work actually ran.
+          grep -Eq '^# tests [1-9][0-9]*$' ten-slot-pg.tap
+          grep -Eq '^# pass [1-9][0-9]*$' ten-slot-pg.tap
+          grep -Eq '^# fail 0$' ten-slot-pg.tap
+          grep -Eq '^# skipped 0$' ten-slot-pg.tap
+          grep -Eq '^# cancelled 0$' ten-slot-pg.tap
+          echo 'PG_PROOF: PASS (nonzero tests, fail 0, skipped 0, cancelled 0)'
+
+      - name: Retain PostgreSQL evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ten-slot-postgres-proof
+          path: ten-slot-pg.tap
+          if-no-files-found: ignore
+          retention-days: 7
