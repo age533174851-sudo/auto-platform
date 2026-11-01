@@ -26,6 +26,7 @@ import { A } from '@/lib/theme/colors';
 import { errorTextOf } from '@/lib/http/errorText';
 import { HOLD_CHOICES, SMOKE_SYMBOLS, DEFAULT_HOLD_MIN, type StepState } from '@/lib/smoke/smokePlan';
 import {
+import { cancelReceiptOf } from '@/lib/engine/cancelReceipt';
   ATTEMPT_CHOICES, MAX_ATTEMPTS, DEFAULT_ATTEMPTS,
   type DirectionMode, type FailurePolicy, type StepMark,
 } from '@/lib/smoke/smokeRun';
@@ -474,8 +475,7 @@ export default function SmokeTestPanel({
                 {cancelRes && (
                   <div style={{ borderTop: `1px dashed ${T.border}`, paddingTop: 6, display: 'grid', gap: 3 }}>
                     <div style={{ fontSize: 9.5, color: T.muted, fontWeight: 800 }}>
-                      취소 응답 · HTTP {cancelRes.httpStatus} · {cancelRes.body?.rounds ?? 0}바퀴 ·
-                      {' '}재조회 {cancelRes.body?.leftoverReadable === false ? '실패(모름)' : '성공'}
+                      취소 응답 · {cancelReceiptOf({ httpStatus: cancelRes.httpStatus, body: cancelRes.body }).line}
                     </div>
                     {(cancelRes.body?.ledger?.entries ?? []).map((e: any) => {
                       const a = (cancelRes.body?.attempts ?? []).find((x: any) => String(x?.id) === String(e?.id));

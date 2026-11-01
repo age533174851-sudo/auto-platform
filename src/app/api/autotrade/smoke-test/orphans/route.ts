@@ -33,6 +33,7 @@ import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { SMOKE_STRATEGY_ID } from '@/lib/smoke/smokePlan';
 import { classifyOrder, ownershipTextOf } from '@/lib/engine/orderOwnership';
 import { ownedOrderIds, cancelLedger, orderIdOf } from '@/lib/engine/protectionLedger';
+import { orderIdEvidence, cancelPlanOf } from '@/lib/engine/cancelReceipt';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -42,8 +43,14 @@ function describe(row: any, myIds: string[]) {
   const initial = row?.initial ?? row ?? {};
   const trigger = row?.trigger ?? {};
   const cls = classifyOrder(row, SMOKE_STRATEGY_ID, myIds);
+  const ev = orderIdEvidence(row);
   return {
-    id: orderIdOf(row),
+    id: ev.id,
+    // **번호를 못 읽은 것과 번호가 없는 것은 다르다.** 화면이 이 둘을
+    // 섞으면 못 읽은 주문에 취소 버튼이 달리고, 앱이 자기 400을 돌려준다.
+    idReadable: ev.readable,
+    idSource: ev.source,
+    idReason: ev.reason || null,
     text: ownershipTextOf(row) || null,
     // Gate: initial.contract · 바이낸스: symbol
     contract: initial.contract ?? row?.symbol ?? null,
@@ -156,18 +163,19 @@ export async function POST(req: NextRequest) {
 
   const connectionId = String(body?.connectionId || '').trim();
   const symbol = String(body?.symbol || '').trim().toUpperCase();
-  const asked = ownedOrderIds({ placed: Array.isArray(body?.ids) ? body.ids : [] });
+  const askedRaw = Array.isArray(body?.ids) ? body.ids : [];
+  const asked = ownedOrderIds({ placed: askedRaw });
 
   if (!connectionId || !symbol) {
     return NextResponse.json({ ok: false, error: 'bad_request',
       message: 'connectionId와 symbol이 필요합니다' }, { status: 400 });
   }
-  if (asked.length === 0) {
-    // **"전부"라는 입력을 두지 않는다.** 두면 언젠가 눌리고, 그때
-    // 다른 전략의 손절이 같이 사라진다.
+  // **"전부"라는 입력을 두지 않는다.** 두면 언젠가 눌리고, 그때
+  // 다른 전략의 손절이 같이 사라진다.
+  const nothing = cancelPlanOf({ asked: askedRaw, rows: [] });
+  if (nothing.code === 'NOTHING_ASKED') {
     return NextResponse.json({ ok: false, error: 'ids_required',
-      message: '지울 주문 번호(ids)를 명시하세요 — 전체 취소는 지원하지 않습니다',
-    }, { status: 400 });
+      message: nothing.reason }, { status: 400 });
   }
 
   const v = await venueOf(sb, userId, connectionId);
@@ -195,8 +203,16 @@ export async function POST(req: NextRequest) {
     }, { status: 409 });
   }
 
-  const missing = asked.filter(id => !seen.some(o => o.id === id));
-  const targets = asked.filter(id => seen.some(o => o.id === id));
+  // **무엇을 보낼 수 있고 무엇을 말할 수 없는지는 한 곳에서 정한다.**
+  const plan = cancelPlanOf({ asked: askedRaw, rows: before });
+  if (plan.blocked) {
+    return NextResponse.json({ ok: false, error: plan.code.toLowerCase(),
+      message: plan.reason, orders: seen,
+      unreadableRows: plan.unreadableRows,
+    }, { status: plan.code === 'ORDERS_UNREADABLE' ? 503 : 409 });
+  }
+  const missing = plan.notFound;
+  const targets = plan.targets;
 
   const cx = targets.length
     ? await ops.cancelExact(v.venue, symbol, targets, { attempts: 3 })
