@@ -37,6 +37,9 @@ import { ownedOrderIds, cancelLedger, orderIdOf } from '@/lib/engine/protectionL
 // cancelPlanOf(#554)를 각자 부르면 같은 판단이 두 곳에 생기고, 언젠가
 // 한쪽만 고쳐진다 — 상습 고장 ②.
 import { orderIdEvidence, orphanCancelDecision, asksNothing, IDS_REQUIRED_REASON } from '@/lib/engine/cancelReceipt';
+// **스모크 경로는 테스트넷에서만 — 조회도 포함한다.** `startAttempt`와
+// 같은 기준을 쓴다. 판정은 `smokeEnv` 한 곳에 있다.
+import { smokeEnvGate } from '@/lib/smoke/smokeEnv';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -160,6 +163,14 @@ export async function GET(req: NextRequest) {
   const v = await venueOf(sb, userId, connectionId);
   if (!v.ok) return NextResponse.json({ ok: false, error: 'creds', message: v.message }, { status: v.status });
 
+  // **거래소에 아무것도 묻기 전에 환경을 확인한다.** 실전 연결이면
+  // signed 조회조차 보내지 않는다 — 스모크는 테스트넷 기능이다.
+  const envGet = smokeEnvGate(v.venue);
+  if (!envGet.ok) {
+    return NextResponse.json({ ok: false, mutated: false, error: envGet.code, message: envGet.message },
+      { status: envGet.status, headers: { 'Cache-Control': 'no-store' } });
+  }
+
   const ops = await import('@/lib/engine/venuePositionOps');
   const [position, orders, mine] = await Promise.all([
     ops.readOpenPosition(v.venue, symbol),
@@ -218,6 +229,14 @@ export async function POST(req: NextRequest) {
 
   const v = await venueOf(sb, userId, connectionId);
   if (!v.ok) return NextResponse.json({ ok: false, error: 'creds', message: v.message }, { status: v.status });
+
+  // **취소뿐 아니라 조회도 막는다.** 아래 `readProtectiveOrders`가 이미
+  // signed 요청이다 — 관문이 그 뒤에 있으면 늦다.
+  const envPost = smokeEnvGate(v.venue);
+  if (!envPost.ok) {
+    return NextResponse.json({ ok: false, mutated: false, error: envPost.code, message: envPost.message },
+      { status: envPost.status, headers: { 'Cache-Control': 'no-store' } });
+  }
 
   const ops = await import('@/lib/engine/venuePositionOps');
   const before = await ops.readProtectiveOrders(v.venue, symbol);

@@ -374,6 +374,35 @@ const receiptGaps = [];
   if (!/\bownedIds\s*:/.test(route)) {
     receiptGaps.push(`${ORPHANS} — 좁혀 읽은 장부 번호(ownedIds)를 판정에 넘기지 않았습니다`);
   }
+  // **스모크 진단은 조회도 테스트넷에서만.** 실전 연결을 넘기면
+  // `readProtectiveOrders`가 이미 signed 요청이다 — 관문이 그 뒤에 있으면
+  // 늦다. `startAttempt.ts:77-81`에는 이 관문이 있었고 이 경로에는 없었다.
+  // 라우트 안의 호출 순서는 유닛 시험이 닿지 않으므로(실측: 연결 범위를
+  // 지워도 시험 7295개가 전부 통과했다) 글자로 고정한다.
+  {
+    const VENUE_CALL = /\bops\.(readOpenPosition|readProtectiveOrders|cancelExact)\s*\(/g;
+    // 두 처리기를 따로 본다. 한쪽에만 관문이 있으면 다른 쪽으로 새어 나간다.
+    const cut = route.indexOf('export async function POST');
+    const parts = cut === -1 ? [['GET+POST', route]] : [['GET', route.slice(0, cut)], ['POST', route.slice(cut)]];
+    for (const [who, text] of parts) {
+      const gate = text.indexOf('smokeEnvGate(');
+      const calls = [...text.matchAll(VENUE_CALL)].map(m => m.index ?? -1);
+      if (calls.length === 0) continue;             // 거래소를 안 부르면 관문도 필요 없다
+      if (gate === -1) {
+        receiptGaps.push(`${ORPHANS} ${who} — 거래소를 부르는데 smokeEnvGate가 없습니다`
+          + ' (실전 연결에 signed 조회가 나갑니다)');
+        continue;
+      }
+      const early = calls.filter(ix => ix < gate);
+      if (early.length > 0) {
+        receiptGaps.push(`${ORPHANS} ${who} — smokeEnvGate보다 먼저 거래소를 부르는 자리가 ${early.length}개 있습니다`);
+      }
+    }
+    if (!existsSync('src/lib/smoke/smokeEnv.ts')) {
+      receiptGaps.push('src/lib/smoke/smokeEnv.ts — 환경 판정 정본이 없습니다 (이 규칙이 헛돌고 있습니다)');
+    }
+  }
+
   // 이 규칙이 헛돌지 않는지. 판정 정본이 사라졌으면 그것이 RED다.
   if (!existsSync(RECEIPT)) {
     receiptGaps.push(`${RECEIPT} — 판정 정본이 없습니다 (이 규칙이 헛돌고 있습니다)`);
