@@ -32,7 +32,7 @@
 // 확인되기 전에 일반 취소를 보내는 것이 #552에서 금지된 바로 그 일이다.
 
 import { venueIdOf, isLostPrecisionId } from '../exchanges/losslessJson';
-import { ownedOrderIds } from './protectionLedger';
+import { ownedOrderIds, orphanCancelGate } from './protectionLedger';
 
 /** 취소에 쓸 수 있는 번호가 어느 칸에서 왔는가. **순서가 우선순위다** */
 const ID_KEYS = ['id', 'orderId', 'order_id'] as const;
@@ -161,6 +161,86 @@ export function cancelPlanOf(i: { asked: Array<string | null | undefined>; rows:
     reason: targets.length > 0
       ? '요청한 번호로 취소를 보냅니다'
       : '요청한 번호가 목록에 없습니다 — 모든 줄의 번호를 읽었으므로 없는 것이 맞습니다' };
+}
+
+/**
+ * 취소할 번호를 **하나도 받지 못했는가.**
+ *
+ * 라우트의 이른 400(`ids_required`)과 아래 합성 판정이 **같은 함수로**
+ * 묻는다. 둘이 따로 세면 화면이 보낸 것과 서버가 센 것이 갈린다.
+ */
+export function asksNothing(asked: Array<string | null | undefined> | null | undefined): boolean {
+  return ownedOrderIds({ placed: Array.isArray(asked) ? asked : [] }).length === 0;
+}
+
+export const IDS_REQUIRED_REASON =
+  '지울 주문 번호(ids)를 명시하세요 — 전체 취소는 지원하지 않습니다';
+
+/** 합성 판정 — 취소를 보낼 수 있는가, 그리고 무엇을 말할 수 있는가 */
+export interface OrphanCancelDecision {
+  /** **이것이 true일 때만 cancelExact를 부른다** */
+  allowed: boolean;
+  code: string;
+  targets: string[];
+  /** 목록에 없던 번호. 관문이 단건 일치를 요구하므로 허용 경로에서는 항상 빈 배열 */
+  notFound: string[];
+  unreadableRows: number;
+  reason: string;
+}
+
+/**
+ * **#553의 사전 관문과 #554의 번호 증거를 한 번에 합성한다.**
+ *
+ * 라우트가 `orphanCancelGate`와 `cancelPlanOf`를 각자 부르면 같은 판단이
+ * 두 곳에 생기고 언젠가 한쪽만 고쳐진다 — 상습 고장 ②. 그래서 라우트는
+ * **이 함수 하나만** 부른다.
+ *
+ * 순서가 계약이다:
+ *   ① 번호를 하나도 받지 못했다           → NOTHING_ASKED
+ *   ② 포지션 0 · 장부 · 목록 · 단건 · 소유권 · namespace (#553 관문)
+ *   ③ 관문이 단건 일치에서 막혔고 번호를 못 읽은 줄이 있다 →
+ *      ASKED_UNREADABLE (왜 못 찾았는지를 "없다"로 적지 않는다)
+ *
+ * `allowed`가 false면 **거래소로 나가는 호출은 없다.**
+ */
+export function orphanCancelDecision(i: {
+  position: { ok: boolean; found: boolean; qty: number | null } | null;
+  ledgerReadable: boolean;
+  orders: Array<{ id: string; ownership: string; namespace: string; idReadable?: boolean }> | null;
+  asked: Array<string | null | undefined>;
+}): OrphanCancelDecision {
+  const unreadableRows = Array.isArray(i?.orders)
+    ? i.orders.filter(o => o?.idReadable === false).length : 0;
+
+  if (asksNothing(i?.asked)) {
+    return { allowed: false, code: 'NOTHING_ASKED', targets: [], notFound: [],
+      unreadableRows, reason: IDS_REQUIRED_REASON };
+  }
+
+  const asked = ownedOrderIds({ placed: i.asked });
+  const gate = orphanCancelGate({
+    position: i?.position ?? null,
+    ledgerReadable: i?.ledgerReadable === true,
+    orders: Array.isArray(i?.orders)
+      ? i.orders.map(o => ({ id: String(o?.id ?? ''), ownership: String(o?.ownership ?? ''), namespace: String(o?.namespace ?? '') }))
+      : null,
+    asked,
+  });
+
+  if (!gate.ok) {
+    // **"요청한 번호를 못 찾았다"의 이유가 '내가 못 읽어서'일 수 있다.**
+    // 그걸 "없다"로 적으면 거래소에 주문이 남은 채로 통과가 된다.
+    if (gate.code === 'TARGET_NOT_UNIQUE' && unreadableRows > 0) {
+      return { allowed: false, code: 'ASKED_UNREADABLE', targets: [], notFound: [], unreadableRows,
+        reason: `번호를 읽지 못한 조건부 주문이 ${unreadableRows}건 있습니다 — `
+          + `${asked.join(', ')}이 거래소에 없다고 말할 수 없습니다 (그 줄이 이 주문일 수 있습니다)` };
+    }
+    return { allowed: false, code: gate.code, targets: [], notFound: [], unreadableRows,
+      reason: gate.reason };
+  }
+
+  return { allowed: true, code: gate.code, targets: gate.targets, notFound: [], unreadableRows,
+    reason: gate.reason };
 }
 
 /** 0 이상의 안전한 정수만 바퀴 수로 인정한다. 나머지는 **모름**이다 */

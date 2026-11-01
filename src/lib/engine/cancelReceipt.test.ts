@@ -20,7 +20,7 @@
 //      내가 못 읽은 그 줄이 바로 그 주문일 수 있다.
 
 import { test, eq, assert } from '../../test/harness';
-import { orderIdEvidence, cancelPlanOf, cancelReceiptOf } from './cancelReceipt';
+import { orderIdEvidence, cancelPlanOf, cancelReceiptOf, orphanCancelDecision, asksNothing } from './cancelReceipt';
 
 /** Gate 조건부 주문 한 줄 (화면이 보여 준 모양) */
 const gateRow = (over: any = {}) => ({
@@ -121,6 +121,132 @@ export function runCancelReceiptTests() {
     eq(p.blocked, false);
     eq(p.targets.join(','), '123456789');
     eq(p.unreadableRows, 1);
+  });
+
+  // ── 합성 판정 (#553 관문 × #554 번호 증거) ──
+  //
+  // **라우트는 이 함수 하나만 부른다.** `allowed`가 false면 거래소로
+  // 나가는 호출이 없다 — 아래 시험은 전부 그 한 줄을 본다.
+  console.log('[취소 영수증 — 사전 관문과 합성: allowed=false면 거래소로 안 나간다]');
+
+  const FLAT = { ok: true, found: false, qty: 0 };
+  const MINE_ROW = { id: '123456789', ownership: 'MINE', namespace: 'GATE_PRICE', idReadable: true };
+  const D = (over: any = {}) => orphanCancelDecision({
+    position: FLAT, ledgerReadable: true, orders: [MINE_ROW], asked: ['123456789'], ...over,
+  });
+
+  test('모두 확인되면 그 한 건만 보낸다', () => {
+    const d = D();
+    eq(d.allowed, true);
+    eq(d.targets.join(','), '123456789');
+    eq(d.notFound.length, 0);
+  });
+
+  test('포지션이 열려 있으면 보호주문을 지우지 않는다 — #553이 막은 P0', () => {
+    const d = D({ position: { ok: true, found: true, qty: 1 } });
+    eq(d.allowed, false);
+    eq(d.code, 'POSITION_NOT_FLAT');
+  });
+
+  test('포지션 조회 실패는 0이 아니다 — 가짜 qty=0도 막는다', () => {
+    // 조회가 실패했는데 qty 칸이 0으로 와도 통과시키지 않는다.
+    eq(D({ position: { ok: false, found: false, qty: 0 } }).allowed, false);
+    eq(D({ position: null }).allowed, false);
+    eq(D({ position: { ok: true, found: false, qty: null } }).allowed, false);
+  });
+
+  test('장부(smoke_tests)를 못 읽으면 취소하지 않는다', () => {
+    const d = D({ ledgerReadable: false });
+    eq(d.allowed, false);
+    eq(d.code, 'LEDGER_UNREADABLE');
+  });
+
+  test('거래소 목록을 못 읽으면 취소하지 않는다', () => {
+    const d = D({ orders: null });
+    eq(d.allowed, false);
+    eq(d.code, 'ORDERS_UNREADABLE');
+  });
+
+  test('번호를 하나도 받지 못하면 요청이 아니다', () => {
+    const d = D({ asked: [''] });
+    eq(d.allowed, false);
+    eq(d.code, 'NOTHING_ASKED');
+    eq(asksNothing([null, '', 'null', 'undefined']), true);
+    eq(asksNothing(['7']), false);
+  });
+
+  test('소유권이 MINE이 아니면 — UNKNOWN도 FOREIGN처럼 막는다', () => {
+    for (const own of ['UNKNOWN', 'FOREIGN', '', 'MAYBE']) {
+      const d = D({ orders: [{ ...MINE_ROW, ownership: own }] });
+      eq(d.allowed, false, `ownership=${own}`);
+      eq(d.code, 'OWNERSHIP_NOT_PROVEN', `ownership=${own}`);
+    }
+  });
+
+  test('Binance Algo는 일반 취소 API로 보내지 않는다', () => {
+    const d = D({ orders: [{ ...MINE_ROW, namespace: 'BINANCE_ALGO' }] });
+    eq(d.allowed, false);
+    eq(d.code, 'UNSUPPORTED_NAMESPACE');
+  });
+
+  test('namespace를 모르면 보내지 않는다', () => {
+    eq(D({ orders: [{ ...MINE_ROW, namespace: 'UNKNOWN' }] }).allowed, false);
+  });
+
+  test('같은 번호가 두 줄이면 어느 것인지 모른다 — 보내지 않는다', () => {
+    const d = D({ orders: [MINE_ROW, { ...MINE_ROW }] });
+    eq(d.allowed, false);
+    eq(d.code, 'TARGET_NOT_UNIQUE');
+  });
+
+  test('요청한 번호가 목록에 없고, 번호를 못 읽은 줄이 있으면 "없다"고 말하지 않는다', () => {
+    const d = D({
+      asked: ['777'],
+      orders: [{ id: '', ownership: 'MINE', namespace: 'UNKNOWN', idReadable: false }],
+    });
+    eq(d.allowed, false);
+    eq(d.code, 'ASKED_UNREADABLE');
+    eq(d.notFound.length, 0, '못 읽은 줄이 있는데 notFound로 적었습니다');
+    eq(d.unreadableRows, 1);
+  });
+
+  test('요청한 번호가 없고 모든 줄을 읽었어도 취소는 보내지 않는다', () => {
+    // 지울 것이 없으면 보낼 것도 없다. **그리고 "사라졌다"로 적지 않는다.**
+    const d = D({ asked: ['777'] });
+    eq(d.allowed, false);
+    eq(d.code, 'TARGET_NOT_UNIQUE');
+    eq(d.notFound.length, 0);
+  });
+
+  test('허용된 경로에서도 notFound는 비어 있다 — 단건 일치를 요구하므로', () => {
+    eq(D().notFound.length, 0);
+  });
+
+  test('관문을 한 조건씩만 어겨도 전부 막힌다 (돌연변이 전수)', () => {
+    // **하나라도 통과하면 그 조건은 지켜지는 것이 아니라 아무도 안 보는 것이다.**
+    const mutations: Array<[string, any]> = [
+      ['position open', { position: { ok: true, found: true, qty: 0.5 } }],
+      ['position read fail', { position: { ok: false, found: false, qty: 0 } }],
+      ['position null', { position: null }],
+      ['qty null', { position: { ok: true, found: false, qty: null } }],
+      ['qty nonzero', { position: { ok: true, found: false, qty: 0.001 } }],
+      ['ledger unreadable', { ledgerReadable: false }],
+      ['orders unreadable', { orders: null }],
+      ['no ids', { asked: [] }],
+      ['blank id', { asked: ['  '] }],
+      ['ownership unknown', { orders: [{ ...MINE_ROW, ownership: 'UNKNOWN' }] }],
+      ['algo namespace', { orders: [{ ...MINE_ROW, namespace: 'BINANCE_ALGO' }] }],
+      ['duplicate rows', { orders: [MINE_ROW, { ...MINE_ROW }] }],
+      ['asked absent', { asked: ['999'] }],
+      ['unreadable row + asked absent', {
+        asked: ['999'], orders: [{ id: '', ownership: 'MINE', namespace: 'UNKNOWN', idReadable: false }] }],
+    ];
+    for (const [name, over] of mutations) {
+      const d = D(over);
+      eq(d.allowed, false, `${name}: 거래소로 나가는 것을 막지 못했습니다`);
+      eq(d.targets.length, 0, `${name}: targets가 비어 있지 않습니다`);
+      eq(d.notFound.length, 0, `${name}: notFound로 "없다"고 적었습니다`);
+    }
   });
 
   console.log('[취소 영수증 — 못 읽은 것을 성공으로 적지 않는다]');

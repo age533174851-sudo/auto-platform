@@ -339,9 +339,24 @@ const receiptGaps = [];
   if (!/\bidReadable\b/.test(panel)) {
     receiptGaps.push(`${PANEL} — idReadable을 보지 않습니다 (번호 못 읽은 주문에 취소 버튼이 달립니다)`);
   }
+  // **라우트는 합성 판정 하나만 부른다.** 관문(#553)과 번호 증거(#554)를
+  // 각자 부르면 같은 판단이 두 곳에 생긴다 — 그것이 상습 고장 ②다.
   if (!/from\s+['"]@\/lib\/engine\/cancelReceipt['"]/.test(route)
-      || !/\bcancelPlanOf\s*\(/.test(route) || !/\borderIdEvidence\s*\(/.test(route)) {
-    receiptGaps.push(`${ORPHANS} — 취소 대상·번호 판단을 cancelReceipt에서 가져와 부르지 않았습니다`);
+      || !/\borphanCancelDecision\s*\(/.test(route) || !/\borderIdEvidence\s*\(/.test(route)) {
+    receiptGaps.push(`${ORPHANS} — 취소 대상·번호 판단을 cancelReceipt의 orphanCancelDecision으로 부르지 않았습니다`);
+  }
+  // 관문을 라우트가 직접 부르면 합성이 우회된다.
+  if (/\borphanCancelGate\s*\(/.test(route)) {
+    receiptGaps.push(`${ORPHANS} — orphanCancelGate를 라우트가 직접 부릅니다 (합성 판정을 우회합니다)`);
+  }
+  // **취소는 합성 판정이 허용한 뒤에만 나간다.** 호출 순서를 글자로 본다.
+  {
+    const dec = route.indexOf('orphanCancelDecision(');
+    const cx = route.indexOf('cancelExact(');
+    if (dec === -1 || cx === -1 || dec > cx) {
+      receiptGaps.push(`${ORPHANS} — cancelExact가 orphanCancelDecision보다 먼저 나옵니다`
+        + ' (포지션·소유권·번호를 확인하기 전에 거래소로 나갑니다)');
+    }
   }
   if (!/\bidReadable\b/.test(route)) {
     receiptGaps.push(`${ORPHANS} — 응답에 idReadable을 싣지 않습니다 (화면이 못 읽은 번호를 구분할 수 없습니다)`);
