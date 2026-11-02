@@ -28,7 +28,7 @@ import {
 } from '../../src/lib/exchanges/futuresExec';
 import { futuresCancelAll, futuresCloseAll } from '../../src/lib/exchanges/futuresAdapter';
 import { evaluateIfDue } from '../../src/lib/autotrade/evaluationRunner';
-import { selectDueSchedules, shouldPollNow, POLL_INTERVAL_MS } from '../../src/lib/autotrade/schedulePoll';
+import { selectDueSchedules, shouldPollNow, POLL_INTERVAL_MS, lastEvaluationBrief } from '../../src/lib/autotrade/schedulePoll';
 import { exitMonitorPlan, exitMonitorOutcome, EXIT_MONITOR_INTERVAL_MS } from '../../src/lib/engine/exitMonitorSchedule';
 import { wakeCadenceHeaders } from '../../src/lib/engine/exitMonitorWake';
 
@@ -579,8 +579,10 @@ async function pollSchedules(): Promise<void> {
       // 그래서 cron 로그 25시간을 읽고도 답을 못 찾았다).
       console.log(`[schedules] due 0건 · 건너뜀 ${sel.skipped.length}건 `
         + sel.skipped.slice(0, 3)
-          .map(x => `${x.symbol}:${x.code}(${x.lastEval?.outcome ?? '판단 없음'}`
-            + `${x.lastEval?.reasonCode ? `/${x.lastEval.reasonCode}` : ''})`)
+          // **문구를 여기서 짜지 않는다.** `outcome`만 꺼내 쓰면 완료를
+          // 확인하지 못한 판단이 확인된 판단처럼 보인다 (`schedulePoll`의
+          // `lastEvaluationBrief` 주석 참고).
+          .map(x => `${x.symbol}:${x.code}(${lastEvaluationBrief(x.lastEval)})`)
           .join(' '));
     }
     return;

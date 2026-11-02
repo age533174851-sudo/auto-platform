@@ -104,8 +104,24 @@ export type PollSkipCode =
  * 적지 않았을 뿐이다. 그래서 적는다.
  */
 export interface LastEvaluationNote {
-  /** 마지막 평가 시각. **없으면 null이다** */
+  /**
+   * 이 줄을 **평가하겠다고 선점한** 시각 (`last_run_at`).
+   *
+   * **완료 증거가 아니다.** `claimSchedule`이 평가 *전에* 적는 값이다.
+   */
   at: string | null;
+  /**
+   * 평가가 **끝나고** 판단과 같은 UPDATE에 적힌 시각
+   * (`last_decision.sourceAt`). 없으면 null — 선점 시각으로 메우지 않는다.
+   */
+  completedAt: string | null;
+  /**
+   * `at`의 그 회차가 **판단까지 마쳤다고 확인됐는가.**
+   *
+   * 확인하지 못한 것은 통과가 아니다(`CLAUDE.md`). 아래 `outcome`은
+   * 그대로 두되(정보를 버리지 않는다) 문구가 이전 회차일 수 있음을 적는다.
+   */
+  completed: boolean;
   outcome: string | null;
   /** 경계 있는 사유 코드. 없으면 null — `UNKNOWN`으로 메우지 않는다 */
   reasonCode: string | null;
@@ -117,10 +133,40 @@ export interface LastEvaluationNote {
 
 /** 로그 한 줄이 화면을 다 먹지 않게 */
 const NOTE_MAX = 160;
+
+/**
+ * **이 문구는 GitHub Actions 공개 로그로 나간다.**
+ *
+ * `last_result`에는 외부 응답·DB 오류 문구가 섞인다. 그 안의 줄바꿈이
+ * 그대로 나가면 뒤 내용이 **줄 시작**에 오고, Actions는 줄 시작의
+ * `::error::`·`::add-mask::` 같은 워크플로 명령을 해석한다. 즉 저장된
+ * 문자열이 CI의 판정 문구를 쓸 수 있다.
+ *
+ * 그래서 제어문자를 **읽는 자리에서 한 번** 없앤다 — 쓰는 쪽을 전부
+ * 믿는 설계보다 실패 지점이 적다.
+ */
+// eslint-disable-next-line no-control-regex
+const CONTROL = /[\u0000-\u001f\u007f]+/g;
 const clip = (v: unknown): string | null => {
-  const t = typeof v === 'string' ? v.trim() : '';
+  const t = typeof v === 'string' ? v.replace(CONTROL, ' ').trim() : '';
   if (!t) return null;
   return t.length > NOTE_MAX ? `${t.slice(0, NOTE_MAX)}…` : t;
+};
+
+/**
+ * 선점 시각과 완료 시각의 허용 오차.
+ *
+ * `recordEvaluation`은 `last_run_at`을 먼저 만들고 `sourceAt`을 그 뒤에
+ * 만든다(같은 UPDATE). 그래서 정상 경로는 `sourceAt >= last_run_at`이다.
+ * 혹시 순서가 바뀌어도 밀리초 차이로 "확인 불가"가 되지 않게 조금만 둔다.
+ * 선점 직후 죽은 경우의 간격은 **예약 간격(분 단위)**이라 이 값으로
+ * 가려지지 않는다.
+ */
+const CLAIM_RECORD_SLACK_MS = 2_000;
+const msOf = (v: string | null): number | null => {
+  if (v == null) return null;
+  const t = Date.parse(v);
+  return Number.isFinite(t) ? t : null;
 };
 const pick = (o: any, k: string): string | null =>
   (o && typeof o === 'object' && !Array.isArray(o) ? clip(o[k]) : null);
@@ -137,7 +183,8 @@ export function lastEvaluationNote(row: PollRow | null | undefined): LastEvaluat
   const raw = (row as any)?.last_decision;
 
   if (at == null && raw == null && (row as any)?.last_result == null) {
-    return { at: null, outcome: null, reasonCode: null, source: null,
+    return { at: null, completedAt: null, completed: false,
+      outcome: null, reasonCode: null, source: null,
       line: '아직 평가 기록이 없습니다 (한 번도 평가하지 않았습니다)' };
   }
 
@@ -151,14 +198,54 @@ export function lastEvaluationNote(row: PollRow | null | undefined): LastEvaluat
   const source = pick(raw, 'source');
   const result = clip((row as any)?.last_result);
 
+  // ── 선점 시각을 평가 완료로 읽지 않는다 ──
+  //
+  // `claimSchedule`이 평가 **전에** `last_run_at`을 지금으로 바꾸므로,
+  // 선점 직후 죽은 회차·기록 UPDATE가 실패한 회차는 `last_run_at`만
+  // 최근이고 판단은 이전 회차의 것이다. 완료 증거는 판단과 **같은
+  // UPDATE에 적힌** `sourceAt` 하나뿐이다.
+  const completedAt = pick(raw, 'sourceAt');
+  const atMs = msOf(at);
+  const doneMs = msOf(completedAt);
+  // 읽지 못한 시각은 비교를 통과시키지 않는다 — 아무 문자열로 초록을
+  // 만들 수 있으면 관문이 아니다.
+  const completed = atMs != null && doneMs != null
+    && doneMs >= atMs - CLAIM_RECORD_SLACK_MS;
+
   const parts = [
-    at ? `마지막 평가 ${at}` : '마지막 평가 시각을 읽지 못했습니다',
+    completed
+      ? `평가 완료 ${completedAt}`
+      : [
+        at ? `선점 ${at}` : '선점 시각을 읽지 못했습니다',
+        completedAt
+          ? `평가 완료 ${completedAt} — 이 선점 회차의 것이 아닙니다`
+          : '평가 완료 시각이 없습니다',
+        // 판단을 **버리지 않고** 무엇인지만 분명히 적는다.
+        outcome ? '아래 판단은 이전 회차의 것일 수 있습니다' : '',
+      ].filter(Boolean).join(' · '),
     outcome ? `판단 ${outcome}` : '판단을 읽지 못했습니다',
     ...(reasonCode ? [`사유 ${reasonCode}`] : []),
     ...(source ? [`주체 ${source}`] : []),
     ...(result ? [result] : []),
   ];
-  return { at, outcome, reasonCode, source, line: parts.join(' · ') };
+  return { at, completedAt, completed, outcome, reasonCode, source,
+    line: parts.join(' · ') };
+}
+
+/**
+ * 짧은 로그 한 칸에 들어가는 판단 요약.
+ *
+ * **왜 함수여야 하나.** 워커 로그는 `ETHUSDT:WAITING(…)`처럼 짧게 적는다.
+ * 그 자리에서 `lastEval.outcome`만 꺼내 쓰면 **확인하지 못한 판단이
+ * 확인된 판단과 똑같이 보인다.** 같은 판단을 두 곳에서 적으면 언젠가
+ * 갈린다 — 이 저장소의 상습 고장이다. 그래서 긴 문구(`line`)와 짧은
+ * 문구를 같은 파일의 두 함수가 만든다.
+ */
+export function lastEvaluationBrief(n: LastEvaluationNote | null | undefined): string {
+  if (!n || !n.outcome) return '판단 없음';
+  const code = n.reasonCode ? `${n.outcome}/${n.reasonCode}` : n.outcome;
+  // 확인하지 못한 것은 통과가 아니다 — 짧게 적을 때도 그 사실을 지우지 않는다.
+  return n.completed ? code : `${code}·완료미확인`;
 }
 
 export interface PollSelection {
