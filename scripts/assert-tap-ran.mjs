@@ -16,17 +16,41 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-/** `# pass 7` 같은 줄에서 숫자만. **없으면 null이다 — 0이 아니다** */
-function countOf(text, key) {
-  // 줄 전체가 `# <key> <숫자>`여야 한다. 뒤에 군더더기가 붙은 줄을
-  // 숫자로 읽으면 변형된 출력이 통과로 새어 들어간다.
-  const m = String(text ?? '').split('\n')
-    .map(l => l.trim())
-    .find(l => new RegExp(`^# ${key} \\d+$`).test(l));
-  return m ? Number(m.slice(`# ${key} `.length)) : null;
-}
-
 const KEYS = ['tests', 'pass', 'fail', 'skipped', 'cancelled'];
+/** 합을 맞출 때 쓰는 칸. `todo`는 실패가 아니지만 **합에는 들어간다** */
+const SUM_KEYS = ['pass', 'fail', 'skipped', 'cancelled', 'todo'];
+
+/**
+ * **루트 요약만** 읽는다.
+ *
+ * 처음에는 `split('\n').map(l => l.trim()).find(...)`로 첫 매치를 썼다.
+ * 그러면 두 가지로 거짓 GREEN이 난다 — 검수가 둘 다 실측으로 재현했다:
+ *
+ *   ① **들여쓴 하위 묶음 요약이 루트로 올라간다.** `trim()`이 들여쓰기를
+ *      지워서, 하위 묶음의 `    # fail 0`이 루트의 `# fail 1`을 가린다.
+ *   ② **앞쪽 요약이 뒤쪽을 가린다.** 루트 요약이 두 벌이면 앞의 성공이
+ *      뒤의 실패를 덮는다.
+ *
+ * 그래서 **1열에서 시작하는 줄만** 루트로 보고, 같은 칸이 두 번 나오면
+ * 거부한다. 어느 쪽을 고를지 고민할 일이 아니다 — 둘 다 못 믿는다.
+ */
+function rootCounts(text) {
+  const counts = {};
+  const duplicated = [];
+  for (const line of String(text ?? '').split('\n')) {
+    // 들여쓴 줄은 하위 묶음의 것이다. `trim()`을 쓰지 않는다.
+    const m = /^# ([a-z_]+) (\d+)$/.exec(line);
+    if (!m) continue;
+    const [, key, num] = m;
+    if (!KEYS.includes(key) && key !== 'todo' && key !== 'suites') continue;
+    if (Object.prototype.hasOwnProperty.call(counts, key)) {
+      if (!duplicated.includes(key)) duplicated.push(key);
+      continue;
+    }
+    counts[key] = Number(num);
+  }
+  return { counts, duplicated };
+}
 
 /**
  * TAP 꼬리가 **일이 실제로 돌았고 다 통과했음**을 말하는가.
@@ -34,8 +58,16 @@ const KEYS = ['tests', 'pass', 'fail', 'skipped', 'cancelled'];
  * 못 읽은 칸은 null이고, null은 통과가 아니다.
  */
 export function verdictOf(tap) {
+  const { counts: root, duplicated } = rootCounts(tap);
   const counts = {};
-  for (const k of KEYS) counts[k] = countOf(tap, k);
+  for (const k of KEYS) counts[k] = root[k] == null ? null : root[k];
+
+  if (duplicated.length > 0) {
+    // 요약이 두 벌이면 **어느 것이 이 실행의 결과인지 알 수 없다.**
+    return { ok: false, counts,
+      reason: `루트 요약이 두 번 이상 나옵니다 (${duplicated.map(k => `# ${k}`).join(', ')})`
+        + ' — 앞쪽 성공이 뒤쪽 실패를 가릴 수 있어 거부합니다' };
+  }
 
   const missing = KEYS.filter(k => counts[k] == null);
   if (missing.length > 0) {
@@ -56,6 +88,17 @@ export function verdictOf(tap) {
         + ' 전부 건너뛴 묶음도 종료 코드 0을 주므로, 그것을 통과로 적지 않습니다' };
   }
   if (counts.pass <= 0) return { ok: false, counts, reason: `pass ${counts.pass} — 통과한 시험이 없습니다` };
+
+  // **합이 맞아야 그 요약이 이 실행의 것이다.** 맞지 않으면 섞인
+  // 출력이거나 잘린 출력이고, 어느 쪽이든 믿을 수 없다.
+  const todo = root.todo == null ? 0 : root.todo;
+  const sum = counts.pass + counts.fail + counts.skipped + counts.cancelled + todo;
+  if (sum !== counts.tests) {
+    return { ok: false, counts,
+      reason: `요약의 합이 맞지 않습니다 — tests ${counts.tests}인데`
+        + ` pass ${counts.pass} + fail ${counts.fail} + skipped ${counts.skipped}`
+        + ` + cancelled ${counts.cancelled} + todo ${todo} = ${sum}` };
+  }
   return { ok: true, counts,
     reason: `tests ${counts.tests} · pass ${counts.pass} · fail 0 · skipped 0 · cancelled 0` };
 }

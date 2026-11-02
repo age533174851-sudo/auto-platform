@@ -83,3 +83,92 @@ test('숫자 뒤에 군더더기가 붙은 줄은 그 줄로 세지 않는다', 
   const v = verdictOf(RAN.replace('# pass 7', '# pass 7 maybe'));
   assert.equal(v.ok, false);
 });
+
+// ── 검수가 재현한 거짓 GREEN 셋 (#559) ──
+//
+// `countOf`가 **첫 매치**를 쓰고 `trim()`으로 들여쓴 줄까지 루트로 올리면,
+// 중첩/중복/모순 요약이 통과로 읽힌다. 세 경우 모두 실측으로 재현됐다.
+
+/** 하위 묶음 요약이 **먼저** 나오고 루트 요약이 뒤에 오는 모양 */
+const NESTED = `    # tests 1
+    # suites 0
+    # pass 1
+    # fail 0
+    # cancelled 0
+    # skipped 0
+    # todo 0
+1..2
+# tests 2
+# suites 0
+# pass 1
+# fail 1
+# cancelled 0
+# skipped 0
+# todo 0`;
+
+/** 루트 요약이 **두 벌** 있고 앞쪽이 성공, 뒤쪽이 실패 */
+const DUPLICATE = `1..7
+# tests 7
+# suites 0
+# pass 7
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+1..7
+# tests 7
+# suites 0
+# pass 6
+# fail 1
+# cancelled 0
+# skipped 0
+# todo 0`;
+
+test('★★ 들여쓴 하위 요약을 루트로 올리지 않는다 — 루트는 fail 1이다', () => {
+  const v = verdictOf(NESTED);
+  assert.equal(v.ok, false, '중첩 요약의 앞쪽 성공을 통과로 읽었습니다');
+  assert.match(v.reason, /fail/);
+});
+
+test('★★ 루트 요약이 두 벌이면 거부한다 — 앞쪽 성공이 뒤쪽 실패를 가린다', () => {
+  const v = verdictOf(DUPLICATE);
+  assert.equal(v.ok, false, '중복 요약의 앞쪽 성공을 통과로 읽었습니다');
+});
+
+test('★★ 모순된 요약은 거부한다 — tests 7인데 합이 1이다', () => {
+  const v = verdictOf(`1..7
+# tests 7
+# suites 0
+# pass 1
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0`);
+  assert.equal(v.ok, false, '합이 맞지 않는 요약을 통과로 읽었습니다');
+});
+
+test('정상 단일 루트 7/7은 그대로 통과한다', () => {
+  const v = verdictOf(`1..7
+# tests 7
+# suites 0
+# pass 7
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0`);
+  assert.equal(v.ok, true, v.reason);
+  assert.equal(v.counts.tests, 7);
+});
+
+test('todo가 있는 묶음도 합이 맞으면 통과한다', () => {
+  // `# todo`는 실패가 아니지만 **합에 들어간다.** 빼고 세면 모순으로 보인다.
+  const v = verdictOf(`1..8
+# tests 8
+# suites 0
+# pass 7
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 1`);
+  assert.equal(v.ok, true, v.reason);
+});
