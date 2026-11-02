@@ -20,6 +20,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   findOverrideKeys, overrideNameOf, OAUTH_OVERRIDE_NAMES, MAX_DEPTH,
+  selfTest, SELF_TEST_CASES,
 } from './lib/oauth-override-names.mjs';
 
 /** 이 저장소에 실제로 커밋돼 있는 모양 — 권한 규칙만 */
@@ -94,4 +95,28 @@ test('overrideNameOf — 공백·대소문자를 흘려보내지 않는다', () 
   assert.equal(overrideNameOf(' ANTHROPIC_API_KEY ')?.name, 'ANTHROPIC_API_KEY');
   assert.equal(overrideNameOf('apikeyhelper')?.name, 'apiKeyHelper');
   assert.equal(overrideNameOf('model'), null);
+});
+
+// ── 검사기가 매 회차 돌리는 자기 점검과 **같은 자료**를 여기서도 돌린다 ──
+//
+// 이 파일은 `ci.yml`의 `.mjs` 시험 목록에 없어서 **CI에서 돌지 않는다.**
+// 그래서 같은 자료를 `check-claude-hourly.mjs`가 매 회차 돌리고(CI의
+// `무인 회차 울타리` 단계), 이 파일은 로컬에서 같은 것을 더 자세히 본다.
+// 자료가 한 벌이므로 두 자리가 갈라질 수 없다.
+
+test('검사기 자기 점검 자료 — 전부 통과한다 (CI에서 돌는 바로 그 판단)', () => {
+  const { total, failed } = selfTest();
+  assert.equal(failed.length, 0, `자기 점검 실패: ${failed.join(' / ')}`);
+  assert.ok(total >= 8, `자기 점검 자료가 ${total}건으로 줄었습니다`);
+});
+
+test('자기 점검 자료가 여섯 이름을 모두 덮는다', () => {
+  const covered = new Set();
+  for (const c of SELF_TEST_CASES) {
+    for (const p of c.paths) covered.add(p.split('.').pop().toLowerCase());
+  }
+  for (const [name] of OAUTH_OVERRIDE_NAMES) {
+    assert.ok(covered.has(name.toLowerCase()),
+      `${name}을 덮는 자기 점검 자료가 없습니다`);
+  }
 });

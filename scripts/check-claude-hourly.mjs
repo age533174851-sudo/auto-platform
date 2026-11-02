@@ -22,7 +22,7 @@
 // 실패한다.
 import { readFileSync, existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { findOverrideKeys } from './lib/oauth-override-names.mjs';
+import { findOverrideKeys, selfTest } from './lib/oauth-override-names.mjs';
 
 // 갈래가 둘이다. **둘 다** 같은 울타리를 가져야 한다 — 한쪽만 검사하면
 // 느슨한 쪽으로 작업이 흘러간다.
@@ -35,6 +35,22 @@ const LANES = [
 
 let bad = 0;
 const err = (m) => { console.error(`❌ ${m}`); console.error(`::error::${m}`); bad += 1; };
+
+// ── ⓞ 이 검사기의 판단이 아직 살아 있는가 ──
+//
+// **음성 시험을 `scripts/test-*.mjs`에만 두면 CI에서 한 번도 돌지 않는다.**
+// `ci.yml`의 `.mjs` 시험 단계는 파일 이름을 두 개 적어 부르고, `npm test`는
+// TypeScript 하네스라 `.mjs`가 안 걸린다 — `ci.yml` 자신이 그 자리에
+// "여기서 돌리지 않으면 PR에서 한 번도 안 돈다"고 적어 두었다.
+//
+// 그래서 목록에 파일 이름을 더하는 대신 **판단이 매 회차 자기를 증명한다.**
+// 이 검사기는 CI의 `무인 회차 울타리` 단계에서 이미 돌기 때문에, 유지해야
+// 할 목록이 없다. 판단이 깨졌으면 그 뒤의 초록은 아무 뜻이 없으므로
+// **갈래 검사보다 먼저** 돌린다.
+const SELF = selfTest();
+for (const f of SELF.failed) {
+  err(`판단 자기 점검 실패 — ${f}`);
+}
 
 for (const lane of LANES) {
 const WF = lane.wf;
@@ -410,6 +426,9 @@ if (lane.mode === 'trading') {
 }
 
 if (bad === 0) {
+  console.log(`✅ 판단 자기 점검 ${SELF.total}/${SELF.total} — `
+    + '인증 바꿔치기 이름을 키로 찾고, 품은 이름은 찾지 않고, 못 본 깊이를 '
+    + '"없음"으로 적지 않고, 결과에 값을 섞지 않는다');
   console.log(`✅ 무인 회차 울타리 ${LANES.length}갈래 — 다른 워크플로 실행 불가 · `
     + '거래소/DB 시크릿 없음 · 도구 차단 · 겹침 방지 · 시간 상한 · '
     + '변경 안전 관문 · 금지 지시 보존 · 체크아웃 설정의 인증 바꿔치기 없음');

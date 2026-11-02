@@ -75,3 +75,81 @@ export function findOverrideKeys(value) {
   walk(value, [], 0);
   return { hits, truncated };
 }
+
+// ── 판단을 **CI가 이미 부르는 자리에서** 증명한다 ──
+//
+// 이 판단의 음성 시험을 `scripts/test-*.mjs`에만 두면 **CI에서 한 번도
+// 돌지 않는다.** `ci.yml`의 `.mjs` 시험 단계는 파일 이름을 두 개 적어
+// 부르고(`test-claude-api-preflight` · `test-claude-exec-category`),
+// `npm test`는 TypeScript 하네스라 `.mjs`가 안 걸린다. `ci.yml` 자신이
+// 그 자리에 이렇게 적어 두었다: "여기서 돌리지 않으면 **PR에서 한 번도
+// 안 돈다** — 이 저장소가 이미 당한 모양이다."
+//
+// 그래서 목록에 파일 이름을 하나 더 더하는 대신, **판단이 자기 자신을
+// 증명하게** 한다. `check-claude-hourly.mjs`는 CI의 `무인 회차 울타리`
+// 단계에서 이미 돌고, 거기서 이 시험을 매번 돌린다. 유지해야 할 목록이
+// 없으므로 "배선을 안 함"이 다시 생길 자리가 없다.
+//
+// 시험 자료는 여기 한 벌뿐이고, 검사기와 `node --test`가 **같은 자료를**
+// 쓴다. 두 벌로 두면 언젠가 한쪽만 늘어난다.
+
+/** 시험용 가짜 값. 실제 토큰이 아니며, 출력에 새는지도 함께 센다 */
+export const SELF_TEST_FAKE = 'SELF-TEST-FAKE-VALUE-NOT-A-TOKEN';
+
+const F = SELF_TEST_FAKE;
+
+/** 깊이 초과 자료 — MAX_DEPTH보다 깊게 감싼다 */
+function tooDeep() {
+  let v = { apiKeyHelper: F };
+  for (let i = 0; i <= MAX_DEPTH + 2; i += 1) v = { nest: v };
+  return v;
+}
+
+export const SELF_TEST_CASES = [
+  { what: '권한 규칙만 — 찾는 것이 없다',
+    input: { permissions: { allow: ['Bash(npm test)'], deny: ['Read(./.env)'] } },
+    paths: [], truncated: false },
+  { what: 'apiKeyHelper 한 줄 (우선순위 ④)',
+    input: { apiKeyHelper: F }, paths: ['apiKeyHelper'], truncated: false },
+  { what: 'env.ANTHROPIC_AUTH_TOKEN (우선순위 ②)',
+    input: { env: { ANTHROPIC_AUTH_TOKEN: F } },
+    paths: ['env.ANTHROPIC_AUTH_TOKEN'], truncated: false },
+  { what: '소문자로 적어도 찾는다',
+    input: { env: { anthropic_api_key: F } },
+    paths: ['env.anthropic_api_key'], truncated: false },
+  { what: '여섯 이름 전부 — 하나도 빠뜨리지 않는다',
+    input: { apiKeyHelper: F, env: Object.fromEntries(
+      OAUTH_OVERRIDE_NAMES.filter(([n]) => n !== 'apiKeyHelper').map(([n]) => [n, F])) },
+    paths: ['apiKeyHelper', ...OAUTH_OVERRIDE_NAMES
+      .filter(([n]) => n !== 'apiKeyHelper').map(([n]) => `env.${n}`)].sort(),
+    truncated: false },
+  { what: '배열·중첩 안에 숨겨도 찾는다',
+    input: { a: [{ b: { apiKeyHelper: F } }] },
+    paths: ['a.[0].b.apiKeyHelper'], truncated: false },
+  { what: '이름을 품고 있을 뿐인 키는 찾지 않는다 (거짓 빨강 방지)',
+    input: { env: { MY_ANTHROPIC_API_KEY_BACKUP: F, NOTE_ABOUT_APIKEYHELPER: F } },
+    paths: [], truncated: false },
+  { what: '너무 깊으면 "없음"이 아니라 못 봤다고 적는다',
+    input: tooDeep(), paths: [], truncated: true },
+];
+
+/**
+ * 위 자료를 전부 돌린다. 돌려주는 `failed`가 비어 있지 않으면 **판단이
+ * 깨진 것**이므로 부르는 쪽이 실패로 다룬다. 값이 결과에 새는지도 센다.
+ */
+export function selfTest() {
+  const failed = [];
+  for (const c of SELF_TEST_CASES) {
+    const { hits, truncated } = findOverrideKeys(c.input);
+    const got = hits.map((h) => h.path).sort();
+    const want = [...c.paths].sort();
+    if (JSON.stringify(got) !== JSON.stringify(want)) {
+      failed.push(`${c.what} — 기대 ${want.length}건, 실제 ${got.length}건`);
+    } else if (truncated !== c.truncated) {
+      failed.push(`${c.what} — truncated 기대 ${c.truncated}, 실제 ${truncated}`);
+    } else if (JSON.stringify(hits).includes(SELF_TEST_FAKE)) {
+      failed.push(`${c.what} — 결과에 값이 섞여 있습니다`);
+    }
+  }
+  return { total: SELF_TEST_CASES.length, failed };
+}
