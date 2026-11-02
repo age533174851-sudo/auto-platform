@@ -574,8 +574,14 @@ async function pollSchedules(): Promise<void> {
   if (sel.due.length === 0) {
     // 건너뛴 이유는 가끔만 남긴다 — 매 tick 찍으면 로그가 덮인다.
     if (tickCount % 100 === 1 && sel.skipped.length > 0) {
+      // **마지막 판단을 같이 적는다.** `ETHUSDT:WAITING`만 적으면
+      // "왜 진입하지 않았나"는 이 로그로 알 수 없다 (2026-11-02에 실제로
+      // 그래서 cron 로그 25시간을 읽고도 답을 못 찾았다).
       console.log(`[schedules] due 0건 · 건너뜀 ${sel.skipped.length}건 `
-        + sel.skipped.slice(0, 3).map(x => `${x.symbol}:${x.code}`).join(' '));
+        + sel.skipped.slice(0, 3)
+          .map(x => `${x.symbol}:${x.code}(${x.lastEval?.outcome ?? '판단 없음'}`
+            + `${x.lastEval?.reasonCode ? `/${x.lastEval.reasonCode}` : ''})`)
+          .join(' '));
     }
     return;
   }

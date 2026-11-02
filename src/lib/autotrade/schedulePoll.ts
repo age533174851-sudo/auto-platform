@@ -81,11 +81,99 @@ export type PollSkipCode =
   /** 꺼져 있다 · 간격이 안 됐다 · 방금 돌았다 · 연결이 없다 */
   | 'OFF' | 'WAITING' | 'TOO_SOON' | 'NO_CONNECTION';
 
+/**
+ * **마지막으로 실제 평가가 무엇을 판단했는가.**
+ *
+ * 왜 필요한가 (2026-11-02)
+ * ───────────────────────
+ * "테스트는 통과하는데 데모 자동매수가 안 나간다"를 쫓다가, GitHub
+ * cron(`autotrade-tick`)의 Actions 로그 25시간 분량이 **전부 이렇게**
+ * 끝나 있는 것을 봤다:
+ *
+ *     {"symbol":"ETHUSDT","mode":"TESTNET","ok":true,"skipped":true,
+ *      "code":"WAITING","detail":"다음 평가까지 30분 남았습니다"}
+ *
+ * cron은 **한 번도 평가하지 않았다.** 실제 평가자는 24시간 도는 Fly
+ * Worker이고(그래서 `last_run_at`이 늘 최근이다) cron은 예비다 — 거기까지는
+ * 정상이다. 문제는 **그 로그로 "왜 진입하지 않았나"에 답할 수 없다**는 것.
+ * 답은 워커의 판단에 있고, 그걸 보려면 Fly 로그나 운영 DB를 열어야 한다.
+ * `CLAUDE.md`가 금지한 그 문장("fly logs를 열어 확인해 주세요")이 거기서 나온다.
+ *
+ * 그런데 그 판단은 **이미 손에 있다** — 예약 줄에 `last_result`·
+ * `last_decision`으로 적혀 있고 cron은 `select('*')`로 읽는다.
+ * 적지 않았을 뿐이다. 그래서 적는다.
+ */
+export interface LastEvaluationNote {
+  /** 마지막 평가 시각. **없으면 null이다** */
+  at: string | null;
+  outcome: string | null;
+  /** 경계 있는 사유 코드. 없으면 null — `UNKNOWN`으로 메우지 않는다 */
+  reasonCode: string | null;
+  /** 누가 깨웠는가(WORKER · GITHUB_FALLBACK · MANUAL …) */
+  source: string | null;
+  /** 사람이 읽는 한 줄. 길이를 묶는다 */
+  line: string;
+}
+
+/** 로그 한 줄이 화면을 다 먹지 않게 */
+const NOTE_MAX = 160;
+const clip = (v: unknown): string | null => {
+  const t = typeof v === 'string' ? v.trim() : '';
+  if (!t) return null;
+  return t.length > NOTE_MAX ? `${t.slice(0, NOTE_MAX)}…` : t;
+};
+const pick = (o: any, k: string): string | null =>
+  (o && typeof o === 'object' && !Array.isArray(o) ? clip(o[k]) : null);
+
+/**
+ * 예약 줄에서 **마지막 판단**을 꺼낸다.
+ *
+ * 규칙은 하나다: **못 읽은 것을 빈 값으로 적지 않는다.** `last_decision`이
+ * 객체가 아니면 "판단이 없었다"가 아니라 "읽지 못했다"다 — 그 둘을 같은
+ * 값으로 적으면 조용히 틀린 보고가 된다.
+ */
+export function lastEvaluationNote(row: PollRow | null | undefined): LastEvaluationNote {
+  const at = clip((row as any)?.last_run_at);
+  const raw = (row as any)?.last_decision;
+
+  if (at == null && raw == null && (row as any)?.last_result == null) {
+    return { at: null, outcome: null, reasonCode: null, source: null,
+      line: '아직 평가 기록이 없습니다 (한 번도 평가하지 않았습니다)' };
+  }
+
+  // **`last_decision`이 객체가 아니면 아래 `pick`이 null을 준다.**
+  // 처음에는 그 경우를 따로 빼서 "읽지 못했습니다"만 적었는데, 돌연변이로
+  // 확인해 보니 그 분기를 지워도 시험이 전부 통과했다 — 일반 경로가 이미
+  // 같은 말을 하고, 분기는 `last_result`를 **빼먹기까지** 했다.
+  // 중복인 데다 정보를 버리는 분기여서 지웠다.
+  const outcome = pick(raw, 'outcome') ?? pick(raw, 'verdict');
+  const reasonCode = pick(raw, 'reasonCode');
+  const source = pick(raw, 'source');
+  const result = clip((row as any)?.last_result);
+
+  const parts = [
+    at ? `마지막 평가 ${at}` : '마지막 평가 시각을 읽지 못했습니다',
+    outcome ? `판단 ${outcome}` : '판단을 읽지 못했습니다',
+    ...(reasonCode ? [`사유 ${reasonCode}`] : []),
+    ...(source ? [`주체 ${source}`] : []),
+    ...(result ? [result] : []),
+  ];
+  return { at, outcome, reasonCode, source, line: parts.join(' · ') };
+}
+
 export interface PollSelection {
   /** 지금 평가해야 하는 줄 */
   due: Array<{ row: PollRow; verdict: DueVerdict }>;
-  /** 건너뛴 줄과 그 이유. **조용히 버리지 않는다** */
-  skipped: Array<{ id: string; symbol: string; code: PollSkipCode; reason: string }>;
+  /**
+   * 건너뛴 줄과 그 이유. **조용히 버리지 않는다.**
+   *
+   * `lastEval`이 함께 간다 — "30분 남았습니다"만 적으면 왜 진입하지
+   * 않았는지는 이 로그로 알 수 없다.
+   */
+  skipped: Array<{
+    id: string; symbol: string; code: PollSkipCode; reason: string;
+    lastEval: LastEvaluationNote;
+  }>;
 }
 
 /** `mode`가 실전 계열인가. 저장소 전체와 같은 판정이다 */
@@ -112,7 +200,8 @@ export function selectDueSchedules(rows: PollRow[], nowMs: number): PollSelectio
     // 되지만, 앞에 두면 "이 루프는 실전을 만지지 않는다"가 코드에서 바로 읽힌다.
     if (isLiveMode(row?.mode)) {
       skipped.push({ id, symbol, code: 'NOT_TESTNET',
-        reason: `실전 예약(${row?.mode})은 이 루프가 평가하지 않습니다` });
+        reason: `실전 예약(${row?.mode})은 이 루프가 평가하지 않습니다`,
+        lastEval: lastEvaluationNote(row) });
       continue;
     }
 
@@ -126,7 +215,7 @@ export function selectDueSchedules(rows: PollRow[], nowMs: number): PollSelectio
       v.code === 'OFF' ? 'OFF'
         : v.code === 'NO_CONNECTION' ? 'NO_CONNECTION'
           : v.code === 'TOO_SOON' ? 'TOO_SOON' : 'WAITING';
-    skipped.push({ id, symbol, code, reason: v.reason });
+    skipped.push({ id, symbol, code, reason: v.reason, lastEval: lastEvaluationNote(row) });
   }
   return { due, skipped };
 }

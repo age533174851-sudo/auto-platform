@@ -1200,12 +1200,27 @@ export async function GET(req: NextRequest) {
       }, nowMs);
 
       if (!record) {
+        // ── 건너뛸 때도 **마지막 판단을 같이 적는다** ──
+        //
+        // 2026-11-02에 "데모 자동매수가 안 나간다"를 쫓으면서 이 로그를
+        // 25시간 분량 읽었더니 전부 `WAITING · 다음 평가까지 N분
+        // 남았습니다`뿐이었다. cron은 예비 실행기이고 주 실행기는 Fly
+        // Worker이니 그 자체는 정상인데, **그 로그로는 왜 진입하지
+        // 않았는지 알 수 없다.** 답은 워커의 판단에 있고 그걸 보려면 Fly
+        // 로그나 운영 DB를 열어야 한다 — `CLAUDE.md`가 금지한 그 문장이다.
+        //
+        // 그 판단은 이미 이 줄(`select('*')`)에 실려 와 있다. 적지
+        // 않았을 뿐이다.
+        const { lastEvaluationNote } = await import('@/lib/autotrade/schedulePoll');
+        const lastEval = lastEvaluationNote(r as any);
         results.push({
           symbol: r.symbol, mode: r.mode,
           // 건너뛴 것은 실패가 아니다. 간격이 안 됐거나 꺼져 있는 것이다.
           ok: due.code !== 'NO_CONNECTION',
           skipped: due.code !== 'NO_CONNECTION',
           code: due.code, detail: due.reason,
+          // **이 한 줄이 "왜 안 나갔나"에 답한다.**
+          lastEval,
           ...(saveError ? { saveError } : {}),
         });
         continue;

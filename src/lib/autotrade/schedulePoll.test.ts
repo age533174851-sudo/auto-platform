@@ -13,6 +13,7 @@
 import { test, eq, assert } from '../../test/harness';
 import {
   selectDueSchedules, claimVerdict, isLiveMode, shouldPollNow, POLL_INTERVAL_MS,
+  lastEvaluationNote,
 } from './schedulePoll';
 import { runtimeStateOf, WORKER_STALE_MS } from './evaluationLoop';
 
@@ -32,6 +33,96 @@ const row = (over: Record<string, any> = {}) => ({
 });
 
 export function runSchedulePollTests() {
+
+  console.log('[예약 폴링 — 건너뛴 줄에도 "마지막 판단"을 적는다]');
+
+  // **왜 이 시험이 생겼나 (2026-11-02).**
+  //
+  // 사용자가 "테스트는 통과하는데 데모 자동매수가 안 나간다"고 했다.
+  // GitHub cron(`autotrade-tick`)의 Actions 로그를 25시간 분량 읽으니
+  // 6회차가 **전부** 이렇게 끝났다:
+  //
+  //   {"symbol":"ETHUSDT","mode":"TESTNET","ok":true,"skipped":true,
+  //    "code":"WAITING","detail":"다음 평가까지 30분 남았습니다"}
+  //
+  // 즉 **cron은 한 번도 평가하지 않았다.** 실제 평가자는 24시간 도는 Fly
+  // Worker이고(그래서 `last_run_at`이 늘 최근이다), cron은 예비다 —
+  // 그 자체는 정상이다.
+  //
+  // 문제는 **그 로그로는 "왜 진입하지 않았나"에 답할 수 없다**는 것이다.
+  // 답은 워커의 판단(`last_decision`·`last_result`)에 있고, 그것을 보려면
+  // Fly 로그나 운영 DB를 열어야 한다. `CLAUDE.md`가 금지한 바로 그
+  // 문장("fly logs를 열어 확인해 주세요")이 거기서 나온다.
+  //
+  // 그 줄은 이미 손에 있다 — cron은 `select('*')`로 읽는다. 적지 않았을 뿐이다.
+
+  test('마지막 판단의 결과·사유·주체를 그대로 적는다', () => {
+    const n = lastEvaluationNote({
+      last_run_at: '2026-11-02T01:00:00.000Z',
+      last_result: 'NO_SIGNAL — 5v5가 모이지 않았습니다',
+      last_decision: { outcome: 'NO_SIGNAL', reasonCode: 'SCORE_BELOW_ENTRY', source: 'WORKER' },
+    } as any);
+    eq(n.outcome, 'NO_SIGNAL');
+    eq(n.reasonCode, 'SCORE_BELOW_ENTRY');
+    eq(n.source, 'WORKER');
+    eq(n.at, '2026-11-02T01:00:00.000Z');
+    assert(n.line.includes('NO_SIGNAL'), n.line);
+    assert(n.line.includes('SCORE_BELOW_ENTRY'), n.line);
+    assert(n.line.includes('WORKER'), n.line);
+  });
+
+  test('★ 한 번도 평가하지 않은 줄을 "판단 없음"으로 적는다 — 0으로 적지 않는다', () => {
+    const n = lastEvaluationNote({} as any);
+    eq(n.at, null);
+    eq(n.outcome, null);
+    eq(n.reasonCode, null);
+    assert(n.line.includes('아직 평가 기록이 없습니다'), n.line);
+  });
+
+  test('★ 칸이 있는데 못 읽은 것과 없는 것을 구분한다', () => {
+    // `last_decision`이 객체가 아니면 **읽지 못한 것이다.** 빈 값으로
+    // 적으면 "판단이 없었다"로 읽히고, 그건 사실이 아니다.
+    const n = lastEvaluationNote({ last_run_at: '2026-11-02T01:00:00.000Z', last_decision: 'x' } as any);
+    eq(n.outcome, null);
+    assert(n.line.includes('읽지 못'), n.line);
+    assert(n.line.includes('2026-11-02T01:00:00.000Z'), n.line);
+  });
+
+  test('★ 사유 코드가 없으면 적지 않는다 — UNKNOWN으로 메우지 않는다', () => {
+    const n = lastEvaluationNote({
+      last_run_at: '2026-11-02T01:00:00.000Z',
+      last_decision: { outcome: 'HOLD' },
+    } as any);
+    eq(n.outcome, 'HOLD');
+    eq(n.reasonCode, null);
+    assert(!n.line.includes('UNKNOWN'), n.line);
+  });
+
+  test('★ 요약은 길이를 묶는다 — 로그를 한 줄이 다 먹지 않게', () => {
+    const n = lastEvaluationNote({
+      last_run_at: '2026-11-02T01:00:00.000Z',
+      last_result: 'x'.repeat(5000),
+      last_decision: { outcome: 'HOLD' },
+    } as any);
+    assert(n.line.length < 400, `문구가 ${n.line.length}자입니다`);
+  });
+
+  test('★ 건너뛴 줄의 보고에 그 판단이 실린다', () => {
+    // 이게 없으면 Actions 로그는 "30분 남았습니다"만 적고 끝난다.
+    const sel = selectDueSchedules([{
+      id: 's1', user_id: 'u', symbol: 'ETHUSDT', connection_id: 'c1', mode: 'TESTNET',
+      enabled: true, interval_min: 60,
+      last_run_at: new Date(Date.parse('2026-11-02T01:00:00.000Z')).toISOString(),
+      last_result: 'NO_SIGNAL — 5v5가 모이지 않았습니다',
+      last_decision: { outcome: 'NO_SIGNAL', reasonCode: 'SCORE_BELOW_ENTRY', source: 'WORKER' },
+    }], Date.parse('2026-11-02T01:30:00.000Z'));
+    eq(sel.due.length, 0);
+    eq(sel.skipped.length, 1);
+    eq(sel.skipped[0].code, 'WAITING');
+    eq(sel.skipped[0].lastEval?.outcome, 'NO_SIGNAL');
+    eq(sel.skipped[0].lastEval?.reasonCode, 'SCORE_BELOW_ENTRY');
+  });
+
   console.log('[예약 폴링 — 무엇을 고르는가]');
 
   test('켜져 있고 차례가 된 TESTNET 예약을 고른다', () => {
