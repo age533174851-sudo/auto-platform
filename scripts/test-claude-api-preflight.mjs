@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { check, diagnoseHttpStatus } from './claude-api-preflight.mjs';
+import { check, diagnoseHttpStatus, checkProjectSettings,
+  PROJECT_SETTINGS_FILES } from './claude-api-preflight.mjs';
+import { OAUTH_OVERRIDE_NAMES, MAX_DEPTH } from './lib/oauth-override-names.mjs';
 
 const run = async (status, key = 'dummy_secret') => {
   const logs = [];
@@ -179,4 +181,138 @@ test('모델 접근 확인에도 키가 없으면 통과로 적지 않는다', a
 
 test('점검 대상 모델은 워크플로가 쓰는 모델과 같다', () => {
   assert.equal(MESSAGES_PREFLIGHT_MODEL, 'claude-opus-5-5');
+});
+
+// ── #533 — 실행 **직전** 프로젝트 설정이 인증을 바꿔치지 않는가 ──
+//
+// `check-claude-hourly`의 설정 관문은 **추적되는** 파일만 본다(개발자
+// 개인 설정을 빨갛게 만들지 않으려고). 무인 회차의 시점은 다르다:
+// `npm ci` → 이 사전 점검 → Claude Action 순서이고, 그 사이에 생긴
+// **추적되지 않는** `.claude/settings.json`도 Claude Code는 읽는다
+// (git이 아니라 파일 시스템을 읽기 때문이다).
+//
+// 이 시험이 고정하는 것:
+//   ① 없는 파일은 정상, 정상 설정도 정상
+//   ② 추적 여부와 무관하게 금지 키는 **실패**
+//   ③ 읽기 실패·깨진 JSON·객체 아님·깊이 초과는 모두 **실패**(fail-closed)
+//   ④ **값·JSON 본문·예외 문구가 로그에 새지 않는다**
+//   ⑤ OAuth 유효성이나 모델 생성 성공으로 적지 않는다
+
+const SENTINEL = 'SENTINEL-MUST-NEVER-BE-LOGGED-9f3a';
+
+/** 디스크를 건드리지 않는다 — 파일 시스템을 주입한다 */
+function fs(map) {
+  const logs = [];
+  const result = checkProjectSettings({
+    files: PROJECT_SETTINGS_FILES,
+    exists: (f) => Object.prototype.hasOwnProperty.call(map, f),
+    readFile: (f) => {
+      const v = map[f];
+      if (v instanceof Error) throw v;
+      return v;
+    },
+    log: (x) => logs.push(x),
+  });
+  return { result, logs, joined: logs.join('\n') };
+}
+
+test('설정 파일이 없으면 정상 — 설정이 없으면 바꿔칠 것도 없다', () => {
+  const { result, joined } = fs({});
+  assert.equal(result.ok, true);
+  assert.equal(result.code, 'project_settings_no_override');
+  assert.ok(joined.includes('absent'));
+});
+
+test('권한 규칙만 있는 설정은 정상 — 이 저장소에 실제로 커밋돼 있는 모양', () => {
+  const { result, joined } = fs({
+    '.claude/settings.local.json': JSON.stringify({ permissions: { allow: ['Bash(npm test)'] } }),
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.code, 'project_settings_no_override');
+  assert.ok(joined.includes('no_auth_override'));
+});
+
+test('**추적되지 않아도** apiKeyHelper는 실패다 — 추적 관문이 놓치는 자리', () => {
+  const { result, joined } = fs({
+    '.claude/settings.json': JSON.stringify({ apiKeyHelper: SENTINEL }),
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'project_settings_override');
+  assert.equal(result.problems.length, 1);
+  assert.equal(result.problems[0].code, 'settings_auth_override');
+  assert.equal(result.problems[0].name, 'apiKeyHelper');
+  assert.ok(!joined.includes(SENTINEL), '값이 로그에 샜습니다');
+});
+
+test('env.ANTHROPIC_AUTH_TOKEN도 실패다', () => {
+  const { result, joined } = fs({
+    '.claude/settings.json': JSON.stringify({ env: { ANTHROPIC_AUTH_TOKEN: SENTINEL } }),
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.problems[0].name, 'ANTHROPIC_AUTH_TOKEN');
+  assert.ok(!joined.includes(SENTINEL));
+});
+
+test('여섯 이름 전부 — 하나도 빠뜨리지 않는다', () => {
+  for (const [name] of OAUTH_OVERRIDE_NAMES) {
+    const { result } = fs({ '.claude/settings.json': JSON.stringify({ env: { [name]: SENTINEL } }) });
+    assert.equal(result.ok, false, `${name}을 놓쳤습니다`);
+    assert.equal(result.problems[0].name, name);
+  }
+});
+
+test('읽기 실패를 통과로 보지 않고, 예외 문구를 적지 않는다', () => {
+  const { result, joined } = fs({ '.claude/settings.json': new Error(`열 수 없음 ${SENTINEL}`) });
+  assert.equal(result.ok, false);
+  assert.equal(result.problems[0].code, 'settings_unreadable');
+  assert.ok(!joined.includes(SENTINEL), '예외 문구가 로그에 샜습니다');
+});
+
+test('깨진 JSON을 통과로 보지 않고, 본문을 적지 않는다', () => {
+  const { result, joined } = fs({ '.claude/settings.json': `{ "apiKeyHelper": "${SENTINEL}"` });
+  assert.equal(result.ok, false);
+  assert.equal(result.problems[0].code, 'settings_malformed_json');
+  assert.ok(!joined.includes(SENTINEL), 'JSON 본문이 로그에 샜습니다');
+});
+
+test('객체가 아니면 무엇을 설정하는지 셀 수 없다 — 실패', () => {
+  for (const body of ['[]', '"str"', '42', 'null']) {
+    const { result } = fs({ '.claude/settings.json': body });
+    assert.equal(result.ok, false, `${body}를 통과로 봤습니다`);
+    assert.equal(result.problems[0].code, 'settings_not_object');
+  }
+});
+
+test('너무 깊으면 "없음"이 아니라 실패로 적는다', () => {
+  let deep = { apiKeyHelper: SENTINEL };
+  for (let i = 0; i <= MAX_DEPTH + 2; i += 1) deep = { nest: deep };
+  const { result, joined } = fs({ '.claude/settings.json': JSON.stringify(deep) });
+  assert.equal(result.ok, false);
+  assert.ok(result.problems.some((p) => p.code === 'settings_depth_exceeded'));
+  assert.ok(!joined.includes(SENTINEL));
+});
+
+test('설정 파일의 **키 이름**도 로그에 적지 않는다 (신뢰할 수 없는 내용)', () => {
+  const { result, joined } = fs({
+    '.claude/settings.json': JSON.stringify({ [`${SENTINEL}-outer`]: { apiKeyHelper: 'x' } }),
+  });
+  assert.equal(result.ok, false);
+  assert.ok(!joined.includes(SENTINEL), '설정 파일의 키 이름이 로그에 샜습니다');
+});
+
+test('두 파일을 모두 본다 — 한쪽만 보고 넘기지 않는다', () => {
+  const { result } = fs({
+    '.claude/settings.json': JSON.stringify({ apiKeyHelper: 'x' }),
+    '.claude/settings.local.json': JSON.stringify({ env: { ANTHROPIC_API_KEY: 'y' } }),
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.problems.length, 2);
+});
+
+test('통과를 OAuth 유효성이나 생성 성공으로 적지 않는다', () => {
+  const { result, joined } = fs({});
+  assert.equal(result.code, 'project_settings_no_override');
+  for (const over of ['oauth_valid', 'model', 'generation', 'authenticated']) {
+    assert.ok(!joined.includes(over), `과한 주장이 로그에 있습니다: ${over}`);
+  }
 });
