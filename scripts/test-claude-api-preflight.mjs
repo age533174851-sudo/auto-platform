@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { check, diagnoseHttpStatus, checkProjectSettings,
-  PROJECT_SETTINGS_FILES } from './claude-api-preflight.mjs';
+  PROJECT_SETTINGS_FILES, runPreflight } from './claude-api-preflight.mjs';
 import { OAUTH_OVERRIDE_NAMES, MAX_DEPTH } from './lib/oauth-override-names.mjs';
 
 const run = async (status, key = 'dummy_secret') => {
@@ -315,4 +315,103 @@ test('통과를 OAuth 유효성이나 생성 성공으로 적지 않는다', () 
   for (const over of ['oauth_valid', 'model', 'generation', 'authenticated']) {
     assert.ok(!joined.includes(over), `과한 주장이 로그에 있습니다: ${over}`);
   }
+});
+
+// ── #533 — 설정 검사가 RED면 **네트워크를 건드리기 전에** 끝내는가 ──
+//
+// 앞선 판은 설정 검사를 먼저 **부르기만** 했다. 주석에는 "네트워크보다 먼저
+// 본다"고 적혀 있었지만 결과를 보지 않고 메타데이터 GET 과 토큰 세기 POST 로
+// 넘어갔고, 마지막 줄에서야 종료 코드에 반영했다. 실측(fetch 스텁):
+//
+//     설정 RED + API 키 → 외부 요청 시도 2회, exitCode 1
+//
+// 적어 둔 계약과 코드가 달랐다. 이 시험들은 **요청 횟수를 세서** 그 계약을
+// 고정한다. 외부 요청은 하나도 나가지 않는다(request 를 주입한다).
+
+const PF_SENTINEL = 'PREFLIGHT-SENTINEL-MUST-NOT-LEAK-7b2e';
+
+/** 요청 횟수를 세는 스텁. 본문은 읽지 않는다 */
+function counting(status = 200) {
+  const calls = [];
+  return {
+    calls,
+    request: async (url, options) => {
+      calls.push({ method: options?.method ?? 'GET' });
+      return { status, text: () => { throw Error('본문 읽지 않음'); } };
+    },
+  };
+}
+
+const settingsStub = (ok) => () => (ok
+  ? { ok: true, code: 'project_settings_no_override' }
+  : { ok: false, code: 'project_settings_override',
+      problems: [{ file: '.claude/settings.json', code: 'settings_auth_override', name: 'apiKeyHelper' }] });
+
+async function pf({ ok, env, status = 200 }) {
+  const { calls, request } = counting(status);
+  const logs = [];
+  const result = await runPreflight({
+    env, request, log: (x) => logs.push(x),
+    checkSettings: settingsStub(ok), retries: 0, sleep: async () => {},
+  });
+  return { result, calls, logs, joined: logs.join('\n') };
+}
+
+test('설정 RED + API 키 → **요청 0회**로 중단한다', async () => {
+  const { result, calls, joined } = await pf({ ok: false, env: { ANTHROPIC_API_KEY: PF_SENTINEL } });
+  assert.equal(calls.length, 0, `요청이 ${calls.length}회 나갔습니다`);
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'project_settings_override');
+  assert.equal(result.stage, 'project_settings');
+  assert.ok(joined.includes('aborted_before_network'));
+  assert.ok(!joined.includes(PF_SENTINEL), '값이 로그에 샜습니다');
+});
+
+test('설정 RED + OAuth 전용 → 요청 0회로 중단한다', async () => {
+  const { result, calls } = await pf({ ok: false, env: { CLAUDE_CODE_OAUTH_TOKEN: PF_SENTINEL } });
+  assert.equal(calls.length, 0);
+  assert.equal(result.ok, false);
+});
+
+test('설정 RED + 자격 증명 없음 → 요청 0회, 그래도 실패', async () => {
+  const { result, calls } = await pf({ ok: false, env: {} });
+  assert.equal(calls.length, 0);
+  assert.equal(result.ok, false);
+});
+
+test('설정 GREEN + OAuth 전용 → 요청 0회, 기존 분류 유지', async () => {
+  const { result, calls, joined } = await pf({ ok: true, env: { CLAUDE_CODE_OAUTH_TOKEN: 'tok' } });
+  assert.equal(calls.length, 0, 'OAuth 전용인데 API 키 경로를 찔렀습니다');
+  assert.equal(result.ok, true);
+  assert.ok(joined.includes('oauth_only'));
+});
+
+test('설정 GREEN + API 키 → 기존 제한된 호출을 그대로 한다 (메타데이터 + 토큰 세기)', async () => {
+  const { result, calls } = await pf({ ok: true, env: { ANTHROPIC_API_KEY: 'k' } });
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].method, 'GET');
+  assert.equal(calls[1].method, 'POST');
+  assert.equal(result.ok, true);
+});
+
+test('설정 GREEN + API 키 + SKIP_MESSAGES=1 → 메타데이터만 한 번', async () => {
+  const { result, calls } = await pf({
+    ok: true, env: { ANTHROPIC_API_KEY: 'k', CLAUDE_PREFLIGHT_SKIP_MESSAGES: '1' } });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].method, 'GET');
+  assert.equal(result.ok, true);
+});
+
+test('설정 GREEN + 자격 증명 없음 → 요청 0회, 통과로 적지 않는다', async () => {
+  const { result, calls } = await pf({ ok: true, env: {} });
+  assert.equal(calls.length, 0);
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'missing_credentials');
+});
+
+test('설정 GREEN + API 키 + 401 → 실패로 적는다', async () => {
+  const { result } = await pf({ ok: true, env: { ANTHROPIC_API_KEY: 'k' }, status: 401 });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'invalid_or_expired_api_key');
+  assert.equal(result.stage, 'metadata');
 });

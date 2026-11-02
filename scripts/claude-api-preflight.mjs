@@ -214,23 +214,54 @@ export function checkProjectSettings({
     : { ok: true, code: 'project_settings_no_override' };
 }
 
-if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
-  // 네트워크보다 **먼저** 본다 — 설정이 인증을 바꿔치면 그 뒤 점검의
-  // 결과가 무엇이든 그 회차는 의도한 인증으로 돌지 않는다.
-  const settings = checkProjectSettings();
-  const apiKey = process.env.ANTHROPIC_API_KEY ?? '';
+/**
+ * 사전 점검 한 회차. **설정 검사가 RED면 네트워크를 건드리기 전에 끝낸다.**
+ *
+ * 앞선 판에서는 설정 검사를 먼저 **부르기만** 했다. 주석에는 "네트워크보다
+ * 먼저 본다"고 적어 두었는데, 실제로는 결과를 보지 않고 그대로 메타데이터
+ * GET 과 토큰 세기 POST 로 넘어갔고 **마지막 줄에서야** 종료 코드에 반영했다.
+ * 즉 설정이 인증을 바꿔친 회차에서도 요청이 두 번 나갔다(실측: 요청 2회).
+ * 적어 둔 계약과 코드가 달랐던 자리다.
+ *
+ * 이제 RED 면 **요청 0회로** 끝낸다. 그 뒤 점검이 무엇을 돌려주든 그 회차는
+ * 의도한 인증으로 돌지 않으므로, 더 볼 것이 없다.
+ *
+ * `request` 와 `checkSettings` 를 주입할 수 있게 해 두어, **요청 횟수를 세는**
+ * 음성 시험을 네트워크 없이 돌릴 수 있다.
+ */
+export async function runPreflight({
+  env = process.env,
+  request = fetch,
+  log = console.log,
+  checkSettings = checkProjectSettings,
   // 일시적 제한(429·5xx)에만 제한된 재시도를 쓴다. 401·403·404는 즉시 끝난다.
-  const RETRIES = 2;
+  retries = 2,
+  sleep = defaultSleep,
+  timeoutMs = 10_000,
+} = {}) {
+  const settings = checkSettings({ log });
+  if (!settings.ok) {
+    log('Claude preflight: aborted_before_network=project_settings_override');
+    return { ok: false, code: 'project_settings_override', stage: 'project_settings' };
+  }
+
+  const apiKey = env.ANTHROPIC_API_KEY ?? '';
   const metadata = await check({
-    apiKey,
-    oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? '',
-    retries: RETRIES,
+    apiKey, oauthToken: env.CLAUDE_CODE_OAUTH_TOKEN ?? '',
+    request, log, retries, sleep, timeoutMs,
   });
   let access = { ok: true, code: 'skipped' };
   // 요금이 붙지 않는 경로지만, 원치 않으면 끌 수 있게 둔다.
-  if (apiKey && process.env.CLAUDE_PREFLIGHT_SKIP_MESSAGES !== '1') {
-    access = await checkModelAccess({ apiKey, retries: RETRIES });
+  if (apiKey && env.CLAUDE_PREFLIGHT_SKIP_MESSAGES !== '1') {
+    access = await checkModelAccess({ apiKey, request, log, retries, sleep, timeoutMs });
   }
   // **둘 중 하나라도 실패면 실패다.** 통과한 쪽만 보고 넘기지 않는다.
-  if (!settings.ok || !metadata.ok || !access.ok) process.exitCode = 1;
+  if (!metadata.ok) return { ok: false, code: metadata.code, stage: 'metadata' };
+  if (!access.ok) return { ok: false, code: access.code, stage: 'model_access' };
+  return { ok: true, code: 'preflight_ok', stage: 'done' };
+}
+
+if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
+  const result = await runPreflight();
+  if (!result.ok) process.exitCode = 1;
 }
