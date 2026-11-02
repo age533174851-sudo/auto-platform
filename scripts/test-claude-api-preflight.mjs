@@ -180,3 +180,25 @@ test('모델 접근 확인에도 키가 없으면 통과로 적지 않는다', a
 test('점검 대상 모델은 워크플로가 쓰는 모델과 같다', () => {
   assert.equal(MESSAGES_PREFLIGHT_MODEL, 'claude-opus-5-5');
 });
+//
+// #533 regression: repository OAuth-only hourly lanes must not silently fall
+// back to billable API-key auth. This test runs in CI's explicit mjs suite.
+// Token presence alone is not evidence of an authenticated Claude model turn.
+import { readFileSync } from 'node:fs';
+
+for (const lane of ['dev', 'trading']) {
+  test(`★★ OAuth-only GitHub Actions ${lane}: no API-key fallback and fail-closed on missing token`, () => {
+    const wf = readFileSync(new URL(`../.github/workflows/claude-hourly-${lane}.yml`, import.meta.url), 'utf8');
+    assert.match(wf, /claude_code_oauth_token:\\s*\\$\\{\\{\\s*secrets\\.CLAUDE_CODE_OAUTH_TOKEN\\s*\\}\\}/);
+    assert.doesNotMatch(wf, /secrets\\.ANTHROPIC_API_KEY\\b|anthropic_api_key:/);
+    assert.match(wf, /if \\[ -z "\\$\\{OAUTH:-\\}" \\]; then[\\s\\S]*?exit 1/);
+    const start = wf.indexOf('      - name: Claude Code —');
+    const end = wf.indexOf('      - name: Claude 실행 진단', start);
+    assert.ok(start >= 0 && end > start, 'Claude action and diagnostic steps must both exist');
+    const action = wf.slice(start, end);
+    assert.match(action, /env:\\n\\s+ANTHROPIC_API_KEY: ''\\n\\s+ANTHROPIC_AUTH_TOKEN: ''/);
+    assert.doesNotMatch(action, /anthropic_api_key:/);
+    assert.match(wf, /Claude OAuth 사전 점검 \\(유효성\\/모델 생성 미검증\\)/);
+    assert.match(wf, /check-autodev-safety\\.mjs/);
+  });
+}
