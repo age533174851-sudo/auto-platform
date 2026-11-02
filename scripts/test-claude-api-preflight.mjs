@@ -181,24 +181,25 @@ test('점검 대상 모델은 워크플로가 쓰는 모델과 같다', () => {
   assert.equal(MESSAGES_PREFLIGHT_MODEL, 'claude-opus-5-5');
 });
 //
-// #533 regression: repository OAuth-only hourly lanes must not silently fall
-// back to billable API-key auth. This test runs in CI's explicit mjs suite.
-// Token presence alone is not evidence of an authenticated Claude model turn.
+// #533 regression: OAuth hourly lanes must never fall back to an API key.
+// The test is static and does not read credentials or make provider requests.
 import { readFileSync } from 'node:fs';
 
 for (const lane of ['dev', 'trading']) {
-  test(`★★ OAuth-only GitHub Actions ${lane}: no API-key fallback and fail-closed on missing token`, () => {
+  test(`★★ OAuth-only hourly ${lane}: fail closed without a token and never pass an API key`, () => {
     const wf = readFileSync(new URL(`../.github/workflows/claude-hourly-${lane}.yml`, import.meta.url), 'utf8');
-    assert.match(wf, /claude_code_oauth_token:\\s*\\$\\{\\{\\s*secrets\\.CLAUDE_CODE_OAUTH_TOKEN\\s*\\}\\}/);
-    assert.doesNotMatch(wf, /secrets\\.ANTHROPIC_API_KEY\\b|anthropic_api_key:/);
-    assert.match(wf, /if \\[ -z "\\$\\{OAUTH:-\\}" \\]; then[\\s\\S]*?exit 1/);
+    assert.ok(wf.includes('claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}'));
+    assert.ok(!wf.includes('secrets.ANTHROPIC_API_KEY'), 'API-key secret must never be injected');
+    assert.ok(!wf.includes('anthropic_api_key:'), 'Claude Action must not receive API key');
+    assert.ok(wf.includes('if [ -z "${OAUTH:-}" ]; then'), 'missing OAuth must fail closed');
+    assert.ok(wf.includes('exit 1'), 'missing credential must be a failure');
     const start = wf.indexOf('      - name: Claude Code —');
     const end = wf.indexOf('      - name: Claude 실행 진단', start);
-    assert.ok(start >= 0 && end > start, 'Claude action and diagnostic steps must both exist');
+    assert.ok(start >= 0 && end > start, 'Claude Action and diagnosis must both exist');
     const action = wf.slice(start, end);
-    assert.match(action, /env:\\n\\s+ANTHROPIC_API_KEY: ''\\n\\s+ANTHROPIC_AUTH_TOKEN: ''/);
-    assert.doesNotMatch(action, /anthropic_api_key:/);
-    assert.match(wf, /Claude OAuth 사전 점검 \\(유효성\\/모델 생성 미검증\\)/);
-    assert.match(wf, /check-autodev-safety\\.mjs/);
+    assert.ok(action.includes("ANTHROPIC_API_KEY: ''"), 'clear action environment API key fallback');
+    assert.ok(action.includes("ANTHROPIC_AUTH_TOKEN: ''"), 'clear action environment auth-token fallback');
+    assert.ok(wf.includes('Claude OAuth 사전 점검 (유효성/모델 생성 미검증)'));
+    assert.ok(wf.includes('check-autodev-safety.mjs'), 'preserve safety gate');
   });
 }
