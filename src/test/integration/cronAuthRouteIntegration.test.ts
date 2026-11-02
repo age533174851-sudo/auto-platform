@@ -367,7 +367,7 @@ export async function runCronAuthRouteTests(): Promise<void> {
   // ══════════ ⑥ cleanup: COUNT와 DELETE 사이 동시 삽입 (Issue #471) ══════════
   // 실제 GET + 가짜 Supabase. COUNT 시점 4,999건, DELETE 시점 5,099건.
   // DELETE는 반드시 사전에 선택한 PK의 유한 집합으로만 수행해야 한다.
-  async function cleanupConcurrentInsertCase(dropOne = false) {
+  async function cleanupConcurrentInsertCase(dropOne = false, unprovable = false) {
     const prevSecret = process.env.CRON_SECRET;
     const resolved = require.resolve(ROUTES[0].path);
     const prevServer = require.cache[serverPath];
@@ -425,6 +425,11 @@ export async function runCronAuthRouteTests(): Promise<void> {
               },
               select(_column: string) {
                 calls.push('bounded_delete');
+                // 거래소·DB가 삭제 결과를 돌려주지 못한 자리. 몇 건이
+                // 지워졌는지 **증명할 수 없다** (boundedDelete.ts:72).
+                if (unprovable) {
+                  return Promise.resolve({ error: { message: '결과 미확인' }, data: null });
+                }
                 const ids = new Set(selectedIds || []);
                 if (dropOne && !dropped && ids.size > 0) {
                   const first = ids.values().next().value;
@@ -472,6 +477,19 @@ export async function runCronAuthRouteTests(): Promise<void> {
     assert(!race.calls.includes('unbounded_delete'), '삭제 대상 ID를 고정하지 않았다');
     eq(race.json.tables.find((t: any) => t.table === 'news_articles')?.deleted, 4_999);
     eq(race.json.totalDeleted, 4_999);
+  });
+
+  const unprovable = await cleanupConcurrentInsertCase(false, true);
+  test('★★ 삭제 결과를 증명하지 못하면 0건이 아니라 모름으로 적는다', () => {
+    // `deleteBoundedCleanupRows`는 이 경우 `deleted: null`을 준다
+    // ("DELETE 결과를 증명할 수 없으면 null — 사전 COUNT로 대체하지 않는다").
+    // 합계가 `?? 0`으로 null을 삼키면 **"0건 지웠다"는 거짓 보고**가 된다.
+    // 되돌릴 수 없는 삭제에서 그건 통과가 아니다 (`CLAUDE.md`).
+    eq(unprovable.json.tables.find((t: any) => t.table === 'news_articles')?.deleted, null,
+      '증명 못 한 삭제 건수를 숫자로 적었다');
+    eq(unprovable.json.totalDeleted, null, '모르는 건수를 합계에 0으로 넣었다');
+    eq(unprovable.json.ok, false);
+    eq(unprovable.status, 207);
   });
 
   const raceDrop = await cleanupConcurrentInsertCase(true);

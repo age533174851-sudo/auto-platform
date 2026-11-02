@@ -131,16 +131,39 @@ export async function GET(req: NextRequest) {
     results.push(base);
   }
 
-  // HTTP 200/ok:true는 표별 삭제 성공의 증거여야 한다.
-  // 조회 미확인·안전 관문 거부·일부만 삭제됨도 "완료"로 표시하면
-  // #466의 크론 판정기가 없는 다른 호출자는 실패를 성공으로 오인한다.
-  // 미리보기의 "실제 삭제하지 않음"과 정상 0건은 실패가 아니다.
-  const incompleteDelete = results.some(r =>
-    r.eligible === null || r.total === null || r.deleted === null ||
+  // ── 이것은 **두 개의 다른 질문**이다 ──
+  //
+  //   ① 몇 건 지웠는지 **아는가**
+  //   ② **다** 지웠는가
+  //
+  // ①이 아니면 `totalDeleted`는 null이다. 그 경우는 하나뿐이다 —
+  // `deleteBoundedCleanupRows`가 `deleted: null`을 준 때
+  // ("DELETE 결과를 증명할 수 없으면 null", `boundedDelete.ts`). 합계를
+  // `?? 0`으로 내면 모르는 것이 "0건 지웠다"가 되므로 null로 둔다.
+  //
+  // ②가 아니면 `ok:false` · HTTP 207이다. 조회 미확인·안전 관문 거부·
+  // 일부만 삭제됨을 "완료"로 표시하면 #466의 크론 판정기가 없는 다른
+  // 호출자가 실패를 성공으로 오인한다. 미리보기의 "실제 삭제하지 않음"과
+  // 정상 0건은 실패가 아니다.
+  //
+  // **둘을 한 변수로 합치면 안 된다.** 합치면 4999건 중 4998건을 실제로
+  // 지운 사실이 null로 사라진다 — 아는 수를 모름으로 적는 것이고, #471이
+  // 세운 "사전 COUNT를 삭제 건수로 적지 않는다"의 반대편 고장이다.
+  // 되돌릴 수 없는 삭제의 건수는 어느 쪽으로도 지워지지 않아야 한다.
+  //
+  // `incompleteDelete`의 첫 항(`deletedUnknown`)을 **지워 보니 시험이 하나도
+  // 빨개지지 않았다.** 지금 도달 가능한 모든 "모름"은 `apply` 경로에서만
+  // 생기고(`deleted: null`은 bounded delete가 돌았을 때만 나온다) 그때는
+  // `r.deleted !== r.eligible`이 이미 참이다. 즉 이 항은 **지금은 잉여다.**
+  // 시험이 증명하는 것이 아니라는 뜻이므로 적어 둔다 — 아래 조건이 나중에
+  // 바뀌어도 "모르는 삭제"가 성공으로 보고되지 않게 두는 fail-closed 안전띠다.
+  const deletedUnknown = results.some(r => r.deleted === null);
+  const incompleteDelete = deletedUnknown || results.some(r =>
+    r.eligible === null || r.total === null ||
     (apply && r.eligible > 0 &&
       (r.skipped !== '' || r.deleted !== r.eligible))
   );
-  const totalDeleted = incompleteDelete
+  const totalDeleted = deletedUnknown
     ? null : results.reduce((s, r) => s + (r.deleted ?? 0), 0);
 
   return NextResponse.json({
