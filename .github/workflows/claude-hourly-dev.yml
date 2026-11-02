@@ -136,7 +136,7 @@ jobs:
           echo "tsc_before=${n}" >> "$GITHUB_OUTPUT"
           echo "tsc 기준선: ${n}건"
 
-      # Metadata-only GET: no model generation and no provider response body logged.
+      # OAuth-only preflight: no API-key GET; secret presence is NOT proof of token validity.
       - name: Claude OAuth 설정 사전 점검 (유효성 미확인)
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
