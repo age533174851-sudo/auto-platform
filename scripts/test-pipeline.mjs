@@ -9,9 +9,9 @@
  * 실행: node scripts/test-pipeline.mjs
  */
 import { execSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, cpSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, statSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname, normalize } from 'node:path';
 
 const dir = mkdtempSync(join(tmpdir(), 'pipeline-'));
 let pass = 0, fail = 0;
@@ -21,57 +21,98 @@ function check(name, cond, detail = '') {
   else { fail++; console.log(`  ✗ ${name}${detail ? ' — ' + detail : ''}`); }
 }
 
-// 필요한 모듈 복사 + 상대경로로 변환
-const files = [
-  ['src/lib/engine/tradingPipeline.ts', 'tradingPipeline.ts'],
-  ['src/lib/engine/riskManager.ts', 'riskManager.ts'],
-  ['src/lib/engine/signalGateway.ts', 'signalGateway.ts'],
-  ['src/lib/strategies/dailyBattle.ts', 'dailyBattle.ts'],
-  ['src/lib/strategies/riskVeto.ts', 'riskVeto.ts'],
-  ['src/lib/strategies/volatilityBaseline.ts', 'volatilityBaseline.ts'],
-  ['src/lib/calendar/econCalendar.ts', 'econCalendar.ts'],
-  ['src/lib/derivatives/index.ts', 'derivatives.ts'],
-  ['src/lib/strategies/regime.ts', 'regime.ts'],
-  ['src/lib/autotrade/dynamicSizing.ts', 'dynamicSizing.ts'],
-  ['src/lib/strategies/regime.ts', 'regime.ts'],
+// ── 필요한 모듈을 **따라가서** 모은다 ──
+//
+// 예전에는 복사할 파일 목록과 import 치환 목록을 **손으로** 적었다.
+// 그 목록이 코드보다 늦게 늘어서, `tradingPipeline`이 새로 import한
+// `expansionMode`·`ladderGate`·`safety`가 목록에 없었고 — **이 시험은
+// `Cannot find module`로 죽어 있었다.** 즉 캘린더 차단·FOMC 차단·웹훅
+// Veto 우회 금지를 보는 통합 시험이 **한 번도 돌지 않았다.**
+// (`node --test scripts/test-pipeline.mjs` → pass 0 / fail 1)
+//
+// 그래서 목록을 없앤다. 진입점에서 상대 import를 **따라가며** 닫힘을
+// 모으고, 각 파일의 상대 지정자를 평탄화한 이름으로 바꾼다. 코드가
+// 새 모듈을 import하면 목록을 고칠 필요 없이 자동으로 따라온다.
+const ROOTS = [
+  'src/lib/engine/tradingPipeline.ts',
+  'src/lib/calendar/econCalendar.ts',
 ];
-for (const [src, dst] of files) {
-  try { cpSync(src, join(dir, dst)); } catch {}
+
+/** `src/lib/strategies/expansionMode.ts` → `strategies__expansionMode` */
+const flatName = (repoPath) => repoPath
+  .replace(/^src\/lib\//, '').replace(/\.tsx?$/, '').replace(/\//g, '__');
+
+/** 상대 지정자를 실제 파일로 푼다. 못 풀면 **조용히 넘기지 않는다** */
+function resolveSpec(importer, spec) {
+  const base = normalize(join(dirname(importer), spec));
+  for (const cand of [`${base}.ts`, `${base}.tsx`, join(base, 'index.ts')]) {
+    if (existsSync(cand) && statSync(cand).isFile()) return cand;
+  }
+  return null;
 }
 
-// import 경로 정리
-const fixes = [
-  ['tradingPipeline.ts', [
-    ["../strategies/dailyBattle", "./dailyBattle.js"],
-    ["../strategies/riskVeto", "./riskVeto.js"],
-    ["../strategies/volatilityBaseline", "./volatilityBaseline.js"],
-    ["../calendar/econCalendar", "./econCalendar.js"],
-    ["./riskManager", "./riskManager.js"],
-    ["./signalGateway", "./signalGateway.js"],
-    ["../derivatives", "./derivatives.js"],
-  ]],
-  ['riskManager.ts', [["./signalGateway", "./signalGateway.js"]]],
-  ['dailyBattle.ts', [["./riskVeto", "./riskVeto.js"]]],
-];
-import { readFileSync } from 'node:fs';
-for (const [file, reps] of fixes) {
-  const p = join(dir, file);
-  try {
-    let s = readFileSync(p, 'utf8');
-    for (const [from, to] of reps) s = s.split(`'${from}'`).join(`'${to}'`);
-    writeFileSync(p, s);
-  } catch {}
+const SPEC = /(['"])(\.\.?\/[^'"]+)\1/g;
+const collected = new Map();   // repoPath → flatName
+const unresolved = [];
+{
+  const queue = [...ROOTS];
+  while (queue.length) {
+    const f = queue.pop();
+    if (collected.has(f)) continue;
+    if (!existsSync(f)) { unresolved.push(['(진입점)', f]); continue; }
+    collected.set(f, flatName(f));
+    const src = readFileSync(f, 'utf8');
+    for (const m of src.matchAll(SPEC)) {
+      const target = resolveSpec(f, m[2]);
+      if (target == null) unresolved.push([f, m[2]]);
+      else if (!collected.has(target)) queue.push(target);
+    }
+  }
 }
+if (unresolved.length) {
+  // 못 푼 import를 "없음"으로 보지 않는다 — 그대로 두면 또 조용히 죽는다.
+  console.log('  ✗ 상대 import를 풀지 못했습니다 — 시험을 돌릴 수 없습니다');
+  for (const [from, spec] of unresolved) console.log(`     ${from} → ${spec}`);
+  process.exit(1);
+}
+
+// 평탄화한 이름으로 복사하면서 지정자를 바꾼다
+for (const [repoPath, name] of collected) {
+  const src = readFileSync(repoPath, 'utf8').replace(SPEC, (whole, q, spec) => {
+    const target = resolveSpec(repoPath, spec);
+    return target ? `'./${collected.get(target)}.js'` : whole;
+  });
+  writeFileSync(join(dir, `${name}.ts`), src);
+}
+
+const ENTRY_PIPELINE = `${flatName(ROOTS[0])}.js`;
+const ENTRY_CALENDAR = `${flatName(ROOTS[1])}.js`;
 
 console.log('통합 테스트: DB → Calendar → 5v5 → Veto → Risk Manager\n');
 
+// 타입 에러 **개수**로는 실패시키지 않는다(저장소가 기준선을 안고 있다).
+// 그러나 **emit이 안 된 것**은 실패다 — 예전에는 그것을 삼켜서,
+// 컴파일이 안 된 사실이 `Cannot find module`이라는 엉뚱한 모양으로만
+// 드러났다. 무엇이 왜 안 됐는지 여기서 적는다.
+let tscOut = '';
 try {
-  execSync(`cd ${dir} && npx tsc *.ts --module commonjs --target es2020 --skipLibCheck --lib es2020,dom 2>&1 | grep -c "error TS" || true`,
+  tscOut = execSync(
+    `cd ${dir} && npx tsc *.ts --module commonjs --target es2020 --skipLibCheck --lib es2020,dom 2>&1 || true`,
     { encoding: 'utf8' });
-} catch {}
+} catch (e) { tscOut = String(e?.stdout ?? e?.message ?? e); }
 
-const { runTradingPipeline, describePipeline } = await import(join(dir, 'tradingPipeline.js'));
-const { clearCalendarCache } = await import(join(dir, 'econCalendar.js'));
+const notEmitted = [...collected.values()].filter((n) => !existsSync(join(dir, `${n}.js`)));
+if (notEmitted.length) {
+  console.log(`  ✗ 컴파일 산출물이 없습니다 (${notEmitted.length}개) — 시험을 돌릴 수 없습니다`);
+  for (const n of notEmitted) console.log(`     ${n}.js`);
+  for (const line of tscOut.split('\n').filter((l) => l.includes('error TS')).slice(0, 10)) {
+    console.log(`     ${line.trim()}`);
+  }
+  process.exit(1);
+}
+
+const { runTradingPipeline, describePipeline } = await import(join(dir, ENTRY_PIPELINE));
+const { clearCalendarCache } = await import(join(dir, ENTRY_CALENDAR));
 
 // ── 테스트 데이터 ──
 function makeDaily(n, trend, vol, seed) {
@@ -191,7 +232,7 @@ check('승인 경로 존재', anyApproved || r4.stage === 'risk',
 
 // ── ⑦ 외부 신호(웹훅) Veto 게이트 — 우회 불가 증명 ──
 console.log('\n⑦ 외부 신호 Veto 게이트 (웹훅 경로)');
-const { applyVetoToSignal } = await import(join(dir, 'tradingPipeline.js'));
+const { applyVetoToSignal } = await import(join(dir, ENTRY_PIPELINE));
 
 // 캘린더 없음 + 고배율 외부 신호 → 차단되어야 함
 clearCalendarCache();
