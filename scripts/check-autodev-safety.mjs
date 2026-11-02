@@ -61,7 +61,10 @@ if (argv.includes('--self-test')) {
     } catch (e) { return { code: e.status ?? 1, out: `${e.stdout || ''}${e.stderr || ''}` }; }
   };
   let fails = 0;
+  // 수를 손으로 적으면 시험을 더할 때 또 어긋난다 — 센 것을 쓴다.
+  let total = 0;
   const want = (name, cond, got) => {
+    total += 1;
     if (cond) console.log(`  ✓ ${name}`);
     else { console.error(`  ✗ ${name} — ${got}`); fails += 1; }
   };
@@ -92,12 +95,63 @@ if (argv.includes('--self-test')) {
     const committed = run();
     want('커밋하면 다시 판정한다', committed.code === 0,
       `exit=${committed.code} ${committed.out.trim()}`);
+
+    // ── 비교 지점이 공통 조상인가 ──
+    //
+    // 브랜치가 base보다 뒤처지면, base **끝점**과 비교하는 순간 main이
+    // 늘린 닻이 브랜치가 지운 것으로 보인다. #561에서 실제로 그랬다:
+    // 그 체인은 main보다 104 커밋 뒤였고, 닻을 하나도 지우지 않았는데
+    // `NO_FIXED_SL 259 → 249`처럼 **거짓 고발**이 세 건 나왔다.
+    //
+    // 그래서 뒤처진 브랜치를 실제로 만들어 돌려 본다.
+    const runBase = (base) => {
+      try {
+        const out = execFileSync(process.execPath,
+          [self, '--base', base, '--mode', 'trading'],
+          { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+        return { code: 0, out };
+      } catch (e) { return { code: e.status ?? 1, out: `${e.stdout || ''}${e.stderr || ''}` }; }
+    };
+    const GUARD = 'guard.ts';
+    const anchors = (n) => Array.from({ length: n }, () => 'reduceOnly').join('\n') + '\n';
+
+    g('checkout', '-q', '-b', 'trunk');
+    writeFileSync(join(dir, GUARD), anchors(3));
+    g('add', '-A'); g('commit', '-q', '-m', 'guards');
+    // 브랜치는 여기서 갈라진다 (= 공통 조상)
+    g('checkout', '-q', '-b', 'work');
+    writeFileSync(join(dir, 'note.ts'), 'export const x = 1;\n');
+    g('add', '-A'); g('commit', '-q', '-m', 'work: 무해한 변경');
+    // trunk 가 **닻을 늘린다** — 브랜치는 이 커밋을 갖고 있지 않다
+    g('checkout', '-q', 'trunk');
+    writeFileSync(join(dir, GUARD), anchors(5));
+    g('add', '-A'); g('commit', '-q', '-m', 'trunk: 닻 추가');
+    g('checkout', '-q', 'work');
+
+    const behind = runBase('trunk');
+    want('뒤처진 브랜치를 닻 제거로 고발하지 않는다 (공통 조상 기준)',
+      behind.code === 0 && !/안전 닻이 줄었/.test(behind.out),
+      `exit=${behind.code} ${behind.out.trim()}`);
+
+    // 같은 상황에서 **진짜로** 지우면 그대로 걸려야 한다 — 약화가 아니다.
+    writeFileSync(join(dir, GUARD), anchors(2));
+    g('add', '-A'); g('commit', '-q', '-m', 'work: 닻 진짜 제거');
+    const removed = runBase('trunk');
+    want('뒤처진 브랜치가 **진짜** 지운 닻은 잡는다',
+      removed.code === 1 && /안전 닻이 줄었/.test(removed.out),
+      `exit=${removed.code} ${removed.out.trim()}`);
+
+    const noBase = runBase('no/such/ref');
+    want('공통 조상을 못 구하면 판정하지 않는다',
+      noBase.code === 1 && /공통 조상/.test(noBase.out),
+      `exit=${noBase.code} ${noBase.out.trim()}`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
   console.log(fails === 0
-    ? '✅ 울타리 자기 점검 4/4 — 커밋되지 않은 변경을 통과로 읽지 않습니다'
-    : `❌ 울타리 자기 점검 실패 ${fails}건`);
+    ? `✅ 울타리 자기 점검 ${total}/${total} — 커밋되지 않은 변경을 통과로 `
+      + '읽지 않고, 비교 지점을 공통 조상으로 잡습니다'
+    : `❌ 울타리 자기 점검 실패 ${fails}/${total}건`);
   process.exit(fails ? 1 : 0);
 }
 
@@ -135,6 +189,39 @@ if (dirty.trim()) {
 }
 
 // ── 바뀐 파일 목록 ──
+// ── 비교 지점은 **공통 조상**이다 ──
+//
+// 바뀐 파일 목록은 `${BASE}...HEAD`(세 점)로 구한다 — 세 점은 **공통
+// 조상 기준** 차이다. 그런데 내용 비교(검사기 단정 수 · 안전 닻 수)는
+// `${BASE}`의 **끝점**에서 읽고 있었다. 같은 판단이 두 기준을 쓰면
+// 브랜치가 base보다 뒤처진 순간 둘이 어긋난다.
+//
+// 실측(#561, 2026-11-02): 그 체인은 main보다 **104 커밋 뒤**였고,
+// `--base origin/main`으로 돌리면 이렇게 나왔다:
+//
+//     ❌ 안전 닻이 줄었습니다: `NO_FIXED_SL` 259 → 249건
+//     ❌ 안전 닻이 줄었습니다: `reduceOnly` 444 → 438건
+//     ❌ 안전 닻이 줄었습니다: `closePosition` 138 → 127건
+//
+// **그 브랜치는 닻을 하나도 지우지 않았다.** 자기 base와 비교하면
+// 145=145 · 377=377 · 112=112로 같았고, 줄어 보인 것은 **main이 그
+// 104 커밋에서 닻을 늘렸기** 때문이다. 즉 울타리가 **하지 않은 일로
+// 브랜치를 고발**하고 있었다 — 그리고 "안전장치를 지웠다"는 고발은
+// 이 저장소에서 가장 비싼 거짓 경보다.
+//
+// 그래서 내용도 **공통 조상에서** 읽는다. 브랜치가 실제로 지운 것은
+// 그대로 걸린다 — 시작점이 공통 조상이기 때문이다.
+const MERGE_BASE = (() => {
+  const out = git('merge-base', BASE, 'HEAD');
+  return out == null ? null : out.trim();
+})();
+if (!MERGE_BASE) {
+  // 공통 조상을 모르면 무엇을 기준으로 비교해야 하는지 모른다.
+  err(`기준(${BASE})과의 공통 조상을 찾지 못했습니다 — `
+    + '비교 지점을 모르는 채로 통과시키지 않습니다');
+  process.exit(1);
+}
+
 const nameStatus = git('diff', '--name-status', `${BASE}...HEAD`);
 if (nameStatus == null) {
   err(`기준(${BASE})과 비교하지 못했습니다 — 비교하지 못한 것을 통과로 보지 않습니다`);
@@ -194,7 +281,7 @@ for (const f of changed) {
     err(`검사기를 지웠습니다: ${f.path} — 막는 것을 없애서 통과시키지 않습니다`);
     continue;
   }
-  const before = git('show', `${BASE}:${f.path}`);
+  const before = git('show', `${MERGE_BASE}:${f.path}`);
   const after = git('show', `HEAD:${f.path}`);
   if (before == null || after == null) continue;
   // **`err(`만 세면 공허하다.** 이 저장소의 검사기는 보고 방식이
@@ -259,7 +346,7 @@ function anchorCounts(ref) {
   // 소스 파일이 하나도 안 바뀌었으면 셀 필요가 없다 — 느린 작업이다.
   const touchedSource = changed.some((f) => /\.(ts|tsx|mjs)$/.test(f.path));
   if (touchedSource) {
-    const before = anchorCounts(BASE);
+    const before = anchorCounts(MERGE_BASE);
     const after = anchorCounts('HEAD');
     if (!before || !after) {
       err('안전 닻을 세지 못했습니다 — 세지 못한 것을 통과로 보지 않습니다');
