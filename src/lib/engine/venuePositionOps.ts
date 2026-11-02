@@ -483,6 +483,28 @@ export function presentIdsOf(rows: any[]): string[] {
   return (Array.isArray(rows) ? rows : []).map(orderIdOf).filter(Boolean);
 }
 
+/**
+ * 재조회한 목록을 보고 **다시 취소를 보낼 번호**를 고른다.
+ *
+ * 규칙이 둘뿐이다:
+ *   · 목록을 **못 읽었으면**(null) 아무것도 빼지 않는다 — 지워졌는지
+ *     모르는 것을 지워진 것으로 다루면 그 주문이 거래소에 남는다.
+ *   · 읽었으면 **읽힌 번호에 있는 것만** 남긴다. 번호를 못 읽은 줄은
+ *     "번호가 없는 줄"이고, 그 줄이 요청한 주문인지는 여기서 알 수 없다 —
+ *     그 판정은 `cancelLedger`가 한다.
+ *
+ * **이 함수가 정본이다.** 예전에는 이 두 줄이 `cancelExact` 안에만 있어서
+ * 시험이 같은 분기를 **다시 써야** 했고, 그러면 제품만 퇴행했을 때 시험이
+ * 잡지 못한다 — `CLAUDE.md`의 상습 고장 ②. 이제 제품과 시험이 같은
+ * 함수를 쓴다.
+ */
+export function pendingAfterReadback(pending: string[], leftover: any[] | null): string[] {
+  const want = (Array.isArray(pending) ? pending : []).map(v => String(v ?? '').trim()).filter(Boolean);
+  if (!Array.isArray(leftover)) return want;      // 못 읽었다 — 빼지 않는다
+  const present = presentIdsOf(leftover);
+  return want.filter(id => present.includes(id));
+}
+
 export async function cancelExact(
   c: VenueCreds, symbol: string, ids: string[],
   opts: { attempts?: number } = {},
@@ -527,8 +549,7 @@ export async function cancelExact(
     // **여기가 핵심이다.** 요청 결과가 아니라 목록을 다시 읽어 확인한다.
     leftover = await readProtectiveOrders(c, symbol);
     if (leftover == null) break;   // 못 읽었다 — 더 지워도 확인할 수 없다
-    const present = presentIdsOf(leftover);
-    pending = pending.filter(id => present.includes(id));
+    pending = pendingAfterReadback(pending, leftover);
   }
 
   return { attempts: [...record.values()], leftover, rounds };

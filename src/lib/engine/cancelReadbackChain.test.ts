@@ -25,7 +25,7 @@
 // 제품의 것 그대로다(복제 없음).
 
 import { test, eq, assert } from '../../test/harness';
-import { presentIdsOf } from './venuePositionOps';
+import { presentIdsOf, pendingAfterReadback } from './venuePositionOps';
 import { cancelLedger, type CancelAttempt } from './protectionLedger';
 
 /** 안전 정수 범위를 넘은 번호 — JSON 숫자로 읽히면 반올림된다 */
@@ -35,14 +35,16 @@ const A = (id: string, over: Partial<CancelAttempt> = {}): CancelAttempt =>
   ({ id, requested: true, httpOk: true, ...over });
 
 /**
- * `cancelExact`가 재조회 뒤에 하는 계산을 **같은 순서로** 합성한다.
+ * `cancelExact`가 재조회 뒤에 하는 계산.
  *
- * 반환하는 것은 그 함수가 호출부에 주는 것과 같은 모양이다 —
- * `pending`(다시 보낼 번호)과 `leftover`(마지막으로 읽은 목록).
+ * **제품과 같은 함수를 쓴다.** 처음에는 `pending` 분기를 이 파일에 다시
+ * 썼는데, 그러면 제품 쪽 분기만 퇴행했을 때 이 시험이 잡지 못한다 —
+ * 검수가 그 점을 지적했고 맞는 지적이다. 그래서 그 두 줄을 제품의
+ * `pendingAfterReadback`으로 꺼내고 양쪽이 그것을 쓴다.
  */
 function readbackRound(i: { ids: string[]; leftover: any[] | null }) {
   const present = Array.isArray(i.leftover) ? presentIdsOf(i.leftover) : null;
-  const pending = present == null ? [...i.ids] : i.ids.filter(id => present.includes(id));
+  const pending = pendingAfterReadback(i.ids, i.leftover);   // ← 제품 함수
   return { present, pending, leftover: i.leftover };
 }
 
@@ -92,6 +94,38 @@ export function runCancelReadbackChainTests() {
     eq(c.pending.join(','), '77', '아직 남아 있는데 재시도 목록에서 뺐습니다');
     eq(c.ledger.ok, false);
     eq(c.ledger.code, 'STILL_PRESENT');
+  });
+
+  test('★ 목록을 못 읽으면 재시도 목록에서 아무것도 빼지 않는다 — 제품 함수로 확인', () => {
+    // **이 시험이 제품의 분기를 직접 본다.** 시험이 같은 분기를 다시 쓰고
+    // 있으면 제품만 퇴행했을 때 못 잡는다(검수 지적).
+    eq(pendingAfterReadback(['77', '88'], null).join(','), '77,88');
+    eq(pendingAfterReadback(['77', '88'], undefined as any).join(','), '77,88');
+  });
+
+  test('★ 번호를 못 읽은 줄은 "남아 있는 번호"가 아니다 — 제품 함수로 확인', () => {
+    eq(pendingAfterReadback(['77'], [{ algoId: '999' }]).length, 0);
+    eq(pendingAfterReadback(['77'], [{ id: UNSAFE }]).length, 0);
+    eq(pendingAfterReadback(['77'], [{ id: '77' }]).join(','), '77');
+  });
+
+  test('★★ 위조된 번호가 요청 번호와 같아지는 경우 — 제품 함수로 확인', () => {
+    // **이 경우를 빼 두면 위조가 보이지 않는다.** `String(9007199254740993)`은
+    // '9007199254740992'이고, 그 값이 요청한 번호와 같아지는 날에만
+    // "남아 있는 주문"으로 세어진다. 돌연변이로 확인했다: 이 시험이 없으면
+    // `presentIdsOf`를 다시 `String(...)`으로 되돌려도 7314개가 전부 통과한다.
+    const forged = String(UNSAFE);                 // '9007199254740992'
+    eq(pendingAfterReadback([forged], [{ id: UNSAFE }]).length, 0,
+       '위조된 번호를 "거래소에 남아 있다"로 셌습니다 — 그 주문은 그 번호가 아닙니다');
+    // 같은 줄을 장부가 보면 UNKNOWN이다 — 둘이 같은 말을 해야 한다.
+    const l = chain({ ids: [forged], leftover: [{ id: UNSAFE }] });
+    eq(l.ledger.code, 'UNKNOWN');
+  });
+
+  test('★ 빈 번호·공백은 재시도 대상이 아니다 — 제품 함수로 확인', () => {
+    eq(pendingAfterReadback(['', '  ', '77'], [{ id: '77' }]).join(','), '77');
+    eq(pendingAfterReadback([] as any, [{ id: '77' }]).length, 0);
+    eq(pendingAfterReadback(null as any, null).length, 0);
   });
 
   test('★ 모든 줄의 번호를 읽었고 요청 번호가 없을 때만 CLEAR다', () => {
