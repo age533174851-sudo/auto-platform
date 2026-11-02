@@ -16,9 +16,20 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-const KEYS = ['tests', 'pass', 'fail', 'skipped', 'cancelled'];
-/** 합을 맞출 때 쓰는 칸. `todo`는 실패가 아니지만 **합에는 들어간다** */
-const SUM_KEYS = ['pass', 'fail', 'skipped', 'cancelled', 'todo'];
+/**
+ * 반드시 읽어야 하는 칸. **`todo`도 여기 있다.**
+ *
+ * `{ todo: true }`로 표시된 시험은 **본문에서 던져도** 실패로 세지 않고
+ * `node --test`는 종료 코드 0을 준다. 실측(Node v22.22.0):
+ *
+ *     # tests 2 · # pass 1 · # fail 0 · # skipped 0 · # cancelled 0 · # todo 1
+ *     node --test 종료코드=0
+ *
+ * 그 묶음은 "PG 계약을 검증했다"의 증거가 아니다 — 한 건은 **아직 안
+ * 만든 시험**이다. 그리고 `# todo`를 읽지 않으면 그 사실이 화면에
+ * 아예 나타나지 않는다. 못 읽은 것을 0으로 읽지 않는다.
+ */
+const KEYS = ['tests', 'pass', 'fail', 'skipped', 'cancelled', 'todo'];
 
 /**
  * **루트 요약만** 읽는다.
@@ -82,6 +93,15 @@ export function verdictOf(tap) {
   if (counts.tests <= 0) return { ok: false, counts, reason: `tests ${counts.tests} — 하나도 돌지 않았습니다` };
   if (counts.fail !== 0) return { ok: false, counts, reason: `fail ${counts.fail} — 실패가 있습니다` };
   if (counts.cancelled !== 0) return { ok: false, counts, reason: `cancelled ${counts.cancelled} — 취소는 결과가 아닙니다` };
+  if (counts.todo !== 0) {
+    // **표시만 해 두고 안 만든 시험은 증거가 아니다.** 던져도 통과로
+    // 세어지므로 종료 코드로는 구분되지 않는다. 별도 모드를 두지 않는다 —
+    // 이 판정의 쓰임은 "실제로 다 돌았는가" 하나뿐이고, 켜고 끄는 손잡이를
+    // 만들면 언젠가 꺼진 채로 돈다.
+    return { ok: false, counts,
+      reason: `todo ${counts.todo} — 아직 만들지 않은 시험이 있습니다.`
+        + ' 표시된 시험은 본문에서 던져도 실패로 세어지지 않으므로 증거로 쓰지 않습니다' };
+  }
   if (counts.skipped !== 0) {
     return { ok: false, counts,
       reason: `skipped ${counts.skipped} — 건너뛴 시험이 있습니다.`
@@ -91,16 +111,15 @@ export function verdictOf(tap) {
 
   // **합이 맞아야 그 요약이 이 실행의 것이다.** 맞지 않으면 섞인
   // 출력이거나 잘린 출력이고, 어느 쪽이든 믿을 수 없다.
-  const todo = root.todo == null ? 0 : root.todo;
-  const sum = counts.pass + counts.fail + counts.skipped + counts.cancelled + todo;
+  const sum = counts.pass + counts.fail + counts.skipped + counts.cancelled + counts.todo;
   if (sum !== counts.tests) {
     return { ok: false, counts,
       reason: `요약의 합이 맞지 않습니다 — tests ${counts.tests}인데`
         + ` pass ${counts.pass} + fail ${counts.fail} + skipped ${counts.skipped}`
-        + ` + cancelled ${counts.cancelled} + todo ${todo} = ${sum}` };
+        + ` + cancelled ${counts.cancelled} + todo ${counts.todo} = ${sum}` };
   }
   return { ok: true, counts,
-    reason: `tests ${counts.tests} · pass ${counts.pass} · fail 0 · skipped 0 · cancelled 0` };
+    reason: `tests ${counts.tests} · pass ${counts.pass} · fail 0 · skipped 0 · cancelled 0 · todo 0` };
 }
 
 // ── CLI ──

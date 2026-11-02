@@ -160,8 +160,11 @@ test('정상 단일 루트 7/7은 그대로 통과한다', () => {
   assert.equal(v.counts.tests, 7);
 });
 
-test('todo가 있는 묶음도 합이 맞으면 통과한다', () => {
-  // `# todo`는 실패가 아니지만 **합에 들어간다.** 빼고 세면 모순으로 보인다.
+test('★★ todo가 하나라도 있으면 통과가 아니다 — 실제 Node TAP으로 재현했다', () => {
+  // **이 시험은 내가 반대로 적어 뒀던 자리다.** 처음에는 `todo 1`을
+  // 통과로 기대했다. 그런데 `{ todo: true }` 시험은 본문에서 던져도
+  // 실패로 세어지지 않고 `node --test`는 종료 코드 0을 준다 —
+  // 실측(Node v22.22.0)으로 확인했다. "다 돌았다"의 증거가 아니다.
   const v = verdictOf(`1..8
 # tests 8
 # suites 0
@@ -170,5 +173,33 @@ test('todo가 있는 묶음도 합이 맞으면 통과한다', () => {
 # cancelled 0
 # skipped 0
 # todo 1`);
-  assert.equal(v.ok, true, v.reason);
+  assert.equal(v.ok, false, 'todo를 통과로 읽었습니다');
+  assert.match(v.reason, /todo/);
+});
+
+test('★★ 실제 Node TAP(todo 1개가 던지는 시험)을 거부한다', () => {
+  // `node --test`가 실제로 뱉은 꼬리다. 종료 코드는 0이었다.
+  const v = verdictOf(`1..2
+# tests 2
+# suites 0
+# pass 1
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 1
+# duration_ms 316.220676`);
+  assert.equal(v.ok, false);
+  assert.match(v.reason, /todo/);
+});
+
+test('★ # todo 줄이 없으면 통과가 아니다 — 못 읽은 것을 0으로 읽지 않는다', () => {
+  const v = verdictOf(`1..7
+# tests 7
+# suites 0
+# pass 7
+# fail 0
+# cancelled 0
+# skipped 0`);
+  assert.equal(v.ok, false);
+  assert.match(v.reason, /todo/);
 });
