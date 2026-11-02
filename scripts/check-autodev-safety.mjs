@@ -36,10 +36,103 @@ const MODE = argOf('--mode', 'dev') === 'trading' ? 'trading' : 'dev';
 let bad = 0;
 const err = (m) => { console.error(`❌ ${m}`); console.error(`::error::${m}`); bad += 1; };
 
+// ── --self-test ──
+//
+// **이 검사기가 "아무것도 보지 못한 채 ✅"를 주지 않는지 자기가 확인한다.**
+//
+// 2026-11-02에 실제로 그랬다. 무인 회차가 변경을 **커밋하기 전에** 이
+// 검사기를 돌렸고, `BASE...HEAD`는 커밋된 상태만 보기 때문에 그 변경을
+// 본 적이 없는 상태로 통과(✅)를 적었다. 세 PR에서 같은 일이 났다.
+//
+// 그래서 임시 저장소를 만들어 **깨끗한 트리**와 **더러운 트리**에서
+// 각각 이 파일을 실제로 돌려 본다. 정적 추론이 아니다.
+if (argv.includes('--self-test')) {
+  const { mkdtempSync, writeFileSync, appendFileSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const self = new URL(import.meta.url).pathname;
+  const dir = mkdtempSync(join(tmpdir(), 'autodev-fence-'));
+  const g = (...a) => execFileSync('git', a, { cwd: dir, encoding: 'utf8' });
+  const run = () => {
+    try {
+      const out = execFileSync(process.execPath, [self, '--base', 'HEAD', '--mode', 'trading'],
+        { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      return { code: 0, out };
+    } catch (e) { return { code: e.status ?? 1, out: `${e.stdout || ''}${e.stderr || ''}` }; }
+  };
+  let fails = 0;
+  const want = (name, cond, got) => {
+    if (cond) console.log(`  ✓ ${name}`);
+    else { console.error(`  ✗ ${name} — ${got}`); fails += 1; }
+  };
+  try {
+    g('init', '-q');
+    g('config', 'user.email', 'selftest@local');
+    g('config', 'user.name', 'selftest');
+    writeFileSync(join(dir, 'a.txt'), 'one\n');
+    g('add', '-A'); g('commit', '-q', '-m', 'base');
+
+    const clean = run();
+    want('깨끗한 트리 + 변경 없음 → 통과', clean.code === 0, `exit=${clean.code} ${clean.out.trim()}`);
+
+    writeFileSync(join(dir, 'b.txt'), 'untracked\n');
+    const untracked = run();
+    want('추적되지 않은 새 파일이 있으면 판정하지 않는다',
+      untracked.code === 1 && /커밋되지 않은/.test(untracked.out),
+      `exit=${untracked.code} ${untracked.out.trim()}`);
+    rmSync(join(dir, 'b.txt'));
+
+    appendFileSync(join(dir, 'a.txt'), 'two\n');
+    const modified = run();
+    want('추적 파일이 수정돼 있으면 판정하지 않는다',
+      modified.code === 1 && /커밋되지 않은/.test(modified.out),
+      `exit=${modified.code} ${modified.out.trim()}`);
+
+    g('add', '-A'); g('commit', '-q', '-m', 'second');
+    const committed = run();
+    want('커밋하면 다시 판정한다', committed.code === 0,
+      `exit=${committed.code} ${committed.out.trim()}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  console.log(fails === 0
+    ? '✅ 울타리 자기 점검 4/4 — 커밋되지 않은 변경을 통과로 읽지 않습니다'
+    : `❌ 울타리 자기 점검 실패 ${fails}건`);
+  process.exit(fails ? 1 : 0);
+}
+
 const git = (...args) => {
   try { return execFileSync('git', args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }); }
   catch { return null; }
 };
+
+// ── ⓪ 커밋되지 않은 변경이 있으면 판정하지 않는다 ──
+//
+// 이 검사는 **커밋된 상태만** 본다(아래 `BASE...HEAD`). 그래서 작업 트리에
+// 아직 커밋하지 않은 변경이 있으면 그 변경을 **본 적이 없는 채로** ✅를 준다.
+//
+// 2026-11-02에 실제로 그렇게 통과시켰다. 무인 회차가 커밋 전에 이 검사기를
+// 돌리고 "검사기 81/0"이라고 적었는데, 커밋된 HEAD로 다시 재면 마이그레이션
+// 규칙(④)에 걸리는 변경이 들어 있었다. 세 PR에서 같은 일이 났다.
+//
+// 돌지 않은 검사를 통과로 읽는 것이 이 저장소에서 가장 비싼 실패이므로,
+// **판정할 수 없는 상태를 통과로 적지 않는다.** 깨끗한 트리에서는 아무
+// 영향이 없다(무인 회차 워크플로는 커밋 뒤에 이 단계를 돈다).
+const dirty = git('status', '--porcelain');
+if (dirty == null) {
+  err('작업 트리 상태를 읽지 못했습니다 — 읽지 못한 것을 통과로 보지 않습니다');
+  process.exit(1);
+}
+if (dirty.trim()) {
+  // 파일 **이름만** 적는다. 내용은 적지 않는다.
+  const names = dirty.split('\n').filter(Boolean).map((l) => l.slice(3)).slice(0, 20);
+  err('커밋되지 않은 변경이 있어 판정하지 않습니다 — 이 검사는 커밋된 상태만 봅니다. '
+    + '커밋한 뒤 다시 돌리세요');
+  for (const n of names) console.error(`     ${n}`);
+  const total = dirty.split('\n').filter(Boolean).length;
+  if (total > names.length) console.error(`     … 그리고 ${total - names.length}개 더`);
+  process.exit(1);
+}
 
 // ── 바뀐 파일 목록 ──
 const nameStatus = git('diff', '--name-status', `${BASE}...HEAD`);
