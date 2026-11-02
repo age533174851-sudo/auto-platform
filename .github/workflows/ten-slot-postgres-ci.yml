@@ -9,6 +9,10 @@ on:
     paths:
       - 'scripts/ten-slot-pg.mjs'
       - 'scripts/ten-slot-pg.test.mjs'
+      # Also trigger on the app/DB contract and the canonical TAP verifier.
+      - 'scripts/ten-slot-lifecycle-pg.test.mjs'
+      - 'scripts/assert-tap-ran.mjs'
+      - 'src/lib/engine/tenSlotLifecycle.ts'
       - 'supabase/migrations/097_ten_slot_atomic_claim.sql'
       - 'supabase/migrations/098_ten_slot_apply_event.sql'
       - '.github/workflows/ten-slot-postgres-ci.yml'
@@ -17,6 +21,10 @@ on:
     paths:
       - 'scripts/ten-slot-pg.mjs'
       - 'scripts/ten-slot-pg.test.mjs'
+      # Also trigger on the app/DB contract and the canonical TAP verifier.
+      - 'scripts/ten-slot-lifecycle-pg.test.mjs'
+      - 'scripts/assert-tap-ran.mjs'
+      - 'src/lib/engine/tenSlotLifecycle.ts'
       - 'supabase/migrations/097_ten_slot_atomic_claim.sql'
       - 'supabase/migrations/098_ten_slot_apply_event.sql'
       - '.github/workflows/ten-slot-postgres-ci.yml'
@@ -66,6 +74,27 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: 'npm'
+
+      # The lifecycle test compiles the actual TypeScript engine module.
+      # On fresh runners missing dependencies must be an explicit RED, not a skip.
+      - name: Install exact Node dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          test -f node_modules/typescript/bin/tsc
+
+      # These files are supplied by the #557/#559 Draft stack. Until they
+      # are integrated into this HEAD, proof MUST fail rather than go green.
+      - name: Require both PostgreSQL proof suites and the TAP verifier
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f scripts/ten-slot-pg.test.mjs
+          test -f scripts/ten-slot-lifecycle-pg.test.mjs
+          test -f scripts/assert-tap-ran.mjs
+          test -f src/lib/engine/tenSlotLifecycle.ts
 
       - name: PostgreSQL client
         shell: bash
@@ -91,18 +120,31 @@ jobs:
 
           # Node's test runner exits zero for fully skipped suites; that is
           # NOT evidence of PostgreSQL correctness. Require work actually ran.
-          grep -Eq '^# tests [1-9][0-9]*$' ten-slot-pg.tap
-          grep -Eq '^# pass [1-9][0-9]*$' ten-slot-pg.tap
-          grep -Eq '^# fail 0$' ten-slot-pg.tap
-          grep -Eq '^# skipped 0$' ten-slot-pg.tap
-          grep -Eq '^# cancelled 0$' ten-slot-pg.tap
-          echo 'PG_PROOF: PASS (nonzero tests, fail 0, skipped 0, cancelled 0)'
+          # Canonical verifier also rejects todo, duplicate/missing root TAP
+          # counters, malformed sums and entirely skipped test bundles.
+          node scripts/assert-tap-ran.mjs ten-slot-pg.tap '10-slot atomic PostgreSQL proof'
+
+      # Separate TAP files and separate validators: one successful bundle
+      # cannot hide a skipped or failed lifecycle suite.
+      - name: App-selected events match PostgreSQL 098 lifecycle transitions
+        shell: bash
+        env:
+          PG_SERVICE_ID: ${{ job.services.postgres.id }}
+        run: |
+          set -euo pipefail
+          echo "TARGET_SHA: $(git rev-parse HEAD)"
+          test -n "$PG_SERVICE_ID"
+          node --test scripts/ten-slot-lifecycle-pg.test.mjs | tee ten-slot-lifecycle-pg.tap
+          node scripts/assert-tap-ran.mjs ten-slot-lifecycle-pg.tap '098 lifecycle PostgreSQL proof'
+          echo 'PG_PROOF: PASS (both independently checked, tests>0, fail 0, skipped 0, cancelled 0, todo 0)'
 
       - name: Retain PostgreSQL evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ten-slot-postgres-proof
-          path: ten-slot-pg.tap
+          path: |
+            ten-slot-pg.tap
+            ten-slot-lifecycle-pg.tap
           if-no-files-found: ignore
           retention-days: 7
