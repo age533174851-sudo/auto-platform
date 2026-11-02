@@ -21,6 +21,8 @@
 // 사용자가 고른 적 없는 자리에 STOP_MARKET이 걸리고, 100배에서 그 자리는
 // 청산선 근처다. 그래서 값(`stop_loss`)이 아니라 **정책**을 먼저 본다.
 
+import { positionAmtEvidence } from '../exchanges/positionRiskRead';
+
 export type StopReattachCode =
   /** 걸어도 된다 */
   | 'ATTACH'
@@ -85,10 +87,13 @@ export function stopReattachVerdict(o: {
  * 는 0이므로 단순 Number(raw) || 0은 위험하다. 조회 실패 시에는
  * 포지션이 없다고 결론 내리지 않고, 보호주문도 임의로 만들지 않는다.
  */
-export function stopPositionQty(raw: unknown): number | null {
-  if (raw == null || typeof raw === 'boolean') return null;
-  if (typeof raw !== 'string' && typeof raw !== 'number') return null;
-  if (typeof raw === 'string' && raw.trim() === '') return null;
-  const qty = Number(raw);
-  return Number.isFinite(qty) ? qty : null;
-}
+/**
+ * **판정은 `exchanges/positionRiskRead`에 있다.** 같은 판단을 두 곳에
+ * 적으면 언젠가 갈린다 — 실제로 갈렸다: 이 함수는 `'bad'`를 null로
+ * 돌려주는데, 그보다 먼저 도는 `shape()`가 이미 그것을 숫자 0으로
+ * 바꿔 놓아서 이 함수가 받는 값은 진짜 0이었다. 그래서 여기서 거르는
+ * 것으로는 아무것도 막지 못했다.
+ *
+ * 이름은 호출부(`orderExecutor`)와 시험이 쓰는 그대로 둔다.
+ */
+export const stopPositionQty = positionAmtEvidence;

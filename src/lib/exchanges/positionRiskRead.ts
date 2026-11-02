@@ -23,6 +23,40 @@
 
 import { monotonicNowMs, monotonicSpanMs } from '../system/monotonicClock';
 
+/**
+ * 포지션 **수량 증거**. 못 읽었으면 null이고 **0이 아니다.**
+ *
+ * 왜 여기 있나
+ * ────────────
+ * 예전에는 `shape()`가 `parseFloat(row.positionAmt ?? '0') || 0`으로 적었다.
+ * `'bad'`·`''`·없음이 **전부 숫자 0**이 되어 나갔다. 같은 함수가
+ * `leverage`에는 *"0은 값이 아니라 '못 받았음'이다"*라고 적어 두고도
+ * 수량만 그렇게 했다.
+ *
+ * 그 0은 아래쪽 어디에서도 되돌릴 수 없다. 손절 복구 경로가
+ * `stopPositionQty()`로 걸러도 소용이 없었다 — 그 함수에 도착한 값은
+ * 이미 **진짜 숫자 0**이다. 그래서 "못 읽었다"가 **확인된 무포지션**으로
+ * 바뀌고, 보호 없는 포지션이 조용히 남았다
+ * (`CLAUDE.md`: UNKNOWN을 0으로 적지 않는다).
+ *
+ * 그래서 판정을 **값이 처음 들어오는 자리**에 둔다. 아래 두 경로(v2·v3)가
+ * 같은 함수를 쓰고, `engine/stopReattach.stopPositionQty`도 이것을 쓴다 —
+ * 같은 판단이 세 곳에 있으면 언젠가 갈린다.
+ */
+export function positionAmtEvidence(raw: unknown): number | null {
+  // 문자열·숫자만 증거로 받는다. `null`·`undefined`·boolean·객체는 전부
+  // 여기서 떨어진다 — 따로 boolean을 적던 줄은 **돌연변이로 확인해 보니
+  // 이 줄과 중복이어서** 지웠다(검출 0건).
+  if (typeof raw !== 'string' && typeof raw !== 'number') return null;
+  // `Number('')`와 `Number('   ')`는 0이다. 빈 칸을 0으로 읽지 않는다.
+  if (typeof raw === 'string' && raw.trim() === '') return null;
+  const qty = Number(raw);
+  return Number.isFinite(qty) ? qty : null;
+}
+
+/** 수량을 못 읽은 행의 거절 이유. 값은 적지 않는다 — 형태만 말한다 */
+const AMT_UNREADABLE = '포지션 수량 증거를 읽지 못했습니다 — 0으로 바꾸지 않습니다';
+
 export interface SymbolPositionRisk {
   symbol: string;
   /** 부호 있는 수량. 0이면 포지션 없음 */
@@ -139,12 +173,18 @@ export async function readPositionRiskWithProvenance(
   const span = monotonicSpanMs;
   const helperT0 = monotonicMs();
 
+  // 수량을 못 읽은 행은 **만들지 않는다.** null을 돌려주면 부르는 쪽이
+  // 기존 `risk: null` + `error` 통로로 보낸다 — 소비처들이 이미
+  // `!rr.risk || rr.risk.positionAmt == null`을 검사하고 있었다(그 분기가
+  // 도달 불가능한 죽은 코드였다).
   const shape = (row: any, extra?: { marginType?: string; leverage?: number | null }) => {
+    const amt = positionAmtEvidence(row?.positionAmt);
+    if (amt === null) return null;
     const liq = parseFloat(row.liquidationPrice ?? '0');
     const lev = extra?.leverage != null ? extra.leverage : parseInt(row.leverage ?? '0', 10);
     return {
       symbol: String(row.symbol ?? sym),
-      positionAmt: parseFloat(row.positionAmt ?? '0') || 0,
+      positionAmt: amt,
       marginType: String(extra?.marginType ?? row.marginType ?? '').toLowerCase(),
       // 0은 값이 아니라 '못 받았음'이다
       leverage: Number.isFinite(lev as any) && Number(lev) > 0 ? Number(lev) : null,
@@ -178,8 +218,12 @@ export async function readPositionRiskWithProvenance(
     const v2T1 = monotonicMs();
     const row = pick(raw);
     if (row && row.marginType != null) {
+      const shaped = shape(row);
+      if (!shaped) {
+        return { risk: null, error: `${AMT_UNREADABLE} (v2)`, provenance: { ...prov } };
+      }
       return {
-        risk: shape(row), error: null,
+        risk: shaped, error: null,
         provenance: {
           ...prov, positionRiskSource: 'V2',
           positionRiskRequestStartedAtMs: v2Started,
@@ -233,8 +277,12 @@ export async function readPositionRiskWithProvenance(
     } catch { /* marginType은 빈 값 → 검사가 '확인 못 함'으로 잡는다 */ }
 
     p3.helperElapsedMs = span(helperT0, monotonicMs());
+    const shaped3 = shape(row, { marginType, leverage });
+    if (!shaped3) {
+      return { risk: null, error: `${AMT_UNREADABLE} (v3)`, provenance: p3 };
+    }
     return {
-      risk: shape(row, { marginType, leverage }),
+      risk: shaped3,
       // 마진 모드를 못 채웠으면 그 사실을 남긴다. 값만 비워 두면 또
       // "왜 확인 못 했지"가 된다.
       error: marginType ? null : `마진 모드를 계정 조회에서 못 찾았습니다 (v2: ${v2Err || '없음'})`,
