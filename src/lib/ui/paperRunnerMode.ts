@@ -69,6 +69,73 @@ export function mayStartTimer(input: { manualOnly?: boolean; on: boolean }): boo
   return !!input.on;
 }
 
+// ──────────────────────────────────────────────────────────────
+// 호출과 결과 판정
+//
+// 전에는 이 둘이 컴포넌트 안에 있어서 **렌더러 없이는 시험할 수 없었다.**
+// 그래서 401·500·`ok:false`·dry-run이 쓰기를 하지 않는지·성공했는데 주문이
+// 없는 회차를 화면이 어떻게 다루는지가 전부 미증명이었다. 값으로 꺼내서
+// 고정 입력으로 시험한다.
+// ──────────────────────────────────────────────────────────────
+
+export interface PaperRunRequest {
+  url: string;
+  init: RequestInit;
+}
+
+/**
+ * 한 사이클 호출을 만든다. **인증이 없으면 아무것도 만들지 않는다**(null) —
+ * 토큰 없이 부르면 서버가 401을 주고, 사용자는 "왜 안 되지"에 답을 못 받는다.
+ *
+ * dry-run은 **GET이고 본문이 없다.** 쓰기 의도가 없다는 것을 모양으로
+ * 드러낸다 — 주석이 아니라 요청이 말하게 한다.
+ */
+export function paperRunRequest(a: {
+  dryRun: boolean;
+  symbol?: string;
+  auth: string | null;
+}): PaperRunRequest | null {
+  const auth = (a.auth ?? '').trim();
+  if (!auth) return null;
+  if (a.dryRun) {
+    const qs = a.symbol ? `?symbols=${encodeURIComponent(a.symbol)}` : '';
+    return { url: `/api/paper/run${qs}`, init: { headers: { Authorization: auth } } };
+  }
+  return {
+    url: '/api/paper/run',
+    init: {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: auth },
+      body: JSON.stringify(a.symbol ? { symbols: a.symbol } : {}),
+    },
+  };
+}
+
+export interface PaperRunOutcome {
+  ok: boolean;
+  /** 장부를 다시 읽어야 하는가 */
+  shouldReload: boolean;
+}
+
+/**
+ * 한 사이클의 결과 판정.
+ *
+ * **성공한 실제 사이클이면 주문이 없어도 다시 읽는다.** 전에는
+ * `closed.length || entered`일 때만 갱신했다. 그런데 진입하지 않은 회차도
+ * 서버 장부에 **판단과 사유**를 남긴다 — 사용자가 버튼을 눌렀는데 화면이
+ * 그대로면 "눌렸나?"가 된다. 30초 폴링은 그 공백을 메우지 못한다(최악 30초).
+ *
+ * dry-run은 **절대 다시 읽지 않는다** — 쓴 것이 없으므로 읽을 것도 없다.
+ */
+export function paperRunOutcome(a: {
+  httpOk: boolean;
+  body: { ok?: boolean } | null;
+  dryRun: boolean;
+}): PaperRunOutcome {
+  const ok = !!a.httpOk && a.body?.ok === true;
+  return { ok, shouldReload: ok && !a.dryRun };
+}
+
 /** 수동 전용 화면에 적는 안내. 문장을 화면마다 새로 짓지 않는다. */
 export const MANUAL_ONLY_NOTE =
   '누를 때마다 한 사이클만 돕니다 — 청산 점검 → 손실 한도 → 진입. '

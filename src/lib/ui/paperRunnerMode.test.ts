@@ -17,7 +17,9 @@
 // 생긴다. 수동 2버튼만 둔다 — 서버 기반 반복은 별도 단계다.
 import { test, eq, assert } from '../../test/harness';
 import { readFileSync, existsSync } from 'node:fs';
-import { paperRunnerControls, mayStartTimer } from './paperRunnerMode';
+import {
+  paperRunnerControls, mayStartTimer, paperRunRequest, paperRunOutcome,
+} from './paperRunnerMode';
 
 const read = (p: string) => (existsSync(p) ? readFileSync(p, 'utf8') : null);
 const RUNNER = 'src/components/terminal/DemoRunner.tsx';
@@ -79,6 +81,69 @@ export function runPaperRunnerModeTests() {
     eq(wide.showCollapseToggle, false);
   });
 
+  // ── 호출 모양 (고정 입력 — 렌더러 없이 시험한다) ──
+
+  test('★ 인증이 없으면 요청을 만들지 않는다', () => {
+    eq(paperRunRequest({ dryRun: false, auth: null }), null);
+    eq(paperRunRequest({ dryRun: false, auth: '' }), null);
+    eq(paperRunRequest({ dryRun: true, auth: '   ' }), null);
+  });
+
+  test('★ dry-run은 GET이고 본문이 없다 — 쓰기 의도가 없음을 모양이 말한다', () => {
+    const r = paperRunRequest({ dryRun: true, auth: 'Bearer t', symbol: 'BTCUSDT' })!;
+    eq(r.init.method, undefined);
+    eq(r.init.body, undefined);
+    assert(r.url.startsWith('/api/paper/run?symbols=BTCUSDT'), r.url);
+    eq((r.init.headers as any).Authorization, 'Bearer t');
+  });
+
+  test('실제 사이클은 POST이고 심볼을 본문에 담는다', () => {
+    const r = paperRunRequest({ dryRun: false, auth: 'Bearer t', symbol: 'ETHUSDT' })!;
+    eq(r.init.method, 'POST');
+    eq(r.url, '/api/paper/run');
+    eq(r.init.body, JSON.stringify({ symbols: 'ETHUSDT' }));
+    eq((r.init.headers as any).Authorization, 'Bearer t');
+  });
+
+  test('심볼이 없으면 빈 본문 — 서버 기본값에 맡긴다', () => {
+    const r = paperRunRequest({ dryRun: false, auth: 'Bearer t' })!;
+    eq(r.init.body, '{}');
+  });
+
+  test('심볼을 URL에 그대로 붙이지 않는다 (인코딩)', () => {
+    const r = paperRunRequest({ dryRun: true, auth: 'Bearer t', symbol: 'A B&C' })!;
+    assert(!/ /.test(r.url) && !/&C/.test(r.url), r.url);
+  });
+
+  // ── 결과 판정 (401 · 500 · ok:false · 갱신 여부) ──
+
+  test('★ 401·500은 성공이 아니고 장부를 다시 읽지 않는다', () => {
+    for (const httpOk of [false]) {
+      const v = paperRunOutcome({ httpOk, body: { ok: false }, dryRun: false });
+      eq(v.ok, false); eq(v.shouldReload, false);
+    }
+    // 본문을 못 읽은 경우(JSON 아님)도 성공이 아니다
+    const nullBody = paperRunOutcome({ httpOk: false, body: null, dryRun: false });
+    eq(nullBody.ok, false); eq(nullBody.shouldReload, false);
+  });
+
+  test('★ HTTP 200인데 본문이 ok:false면 성공으로 적지 않는다', () => {
+    const v = paperRunOutcome({ httpOk: true, body: { ok: false }, dryRun: false });
+    eq(v.ok, false); eq(v.shouldReload, false);
+  });
+
+  test('★ 성공한 실제 사이클은 주문이 없어도 장부를 다시 읽는다', () => {
+    // 진입하지 않은 회차도 서버는 판단과 사유를 남긴다. 눌렀는데 화면이
+    // 그대로면 "눌렸나?"가 된다.
+    const v = paperRunOutcome({ httpOk: true, body: { ok: true }, dryRun: false });
+    eq(v.ok, true); eq(v.shouldReload, true);
+  });
+
+  test('★ dry-run 성공은 절대 다시 읽지 않는다 — 쓴 것이 없다', () => {
+    const v = paperRunOutcome({ httpOk: true, body: { ok: true }, dryRun: true });
+    eq(v.ok, true); eq(v.shouldReload, false);
+  });
+
   // ── 배선 (실제 소스) ──
 
   test('★ 공용 실행 컴포넌트는 터미널 context에 의존하지 않는다', () => {
@@ -101,6 +166,15 @@ export function runPaperRunnerModeTests() {
     const s = src(RUNNER);
     assert(/mayStartTimer/.test(s),
       `${RUNNER}가 mayStartTimer를 거치지 않고 타이머를 돌립니다`);
+  });
+
+  test('★ 호출과 판정을 컴포넌트가 직접 짜지 않는다', () => {
+    const s = src(RUNNER);
+    assert(/paperRunRequest\(/.test(s), `${RUNNER}가 paperRunRequest를 거치지 않습니다`);
+    assert(/paperRunOutcome\(/.test(s), `${RUNNER}가 paperRunOutcome을 거치지 않습니다`);
+    // 예전 조건이 남아 있으면 판정이 두 곳이 된다.
+    assert(!/closed\?\.length\s*\|\|/.test(s),
+      `${RUNNER}에 갱신 조건이 따로 남아 있습니다 — 판정이 두 곳입니다`);
   });
 
   test('★ 모의투자 탭이 공용 실행 컴포넌트를 올린다', () => {

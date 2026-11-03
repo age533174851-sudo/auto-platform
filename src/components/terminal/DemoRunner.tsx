@@ -32,7 +32,9 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { errorTextOf } from '@/lib/http/errorText';
 import { C, FS, NUM, ghostBtn } from './theme';
 // 어느 컨트롤을 보여 줄지·타이머를 돌려도 되는지는 **한 곳**에서 정한다.
-import { paperRunnerControls, mayStartTimer, MANUAL_ONLY_NOTE } from '@/lib/ui/paperRunnerMode';
+import {
+  paperRunnerControls, mayStartTimer, paperRunRequest, paperRunOutcome, MANUAL_ONLY_NOTE,
+} from '@/lib/ui/paperRunnerMode';
 
 const INTERVALS: Array<[number, string]> = [[60, '1분'], [300, '5분'], [900, '15분']];
 
@@ -66,26 +68,22 @@ export function DemoRunner({ auth, dense, symbol, onChanged, manualOnly }: {
   const push = (l: RunLog) => setLogs(prev => [l, ...prev].slice(0, 6));
 
   const run = useCallback(async (dryRun: boolean) => {
-    if (!auth) { push({ at: Date.now(), ok: false, text: '로그인이 필요합니다' }); return; }
+    // 요청 모양과 결과 판정은 `paperRunnerMode`가 정한다 — 렌더러 없이
+    // 401·500·dry-run 무쓰기·갱신 여부를 시험할 수 있어야 한다.
+    const req = paperRunRequest({ dryRun, symbol, auth });
+    if (!req) { push({ at: Date.now(), ok: false, text: '로그인이 필요합니다' }); return; }
     if (running.current) return;
     running.current = true;
     setBusy(true);
     try {
-      const qs = symbol ? `?symbols=${encodeURIComponent(symbol)}` : '';
-      const r = dryRun
-        ? await fetch(`/api/paper/run${qs}`, { headers: { Authorization: auth } })
-        : await fetch('/api/paper/run', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: auth },
-            body: JSON.stringify(symbol ? { symbols: symbol } : {}),
-          });
+      const r = await fetch(req.url, req.init);
       const j = await r.json().catch(() => null);
-      const ok = r.ok && !!j?.ok;
+      const verdict = paperRunOutcome({ httpOk: r.ok, body: j, dryRun });
       push({
-        at: Date.now(), ok, dryRun,
+        at: Date.now(), ok: verdict.ok, dryRun,
         text: errorTextOf(j, `응답 없음 (${r.status})`),
       });
-      if (ok && !dryRun && (j?.closed?.length || j?.entered)) onChanged?.();
+      if (verdict.shouldReload) onChanged?.();
     } catch (e: any) {
       // 네트워크가 끊긴 것을 '아무 일 없음'으로 그리지 않는다.
       push({ at: Date.now(), ok: false, dryRun, text: `호출 실패 — ${e?.message || e}` });
