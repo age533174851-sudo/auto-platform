@@ -36,6 +36,32 @@ const LANES = [
 let bad = 0;
 const err = (m) => { console.error(`❌ ${m}`); console.error(`::error::${m}`); bad += 1; };
 
+/**
+ * 회차가 **작업물을 내보내는** 데 필요한 최소 도구.
+ *
+ * 하나라도 없으면 그 회차는 읽고·시험하고·보고만 할 수 있다.
+ * 이름과 이유를 함께 둔다 — 실패 메시지가 "무엇을 왜"로 읽혀야 한다.
+ */
+const DELIVERY_TOOLS = [
+  ['Bash(git switch -c:*)', '새 브랜치를 만들 수 없습니다'],
+  ['Bash(git add:*)', '변경을 담을 수 없습니다'],
+  ['Bash(git commit:*)', '커밋할 수 없습니다 — 작업물이 러너에서 사라집니다'],
+  ['Bash(git push -u origin:*)', '브랜치를 올릴 수 없습니다'],
+  ['Bash(gh pr create:*)', 'Draft PR을 열 수 없습니다 — 회차 지시가 성립하지 않습니다'],
+];
+
+/**
+ * 통로를 열어도 **계속 막혀 있어야 하는** 모양.
+ *
+ * `-u origin` 접두어를 허용하면 `git push -u origin main`이 그 접두어에
+ * 걸린다. 그래서 그 한 줄을 따로 막고, 막혔는지 센다.
+ */
+const MUST_STAY_DENIED = [
+  'git push origin main',
+  'git push -u origin main',
+  'git push --force',
+];
+
 // ── ⓞ 이 검사기의 판단이 아직 살아 있는가 ──
 //
 // **음성 시험을 `scripts/test-*.mjs`에만 두면 CI에서 한 번도 돌지 않는다.**
@@ -311,6 +337,54 @@ if (lane.mode === 'trading') {
       if (allow.includes(tooWide)) {
         err(`${WF}: 허용 목록이 너무 넓습니다 (\`${tooWide}\`) — `
           + '그 하나로 금지한 명령까지 전부 열립니다');
+      }
+    }
+  }
+}
+
+// ── ⑫a 작업물을 내보낼 통로가 있는가 (열어도 위험한 push는 계속 막는가) ──
+//
+// **울타리가 너무 좁으면 회차는 아무것도 못 한다.**
+//
+// 인증을 고친 뒤 두 갈래가 실제로 성공했는데(2026-11-03 Dev·Trading),
+// 둘 다 `✅ 변경 없음`으로 끝났다. 그때 허용 목록에는
+// `git switch -c`·`git add`·`git commit`·`git push`·`gh pr create`가
+// **하나도 없었다.** 즉 고칠 것을 찾아도 올릴 방법이 없었고, 어떤 회차든
+// 결과는 같았다 — "고칠 것이 없었다"와 "올릴 수 없었다"가 구분되지 않는다.
+//
+// 회차 지시는 "새 브랜치 + Draft PR"을 전제한다. 그 수단을 허용 목록에
+// 두지 않으면 지시가 성립하지 않는다. 그래서 **통로의 존재를 센다.**
+//
+// 통로를 열면서 **울타리는 한 칸도 풀지 않는다**: `main`으로 직접 밀거나
+// 역사를 다시 쓰는 모양은 계속 막혀 있어야 한다. `-u origin` 접두어를
+// 허용하면 `git push -u origin main`이 그 접두어에 걸리므로, 그 한 줄도
+// 금지 목록에 있어야 한다 — **구멍을 열면서 센다**.
+{
+  const am = src.match(/--allowedTools\s+"([^"]*)"/);
+  const dm = src.match(/--disallowedTools\s+"([^"]*)"/);
+
+  if (am && dm) {
+    const allow = am[1];
+    const deny = dm[1];
+
+    for (const [need, why] of DELIVERY_TOOLS) {
+      if (!allow.includes(need)) {
+        err(`${WF}: 허용 목록에 \`${need}\`가 없습니다 — ${why}`);
+      }
+    }
+
+    for (const d of MUST_STAY_DENIED) {
+      if (!deny.includes(d)) {
+        err(`${WF}: \`${d}\`를 막지 않습니다 — 통로를 열었으면 이 모양은 `
+          + '계속 막혀 있어야 합니다');
+      }
+    }
+
+    // 넓은 push 허용은 금지 목록을 무의미하게 만든다.
+    for (const wide of ['Bash(git push:*)', 'Bash(git push)', 'Bash(git:*)']) {
+      if (allow.includes(wide)) {
+        err(`${WF}: 허용 목록이 push를 넓게 엽니다 (\`${wide}\`) — `
+          + 'main 직접 push까지 포함됩니다');
       }
     }
   }
