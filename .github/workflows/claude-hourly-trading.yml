@@ -342,6 +342,13 @@ jobs:
           node scripts/check-100x-mutations.mjs --self-test || fail=1
           exit $fail
 
+      # ── 원인을 여기서 **또** 정하지 않는다 ──
+      #
+      # "어느 단계에서 멈췄으면 무엇이다"가 네 줄 있었다. 어느 단계에서
+      # 멈췄는지는 이 단계가 모르고, 원인은 위 **진단** 항목이 이미 범주로
+      # 적는다. 두 곳이 같은 것을 정하면 갈린다(상습 고장 ②) — 실제로
+      # 회차 41264530329에서 갈렸다. 판단은
+      # `scripts/claude-exec-category.mjs` 한 곳에만 둔다.
       - name: 실패 원인 기록
         if: failure()
         run: |
@@ -351,10 +358,8 @@ jobs:
             echo "- 실행: ${{ github.run_id }} (시도 ${{ github.run_attempt }})"
             echo "- 트리거: ${{ github.event_name }}"
             echo "- tsc 기준선: ${{ steps.baseline.outputs.tsc_before }}건"
+            echo "- Claude 단계: ${{ steps.claude.outcome }}"
             echo ""
-            echo "**변경 안전 관문**에서 멈췄다면 그 회차가 안전 닻을 줄였거나"
-            echo "울타리를 넘은 것입니다. 브랜치를 병합하지 말고 내용을 먼저 보세요."
-            echo ""
-            echo "**검사기 전수**에서 멈췄다면 에이전트가 통과했다고 적었더라도"
-            echo "실제로는 통과하지 않은 것입니다."
+            echo "이 회차의 브랜치는 검증을 끝내지 못했습니다 — **병합하지 않습니다.**"
+            echo "에이전트가 통과했다고 적었더라도 통과한 것이 아닙니다."
           } >> "$GITHUB_STEP_SUMMARY"

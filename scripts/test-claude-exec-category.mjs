@@ -13,7 +13,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { categorize, render } from './claude-exec-category.mjs';
+import { categorize, render, nextAction, CATEGORIES } from './claude-exec-category.mjs';
 
 /** 실제 실패 회차가 보고한 모양 */
 const OBSERVED = {
@@ -241,4 +241,69 @@ test('★★ 비용 칸이 아예 없으면 0으로 바꿔 범주를 단정하�
   assert.notEqual(c.category, 'no_usage_record',
     '확인 못 한 비용을 0으로 바꿔 범주를 단정했다');
   assert.equal(c.category, 'unknown');
+});
+
+// ── 범주 → 누가 움직여야 하는가 ──
+//
+// 이 판단은 전에 **워크플로 YAML 안**에 산문으로 있었다. 범주를 고치면
+// 산문은 그대로 남아 갈렸다 — 실제로 `credit_or_billing` 회차에
+// "인증 단계" 처방이 붙었다. 표로 옮겼으니 표를 고정한다.
+
+test('알려진 범주 전부가 처방 표에 있다 — 새 범주를 올리는 것을 잊으면 RED', () => {
+  const missing = CATEGORIES.filter((c) => {
+    const a = nextAction(c);
+    // 표에 없으면 기본값이 돌아온다. 그 기본값과 같은지로 누락을 센다.
+    return a.line === '원인을 범주로 좁히지 못했습니다 — 사람이 봐야 합니다.' && c !== 'unknown';
+  });
+  assert.deepEqual(missing, [], `처방 표에 없는 범주: ${missing.join(', ')}`);
+});
+
+test('★★ 모르는 범주는 시스템이 아니라 사람에게 간다', () => {
+  // 기본값이 system이면, 표에 올리는 것을 잊은 새 범주가 "다음 회차가
+  // 알아서 한다"로 적히고 영원히 조용히 실패한다.
+  assert.equal(nextAction('방금 지어낸 범주').owner, 'human');
+  assert.equal(nextAction('unknown').owner, 'human');
+  assert.equal(nextAction(undefined).owner, 'human');
+});
+
+test('자금·키·권한·모델 접근은 사람만 — 시스템이 하겠다고 적지 않는다', () => {
+  for (const c of ['credit_or_billing', 'auth_invalid', 'permission_denied', 'model_not_found']) {
+    assert.equal(nextAction(c).owner, 'human', `${c}를 시스템 몫으로 적었다`);
+  }
+});
+
+test('일시적 실패는 사람을 부르지 않는다', () => {
+  for (const c of ['rate_limited', 'overloaded', 'timeout', 'transport_error']) {
+    assert.equal(nextAction(c).owner, 'system', `${c}로 사람을 불렀다`);
+  }
+});
+
+test('원인 미확정(기록 없음)은 사람에게 간다 — 확인 못 한 것은 통과가 아니다', () => {
+  assert.equal(nextAction('no_usage_record').owner, 'human');
+  assert.equal(nextAction('no_execution_record').owner, 'human');
+});
+
+test('ok는 아무도 부르지 않는다', () => {
+  assert.equal(nextAction('ok').owner, 'none');
+});
+
+test('★★ 요약에 처방이 실린다 — 범주만 적고 끝내지 않는다', () => {
+  const out = render(categorize([{
+    ...OBSERVED,
+    result: 'API Error: Your credit balance is too low to access the Claude API.',
+  }]));
+  assert.match(out, /범주: `credit_or_billing`/);
+  assert.match(out, /다음에 움직일 쪽: \*\*사람\*\*/);
+  assert.match(out, /자금 결정은 사람만 합니다/);
+  // 원문은 여전히 새지 않는다.
+  assert.ok(!out.includes('credit balance'), '오류 원문이 요약에 샜다');
+  assert.ok(!out.includes('API Error'), '오류 원문이 요약에 샜다');
+});
+
+test('★★ 처방 한 줄에도 오류 원문이 섞이지 않는다', () => {
+  for (const c of CATEGORIES) {
+    const line = nextAction(c).line;
+    assert.ok(!/[A-Za-z]{2,}-[A-Za-z0-9]{8,}/.test(line), `${c}의 처방에 토큰 모양이 있다`);
+    assert.ok(!line.includes('http'), `${c}의 처방에 URL이 있다`);
+  }
 });
