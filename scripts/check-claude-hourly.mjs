@@ -95,6 +95,23 @@ const src = stripComments(raw);
   }
 }
 
+// ── ②a OAuth 전용: 종량제 API 키가 다시 우선하지 않는가 ──
+//
+// GitHub Actions의 비대화형 Claude Code는 ANTHROPIC_API_KEY가 있으면
+// OAuth보다 먼저 선택할 수 있습니다. 인증 확인 로그의 OAuth 표시는
+// 시크릿 존재만 뜻하므로 실제 사용 방식의 증거가 아닙니다.
+// 이 검사기는 두 갈래가 API 키를 Claude Action/사전 점검에
+// 다시 전달하는 회귀를 CI에서 거부합니다.
+{
+  if (/secrets\.ANTHROPIC_API_KEY\b/.test(src)
+      || /\banthropic_api_key\s*:/.test(src)
+      || /^\s*ANTHROPIC_API_KEY\s*:/m.test(src)) {
+    err(`${WF}: OAuth 전용 회차에 ANTHROPIC_API_KEY가 전달됩니다 — API 키 우선순위로 종량제 인증이 재발할 수 있습니다`);
+  }
+  if (!/claude_code_oauth_token:\s*\$\{\{\s*secrets\.CLAUDE_CODE_OAUTH_TOKEN\s*\}\}/.test(src)) {
+    err(`${WF}: Claude Action의 OAuth 입력이 없습니다 — 시크릿 존재 로그만으로는 인증할 수 없습니다`);
+  }
+}
 // ── ③ 겹쳐 돌지 않는가 ──
 //
 // 두 회차가 동시에 깨면 같은 문제를 각자 고치고 Draft PR을 둘 연다.
