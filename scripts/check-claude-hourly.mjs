@@ -22,7 +22,7 @@
 // 실패한다.
 import { readFileSync, existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { findOverrideKeys, selfTest } from './lib/oauth-override-names.mjs';
+import { findOverrideKeys, selfTest, OAUTH_OVERRIDE_NAMES } from './lib/oauth-override-names.mjs';
 
 // 갈래가 둘이다. **둘 다** 같은 울타리를 가져야 한다 — 한쪽만 검사하면
 // 느슨한 쪽으로 작업이 흘러간다.
@@ -106,26 +106,52 @@ const src = stripComments(raw);
       err(`${WF}: \`secrets.${s}\`을 넘깁니다 — 무인 회차는 거래소·운영 DB에 닿으면 안 됩니다`);
     }
   }
-  // 인증은 있어야 한다. 둘 중 하나는 반드시.
-  const hasAuth = /secrets\.ANTHROPIC_API_KEY\b/.test(src)
-    || /secrets\.CLAUDE_CODE_OAUTH_TOKEN\b/.test(src);
-  if (!hasAuth) {
-    err(`${WF}: Claude 인증 시크릿을 쓰지 않습니다 — 돌 수 없는 워크플로입니다`);
+  // 인증은 있어야 한다. **OAuth 토큰 하나뿐이다** — ②a가 나머지 경로를
+  // 전부 거부하므로 "둘 중 하나"로 세면 두 판단이 서로 어긋난다.
+  if (!/secrets\.CLAUDE_CODE_OAUTH_TOKEN\b/.test(src)) {
+    err(`${WF}: Claude OAuth 시크릿을 쓰지 않습니다 — 돌 수 없는 워크플로입니다`);
   }
 }
 
-// ── ②a OAuth 전용: 종량제 API 키가 다시 우선하지 않는가 ──
+// ── ②a OAuth 전용: OAuth보다 먼저 선택되는 인증 경로가 없는가 ──
 //
-// GitHub Actions의 비대화형 Claude Code는 ANTHROPIC_API_KEY가 있으면
-// OAuth보다 먼저 선택할 수 있습니다. 인증 확인 로그의 OAuth 표시는
-// 시크릿 존재만 뜻하므로 실제 사용 방식의 증거가 아닙니다.
-// 이 검사기는 두 갈래가 API 키를 Claude Action/사전 점검에
-// 다시 전달하는 회귀를 CI에서 거부합니다.
+// 공식 인증 우선순위(code.claude.com/docs/en/authentication)는
+//   ① 클라우드 공급자(Bedrock/Vertex) → ② ANTHROPIC_AUTH_TOKEN
+//   → ③ ANTHROPIC_API_KEY → ④ apiKeyHelper → ⑤ CLAUDE_CODE_OAUTH_TOKEN
+// 이다. 즉 **①~④ 중 하나라도 회차에 들어오면 ⑤는 쓰이지 않는다.**
+//
+// 처음 이 블록은 ③(API 키) **하나만** 셌다. 통합 트리에서 실측하니 나머지
+// 다섯은 그대로 통과했다(`ANTHROPIC_AUTH_TOKEN` · `ANTHROPIC_BASE_URL` ·
+// `CLAUDE_CODE_USE_BEDROCK` · `CLAUDE_CODE_USE_VERTEX` · `apiKeyHelper`
+// → 전부 exit 0). 이름이 여섯인데 하나만 센 자리였다.
+//
+// 이름 목록은 `scripts/lib/oauth-override-names.mjs` **한 곳**에 있다.
+// 설정 파일을 보는 관문 ⑮도 같은 목록을 쓴다 — 들어올 자리가 둘인데
+// 목록이 둘이면 언젠가 한쪽만 늘어난다.
+//
+// 인증 확인 로그의 `인증: ...OAUTH_TOKEN`은 **시크릿이 비어 있지 않다는
+// 것만** 뜻한다. 무엇으로 인증했는지의 증거가 아니다.
 {
-  if (/secrets\.ANTHROPIC_API_KEY\b/.test(src)
-      || /\banthropic_api_key\s*:/.test(src)
-      || /^\s*ANTHROPIC_API_KEY\s*:/m.test(src)) {
-    err(`${WF}: OAuth 전용 회차에 ANTHROPIC_API_KEY가 전달됩니다 — API 키 우선순위로 종량제 인증이 재발할 수 있습니다`);
+  // 한 이름이 들어오는 모양이 여럿이다 — `secrets.X` · `vars.X` ·
+  // env/`with` 리터럴 · 소문자 액션 입력 · 셸 `X=` · settings JSON.
+  // 모양을 하나씩 세면 세지 않은 모양으로 들어오므로 **이름이 본문에
+  // 나오는지**를 센다. 설명이 필요하면 `#` 주석에 적는다.
+  const lines = src.split('\n');
+  for (const [name, why] of OAUTH_OVERRIDE_NAMES) {
+    const needle = name.toLowerCase();
+    const hits = [];
+    for (let i = 0; i < lines.length; i += 1) {
+      if (lines[i].toLowerCase().includes(needle)) hits.push(i + 1);
+    }
+    if (hits.length) {
+      err(`${WF}: OAuth 전용 회차에 \`${name}\` 이름이 나옵니다 (줄 ${hits.slice(0, 5).join(', ')})`
+        + ` — ${why} · 설명이라면 \`#\` 주석으로 옮기세요`);
+    }
+  }
+  // settings 입력은 **이 검사기가 읽지 않는 파일**로 인증 설정을 옮긴다.
+  if (/^\s*settings\s*:/m.test(src) || /--settings\b/.test(src)) {
+    err(`${WF}: Claude Action에 settings 입력을 줍니다 — 인증 설정이 `
+      + '이 검사기가 읽지 않는 파일로 옮겨가 OAuth 전용인지 셀 수 없습니다');
   }
   if (!/claude_code_oauth_token:\s*\$\{\{\s*secrets\.CLAUDE_CODE_OAUTH_TOKEN\s*\}\}/.test(src)) {
     err(`${WF}: Claude Action의 OAuth 입력이 없습니다 — 시크릿 존재 로그만으로는 인증할 수 없습니다`);
