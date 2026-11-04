@@ -49,7 +49,7 @@ jobs:
     # 비용·동작을 보고, 확인한 뒤에 켠다.
     if: ${{ github.event_name == 'workflow_dispatch' || vars.CLAUDE_HOURLY_ENABLED == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 50
 
     steps:
       - name: 인증 확인
@@ -155,7 +155,7 @@ jobs:
           base_branch: main
           branch_prefix: 'claude/dev-'
           claude_args: |
-            --max-turns 40
+            --max-turns 60
             --model claude-opus-5-5
             --allowedTools "Bash(npm ci),Bash(npm ci --prefix worker),Bash(npm test),Bash(npm run build),Bash(npm run worker:build),Bash(npx tsc --noEmit),Bash(node scripts/check-:*),Bash(git status),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git fetch:*),Bash(gh pr list:*),Bash(gh pr view:*),Bash(gh issue list:*),Bash(gh api repos/:*),Bash(git switch -c:*),Bash(git add:*),Bash(git commit:*),Bash(git push -u origin:*),Bash(gh pr create:*)"
             --disallowedTools "Bash(gh workflow run:*),Bash(gh pr merge:*),Bash(gh api --method POST:*),Bash(gh api -X POST:*),Bash(git push --force:*),Bash(git push origin main:*),Bash(git push -u origin main:*),Bash(curl:*),Bash(wget:*),Bash(psql:*),Bash(npx supabase:*),Bash(flyctl:*),Bash(vercel:*)"
