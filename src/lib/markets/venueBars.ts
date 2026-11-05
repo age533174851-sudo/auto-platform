@@ -95,6 +95,119 @@ export function dropIncompleteBar<T extends { openTime: number }>(
   return { rows, dropped: false };
 }
 
+/**
+ * 봉 신선도 한도의 **후보값** (#450).
+ *
+ * **정책으로 확정된 값이 아니다.** 소유자가 N=3을 "초기 후보"로 고른
+ * 값이고, 이 저장소의 어느 호출부도 아직 이 값을 쓰지 않는다 —
+ * `fetchVenueBars`에 `maxAgeIntervals`를 **주는 호출부가 없으면 동작은
+ * 지금과 바이트까지 같다.** 켜는 것은 별도 결정이다.
+ */
+export const STALE_MAX_AGE_INTERVALS = 3;
+
+export interface BarFreshness {
+  /** 마지막 봉이 **닫힌 뒤** 지난 시간(ms). 모르면 null */
+  ageMs: number | null;
+  /** `ageMs`를 봉 길이로 나눈 값. 모르면 null */
+  ageIntervals: number | null;
+  /** 한도(ms). 한도를 안 줬으면 null */
+  limitMs: number | null;
+  /**
+   * 한도를 넘었는가.
+   *
+   * **모르면 `null`이다.** `false`로 적지 않는다 — 봉 간격을 못 읽은 것과
+   * "신선하다"는 완전히 다른 사실이고, 둘을 같은 값으로 적으면 확인하지
+   * 못한 것이 통과가 된다.
+   */
+  stale: boolean | null;
+  /** 거래소 시각이 우리보다 **앞서** 있는 정도(ms). 아니면 null */
+  futureSkewMs: number | null;
+  /** 사람이 읽을 이유. 신선하면 null */
+  reason: string | null;
+}
+
+/**
+ * 마지막 봉이 얼마나 오래됐는가.
+ *
+ * 왜 필요한가
+ * ───────────
+ * `dropIncompleteBar`는 **미완성 봉 하나**만 자른다. 그 조건
+ * (`여는 시각 + 봉 길이 > 지금`)은 3일 지연된 차트에서는 거짓이라
+ * 아무것도 자르지 않는다. 그래서 호출부가 받는 값이 신선한 차트와
+ * **구별되지 않았다** — 둘 다 `dropped: false` + 봉 있음이다.
+ *
+ * 그 뒤 돌파 판정이 3일 전 고점으로 일어나고, 장부에는
+ * `NO_SIGNAL · NO_BREAKOUT`이 남는다. 사람이 읽으면 "시장이 조용했구나"다.
+ * 틀린 값으로 조용히 판단하는 쪽이라 가장 나쁘다.
+ *
+ * 경계
+ * ────
+ * 나이가 한도와 **정확히 같으면 신선하다**(`>`가 아니라 `>=`로 막으면
+ * 경계에 걸린 정상 봉을 버린다). 미완성 봉을 일부러 남긴 조회
+ * (`keptIncomplete`)에서 마지막 봉이 아직 진행 중인 것은 **정상**이다.
+ *
+ * 거래소 시각 오차
+ * ────────────────
+ * 거래소 시계가 우리보다 앞서 있으면 마지막 봉이 아직 닫히지 않은 것으로
+ * 보인다. 그때는 **판정하지 않는다**(`stale: null`) — 앞선 시계를
+ * "신선하다"로 읽으면 진짜 지연을 못 잡고, "오래됐다"로 읽으면 멀쩡한
+ * 봉을 버린다. 어느 쪽도 사실이 아니므로 모른다고 적는다.
+ */
+export function barFreshness(i: {
+  newestOpenTime: any;
+  interval: string;
+  nowMs: number;
+  /** 허용할 봉 길이의 배수. 주지 않으면 판정하지 않는다(`stale: null`) */
+  maxAgeIntervals?: number | null;
+  /** 미완성 봉을 일부러 남긴 조회인가 */
+  keptIncomplete?: boolean;
+}): BarFreshness {
+  const none: BarFreshness = {
+    ageMs: null, ageIntervals: null, limitMs: null,
+    stale: null, futureSkewMs: null, reason: null,
+  };
+  const step = intervalMs(i.interval);
+  if (step == null) {
+    return { ...none, reason: `봉 간격을 읽을 수 없습니다 (${String(i.interval)}) — 신선도를 판정하지 않습니다` };
+  }
+  // **`Number(null) === 0`이다.** 그대로 쓰면 비어 있는 값이 1970년으로
+  // 읽히고, 그러면 **모든 봉이 오래된 것**이 되어 자동매매가 통째로 멈춘다.
+  // 이 저장소에서 같은 함정에 세 번 빠졌다.
+  const raw = i.newestOpenTime;
+  const open = raw == null || raw === '' ? NaN : Number(raw);
+  if (!Number.isFinite(open)) {
+    return { ...none, reason: '마지막 봉의 여는 시각을 읽을 수 없습니다 — 신선도를 판정하지 않습니다' };
+  }
+  const n = Number(i.maxAgeIntervals);
+  const limitMs = i.maxAgeIntervals == null || !Number.isFinite(n) || n < 0 ? null : step * n;
+
+  // 봉은 `여는 시각 + 봉 길이`에 닫힌다. 나이는 **닫힌 뒤**로 센다 —
+  // 여는 시각으로 세면 봉 하나 길이만큼 늘 늙어 보인다.
+  const ageMs = i.nowMs - (open + step);
+  const ageIntervals = ageMs / step;
+
+  if (ageMs < 0) {
+    // 일부러 남긴 미완성 봉이면 진행 중인 것이 정상이다.
+    if (i.keptIncomplete === true) {
+      return { ageMs, ageIntervals, limitMs, stale: false, futureSkewMs: null, reason: null };
+    }
+    return { ageMs, ageIntervals, limitMs, stale: null, futureSkewMs: -ageMs,
+      reason: `거래소 시각이 ${Math.round(-ageMs / 1000)}초 앞서 있습니다 — 신선도를 판정하지 않습니다` };
+  }
+
+  if (limitMs == null) {
+    return { ageMs, ageIntervals, limitMs: null, stale: null, futureSkewMs: null, reason: null };
+  }
+  const stale = ageMs > limitMs;
+  return {
+    ageMs, ageIntervals, limitMs, stale, futureSkewMs: null,
+    reason: stale
+      ? `봉이 오래됐습니다 — 마지막 봉이 ${Math.round(ageMs / 60_000)}분 전에 닫혔습니다`
+        + ` (한도 ${Math.round(limitMs / 60_000)}분 · ${i.interval} × ${n})`
+      : null,
+  };
+}
+
 interface RawBar { openTime: number; open: number; high: number; low: number; close: number; volume: number }
 
 function toVenueBars(rows: RawBar[]): VenueBars | null {
@@ -111,6 +224,30 @@ function toVenueBars(rows: RawBar[]): VenueBars | null {
     openTimes.push(r.openTime);
   }
   return closes.length ? { opens, highs, lows, closes, volumes, openTimes } : null;
+}
+
+/**
+ * 두 거래소 경로가 **같은 판단**을 쓴다.
+ *
+ * 같은 판정을 두 곳에 적으면 언젠가 갈린다 — 이 저장소에서 가장 자주 난
+ * 고장이다. 막을 때만 값을 돌려주고, 아니면 `null`이다.
+ *
+ * **`stale === true`일 때만 막는다.** `null`(모름)은 지금과 같이 통과한다 —
+ * 모르는 것을 막으면 봉 간격 표기가 바뀌는 날 자동매매가 통째로 멈춘다.
+ */
+function staleRefusal(
+  cut: { rows: RawBar[]; dropped: boolean },
+  opts: { interval: string; maxAgeIntervals?: number | null; keepIncomplete?: boolean },
+  now: number, src: string,
+): VenueBarsResult | null {
+  if (opts.maxAgeIntervals == null) return null;
+  const last = cut.rows.length ? cut.rows[cut.rows.length - 1] : null;
+  const f = barFreshness({
+    newestOpenTime: last?.openTime, interval: opts.interval, nowMs: now,
+    maxAgeIntervals: opts.maxAgeIntervals, keptIncomplete: opts.keepIncomplete === true,
+  });
+  if (f.stale !== true) return null;
+  return { bars: null, source: src, error: f.reason, droppedIncomplete: cut.dropped };
 }
 
 /** Gate 간격 이름. 저장소는 바이낸스 표기를 쓰므로 여기서 맞춘다 */
@@ -219,6 +356,25 @@ export async function fetchVenueBars(opts: {
    */
   keepIncomplete?: boolean;
   /**
+   * 마지막 봉이 `봉 길이 × 이 값`보다 오래되면 **봉을 돌려주지 않는다**
+   * (`bars: null` + 이유). 후보값은 `STALE_MAX_AGE_INTERVALS`.
+   *
+   * **주지 않으면 검사하지 않는다.** 기존 호출부의 동작은 그대로다 —
+   * 켜는 것은 별도 결정이고, 이 작업은 그 결정을 하지 않는다 (#450).
+   */
+  maxAgeIntervals?: number | null;
+  /**
+   * 봉을 실제로 받아 오는 것. **시험에서는 값으로 바꾼다.**
+   *
+   * 전역 `fetch`를 갈아 끼우는 시험을 먼저 썼다가 **다른 묶음의 주문
+   * 시험 8건을 깼다** — 이 하네스는 비동기 시험을 한꺼번에 flush 하므로
+   * 그 사이 남의 시험이 가짜 fetch 를 본다. 주입이 맞다.
+   *
+   * 바이낸스 경로만 쓴다. Gate 는 `gateReq`를 지나므로 여기서 바꾸지
+   * 않는다 — 두 경로에 같은 주입을 두 방식으로 만들지 않는다.
+   */
+  fetchImpl?: typeof fetch;
+  /**
    * 어느 시장의 봉인가. **기본은 선물(`USDM`)이다 — 기존 계약 그대로다.**
    *
    * 이 인자가 없던 동안 `/api/market/candles`는 `market=SPOT`을 받아
@@ -285,6 +441,8 @@ export async function fetchVenueBars(opts: {
       const cut = opts.keepIncomplete
         ? { rows: parsed, dropped: false }
         : dropIncompleteBar(parsed, opts.interval, now);
+      const gstale = staleRefusal(cut, opts, now, src);
+      if (gstale) return gstale;
       return { bars: toVenueBars(cut.rows), source: src, error: null, droppedIncomplete: cut.dropped };
     }
 
@@ -304,7 +462,8 @@ export async function fetchVenueBars(opts: {
       symbol: opts.symbol, interval: opts.interval, limit: want,
       startTimeMs: st, endTimeMs: et,
     });
-    const r = await fetch(url, { signal: AbortSignal.timeout(10_000), cache: 'no-store' });
+    const doFetch = opts.fetchImpl ?? fetch;
+    const r = await doFetch(url, { signal: AbortSignal.timeout(10_000), cache: 'no-store' });
     if (!r.ok) {
       return { bars: null, source: src, error: `봉 조회 실패 (HTTP ${r.status})`, droppedIncomplete: false };
     }
@@ -323,6 +482,8 @@ export async function fetchVenueBars(opts: {
     const cut = opts.keepIncomplete
       ? { rows: parsed, dropped: false }
       : dropIncompleteBar(parsed, opts.interval, now);
+    const bstale = staleRefusal(cut, opts, now, src);
+    if (bstale) return bstale;
     return { bars: toVenueBars(cut.rows), source: src, error: null, droppedIncomplete: cut.dropped };
   } catch (e: any) {
     return { bars: null, source: opts.exchange, error: String(e?.message || e), droppedIncomplete: false };
