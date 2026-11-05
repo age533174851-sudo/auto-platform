@@ -11,7 +11,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   normalizeReviewThreads, normalizeChangesRequested,
-  reviewFacts, headContainsBase, buildFacts, prDetail, gatherFacts,
+  reviewFacts, headContainsBase, buildFacts, prDetail, gatherFacts, baseTip,
 } from './lib/pr-facts.mjs';
 
 const ok = body => ({ ok: true, status: 200, body });
@@ -265,4 +265,98 @@ test('gatherFacts — 느리게 계산된 mergeable이 사실에 들어간다', 
     number: 5, sleep: async () => {} });
   assert.equal(f.mergeable, false, '두 번째 조회 값이 들어가야 한다');
   assert.equal(f.mergeableState, 'dirty');
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// **`pr.base.sha`는 base 브랜치의 지금 tip이 아니다.**
+//
+// 게이트의 `BEHIND_BASE` 검사는 이렇게 적혀 있다:
+//
+//     head가 base tip을 조상으로 갖고 있어야, 그 head에서 돈 검사가
+//     지금의 main과 합쳐진 상태를 실제로 본 것이다.
+//
+// 그런데 비교에 넣던 값은 `pr.base.sha` — **PR이 만들어지거나 마지막으로
+// 갱신된 시점의 base 커밋**이다. main이 그 뒤로 움직이면 이 값은 낡는다.
+//
+// 2026-11-05 실측: 열린 PR 중 "기술적으로 올려도 됨"으로 나온 21개 중
+// 16개가 실제로는 main에 뒤처져 있었다.
+//
+//     #449 #455 #475 #477 #492 #512 #517   main 대비 119 커밋 뒤
+//     #546 #547 #548 #551 #553 #556 #560 #571 #573   17 커밋 뒤
+//
+// 전부 `base.sha`가 `38bb8217`(10월) 또는 `f6f948fc`로 굳어 있어서,
+// head는 그 낡은 값보다는 당연히 `ahead`다. 그래서 검사가 통과했다.
+// **119커밋 전 main에서 돈 CI를 지금 main의 증거로 쓰게 된다.**
+//
+// 고치는 방향은 더 엄격해지는 쪽이다 — base ref의 **지금 tip**을 읽어서
+// 비교한다. tip을 못 읽으면 null이고, null이면 게이트가 막는다.
+// ─────────────────────────────────────────────────────────────────────
+
+test('base tip — ref 를 읽어 지금 tip 을 돌려준다', async () => {
+  const r = await baseTip({
+    api: async path => {
+      assert.ok(path.includes('/git/ref/heads/main'), path);
+      return ok({ object: { sha: 'tip999' } });
+    },
+    repo: 'o/r', ref: 'main',
+  });
+  assert.equal(r, 'tip999');
+});
+
+test('base tip — 못 읽으면 null이다 (낡은 base.sha로 떨어지지 않는다)', async () => {
+  for (const res of [fail(404), fail(500), ok({}), ok({ object: {} }), ok(null)]) {
+    const r = await baseTip({ api: async () => res, repo: 'o/r', ref: 'main' });
+    assert.equal(r, null, JSON.stringify(res));
+  }
+});
+
+test('**뒤처진 PR이 BEHIND_BASE로 잡힌다** — 낡은 base.sha를 쓰지 않는다', async () => {
+  // main 은 tipNEW 로 움직였고, PR 은 10월의 baseOLD 위에서 만들어졌다.
+  // head 는 baseOLD 보다는 ahead 지만 tipNEW 에는 17 커밋 뒤처져 있다.
+  const compared = [];
+  const api = async path => {
+    if (/\/pulls\/\d+$/.test(path)) {
+      return ok({ number: 9, draft: true, labels: [], head: { sha: 'headX' },
+        base: { ref: 'main', sha: 'baseOLD' }, mergeable: true, mergeable_state: 'blocked' });
+    }
+    if (path.includes('/git/ref/heads/main')) return ok({ object: { sha: 'tipNEW' } });
+    if (path.includes('/compare/')) {
+      compared.push(path);
+      // tipNEW...headX 는 behind, baseOLD...headX 는 ahead
+      if (path.includes('tipNEW')) return ok({ status: 'behind' });
+      return ok({ status: 'ahead' });
+    }
+    if (path.includes('check-runs')) return ok({ check_runs: [] });
+    if (path.endsWith('/status')) return ok({ statuses: [] });
+    if (path.includes('ccr/review_threads')) return ok([]);
+    if (path.includes('/reviews')) return ok([]);
+    return fail(404);
+  };
+  const f = await gatherFacts({ api, graphql: null, repo: 'o/r', owner: 'o', name: 'r',
+    number: 9, sleep: async () => {} });
+  assert.ok(compared.some(p => p.includes('tipNEW')),
+    `지금 tip 과 비교해야 한다 — 비교한 경로: ${compared.join(' ')}`);
+  assert.ok(!compared.some(p => p.includes('baseOLD')),
+    `낡은 base.sha 와 비교하면 안 된다 — 비교한 경로: ${compared.join(' ')}`);
+  assert.equal(f.headContainsBase, false, '뒤처진 PR 은 false 여야 게이트가 막는다');
+  assert.equal(f.baseSha, 'tipNEW', '사실에 기록되는 base 도 지금 tip 이어야 한다');
+});
+
+test('base tip 을 못 읽으면 headContainsBase 는 null이다 (통과가 아니다)', async () => {
+  const api = async path => {
+    if (/\/pulls\/\d+$/.test(path)) {
+      return ok({ number: 9, draft: true, labels: [], head: { sha: 'headX' },
+        base: { ref: 'main', sha: 'baseOLD' }, mergeable: true, mergeable_state: 'blocked' });
+    }
+    if (path.includes('/git/ref/heads/main')) return fail(403);
+    if (path.includes('/compare/')) return ok({ status: 'ahead' });
+    if (path.includes('check-runs')) return ok({ check_runs: [] });
+    if (path.endsWith('/status')) return ok({ statuses: [] });
+    if (path.includes('ccr/review_threads')) return ok([]);
+    if (path.includes('/reviews')) return ok([]);
+    return fail(404);
+  };
+  const f = await gatherFacts({ api, graphql: null, repo: 'o/r', owner: 'o', name: 'r',
+    number: 9, sleep: async () => {} });
+  assert.equal(f.headContainsBase, null, '못 읽은 것은 통과가 아니다');
 });

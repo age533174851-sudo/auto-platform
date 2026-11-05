@@ -158,7 +158,7 @@ export async function headContainsBase({ api, repo, baseSha, headSha, log = () =
  * `CHECKS_MISSING`으로 막는다 — '검사를 못 읽었다'와 '검사가 없다'는
  * 둘 다 "통과를 확인하지 못했다"이고, 결과가 같아야 맞다.
  */
-export function buildFacts({ pr, runs, statuses, review, contains }) {
+export function buildFacts({ pr, runs, statuses, review, contains, baseSha }) {
   if (!pr || typeof pr !== 'object') throw new Error('buildFacts: pr이 없습니다');
   if (!pr.head?.sha) throw new Error('buildFacts: head.sha가 없습니다');
   const headSha = pr.head.sha;
@@ -168,7 +168,9 @@ export function buildFacts({ pr, runs, statuses, review, contains }) {
     labels: (pr.labels || []).map(l => (typeof l === 'string' ? l : l?.name)).filter(Boolean),
     baseRef: pr.base?.ref,
     headSha,
-    baseSha: pr.base?.sha,
+    // **낡은 `pr.base.sha`를 적지 않는다.** 호출하는 쪽이 지금 tip을
+    // 넘기고, 못 읽었으면 null이다 (`baseTip` 설명 참고).
+    baseSha: baseSha !== undefined ? baseSha : (pr.base?.sha ?? null),
     headContainsBase: contains,
     mergeable: pr.mergeable,
     mergeableState: pr.mergeable_state || 'unknown',
@@ -220,6 +222,48 @@ export async function prDetail({ api, repo, number, log = () => {}, attempts = 4
   return last;
 }
 
+/**
+ * base 브랜치의 **지금 tip**. 못 읽으면 null.
+ *
+ * 왜 `pr.base.sha`를 쓰면 안 되나
+ * ───────────────────────────────
+ * 게이트의 `BEHIND_BASE` 검사는 이렇게 적혀 있다:
+ *
+ *     head가 base tip을 조상으로 갖고 있어야, 그 head에서 돈 검사가
+ *     지금의 main과 합쳐진 상태를 실제로 본 것이다.
+ *
+ * 그런데 비교에 넣던 값은 `pr.base.sha` — **PR이 만들어지거나 마지막으로
+ * 갱신된 시점의 base 커밋**이다. main이 그 뒤로 움직이면 이 값은 낡는다.
+ * head는 낡은 값보다는 당연히 `ahead`라서 검사가 통과한다.
+ *
+ * 2026-11-05 실측. 열린 PR 중 "기술적으로 올려도 됨"으로 나온 21개 중
+ * **16개가 실제로는 main에 뒤처져 있었다**:
+ *
+ *     #449 #455 #475 #477 #492 #512 #517              119 커밋 뒤 (base.sha=38bb8217, 10월)
+ *     #546 #547 #548 #551 #553 #556 #560 #571 #573     17 커밋 뒤 (base.sha=f6f948fc)
+ *
+ * 119커밋 전 main에서 돈 CI를 지금 main의 증거로 쓰게 된다 — 검사가
+ * 막으려던 바로 그 일이다.
+ *
+ * **못 읽으면 null이고, 낡은 값으로 떨어지지 않는다.** 그때
+ * `headContainsBase`도 null이 되고 게이트는 `MERGEABILITY_UNKNOWN`으로
+ * 막는다. 확인하지 못한 것은 통과가 아니다.
+ */
+export async function baseTip({ api, repo, ref, log = () => {} }) {
+  if (!ref) return null;
+  const r = await api(`/repos/${repo}/git/ref/heads/${ref}`);
+  if (!r?.ok) {
+    log(`base 브랜치 '${ref}'의 지금 tip을 읽지 못했습니다 (HTTP ${r?.status})`);
+    return null;
+  }
+  const sha = r.body?.object?.sha;
+  if (typeof sha !== 'string' || !sha) {
+    log(`base 브랜치 '${ref}' 응답에 object.sha가 없습니다`);
+    return null;
+  }
+  return sha;
+}
+
 /** 한 PR의 사실을 전부 모은다. 상세 조회 실패면 null. */
 export async function gatherFacts({ api, graphql, repo, owner, name, number, log = () => {}, sleep }) {
   const detail = await prDetail({ api, repo, number, log, sleep });
@@ -229,11 +273,18 @@ export async function gatherFacts({ api, graphql, repo, owner, name, number, log
   }
   const pr = detail.body;
   const headSha = pr.head.sha;
+
+  // **base 브랜치의 지금 tip을 먼저 읽는다.** `pr.base.sha`는 낡을 수 있고,
+  // 낡은 값과 비교하면 뒤처진 PR이 `ahead`로 통과한다 (`baseTip` 설명 참고).
+  const tip = await baseTip({ api, repo, ref: pr.base?.ref, log });
+
   const [runs, statuses, review, contains] = await Promise.all([
     api(`/repos/${repo}/commits/${headSha}/check-runs?per_page=100`),
     api(`/repos/${repo}/commits/${headSha}/status`),
     reviewFacts({ api, graphql, repo, owner, name, number, log }),
-    headContainsBase({ api, repo, baseSha: pr.base.sha, headSha, log }),
+    // tip을 못 읽었으면 **비교하지 않는다** — null이면 게이트가 막는다.
+    tip ? headContainsBase({ api, repo, baseSha: tip, headSha, log })
+        : Promise.resolve(null),
   ]);
-  return buildFacts({ pr, runs, statuses, review, contains });
+  return buildFacts({ pr, runs, statuses, review, contains, baseSha: tip });
 }
