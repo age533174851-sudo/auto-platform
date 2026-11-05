@@ -21,8 +21,10 @@
 // 그쪽은 사람이 직접 넣거나 외부 결과를 주입하는 통로다. 여기는 예약
 // 수집이다. 둘 다 같은 테이블에 같은 규칙으로 쓴다.
 import { NextRequest, NextResponse } from 'next/server';
+import { cronAuthFromRequest } from '@/lib/cron/cronAuth';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/server';
 import { collectEvents, syncCooldown } from '@/lib/calendar/normalize';
+import { calendarProviderVerdict } from '@/lib/calendar/providerHealth';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -77,11 +79,19 @@ export async function POST(req: NextRequest) {
 }
 
 export async function GET(req: NextRequest) {
-  const secret = process.env.CRON_SECRET || '';
-  if (secret) {
-    const given = req.headers.get('authorization')?.replace(/^Bearer\s+/i, '')
-      || req.nextUrl.searchParams.get('secret') || '';
-    if (given !== secret) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
+  // ── 크론 인증 ──
+  //
+  // **판정은 `cronAuthVerdict` 한 곳에 있다.** 예전에는 다섯 경로가
+  // 각자 적고 있었고, 그래서 `if (secret) { … }`라는 같은 실수를
+  // 다섯 벌이 같이 갖고 있었다 — `CRON_SECRET`이 없으면 인증이
+  // 통째로 사라져 아무나 부를 수 있었다.
+  //
+  // **인증 전에는 DB도 외부 API도 건드리지 않는다.** 이 반환이
+  // 함수의 첫 문장이어야 하는 이유다.
+  const auth = cronAuthFromRequest(req);
+  if (!auth.ok) {
+    return NextResponse.json({ ok: false, error: auth.error, message: auth.message },
+      { status: auth.status, headers: { 'Cache-Control': 'no-store' } });
   }
   return runSync();
 }
@@ -114,13 +124,16 @@ async function runSync() {
   //
   // 시각을 지어내지 않는 이유는 fred.ts 맨 위에 적어 뒀다.
   let fredRows: Array<Record<string, any>> = [];
+  let fredResponseValid = false;
   const fredKey = process.env.FRED_API_KEY;
   if (fredKey) {
     const { pickFredEvents, fredEventsToRows, fredReleaseDatesUrl } = await import('@/lib/calendar/fred');
     const d = await fetchJson(fredReleaseDatesUrl(fredKey, from, to));
+    // 유효한 빈 release_dates는 성공. 관심 지표 0건과 공급자 실패는 다르다.
+    fredResponseValid = Array.isArray(d?.release_dates);
     const picked = pickFredEvents(d?.release_dates);
     fredRows = fredEventsToRows(picked);
-    sourceStatus.fred = d
+    sourceStatus.fred = fredResponseValid
       ? `${picked.length}건 (시각 없음 — 하루 단위 회피)`
       : '응답 없음';
   } else sourceStatus.fred = 'FRED_API_KEY 없음';
@@ -133,13 +146,25 @@ async function runSync() {
     sourceStatus.fmp = Array.isArray(d) ? `${d.length}건` : '응답 없음';
   } else sourceStatus.fmp = 'FMP_API_KEY 없음';
 
-  if (batches.length === 0 && fredRows.length === 0) {
+  const providerVerdict = calendarProviderVerdict(batches, !!fredKey, fredResponseValid);
+  if (providerVerdict === 'NO_PROVIDERS') {
     // 키가 없는 것과 일정이 없는 것은 다르다. 화면에서는 둘 다 빈 달력이다.
     return NextResponse.json({
       ok: false,
       message: '경제 캘린더 공급자 키가 없습니다. FRED_API_KEY(무료) 또는 TRADING_ECONOMICS_API_KEY / FMP_API_KEY를 넣으세요.',
       sources: sourceStatus,
     }, { status: 503 });
+  }
+
+  if (providerVerdict === 'UNAVAILABLE') {
+    // TE/FMP가 모두 null이고 FRED도 유효한 배열을 반환하지 않았다.
+    // Risk Veto의 입력이 갱신되지 않았는데 정상 빈 달력으로 기록하면 안 된다.
+    return NextResponse.json({
+      ok: false,
+      error: 'calendar_providers_unavailable',
+      message: '설정된 경제 캘린더 공급자가 모두 실패했습니다. 기존 일정의 최신성을 확인하세요.',
+      sources: sourceStatus,
+    }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
   }
 
   const collected = collectEvents(batches);
