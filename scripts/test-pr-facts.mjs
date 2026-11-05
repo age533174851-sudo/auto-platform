@@ -11,7 +11,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   normalizeReviewThreads, normalizeChangesRequested,
-  reviewFacts, headContainsBase, buildFacts,
+  reviewFacts, headContainsBase, buildFacts, prDetail, gatherFacts,
 } from './lib/pr-facts.mjs';
 
 const ok = body => ({ ok: true, status: 200, body });
@@ -186,4 +186,83 @@ test('buildFacts — 라벨은 문자열과 객체 둘 다 받는다', () => {
     runs: ok({}), statuses: ok({}), review: null, contains: true,
   });
   assert.deepEqual(f.labels, ['a', 'b']);
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// **GitHub은 mergeable을 느리게 계산한다.**
+//
+// 2026-11-05에 열린 PR 100개를 전수 판정했을 때 34개가
+// `MERGEABILITY_UNKNOWN`으로 나왔다. 한 번 더 물어보니 #441·#443·#446은
+// `mergeable=false, dirty` — **실제로 충돌난 PR**이었고 #449·#455는
+// 멀쩡했다. 한 번만 묻고 포기해서 **충돌을 과소보고했다.**
+//
+// 그래서 null이면 짧게 다시 묻는다. 끝까지 null이면 **여전히 null이다** —
+// 재시도가 모르는 것을 아는 것으로 바꾸지는 않는다.
+// ─────────────────────────────────────────────────────────────────────
+
+test('상세 조회 — mergeable이 null이면 다시 묻는다', async () => {
+  let n = 0;
+  const r = await prDetail({
+    api: async () => {
+      n++;
+      return ok({ number: 1, head: { sha: 'h' }, base: { ref: 'main', sha: 'b' },
+        mergeable: n < 3 ? null : false, mergeable_state: n < 3 ? 'unknown' : 'dirty' });
+    },
+    repo: 'o/r', number: 1, sleep: async () => {},
+  });
+  assert.equal(n, 3, '계산될 때까지 다시 물어야 한다');
+  assert.equal(r.body.mergeable, false);
+  assert.equal(r.body.mergeable_state, 'dirty');
+});
+
+test('상세 조회 — 한 번에 나오면 더 묻지 않는다', async () => {
+  let n = 0;
+  await prDetail({
+    api: async () => { n++; return ok({ number: 1, head: { sha: 'h' }, mergeable: true }); },
+    repo: 'o/r', number: 1, sleep: async () => {},
+  });
+  assert.equal(n, 1);
+});
+
+test('상세 조회 — 끝까지 null이면 null이다. **재시도가 아는 것으로 바꾸지 않는다**', async () => {
+  let n = 0;
+  const r = await prDetail({
+    api: async () => { n++; return ok({ number: 1, head: { sha: 'h' }, mergeable: null }); },
+    repo: 'o/r', number: 1, sleep: async () => {}, attempts: 4,
+  });
+  assert.equal(n, 4);
+  assert.equal(r.body.mergeable, null);
+});
+
+test('상세 조회 — HTTP 실패는 즉시 돌려준다 (재시도로 덮지 않는다)', async () => {
+  let n = 0;
+  const r = await prDetail({
+    api: async () => { n++; return fail(404); },
+    repo: 'o/r', number: 1, sleep: async () => {},
+  });
+  assert.equal(n, 1, '없는 PR을 네 번 묻지 않는다');
+  assert.equal(r.ok, false);
+});
+
+test('gatherFacts — 느리게 계산된 mergeable이 사실에 들어간다', async () => {
+  let detailCalls = 0;
+  const api = async path => {
+    if (/\/pulls\/\d+$/.test(path)) {
+      detailCalls++;
+      return ok({ number: 5, draft: true, labels: [], head: { sha: 'h5' },
+        base: { ref: 'main', sha: 'b5' },
+        mergeable: detailCalls < 2 ? null : false,
+        mergeable_state: detailCalls < 2 ? 'unknown' : 'dirty' });
+    }
+    if (path.includes('check-runs')) return ok({ check_runs: [] });
+    if (path.endsWith('/status')) return ok({ statuses: [] });
+    if (path.includes('ccr/review_threads')) return ok([]);
+    if (path.includes('/reviews')) return ok([]);
+    if (path.includes('/compare/')) return ok({ status: 'ahead' });
+    return fail(404);
+  };
+  const f = await gatherFacts({ api, graphql: null, repo: 'o/r', owner: 'o', name: 'r',
+    number: 5, sleep: async () => {} });
+  assert.equal(f.mergeable, false, '두 번째 조회 값이 들어가야 한다');
+  assert.equal(f.mergeableState, 'dirty');
 });
