@@ -19,7 +19,7 @@ const SPOT   = 'src/lib/exchanges/binance.ts';
 const FUT    = 'src/lib/exchanges/binanceFutures.ts';
 const PAPER  = 'src/app/api/paper/order/route.ts';
 const SELL   = 'src/app/api/paper/sell/route.ts';
-const QUANT  = 'src/lib/exchanges/quantize.ts';
+const QUANT  = 'src/lib/kernel/quantize.ts';
 const REG    = 'src/lib/products/registry.ts';
 
 let bad = 0;
