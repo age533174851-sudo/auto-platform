@@ -375,7 +375,7 @@ import { runKisCoreTests } from './src/lib/exchanges/kisCore.test';
 import { runSpreadGuardTests } from './src/lib/markets/spreadGuard.test';
 import { runInstrumentTests } from './src/lib/markets/instrument.test';
 import { runContractSpecTests } from './src/lib/markets/contractSpec.test';
-import { runQuantizeTests } from './src/lib/exchanges/quantize.test';
+import { runQuantizeTests } from './src/lib/kernel/quantize.test';
 import { runDisplayScaleTests } from './src/lib/ui/displayScale.test';
 import { runStatusReportTests } from './src/lib/system/statusReport.test';
 import { runPositionParseTests } from './src/lib/signals/positionParse.test';
