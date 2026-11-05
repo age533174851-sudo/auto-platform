@@ -1,0 +1,189 @@
+// scripts/test-pr-facts.mjs
+//
+// **못 읽은 것이 0이 되지 않는다는 것을 값으로 못 박는다.**
+//
+// 이 모듈이 틀리는 방식은 하나뿐이다: 읽기 실패를 "깨끗함"으로 바꾸는
+// 것. 리뷰를 못 읽어서 `unresolvedThreads: 0`이 되면 판정기는 통과를
+// 주고, 미해결 리뷰가 달린 PR이 합쳐진다. 그래서 실패 경로마다
+// null인지 확인한다.
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  normalizeReviewThreads, normalizeChangesRequested,
+  reviewFacts, headContainsBase, buildFacts,
+} from './lib/pr-facts.mjs';
+
+const ok = body => ({ ok: true, status: 200, body });
+const fail = (status = 500, body = null) => ({ ok: false, status, body });
+
+test('리뷰 스레드 — 미해결만 센다', () => {
+  assert.equal(normalizeReviewThreads([]), 0);
+  assert.equal(normalizeReviewThreads([{ isResolved: true, isOutdated: false }]), 0);
+  assert.equal(normalizeReviewThreads([{ isResolved: false, isOutdated: false }]), 1);
+  // outdated는 그 코드가 사라진 것이라 세지 않는다
+  assert.equal(normalizeReviewThreads([{ isResolved: false, isOutdated: true }]), 0);
+  // snake_case (CCR REST)
+  assert.equal(normalizeReviewThreads([{ is_resolved: false, is_outdated: false }]), 1);
+});
+
+test('리뷰 스레드 — 모양을 모르면 null이다 (0이 아니다)', () => {
+  for (const bad of [null, undefined, 'nope', 42, {}, [null], ['x'],
+                     [{ foo: 1 }], [{ isResolved: 'false' }]]) {
+    assert.equal(normalizeReviewThreads(bad), null,
+      `${JSON.stringify(bad)}가 null이 아니다`);
+  }
+});
+
+test('CHANGES_REQUESTED — 숫자도 배열도 받는다', () => {
+  assert.equal(normalizeChangesRequested(0), 0);
+  assert.equal(normalizeChangesRequested(3), 3);
+  assert.equal(normalizeChangesRequested([]), 0);
+  assert.equal(normalizeChangesRequested([{ state: 'APPROVED' }]), 0);
+  assert.equal(normalizeChangesRequested([{ state: 'changes_requested' }]), 1);
+  assert.equal(normalizeChangesRequested(
+    [{ state: 'CHANGES_REQUESTED' }, { state: 'COMMENTED' }, { state: 'CHANGES_REQUESTED' }]), 2);
+});
+
+test('CHANGES_REQUESTED — 모르면 null이다', () => {
+  for (const bad of [null, undefined, 'x', NaN, {}, [null], [{}], [{ state: '' }]]) {
+    assert.equal(normalizeChangesRequested(bad), null,
+      `${JSON.stringify(bad)}가 null이 아니다`);
+  }
+});
+
+test('리뷰 — GraphQL이 되면 그것을 쓴다', async () => {
+  const graphql = async () => ok({
+    data: { repository: { pullRequest: {
+      reviewThreads: { nodes: [{ isResolved: false, isOutdated: false }] },
+      reviews: { totalCount: 2 },
+    } } },
+  });
+  const api = async () => { throw new Error('REST를 부르면 안 된다'); };
+  const r = await reviewFacts({ api, graphql, repo: 'o/r', owner: 'o', name: 'r', number: 1 });
+  assert.deepEqual(r, { unresolvedThreads: 1, changesRequested: 2 });
+});
+
+test('리뷰 — GraphQL이 403이면 REST로 떨어진다', async () => {
+  const graphql = async () => ({ ok: false, body: null });
+  const calls = [];
+  const api = async path => {
+    calls.push(path);
+    if (path.includes('ccr/review_threads')) {
+      return ok([{ is_resolved: false, is_outdated: false },
+                 { is_resolved: true, is_outdated: false }]);
+    }
+    if (path.includes('/reviews')) return ok([{ state: 'CHANGES_REQUESTED' }]);
+    return fail(404);
+  };
+  const r = await reviewFacts({ api, graphql, repo: 'o/r', owner: 'o', name: 'r', number: 7 });
+  assert.deepEqual(r, { unresolvedThreads: 1, changesRequested: 1 });
+  assert.ok(calls.some(p => p.includes('ccr/review_threads')), 'CCR 라우트를 불러야 한다');
+});
+
+test('리뷰 — 둘 다 실패하면 null이다. **다른 경로가 있다는 게 아는 것은 아니다**', async () => {
+  const graphql = async () => ({ ok: false, body: null });
+  const api = async () => fail(403);
+  const r = await reviewFacts({ api, graphql, repo: 'o/r', owner: 'o', name: 'r', number: 7 });
+  assert.deepEqual(r, { unresolvedThreads: null, changesRequested: null });
+});
+
+test('리뷰 — 한쪽만 읽혀도 null이다', async () => {
+  const graphql = async () => ({ ok: false, body: null });
+  const api = async path =>
+    path.includes('ccr/review_threads') ? ok([]) : fail(500);
+  const r = await reviewFacts({ api, graphql, repo: 'o/r', owner: 'o', name: 'r', number: 7 });
+  assert.equal(r.changesRequested, null);
+  assert.equal(r.unresolvedThreads, null, '한쪽을 모르면 전체가 모르는 것이다');
+});
+
+test('base 포함 — ahead/identical은 true, behind/diverged는 false', async () => {
+  for (const [status, want] of [['ahead', true], ['identical', true],
+                                ['behind', false], ['diverged', false]]) {
+    const r = await headContainsBase({
+      api: async () => ok({ status }), repo: 'o/r', baseSha: 'b', headSha: 'h', sleep: async () => {},
+    });
+    assert.equal(r, want, status);
+  }
+});
+
+test('base 포함 — 재시도하고, 끝까지 못 읽으면 null이다', async () => {
+  let n = 0;
+  const r1 = await headContainsBase({
+    api: async () => { n++; return n < 3 ? fail(502) : ok({ status: 'ahead' }); },
+    repo: 'o/r', baseSha: 'b', headSha: 'h', sleep: async () => {},
+  });
+  assert.equal(r1, true); assert.equal(n, 3, '재시도해야 한다');
+
+  const r2 = await headContainsBase({
+    api: async () => fail(403), repo: 'o/r', baseSha: 'b', headSha: 'h', sleep: async () => {},
+  });
+  assert.equal(r2, null);
+});
+
+test('base 포함 — status가 모르는 값이면 null이다', async () => {
+  const r = await headContainsBase({
+    api: async () => ok({ status: 'weird' }), repo: 'o/r', baseSha: 'b', headSha: 'h', sleep: async () => {},
+  });
+  assert.equal(r, null);
+});
+
+const prStub = (over = {}) => ({
+  number: 9, draft: true, labels: [{ name: 'x' }],
+  base: { ref: 'main', sha: 'base1' }, head: { sha: 'head1' },
+  mergeable: true, mergeable_state: 'clean', ...over,
+});
+
+test('buildFacts — 응답을 그대로 사실로 옮긴다', () => {
+  const f = buildFacts({
+    pr: prStub(),
+    runs: ok({ check_runs: [{ name: 'verify', status: 'completed', conclusion: 'success', head_sha: 'head1' }] }),
+    statuses: ok({ statuses: [{ context: 'Vercel', state: 'success' }] }),
+    review: { unresolvedThreads: 0, changesRequested: 0 },
+    contains: true,
+  });
+  assert.equal(f.number, 9);
+  assert.equal(f.draft, true);
+  assert.deepEqual(f.labels, ['x']);
+  assert.equal(f.baseRef, 'main');
+  assert.equal(f.headSha, 'head1');
+  assert.equal(f.headContainsBase, true);
+  assert.deepEqual(f.checks, [{ name: 'verify', status: 'completed', conclusion: 'success', headSha: 'head1' }]);
+  assert.deepEqual(f.statuses, [{ context: 'Vercel', state: 'success' }]);
+});
+
+test('buildFacts — 검사를 못 읽으면 빈 배열이다 (판정기가 CHECKS_MISSING으로 막는다)', () => {
+  const f = buildFacts({
+    pr: prStub(), runs: fail(500), statuses: fail(500),
+    review: { unresolvedThreads: 0, changesRequested: 0 }, contains: true,
+  });
+  assert.deepEqual(f.checks, []);
+  assert.deepEqual(f.statuses, []);
+});
+
+test('buildFacts — 리뷰가 null이면 null로 들어간다. **0으로 바뀌지 않는다**', () => {
+  const f = buildFacts({
+    pr: prStub(), runs: ok({ check_runs: [] }), statuses: ok({ statuses: [] }),
+    review: { unresolvedThreads: null, changesRequested: null }, contains: null,
+  });
+  assert.equal(f.unresolvedThreads, null);
+  assert.equal(f.changesRequested, null);
+  assert.equal(f.headContainsBase, null);
+  // review 자체가 없을 때도 0이 아니다
+  const g = buildFacts({ pr: prStub(), runs: ok({}), statuses: ok({}), review: null, contains: null });
+  assert.equal(g.unresolvedThreads, null);
+  assert.equal(g.changesRequested, null);
+});
+
+test('buildFacts — head.sha가 없으면 던진다 (조용히 빈 사실을 만들지 않는다)', () => {
+  assert.throws(() => buildFacts({ pr: { number: 1, base: {} }, runs: ok({}), statuses: ok({}) }));
+  assert.throws(() => buildFacts({ pr: null }));
+});
+
+test('buildFacts — 라벨은 문자열과 객체 둘 다 받는다', () => {
+  const f = buildFacts({
+    pr: prStub({ labels: ['a', { name: 'b' }, null, { name: '' }] }),
+    runs: ok({}), statuses: ok({}), review: null, contains: true,
+  });
+  assert.deepEqual(f.labels, ['a', 'b']);
+});
