@@ -207,10 +207,37 @@ export async function recordEvaluation(
      * 없으면 적지 않는다 — 'UNKNOWN'으로 메우면 "코드가 없다"와
      * "코드가 UNKNOWN이다"가 같은 값이 된다.
      */
-    reasonCode?: string | null },
+    reasonCode?: string | null;
+    /**
+     * **이 평가를 선점한 시각.** 주면 `last_run_at`에 그 값을 적는다.
+     *
+     * 없으면 지금을 적는다 — 선점 없이 부르는 경로(연결 없음·계약 차단)가
+     * 그렇다.
+     *
+     * 왜 받는가
+     * ─────────
+     * `claimSchedule`이 이미 `new Date(nowMs)`를 적었는데 여기서 다시
+     * `new Date()`를 적으면 **전략 호출에 걸린 시간만큼 뒤로 옮겨진다.**
+     * 그러면 다음 창은 `설정 간격`이 아니라 `설정 간격 + 평가 소요시간`
+     * 뒤에 열리고, 그 차이가 회차마다 누적된다.
+     *
+     * 운영에서 실제로 밀렸다 (#450): `autotrade-tick` 응답의 leftMin
+     * 19개를 역산하니 선점 위상이 4.7일 동안 58:15 → 40:14 로 단조
+     * 전진했다 — 선점 1회당 약 22.5초, 112회에 42분.
+     *
+     * 사용자가 60분을 넣었으면 60분이어야 한다. 선점 시각을 그대로
+     * 적으면 두 쓰기가 같은 값이 되고(기록이 실패해도 선점이 남긴
+     * 값이 그대로다) 간격은 설정값대로 지켜진다.
+     */
+    claimedAtMs?: number | null },
 ): Promise<{ saved: boolean; error: string | null }> {
+  const claimed = Number(rec.claimedAtMs);
   const base = {
-    last_run_at: new Date().toISOString(),
+    // **선점 시각을 주면 그것을 적는다.** 안 주면 지금이다 — 0으로
+    // 메우지 않는다(`Number(null) === 0`이라 1970년이 적힌다).
+    last_run_at: new Date(
+      rec.claimedAtMs != null && Number.isFinite(claimed) ? claimed : Date.now(),
+    ).toISOString(),
     last_result: resultLineOf(rec.outcome, rec.summary),
   };
   // 옛 화면이 읽는 `verdict`와 새 값 `outcome`을 **둘 다** 적는다.
@@ -388,6 +415,11 @@ export async function evaluateIfDue(
   }
   // `record`에 `reasonCode`가 있으면 전개로 그대로 넘어간다 — 여기서
   // 다시 꺼내 적지 않는다(한쪽만 고치는 실수를 만들지 않는다).
-  const save = await recordEvaluation(sb, row.id, { ...record, source: deps.source });
+  //
+  // **선점 시각을 같이 넘긴다.** 안 넘기면 여기서 `new Date()`를 적어
+  // 위 `claimSchedule`이 적은 값을 덮고, 전략 호출에 걸린 시간이 간격에
+  // 더해진다 — 회차마다 누적돼 운영에서 112회에 42분 밀렸다 (#450).
+  const save = await recordEvaluation(sb, row.id,
+    { ...record, source: deps.source, claimedAtMs: nowMs });
   return { due, record, saveError: save.error };
 }
