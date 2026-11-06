@@ -174,6 +174,7 @@ import {
   runAdoptIntentIntegrationTests,
 } from './src/test/integration/orderPathIntegration.test';
 import { runSmokeStartRouteTests } from './src/test/integration/smokeStartRouteIntegration.test';
+import { runGateFindOrderTests } from './src/test/integration/gateFindOrderIntegration.test';
 import { runHoldExtensionIntegrationTests } from './src/test/integration/holdExtensionIntegration.test';
 import { runFailureRecoveryTests } from './src/lib/engine/failureRecovery.test';
 import { runMarketTypeTests } from './src/lib/markets/marketType.test';
@@ -434,6 +435,7 @@ runMigrationStatusTests(); runWalletTruthTests(); runSmokePlanTests(); runSmokeR
   await runPrecisionIntegrationTests();
   await runPrecisionMatrixTests();
   await runSmokeStartRouteTests();
+  await runGateFindOrderTests();
   await runHoldExtensionIntegrationTests();
   await runKillCloseIntegrationTests();
   await flushAsync();
