@@ -138,24 +138,15 @@ async function graphql(query, variables) {
 /**
  * 리뷰 상태. **못 읽으면 null이다** — 0으로 두면 미해결 리뷰를 무시하고 합친다.
  */
-async function reviewFacts(number) {
+async function reviewFacts(number, parseFacts) {
   const q = `query($o:String!,$n:String!,$p:Int!){
     repository(owner:$o,name:$n){ pullRequest(number:$p){
-      reviewThreads(first:100){ nodes { isResolved isOutdated } }
+      reviewThreads(first:100){ nodes { isResolved isOutdated } pageInfo { hasNextPage } }
       reviews(first:100, states:CHANGES_REQUESTED){ totalCount }
     }}}`;
   const r = await graphql(q, { o: OWNER, n: NAME, p: number });
   if (!r.ok) return { unresolvedThreads: null, changesRequested: null };
-  const pr = r.body?.data?.repository?.pullRequest;
-  const nodes = pr?.reviewThreads?.nodes;
-  if (!Array.isArray(nodes) || pr?.reviews?.totalCount == null) {
-    return { unresolvedThreads: null, changesRequested: null };
-  }
-  return {
-    // outdated된 스레드는 이미 그 코드가 사라진 것이라 세지 않는다.
-    unresolvedThreads: nodes.filter(t => !t.isResolved && !t.isOutdated).length,
-    changesRequested: pr.reviews.totalCount,
-  };
+  return parseFacts(r.body);
 }
 
 /**
@@ -213,7 +204,10 @@ async function upsertComment(number, body) {
 
 async function main() {
   const outDir = loadGate();
-  const { autoMergeGate, gateComment, AUTO_MERGE_LABEL, SELF_CHECK_NAME, REQUIRED_CHECKS } =
+  const {
+    autoMergeGate, gateComment, AUTO_MERGE_LABEL, SELF_CHECK_NAME, REQUIRED_CHECKS,
+    reviewFactsFromGraphql, completeCheckRunsPage,
+  } =
     await import(`file://${join(outDir, 'autoMergeGate.js')}`);
   const {
     deployDispatchPlan, deployDispatchRequest, dispatchResultNote,
@@ -250,9 +244,16 @@ async function main() {
     const [runs, statuses, review, contains] = await Promise.all([
       api(`/repos/${REPO}/commits/${headSha}/check-runs?per_page=100`),
       api(`/repos/${REPO}/commits/${headSha}/status`),
-      reviewFacts(pr.number),
+      reviewFacts(pr.number, reviewFactsFromGraphql),
       headContainsBase(pr.base.sha, headSha),
     ]);
+
+    // GitHub REST는 첫 100개 검사만 준다. total_count가 더 크면
+    // 숨은 실패가 있을 수 있으므로 판정기에 UNKNOWN(빈 목록)을 전달한다.
+    const completeChecks = runs.ok ? completeCheckRunsPage(runs.body) : null;
+    if (completeChecks === null) {
+      console.log(`#${pr.number} 검사 목록 불완전 — total_count와 첫 페이지를 확인하지 못했습니다`);
+    }
 
     const facts = {
       number: pr.number,
@@ -264,19 +265,13 @@ async function main() {
       headContainsBase: contains,
       mergeable: pr.mergeable,
       mergeableState: pr.mergeable_state || 'unknown',
-      checks: (runs.ok ? (runs.body.check_runs || []) : []).map(c => ({
-        name: c.name, status: c.status, conclusion: c.conclusion, headSha: c.head_sha,
-      })),
+      checks: completeChecks ?? [],
       statuses: (statuses.ok ? (statuses.body.statuses || []) : []).map(s => ({
         context: s.context, state: s.state,
       })),
       unresolvedThreads: review.unresolvedThreads,
       changesRequested: review.changesRequested,
     };
-
-    // 검사 목록을 못 읽었으면 **빈 배열로 두지 않는다** — 그러면
-    // '검사가 없다'가 되어 CHECKS_MISSING으로 막힌다. 그게 맞는 결과다.
-    if (!runs.ok) facts.checks = [];
 
     const v = autoMergeGate(facts);
     console.log(`#${pr.number} ${v.merge ? 'MERGE' : v.code} — ${v.reason}`);
