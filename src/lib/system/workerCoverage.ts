@@ -54,6 +54,17 @@ export interface WorkerTask {
 export interface VercelCron {
   schedule: string;
   path: string;
+  /**
+   * 이 cron을 거는 쪽. 생략하면 `vercel.json`이다.
+   *
+   * **Vercel Hobby는 일 단위 cron만 허용한다** — 이 저장소가 여러 곳에
+   * 적어 둔 제약이다(`exit-monitor/route.ts:9`, `calendar-sync/route.ts:54`,
+   * `PROGRESS.md:493`). 그래서 분 단위로 깨우는 일은 이미 **GitHub
+   * Actions의 `schedule`** 이 하고 있다. 대체 범위를 `vercel.json`만
+   * 보고 판정하면 **이미 있는 대체를 없다고 적는다** — 실제로 그렇게
+   * 틀렸고, 손절 감시를 288배 악화로 보고했다(진짜는 12배다).
+   */
+  source?: string;
 }
 
 export interface CoverageRow {
@@ -133,15 +144,28 @@ export function coverageRow(task: WorkerTask, crons: VercelCron[]): CoverageRow 
     return {
       ...base, vercelEveryMs: null, substitute: 'NONE', factor: null,
       reason: 'DB를 직접 보는 작업이라 깨울 수 있는 HTTP 경로가 없습니다 — '
-        + 'Vercel cron으로 대체할 대상 자체가 없습니다',
+        + 'cron으로 대체할 대상 자체가 없습니다',
     };
   }
 
-  const hit = crons.find((c) => String(c.path ?? '').trim() === task.endpoint);
+  // 같은 경로를 여러 곳이 깨울 수 있다(Vercel cron + GitHub Actions).
+  // 실제 대체는 **가장 자주 도는 것**이다. 첫 번째를 집으면 느린 쪽을
+  // 답으로 적어 악화 배수가 부풀려진다.
+  const matches = (crons ?? []).filter((c) => String(c.path ?? '').trim() === task.endpoint);
+  const ranked = matches
+    .map((c) => ({ c, ms: cronEveryMs(c.schedule) }))
+    .sort((x, y) => {
+      if (x.ms == null && y.ms == null) return 0;
+      if (x.ms == null) return 1;   // 환산 불가는 뒤로
+      if (y.ms == null) return -1;
+      return x.ms - y.ms;           // 더 자주 도는 것이 앞
+    });
+  const hit = ranked.length ? ranked[0].c : undefined;
   if (!hit) {
     return {
       ...base, vercelEveryMs: null, substitute: 'NONE', factor: null,
-      reason: `${task.endpoint}을 부르는 Vercel cron이 없습니다 — `
+      reason: `${task.endpoint}을 부르는 cron이 어디에도 없습니다 `
+        + '(vercel.json · GitHub Actions schedule 모두) — '
         + 'Fly를 끄면 이 작업은 아무도 깨우지 않습니다',
     };
   }
@@ -168,12 +192,13 @@ export function coverageRow(task: WorkerTask, crons: VercelCron[]): CoverageRow 
   if (factor <= SAME_ORDER_FACTOR) {
     return {
       ...base, vercelEveryMs, substitute: 'EQUIVALENT', factor,
-      reason: `${hit.schedule} → 같은 급의 주기입니다`,
+      reason: `${hit.source ?? 'vercel.json'} \`${hit.schedule}\` → 같은 급의 주기입니다`,
     };
   }
   return {
     ...base, vercelEveryMs, substitute: 'DEGRADED', factor,
-    reason: `${hit.schedule} → 주기가 ${Math.round(factor)}배 나빠집니다`,
+    reason: `${hit.source ?? 'vercel.json'} \`${hit.schedule}\` → `
+      + `주기가 ${Math.round(factor)}배 나빠집니다`,
   };
 }
 

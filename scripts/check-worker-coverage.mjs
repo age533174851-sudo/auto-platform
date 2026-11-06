@@ -27,7 +27,7 @@
 // 판정 로직을 이 스크립트에 복제하지 않는다. `loadJudge()`가 앱과 **같은
 // 파일**을 컴파일해서 쓴다 — 복제하면 언젠가 한쪽만 고쳐진다.
 
-import { readFileSync, existsSync, mkdtempSync } from 'node:fs';
+import { readFileSync, existsSync, mkdtempSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -126,6 +126,34 @@ function extractTasks(intervals) {
   });
 }
 
+/**
+ * GitHub Actions 워크플로의 `schedule` cron과 그 워크플로가 부르는
+ * `/api/...` 경로를 짝지어 돌려준다.
+ *
+ * 한 워크플로가 여러 경로를 부르면 그 cron이 전부에 걸린다고 본다 —
+ * 실제로 그 주기에 깨워지기 때문이다.
+ */
+function actionsCrons() {
+  const dir = '.github/workflows';
+  if (!existsSync(dir)) return [];
+  const out = [];
+  for (const name of readdirSync(dir)) {
+    if (!/\.ya?ml$/.test(name)) continue;
+    const text = readFileSync(join(dir, name), 'utf8');
+    const schedules = [...text.matchAll(/-\s*cron:\s*['"]([^'"]+)['"]/g)].map((m) => m[1]);
+    if (!schedules.length) continue;
+    const paths = [...new Set([...text.matchAll(/(\/api\/[A-Za-z0-9/_-]+)/g)].map((m) => m[1]))]
+      // 디렉터리만 가리키는 조각은 버린다
+      .filter((p) => !p.endsWith('/'));
+    for (const schedule of schedules) {
+      for (const path of paths) {
+        out.push({ schedule, path, source: `.github/workflows/${name}` });
+      }
+    }
+  }
+  return out;
+}
+
 function loadJudge() {
   const dir = mkdtempSync(join(tmpdir(), 'traigo-cov-'));
   const tsc = join('node_modules', 'typescript', 'bin', 'tsc');
@@ -178,7 +206,18 @@ async function main() {
   const { coverage, flyRetirementBlockers } =
     await import(`file://${join(outDir, 'workerCoverage.js')}`);
 
-  const crons = (JSON.parse(readFileSync('vercel.json', 'utf8')).crons) || [];
+  // ── 깨우는 쪽을 **전부** 모은다 ──
+  //
+  // `vercel.json`만 보면 틀린다. **Vercel Hobby는 일 단위 cron만
+  // 허용하고**(이 저장소가 `exit-monitor/route.ts:9` · `PROGRESS.md:493`
+  // 등 여러 곳에 적어 둔 제약), 그래서 분 단위로 깨우는 일은 이미
+  // **GitHub Actions의 `schedule`** 이 하고 있다. 한쪽만 보면 이미 있는
+  // 대체를 없다고 적는다 — 실제로 그렇게 틀렸다.
+  const crons = [
+    ...((JSON.parse(readFileSync('vercel.json', 'utf8')).crons) || [])
+      .map((c) => ({ ...c, source: 'vercel.json' })),
+    ...actionsCrons(),
+  ];
   const tasks = found
     .filter((t) => DECLARED[t.fn])
     .map((t) => ({
@@ -189,14 +228,16 @@ async function main() {
   const rows = coverage(tasks, crons);
 
   console.log('');
-  console.log('Fly Worker 주기 작업 → Vercel cron 대체 상태');
+  console.log('Fly Worker 주기 작업 → cron 대체 상태 (vercel.json + GitHub Actions)');
   console.log('');
-  console.log('| 작업 | 역할 | 안전 | Fly 주기 | Vercel 주기 | 상태 | 악화 |');
-  console.log('|---|---|---|---|---|---|---|');
+  console.log('| 작업 | 역할 | 안전 | Fly 주기 | 대체 주기 | 상태 | 악화 | 깨우는 쪽 |');
+  console.log('|---|---|---|---|---|---|---|---|');
   for (const r of rows) {
+    const who = r.substitute === 'NONE' ? '없음'
+      : (String(r.reason).match(/^([^\s`]+)/) || [])[1] || '?';
     console.log(`| \`${r.fn}\` | ${r.role} | ${r.safetyCritical ? '★' : ''} | `
       + `${fmt(r.flyEveryMs)} | ${fmt(r.vercelEveryMs)} | ${r.substitute} | `
-      + `${r.factor == null ? 'UNKNOWN' : Math.round(r.factor) + '배'} |`);
+      + `${r.factor == null ? 'UNKNOWN' : Math.round(r.factor) + '배'} | ${who} |`);
   }
 
   const blockers = flyRetirementBlockers(rows);

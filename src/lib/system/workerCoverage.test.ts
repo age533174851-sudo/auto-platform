@@ -142,6 +142,51 @@ export function runWorkerCoverageTests() {
     eq(r.factor, null);
   });
 
+  // ── ②-b 깨우는 쪽이 여럿일 때 ──
+  //
+  // **이 시험은 제 분석이 틀렸기 때문에 추가됐다.**
+  // 처음에는 `vercel.json`만 보고 손절 감시를 "288배 악화"로 보고했다.
+  // 그런데 Vercel Hobby는 일 단위 cron만 허용하고, 분 단위로 깨우는 일은
+  // 이미 **GitHub Actions의 schedule**이 하고 있었다(`exit-monitor.yml`
+  // `7 * * * *`). 실제 악화는 12배다. 한쪽만 보면 **이미 있는 대체를
+  // 없다고 적는다.**
+  test('★ 같은 경로를 여럿이 깨우면 가장 자주 도는 것이 답이다', () => {
+    const r = coverageRow(
+      task({ fn: 'pollExitMonitor', everyMs: 5 * MIN, endpoint: '/api/autotrade/exit-monitor' }),
+      [
+        { schedule: '0 0 * * *', path: '/api/autotrade/exit-monitor', source: 'vercel.json' },
+        { schedule: '7 * * * *', path: '/api/autotrade/exit-monitor', source: 'actions' },
+      ],
+    );
+    eq(r.vercelEveryMs, HOUR);        // 1일이 아니라 1시간
+    eq(Math.round(r.factor as number), 12);  // 288배가 아니라 12배
+    assert(r.reason.includes('actions'), '어느 쪽이 깨우는지 적어야 한다');
+  });
+
+  test('순서가 뒤바뀌어도 가장 자주 도는 것을 집는다', () => {
+    const r = coverageRow(
+      task({ everyMs: MIN, endpoint: '/api/x' }),
+      [
+        { schedule: '*/5 * * * *', path: '/api/x', source: 'fast' },
+        { schedule: '0 0 * * *', path: '/api/x', source: 'slow' },
+      ],
+    );
+    eq(r.vercelEveryMs, 5 * MIN);
+    assert(r.reason.includes('fast'), '빠른 쪽이 답이어야 한다');
+  });
+
+  test('환산 불가 cron은 환산 가능한 것보다 뒤로 밀린다', () => {
+    const r = coverageRow(
+      task({ everyMs: MIN, endpoint: '/api/x' }),
+      [
+        { schedule: '0 9 * * 1', path: '/api/x', source: 'weekly' },
+        { schedule: '*/5 * * * *', path: '/api/x', source: 'fast' },
+      ],
+    );
+    eq(r.vercelEveryMs, 5 * MIN);
+    eq(r.substitute, 'DEGRADED');
+  });
+
   // ── ③ Fly를 끌 수 있는가 ──
   test('★ 안전상 필수가 EQUIVALENT가 아니면 Fly를 끌 수 없다', () => {
     const rows = coverage([
