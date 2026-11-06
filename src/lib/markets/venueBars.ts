@@ -146,6 +146,12 @@ export interface BarFreshness {
  * 경계에 걸린 정상 봉을 버린다). 미완성 봉을 일부러 남긴 조회
  * (`keptIncomplete`)에서 마지막 봉이 아직 진행 중인 것은 **정상**이다.
  *
+ * 무엇을 판정하지 **않는가**
+ * ──────────────────────────
+ * 이 함수는 타임스탬프 하나만 본다. "과거 구간을 일부러 조회한 것인가"는
+ * 여기서 알 수 없고 `fetchVenueBars`의 인자가 안다 — 그 판단은
+ * `staleRefusal` 한 곳에 있다.
+ *
  * 거래소 시각 오차
  * ────────────────
  * 거래소 시계가 우리보다 앞서 있으면 마지막 봉이 아직 닫히지 않은 것으로
@@ -237,10 +243,25 @@ function toVenueBars(rows: RawBar[]): VenueBars | null {
  */
 function staleRefusal(
   cut: { rows: RawBar[]; dropped: boolean },
-  opts: { interval: string; maxAgeIntervals?: number | null; keepIncomplete?: boolean },
+  opts: {
+    interval: string; maxAgeIntervals?: number | null; keepIncomplete?: boolean;
+    startTimeMs?: number | null; endTimeMs?: number | null;
+  },
   now: number, src: string,
 ): VenueBarsResult | null {
   if (opts.maxAgeIntervals == null) return null;
+
+  // ── 과거 구간 조회는 '지금' 기준으로 판정하지 않는다 ──
+  //
+  // `startTimeMs`·`endTimeMs`를 준 조회는 **지난 구간을 일부러 달라고 한
+  // 것**이다. 그 봉이 오래된 것은 고장이 아니라 요청대로 받은 것이다.
+  //
+  // 실제 호출부가 있다: `src/app/api/signals/ledger/route.ts:104-106`은
+  // 신호가 난 과거 구간을 받아 체결을 대조한다. 여기서 지금 기준으로
+  // 막으면 **신호 장부 대조가 통째로 멈춘다.** 백테스트·리서치도 같다.
+  //
+  // 이 면제는 좁다 — 구간을 주지 않은 실시간 조회는 그대로 판정한다.
+  if (opts.startTimeMs != null || opts.endTimeMs != null) return null;
   const last = cut.rows.length ? cut.rows[cut.rows.length - 1] : null;
   const f = barFreshness({
     newestOpenTime: last?.openTime, interval: opts.interval, nowMs: now,
@@ -361,6 +382,9 @@ export async function fetchVenueBars(opts: {
    *
    * **주지 않으면 검사하지 않는다.** 기존 호출부의 동작은 그대로다 —
    * 켜는 것은 별도 결정이고, 이 작업은 그 결정을 하지 않는다 (#450).
+   *
+   * 줘도 **과거 구간 조회(`startTimeMs`·`endTimeMs`)에는 적용되지 않는다.**
+   * 그 봉이 오래된 것은 요청대로 받은 것이다.
    */
   maxAgeIntervals?: number | null;
   /**

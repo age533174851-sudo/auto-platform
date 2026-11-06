@@ -231,6 +231,63 @@ export function runVenueBarsFreshnessTests() {
     assert(v.summary.includes('360분'), `얼마나 오래됐는지가 남는다: ${v.summary}`);
   });
 
+  // ── 과거 구간 조회는 '지금' 기준으로 판정하면 안 된다 ──
+  //
+  // 소유자 결정(#450): "`startTimeMs/endTimeMs`을 쓰는 과거 구간 조회·
+  // 백테스트/리서치는 현재 시각 기준 stale 판정으로 모두 막으면 안 됨."
+  //
+  // 실제 호출부가 있다. `src/app/api/signals/ledger/route.ts:104-106`은
+  // 신호가 난 **과거 구간**을 `startTimeMs`·`endTimeMs`로 받아 체결을
+  // 대조한다. 그 봉은 당연히 오래됐다 — 오래된 것이 **정상**이다.
+  // 지금 기준으로 막으면 신호 장부 대조가 통째로 멈춘다.
+
+  test('★ RED — 과거 구간 조회(startTimeMs)는 한도를 줘도 막히지 않는다', async () => {
+    const r = await fetchVenueBars({ fetchImpl: fakeFetch(klines(NOW - 72 * 60 * MIN, MIN)),
+      exchange: 'binance', symbol: 'BTCUSDT', interval: '1m', limit: 5,
+      testnet: true, nowMs: NOW, maxAgeIntervals: 3,
+      startTimeMs: NOW - 80 * 60 * MIN,
+    } as any);
+    assert(r.bars != null, `과거 구간 조회가 막혔다 — 신호 장부 대조가 멈춘다: ${r.error}`);
+    eq(r.error, null);
+  });
+
+  test('★ RED — 과거 구간 조회(endTimeMs)도 막히지 않는다', async () => {
+    const r = await fetchVenueBars({ fetchImpl: fakeFetch(klines(NOW - 72 * 60 * MIN, MIN)),
+      exchange: 'binance', symbol: 'BTCUSDT', interval: '1m', limit: 5,
+      testnet: true, nowMs: NOW, maxAgeIntervals: 3,
+      endTimeMs: NOW - 60 * 60 * MIN,
+    } as any);
+    assert(r.bars != null, `과거 구간 조회가 막혔다: ${r.error}`);
+  });
+
+  test('★ RED — 두 끝을 다 준 조회도 막히지 않는다 (signals/ledger 의 모양)', async () => {
+    const r = await fetchVenueBars({ fetchImpl: fakeFetch(klines(NOW - 72 * 60 * MIN, MIN)),
+      exchange: 'binance', symbol: 'BTCUSDT', interval: '1m', limit: 1000,
+      testnet: true, nowMs: NOW, maxAgeIntervals: 3,
+      startTimeMs: NOW - 80 * 60 * MIN, endTimeMs: NOW - 70 * 60 * MIN,
+    } as any);
+    assert(r.bars != null, `signals/ledger 모양이 막혔다: ${r.error}`);
+  });
+
+  test('구간을 안 준 실시간 조회는 여전히 막힌다 — 면제가 너무 넓지 않다', async () => {
+    const r = await fetchVenueBars({ fetchImpl: fakeFetch(klines(NOW - 72 * 60 * MIN, MIN)),
+      exchange: 'binance', symbol: 'BTCUSDT', interval: '1m', limit: 5,
+      testnet: true, nowMs: NOW, maxAgeIntervals: 3,
+    } as any);
+    eq(r.bars, null, '실시간 조회에서 면제가 새면 검사가 무의미해진다');
+    assert(/오래/.test(String(r.error)), r.error ?? '');
+  });
+
+  test('실시간 차트(keepIncomplete)는 진행 중 봉이 정상이다 — market/candles 의 모양', async () => {
+    // 마지막 봉이 아직 안 닫혔다. `market/candles/route.ts:76`이 이 모양이다.
+    const r = await fetchVenueBars({ fetchImpl: fakeFetch(klines(NOW + MIN, MIN)),
+      exchange: 'binance', symbol: 'BTCUSDT', interval: '1m', limit: 5,
+      testnet: true, nowMs: NOW, maxAgeIntervals: 3, keepIncomplete: true,
+    } as any);
+    assert(r.bars != null, `실시간 차트가 막혔다: ${r.error}`);
+    eq(r.droppedIncomplete, false, 'keepIncomplete 면 자르지 않는다');
+  });
+
   test('봉 길이 상수는 그대로다 — 이 작업이 바꾸지 않는다', () => {
     eq(intervalMs('1m'), 60_000);
     eq(intervalMs('5m'), 300_000);
