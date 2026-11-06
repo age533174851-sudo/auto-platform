@@ -65,6 +65,35 @@ const DECLARED = {
 // tick()에서 불리지만 주기 작업이 아닌 것 (락·하트비트)
 const NOT_A_TASK = new Set(['acquireLock', 'heartbeat', 'noteScheduler', 'releaseLock', 'sleep']);
 
+// ── 기능적 대체 ──
+//
+// **이 표가 없어서 제 판정이 두 번째로 틀렸다.**
+//
+// 대체를 **엔드포인트로만** 짝지었다. 그런데 DB를 직접 보는 작업은
+// 자기 이름의 엔드포인트가 없고, 그 일을 **다른 주소**가 한다. 그래서
+// `pollSchedules`(예약 평가)를 "대체 없음"으로 적었는데, 실제로는
+// `/api/autotrade/daily-ladder`의 GET이 `autotrade_schedules`를 읽어
+// **워커와 같은 `evaluateIfDue`** 를 부른다
+// (`src/app/api/autotrade/daily-ladder/route.ts:1157` · `:1173` · `:1188`).
+// 그 주소는 `autotrade-tick.yml`이 `*/15`로 깨운다.
+//
+// 즉 예약 평가는 **15분 대체가 이미 있다**(15배 느림). 없는 것이 아니다.
+// 한쪽만 보고 "없음"으로 적으면 이관이 실제보다 어려워 보이고, 그 방향의
+// 오보가 더 나쁘다 — 멀쩡한 대체를 다시 만들게 된다.
+//
+// 그래서 **증거(파일:줄)를 함께 적어** 기능적 대체를 선언한다. 증거 없이
+// 이 표에 줄을 더하면 "대체됐다"는 거짓이 생기므로, 검사기가 그 파일에
+// 그 심볼이 실제로 있는지 확인한다.
+const FUNCTIONAL_SUBSTITUTE = {
+  pollSchedules: {
+    endpoint: '/api/autotrade/daily-ladder',
+    evidenceFile: 'src/app/api/autotrade/daily-ladder/route.ts',
+    // 이 심볼들이 그 파일에 실제로 있어야 한다 — 없으면 선언이 거짓이다
+    evidenceSymbols: ['autotrade_schedules', 'evaluateIfDue'],
+    why: 'GET이 autotrade_schedules를 읽어 워커와 같은 evaluateIfDue를 부른다',
+  },
+};
+
 /** 간격 상수 이름 → 값(ms). 못 읽으면 null (UNKNOWN, 0이 아니다) */
 function resolveIntervals() {
   const out = {};
@@ -119,7 +148,19 @@ function extractTasks(intervals) {
     const defIdx = lines.findIndex((l) => new RegExp(`^async function ${fn}\\(`).test(l));
     if (defIdx < 0) return { fn, everyMs: null, endpoint: null, unresolved: '정의를 찾지 못했습니다' };
     const body = bodyOf(defIdx);
-    const ep = (body.match(/\$\{APP_URL\}(\/api\/[A-Za-z0-9/\-]+)/) || [])[1] || null;
+    let ep = (body.match(/\$\{APP_URL\}(\/api\/[A-Za-z0-9/\-]+)/) || [])[1] || null;
+    // 자기 이름의 주소가 없으면 기능적 대체를 본다 (증거를 확인한 뒤에만)
+    if (!ep && FUNCTIONAL_SUBSTITUTE[fn]) {
+      const sub = FUNCTIONAL_SUBSTITUTE[fn];
+      const ev = existsSync(sub.evidenceFile) ? readFileSync(sub.evidenceFile, 'utf8') : '';
+      const missing = sub.evidenceSymbols.filter((sym) => !ev.includes(sym));
+      if (missing.length) {
+        err(`${fn}의 기능적 대체 선언이 거짓입니다 — ${sub.evidenceFile}에 `
+          + `${missing.join(' · ')}이 없습니다. 증거 없는 대체를 "대체됨"으로 적지 않습니다`);
+      } else {
+        ep = sub.endpoint;
+      }
+    }
     const ivName = (body.match(/\b([A-Z][A-Z0-9_]*_MS)\b/) || [])[1] || null;
     const everyMs = ivName ? (intervals[ivName] ?? null) : null;
     return { fn, line: defIdx + 1, everyMs, endpoint: ep, ivName, perTick: !ivName };
