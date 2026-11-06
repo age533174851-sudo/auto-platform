@@ -125,6 +125,88 @@ export function dueCheck(i: {
 }
 
 /**
+ * **왜 지금 안 도는가 — 한 번에 읽는 진단.** 읽기만 한다.
+ *
+ * 무엇이 문제였나
+ * ───────────────
+ * `runtimeStateOf`는 `dueCheck`를 부르지 않는다. 그래서 조회 응답과
+ * 화면은 `WATCHING`(감시 중)을 보여주는데, 실행기의 틱은 매번
+ * `WAITING`으로 돌아선다. 2026-11-02~05 사이 `autotrade-tick` 12회차가
+ * **전부** `code:"WAITING"`이었고, 그 사실은 워크플로 로그에만 있었다.
+ * 화면만 보는 사람에게는 자동매매가 정상으로 보인다.
+ *
+ * 조회 응답에는 `interval_min`·`last_run_at`·`nextEvaluationAtMs`가 이미
+ * 실린다. 빠진 것은 **"그래서 지금 왜 안 도는가"** 하나다.
+ *
+ * 판정을 다시 쓰지 않는다
+ * ───────────────────────
+ * 답을 `dueCheck` 정본에서 그대로 가져온다 — 같은 판단을 두 번 적으면
+ * 언젠가 갈리고, 갈리면 진단이 "지금 돌 차례"라고 한 예약을 실행기가
+ * 건너뛴다 (`CLAUDE.md`: 같은 판단이 두 곳에 있으면 언젠가 갈린다).
+ * 테스트가 두 결과의 `code`·`due`·`reason`·`leftMin`이 **값으로 같다**는
+ * 것을 못 박는다.
+ *
+ * 표에 적힌 값과 실제로 쓰인 값을 나눠 적는다
+ * ───────────────────────────────────────────
+ * `interval_min`이 NULL이나 0이면 `DEFAULT_INTERVAL_MIN`(1440 = 하루)이
+ * 쓰인다. 그 사실이 안 보이면 "간격을 60분으로 해 뒀는데 왜 안 도나"가
+ * 영원히 안 풀린다. 그래서 `intervalMinRaw`(적힌 값) ·
+ * `intervalMin`(쓰인 값) · `intervalMinDefaulted`(기본값이 끼어들었나)를
+ * 따로 준다.
+ *
+ * **시크릿을 싣지 않는다**
+ * ────────────────────────
+ * 호출하는 쪽이 예약 행을 통째로 넘겨도 아는 필드만 돌려준다. 돌려주는
+ * 키 집합이 고정이라, 나중에 행에 새 열이 생겨도 조용히 새지 않는다.
+ * 테스트가 키 집합과 "키·시크릿 문자열이 안 들어간다"를 확인한다.
+ */
+export interface DueDiagnostics {
+  /** 표에 적힌 값. null이면 안 적혀 있다 */
+  intervalMinRaw: number | null;
+  /** 실제로 쓰인 값 */
+  intervalMin: number;
+  /** 적힌 값이 없거나 못 쓸 값이어서 기본값이 끼어들었는가 */
+  intervalMinDefaulted: boolean;
+  lastEvaluationAtMs: number | null;
+  lastEvaluationAt: string | null;
+  nextEvaluationAtMs: number | null;
+  nextEvaluationAt: string | null;
+  /** `dueCheck`가 돌려준 것 그대로 */
+  due: { due: boolean; code: DueCode; leftMin: number | null; reason: string };
+}
+
+export function dueDiagnostics(i: {
+  nowMs: number;
+  enabled: any;
+  connectionId?: any;
+  lastRunAtMs?: any;
+  intervalMin?: any;
+}): DueDiagnostics {
+  // **판정은 정본에서 가져온다.** 여기서 다시 계산하지 않는다.
+  const v = dueCheck({
+    nowMs: i.nowMs, enabled: i.enabled, connectionId: i.connectionId,
+    lastRunAtMs: i.lastRunAtMs, intervalMin: i.intervalMin,
+  });
+
+  const raw = num(i.intervalMin);
+  const used = intervalMinOf(i.intervalMin);
+  const last = msOf(i.lastRunAtMs);
+  const next = nextEvaluationAtMs({ lastRunAtMs: i.lastRunAtMs, intervalMin: i.intervalMin });
+
+  return {
+    intervalMinRaw: raw,
+    intervalMin: used,
+    // 적힌 값이 그대로 쓰이지 않았으면 기본값이 끼어든 것이다
+    intervalMinDefaulted: raw !== used,
+    lastEvaluationAtMs: last,
+    lastEvaluationAt: last == null ? null : new Date(last).toISOString(),
+    nextEvaluationAtMs: next,
+    nextEvaluationAt: next == null ? null : new Date(next).toISOString(),
+    due: { due: v.due, code: v.code, leftMin: v.leftMin, reason: v.reason },
+  };
+}
+
+/**
  * 다음 평가가 **가능해지는** 시각.
  *
  * '실행되는 시각'이 아니다 — 실행기는 주기적으로 와서 보므로 몇 분
