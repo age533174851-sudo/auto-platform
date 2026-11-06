@@ -1086,6 +1086,64 @@ export async function POST(req: NextRequest) {
     }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
   }
 
+  // ── 이미 열려 있는 포지션의 **방향**을 본다 ──
+  //
+  // **여기까지 아무도 그것을 보지 않았다.**
+  //
+  // 위의 관문 여섯(정지 · 마이그레이션 · 전략겹침 · 증거금 · 패리티 ·
+  // 청산감시)은 전부 계좌·시스템 관문이다. 거래소에 지금 무엇이 어느
+  // 방향으로 열려 있는지는 그 여섯 중 아무것도 묻지 않는다.
+  //
+  // ONE_WAY 계좌에서 그게 무슨 뜻인가: SHORT가 열려 있는데 LONG 진입을
+  // 내면 거래소가 **그 숏을 상계해서 조용히 닫는다.** 반대도 같다.
+  // 사용자는 숏을 들고 있다고 믿는 채로 포지션이 사라지고, 걸어 둔
+  // 보호주문은 고아로 남는다. 그런데 응답에는 "진입 성공"이 적힌다.
+  //
+  // 판정은 **만들지 않는다.** `positionLifecycle.entryGate()`가 이미
+  // 있고 `my-original-v1`은 그것을 부르고 있었다 — 이 경로만 빠져 있었다
+  // (`CLAUDE.md` 상습 고장 ②: 경로가 둘인데 한쪽만 고침).
+  //
+  // **반전은 여기서 하지 않는다.** 반대 방향이면 막고 끝낸다. 반전은
+  // 닫고-확인하고-열는 절차이고 이 경로에는 그 절차가 없다. 절차 없이
+  // 시장가로 상계하면 그게 바로 위에 적은 사고다. 못 하는 것을
+  // 막는 쪽이 하는 척하는 쪽보다 낫다.
+  {
+    const { futuresExchangeOf } = await import('@/lib/exchanges/futuresAdapter');
+    const dirEx = futuresExchangeOf(conn.exchange);
+    if (!dirEx) {
+      return NextResponse.json({
+        ...base, executed: false, blocked: 'POSITION_UNKNOWN',
+        error: `선물 거래소를 알아보지 못했습니다 (${conn.exchange}) — `
+          + '열린 포지션의 방향을 모르는 채로 진입하지 않습니다',
+      }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+    }
+
+    const ops = await import('@/lib/engine/venuePositionOps');
+    const { entryGate } = await import('@/lib/engine/positionLifecycle');
+
+    // 조회가 **실패하면 `ok:false`로 온다.** 그것을 '포지션 없음'으로
+    // 읽지 않는다 — `entryGate`가 `POSITION_UNKNOWN`으로 막는다.
+    const before = await ops.readOpenPosition(
+      { exchange: dirEx, apiKey: conn.apiKey, apiSecret: conn.apiSecret, testnet: !connIsLive },
+      symbol,
+    );
+    const dirGate = entryGate({ read: before, desiredSide: plan.side });
+
+    // 무엇을 읽었고 무엇을 못 읽었는지 응답에 남긴다. 이게 없으면
+    // "방향을 확인했다"와 "확인하지 못했다"가 화면에서 같아 보인다.
+    (base as any).lifecycle = {
+      before: { ok: before.ok, found: before.found, side: before.side, qty: before.qty },
+      gate: { ok: dirGate.ok, code: dirGate.code, needsReversal: dirGate.needsReversal },
+    };
+
+    if (!dirGate.ok) {
+      return NextResponse.json({
+        ...base, executed: false, blocked: dirGate.code,
+        error: dirGate.reason,
+      }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+    }
+  }
+
   // ── 숏은 롱의 부호 반전이 아니다 ──
   //
   // 지금까지 `allowShort`는 켜고 끄는 스위치일 뿐이었고, 진입 검사는
