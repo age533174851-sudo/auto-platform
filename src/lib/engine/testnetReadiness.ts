@@ -33,8 +33,23 @@ type SampleReadinessInput = RiskObservationEligibilityInput;
 export type CredentialDiagnosis =
   /** 쓸 수 있다 */
   | 'READY'
-  /** 그 연결 row가 없다 (또는 읽지 못했다) */
+  /**
+   * 그 연결 row가 **없다.** 삭제된 연결의 과거 주문일 수 있다.
+   *
+   * ★ "못 읽었다"를 여기 넣지 않는다 — 아래 `READ_FAILED`가 그쪽이다.
+   *   둘을 한 코드로 적으면 조회 장애가 영원히 "삭제된 연결"로 분류되고,
+   *   고아 정리는 그것을 **비실패 skip**으로 넘긴다(설계된 처분이다).
+   *   그러면 지금 고쳐야 할 장애가 조용히 사라진다.
+   */
   | 'NO_CONNECTION'
+  /**
+   * 연결 표를 **읽지 못했다.** 연결이 없다는 뜻이 아니다.
+   *
+   * Supabase의 select는 실패해도 던지지 않고 `{ data: null, error }`를
+   * 준다. `error`를 받지 않으면 그 실패가 `row = null`이 되어 "연결
+   * 없음"으로 적힌다 — 이 저장소가 반복한 고장이다.
+   */
+  | 'READ_FAILED'
   /** 거래소 식별자를 해석하지 못했다. **모르는 거래소를 binance로 읽지 않는다** */
   | 'UNSUPPORTED_EXCHANGE'
   /** 출금 권한이 있는 키다 — 조회조차 하지 않는다 */
@@ -53,6 +68,11 @@ export type CredentialDiagnosis =
  *   실수로 로그에 싣는 경로가 생기지 않는다.
  */
 export interface CredentialFacts {
+  /**
+   * 조회 자체가 실패했는가. **참이면 다른 사실은 보지 않는다** —
+   * 못 읽은 상태에서 "키 칸이 비었다"고 적으면 거짓 진단이 된다.
+   */
+  readFailed?: boolean | null;
   /** 연결 row를 실제로 읽었는가 */
   rowFound: boolean;
   /** 거래소 식별자가 해석됐는가 (`resolveExecExchange`의 결과 유무) */
@@ -73,6 +93,9 @@ export interface CredentialFacts {
  * 순서가 의미를 가진다 — 없는 row의 출금 권한을 묻지 않는다.
  */
 export function diagnoseCredential(i: CredentialFacts): CredentialDiagnosis {
+  // ★ **못 읽은 것이 먼저다.** 조회가 실패했으면 나머지 사실은 전부
+  //   "없다"로 보이고, 그 모양으로 진단하면 거짓 사유가 적힌다.
+  if (i?.readFailed === true) return 'READ_FAILED';
   if (i?.rowFound !== true) return 'NO_CONNECTION';
   if (i.exchangeResolved !== true) return 'UNSUPPORTED_EXCHANGE';
   // **null은 통과가 아니다.** 출금 권한을 확인하지 못했으면 켜진 것으로 본다.
@@ -87,7 +110,8 @@ export function diagnoseCredential(i: CredentialFacts): CredentialDiagnosis {
 export function credentialDiagnosisReason(code: CredentialDiagnosis): string {
   switch (code) {
     case 'READY': return '';
-    case 'NO_CONNECTION': return '연결 기록을 읽지 못했습니다';
+    case 'NO_CONNECTION': return '그 연결 기록이 없습니다 — 삭제된 연결의 과거 주문일 수 있습니다';
+    case 'READ_FAILED': return '연결 기록을 조회하지 못했습니다 — 연결이 없다는 뜻이 아닙니다';
     case 'UNSUPPORTED_EXCHANGE': return '거래소 식별자를 해석하지 못했습니다';
     case 'WITHDRAWAL_ENABLED': return '출금 권한이 있는(또는 확인하지 못한) 키라 조회하지 않았습니다';
     case 'KEY_MISSING': return 'API 키 칸이 비어 있습니다';

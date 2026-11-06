@@ -236,8 +236,31 @@ export function runTestnetReadinessTests() {
     eq(diagnoseCredential({ ...okCreds, rowFound: false, hasWithdrawal: true }), 'NO_CONNECTION');
   });
 
+  test('★ 조회 실패를 "연결 없음"으로 적지 않는다 — 처분이 다르다', () => {
+    // 못 읽은 상태에서는 다른 사실이 전부 "없다"로 보인다. 그 모양으로
+    // 진단하면 거짓 사유가 적히므로 **조회 실패가 가장 먼저**다.
+    eq(diagnoseCredential({ ...okCreds, readFailed: true }), 'READ_FAILED');
+    eq(diagnoseCredential({ readFailed: true, rowFound: false, exchangeResolved: false,
+      hasWithdrawal: null, keyPresent: false,
+      secretCiphertextPresent: false, secretDecrypted: false }), 'READ_FAILED');
+    // 조회는 됐고 줄이 정말 없는 경우는 그대로 NO_CONNECTION이다.
+    eq(diagnoseCredential({ ...okCreds, rowFound: false }), 'NO_CONNECTION');
+    eq(diagnoseCredential({ ...okCreds, readFailed: false, rowFound: false }), 'NO_CONNECTION');
+    // 못 읽었는데 "통과"가 나오는 입력은 없어야 한다.
+    assert(diagnoseCredential({ ...okCreds, readFailed: true }) !== 'READY',
+      '★ 못 읽은 것을 READY로 읽었다');
+  });
+
+  test('★ READ_FAILED 사유가 "없다"고 말하지 않는다', () => {
+    const r = credentialDiagnosisReason('READ_FAILED');
+    assert(r.includes('조회하지 못'), `조회 실패를 말해야 한다 (${r})`);
+    assert(r.includes('연결이 없다는 뜻이 아닙니다'), '없다는 뜻이 아님을 적어야 한다');
+    const gone = credentialDiagnosisReason('NO_CONNECTION');
+    assert(gone !== r, '두 사유가 같은 문장이면 구별되지 않는다');
+  });
+
   test('★ 사유 문구에 값이 들어갈 자리가 없다', () => {
-    for (const c of ['NO_CONNECTION', 'UNSUPPORTED_EXCHANGE', 'WITHDRAWAL_ENABLED',
+    for (const c of ['NO_CONNECTION', 'READ_FAILED', 'UNSUPPORTED_EXCHANGE', 'WITHDRAWAL_ENABLED',
                      'KEY_MISSING', 'SECRET_MISSING', 'DECRYPT_FAILED'] as const) {
       const r = credentialDiagnosisReason(c);
       assert(r.length > 0, `${c} 사유가 비었다`);
