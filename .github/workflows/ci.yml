@@ -665,6 +665,16 @@ jobs:
       - name: 배포 증거 (관측 없는 SHA를 관측으로 적지 않는다)
         run: node scripts/check-deploy-evidence.mjs
 
+      # ── 승인 적용 → 배포 배선 ──
+      #
+      # 위험 마이그레이션 승인 적용은 main에 push를 만들지 않아 fly-deploy가
+      # 저절로 깨어나지 않는다. 그래서 "승인했는데 DB만 새 모양이고 Worker는
+      # 옛 코드"가 된다 — 2026-11-01~11-06에 실제로 그랬다(89커밋 뒤처짐).
+      # migrate.yml이 배포를 부르는지, 그것도 **승인 적용이 성공했을 때만**
+      # 부르는지를 if 식과 넘기는 값으로 확인한다.
+      - name: 승인 적용 뒤 배포 배선 (if 식 · 넘기는 값 · actions 권한)
+        run: node scripts/check-migrate-deploy-wiring.mjs
+
       # ── 모의계좌 단일화 ──
       #
       # 모의계좌가 둘이었다: 서버 PAPER(USDT·실제 전략)와 브라우저
