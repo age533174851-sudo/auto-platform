@@ -306,8 +306,66 @@ if (evidenceGaps.length > 0) {
   bad = true;
 }
 
+// ── 회차가 왜 실패했는지 **한 곳에서만** 정하는가 ──
+//
+// 위 두 규칙은 판정을 부르는지, 그 결과가 사람에게 닿는지를 본다.
+// 이 규칙은 그 다음이다 — **같은 판정을 두 곳에서 하지 않는가.**
+//
+// 무엇이 있었나
+// ─────────────
+// 무인 회차의 실패 원인은 `scripts/claude-exec-category.mjs`가 범주로
+// 정한다. 그런데 같은 워크플로의 `실패 원인 기록` 단계가 그 아래에서
+// **스스로 원인을 또 추측**했다:
+//
+//   echo "인증 단계에서 멈췄다면 시크릿이 없는 것입니다."
+//
+// 회차 41264530329(main `4f6ee8c6`)은 진단기가 `credit_or_billing`으로
+// 분류했는데 그 줄은 인증을 가리켰다. 갈릴 수 있는 것이 아니라 **갈렸다.**
+// 상습 고장 ② "경로가 둘인데 한쪽만 고침"이다.
+//
+// 이 규칙은 그 두 번째 경로가 돌아오는 것을 막는다. 처방을 YAML에 적지
+// 말고 표에 올린다 — 그래야 범주와 처방이 같이 움직인다.
+const HOURLY = [
+  '.github/workflows/claude-hourly-dev.yml',
+  '.github/workflows/claude-hourly-trading.yml',
+];
+// `"…에서 멈췄다면 …입니다"` 모양. 조건부 원인 추측의 서명이다.
+const CAUSE_GUESS = /에서 멈췄다면/;
+const causeGaps = [];
+for (const wf of HOURLY) {
+  const text = readFileSync(wf, 'utf8');
+  // 진단기가 **항상** 돌아야 한다. 실패한 회차에만 돌면 `cancelled`·
+  // `timed_out`으로 끝난 회차에는 범주가 없다.
+  if (!/node scripts\/claude-exec-category\.mjs/.test(text)) {
+    causeGaps.push(`${wf} — 진단기(claude-exec-category)를 부르지 않습니다`);
+  }
+  const at = text.indexOf('- name: 실패 원인 기록');
+  if (at === -1) {
+    // 단계 이름이 바뀌면 아래 검사가 **조용히 통과한다.** 못 찾은 것을
+    // 통과로 적지 않는다.
+    causeGaps.push(`${wf} — '실패 원인 기록' 단계를 찾지 못했습니다 (이 규칙이 헛돌고 있습니다)`);
+    continue;
+  }
+  const rest = text.slice(at + 1);
+  const end = rest.search(/\n {6}- name:/);
+  const step = end === -1 ? rest : rest.slice(0, end);
+  const firstLine = text.slice(0, at).split('\n').length;
+  for (const [i, l] of step.split('\n').entries()) {
+    if (CAUSE_GUESS.test(l)) causeGaps.push(`${wf}:${firstLine + i} — ${l.trim()}`);
+  }
+}
+
+if (causeGaps.length > 0) {
+  console.error('\n❌ 실패 원인을 진단기 밖에서 또 정하는 자리:');
+  for (const g of causeGaps) console.error(`   · ${g}`);
+  console.error('\n   범주는 scripts/claude-exec-category.mjs가 정합니다.');
+  console.error('   처방을 YAML에 적지 말고 그 파일의 NEXT_ACTION 표에 올리세요.');
+  bad = true;
+}
+
 if (bad) process.exit(1);
 
 console.log(`✅ 판정 모듈 ${files.length}개 · 배선 안 된 것 0개`
   + (ALLOW.size > 0 ? ` (면제 ${ALLOW.size}개)` : ''));
 console.log(`✅ 청산 감시 200 응답 ${evidenceSeen.length}개 전부 워커 생존 증거를 싣는다`);
+console.log(`✅ 무인 회차 워크플로 ${HOURLY.length}개 전부 실패 원인을 진단기 한 곳에서만 정한다`);
