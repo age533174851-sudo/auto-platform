@@ -239,4 +239,37 @@ export function runExitMonitorLeaseTests() {
     eq(r.myFence, 5, '뒤늦게 깨어난 내 옛 실행이 통과하면 안 된다');
     eq(fenceStillMine({ myFence: 4, currentFence: 5 }).ok, false);
   });
+
+  // ══════════════════════════════════════════════════════════
+  // ★ 긴급 선점 — 기본은 꺼짐
+  // ══════════════════════════════════════════════════════════
+  test('★ 기본값은 선점하지 않는다 (남이 쥐고 있으면 건너뜀)', () => {
+    const live = { holder: 'worker-a', fence: 7, expiresAtMs: 2_000 };
+    const d = leaseDecision({ current: live, me: 'kill-1', nowMs: 1_000 });
+    eq(d.code, 'HELD_BY_OTHER');
+    eq(d.granted, false);
+  });
+
+  test('★ 긴급 선점은 살아 있는 임차도 가져가고 번호를 올린다', () => {
+    const live = { holder: 'worker-a', fence: 7, expiresAtMs: 2_000 };
+    const d = leaseDecision({ current: live, me: 'kill-1', nowMs: 1_000, preempt: true });
+    eq(d.code, 'PREEMPTED');
+    eq(d.granted, true);
+    eq(d.nextFence, 8, '★ 번호를 올려야 돌고 있던 쪽이 재검증에서 막힌다');
+  });
+
+  test('★ 선점해도 상태를 못 읽으면 통과시키지 않는다', () => {
+    const d = leaseDecision({ current: undefined, me: 'kill-1', nowMs: 1_000, preempt: true });
+    eq(d.code, 'UNKNOWN');
+    eq(d.granted, false, '★ 번호를 모르면 재검증할 수 없다');
+  });
+
+  test('선점 뒤 옛 실행자의 울타리는 낡은 것으로 막힌다', () => {
+    const live = { holder: 'worker-a', fence: 7, expiresAtMs: 2_000 };
+    const d = leaseDecision({ current: live, me: 'kill-1', nowMs: 1_000, preempt: true });
+    // 옛 실행자(7)가 쓰기 직전에 다시 묻는다 → 지금은 8
+    eq(fenceStillMine({ myFence: 7, currentFence: d.nextFence }).ok, false);
+    // 선점한 쪽(8)은 통과한다
+    eq(fenceStillMine({ myFence: d.nextFence, currentFence: d.nextFence }).ok, true);
+  });
 }

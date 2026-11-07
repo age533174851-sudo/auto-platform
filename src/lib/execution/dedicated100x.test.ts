@@ -63,12 +63,53 @@ const okDeps = (over: Partial<Entry100xDeps> = {}): Entry100xDeps => ({
   observeMarginMode: async () => 'isolated',
   applyLeverage: async (lev: number) => ({ ok: true, observed: lev, message: `${lev}배 확인` }),
   availableUsd: async () => 1_000,
-  referencePrice: async () => 50_000,
+  referenceMark: async () => ({
+    price: 50_000,
+    // 거래소가 적어 준 시각과 우리가 받은 시각은 **다른 값이다**.
+    exchangeTimeMs: Date.now() - 100,
+    observedAtMs: Date.now(),
+    source: 'EXCHANGE_PREMIUM_INDEX', cache: 'FRESH' as const,
+  }),
   quantize: async (q: number) => ({ qty: q, message: '' }),
+  // 거래소 브래킷 첫 구간(BTCUSDT 소액): MMR 0.4% · 공제액 0.
+  // 이 값이면 50,000 · 100배에서 청산거리가 약 0.6%로 나온다.
+  maintenanceTiers: async () => ({
+    tiers: [[50_000_000, 0.004, 0]] as Array<[number, number, number]>,
+    observedAtMs: Date.now(), freshness: 'FRESH' as const,
+  }),
+  // **손절 주문이 아니다** — 신호가 ATR로 잰 참고 위험 거리다.
+  adverseDistancePct: async () => 0.3,
+  commissionRates: async () => ({
+    takerRate: 0.0004, makerRate: 0.0002,
+    source: 'EXCHANGE_ACCOUNT' as const, observedAtMs: Date.now(),
+  }),
+  // 수량 0.2를 받아낼 깊이. 기준가 50,000에서 매도호가가 한 칸 위다.
+  orderBookDepth: async () => ({
+    bids: [[49_995, 50] as [number, number]],
+    asks: [[50_005, 50] as [number, number]],
+    source: 'EXCHANGE_DEPTH' as const,
+    observedAtMs: Date.now(), exchangeTimeMs: Date.now() - 100,
+  }),
+  fundingContext: async () => ({
+    rate: 0.0001, nextFundingTimeMs: Date.now() + 3_600_000, intervalHours: 8,
+    // 1회 최대 지불 요율의 근거 — 지금 요율이 아니다.
+    capRate: 0.0005, floorRate: -0.0005,
+    source: 'EXCHANGE_FUNDING_INFO' as const,
+    // **합치지 않는다** — 다른 엔드포인트의 다른 순간이다.
+    premiumObservedAtMs: Date.now(), premiumExchangeTimeMs: Date.now() - 100,
+    premiumCache: 'FRESH' as const,
+    fundingBoundsObservedAtMs: Date.now(),
+  }),
   ...over,
 });
 
-const contract100x = { leverage: 100, sizingPolicy: 'MARGIN_ALLOCATION', marginModes: ['isolated'] };
+const contract100x = {
+  leverage: 100, sizingPolicy: 'MARGIN_ALLOCATION', marginModes: ['isolated'],
+  side: 'LONG' as const,
+  // 시장가 주문이므로 taker다 (MAX_LEV_100X.orderType === 'market').
+  fillKind: 'TAKER' as const,
+  maxHoldSec: 14_400,
+};
 
 /** 열린 조합 한 벌 — 켜기 관련 시험이 쓴다 */
 const openRow = {
@@ -299,7 +340,10 @@ export async function runDedicated100xTests() {
 
   test('가짜 어댑터: 잔고·기준가를 못 읽으면 진입하지 않는다', async () => {
     eq((await planEntry100x(contract100x, 10, okDeps({ availableUsd: async () => null }))).code, 'SIZING_BLOCKED');
-    eq((await planEntry100x(contract100x, 10, okDeps({ referencePrice: async () => null }))).code, 'SIZING_BLOCKED');
+    // 기준 마크가는 **관측**이다. 못 읽으면 사이징 전에 신선도에서 막힌다 —
+    // "값이 없다"가 아니라 "언제의 값인지 모른다"가 사유다.
+    eq((await planEntry100x(contract100x, 10, okDeps({ referenceMark: async () => null }))).code,
+       'MARKET_DATA_STALE');
   });
 
   test('가짜 어댑터: 거래소 규격에 못 맞추면 진입하지 않는다', async () => {
@@ -476,10 +520,90 @@ export async function runDedicated100xTests() {
     eq(v.allowed, true, `열린 조합이 막혔다: ${v.reason}`);
   });
 
+  // ── 비용을 빼면 모자라는 자리 (③) ──
+  //
+  // RAW 0.6024% · 실질 0.4920%이므로 변동성 위험 거리 0.55%는 **그 사이**다.
+  // RAW만 보면 통과하고 비용을 빼면 막힌다. 이 자리를 시험하지 않으면
+  // 실질 여유 관문을 통째로 지우는 변경이 조용히 통과한다.
+  test('RAW는 통과하는데 비용을 빼면 막힌다', async () => {
+    const v = await planEntry100x(contract100x as any, 10,
+      okDeps({ adverseDistancePct: async () => 0.55 }));
+    eq(v.ok, false, '★ 비용을 빼면 여유가 모자란데 진입했다');
+    eq(v.code, 'LIQUIDATION_UNSAFE_AFTER_COST');
+    // RAW가 통과했다는 사실이 남아야 "구조는 괜찮은데 비용이 먹었다"를 읽는다.
+    eq(v.liquidation?.ok, true, '★ RAW 판정을 버렸다');
+    eq(v.effectiveLiquidation?.ok, false, '★ 실질 판정을 버렸다');
+    eq(v.effectiveLiquidation?.headroomKind, 'EFFECTIVE');
+  });
+
+  test('RAW 자체가 모자라면 사유가 다르다 — 두 실패를 구별한다', async () => {
+    const v = await planEntry100x(contract100x as any, 10,
+      okDeps({ adverseDistancePct: async () => 0.62 }));
+    eq(v.ok, false);
+    eq(v.code, 'LIQUIDATION_UNSAFE', '★ 비용 때문인지 구조 때문인지 구별되지 않는다');
+  });
+
   test('LIVE는 막힌다', () => {
     const v = executionGateVerdict({ ...openRow, mode: 'LIVE' });
     eq(v.allowed, false, 'LIVE가 열렸다');
   });
+
+  // ── 표가 실자금 모드를 열어도 계약이 막는다 ──────────────
+  //
+  // 위 시험들은 **표에 적힌 것**을 본다. 그래서 `modes`에 한 줄 더하는
+  // 것만으로 실계좌가 열린다 — 검사기가 그것을 잡지만 검사기는 돌려야
+  // 의미가 있고, 그 사이에 배포가 나갈 수 있다. 체크리스트를 자동으로
+  // 눌러 주기보다 **그 칸이 아예 없게** 만든다.
+  //
+  // 그리고 글자로 막으면 안 된다: `'LIVE'`라는 모드는 **존재하지 않는다.**
+  // 실자금 모드는 `LIVE_SMALL`·`LIVE_LIMITED`다. `mode === 'LIVE'`로
+  // 막았다면 둘 다 그대로 통과했을 것이다.
+  {
+    const wideOpen = [
+      { strategyId: 'scalp', profileId: ID, presetId: PRESET, contractVersion: V,
+        modes: ['TESTNET', 'SHADOW_LIVE', 'LIVE_SMALL', 'LIVE_LIMITED'],
+        requiresMarginAllocation: true },
+    ];
+
+    test('표가 LIVE_SMALL을 열어도 NO_FIXED_SL 계약은 막힌다', () => {
+      const v = executionGateVerdict({ ...openRow, mode: 'LIVE_SMALL' }, wideOpen);
+      eq(v.allowed, false, '★ 표에 한 줄 더한 것만으로 실자금이 열렸습니다');
+      assert(/고정 손절을 걸지 않는 계약/.test(v.reason),
+        `사유가 계약을 가리키지 않는다: ${v.reason}`);
+      assert(/사람이 직접 닫는/.test(v.reason),
+        `무엇이 없는지 적지 않는다: ${v.reason}`);
+    });
+
+    test('LIVE_LIMITED도 막힌다 — 글자가 아니라 능력으로 판정한다', () => {
+      const v = executionGateVerdict({ ...openRow, mode: 'LIVE_LIMITED' }, wideOpen);
+      eq(v.allowed, false, '★ LIVE_LIMITED가 열렸습니다');
+    });
+
+    test('TESTNET은 그대로 통과한다 — 기존 동작을 바꾸지 않는다', () => {
+      const v = executionGateVerdict({ ...openRow, mode: 'TESTNET' }, wideOpen);
+      eq(v.allowed, true, `★ TESTNET 검증이 막혔습니다: ${v.reason}`);
+    });
+
+    test('SHADOW_LIVE는 막지 않는다 — 주문이 나가지 않는 모드다', () => {
+      // 실계좌로 판단만 하고 보내지 않는다(`sendsOrders: false`).
+      // 나간 주문이 없으면 닫을 것도 없다. 여기까지 막으면 LIVE 승급에
+      // 필요한 관찰 자체를 못 하게 된다.
+      const v = executionGateVerdict({ ...openRow, mode: 'SHADOW_LIVE' }, wideOpen);
+      eq(v.allowed, true, `★ 주문을 보내지 않는 모드가 막혔습니다: ${v.reason}`);
+    });
+
+    test('계약을 해석할 수 없으면 실자금 모드에서 통과시키지 않는다', () => {
+      // 표에는 있는데 계약 해석이 깨진 조합. **모르는 것을 통과로 읽지
+      // 않는다** — 무엇이 도는지 모른 채 돈을 걸게 된다.
+      const brokenVersion = [
+        { strategyId: 'scalp', profileId: ID, presetId: PRESET, contractVersion: 99,
+          modes: ['LIVE_SMALL'], requiresMarginAllocation: true },
+      ];
+      const v = executionGateVerdict(
+        { ...openRow, contractVersion: 99, mode: 'LIVE_SMALL' }, brokenVersion);
+      eq(v.allowed, false, '★ 해석되지 않는 계약이 실자금 모드에서 통과했습니다');
+    });
+  }
 
   test('배정 비율이 없으면 켤 수 없다', () => {
     for (const pct of [null, undefined, 0, -1, 101]) {

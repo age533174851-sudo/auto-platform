@@ -35,6 +35,8 @@
 // 활성화하지 않는다.** 바꾸려면 이 한 줄이 아니라 승격 절차를 거쳐야 한다.
 
 import { NextRequest, NextResponse } from 'next/server';
+import { ledgerFillQty } from '@/lib/engine/ledgerFillQty';
+import { HOLDING_EVIDENCE_STATUSES } from '@/lib/engine/holdingEvidence';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { STRATEGY_MY_ORIGINAL_V1 } from '@/lib/strategies/registry';
 import { cycleStatusOf, CYCLE_TARGET_USD } from '@/lib/strategies/ladderCycle';
@@ -376,23 +378,29 @@ export async function POST(req: NextRequest) {
     const { data, error } = await (sb as any).from('live_orders')
       .select('side, filled_qty, quantity, signal_id')
       .eq('user_id', userId).eq('symbol', symbol)
-      .in('status', ['FILLED', 'RECONCILED'])
+      .in('status', [...HOLDING_EVIDENCE_STATUSES])
       .order('created_at', { ascending: true }).limit(500);
     // **조회 실패를 '아무도 안 들고 있다'로 읽지 않는다.**
     if (error) throw new Error(error.message);
 
     const net = new Map<string, number>();
+    let assumedFills = 0;
     for (const r of (Array.isArray(data) ? data : [])) {
       const owner = strategyOf(r);
       if (!owner || owner === STRATEGY_MY_ORIGINAL_V1) continue;
-      const q = Number(r.filled_qty ?? r.quantity) || 0;
+      const fq = ledgerFillQty(r);
+      const q = fq.qty;
+      if (fq.assumed && q > 0) assumedFills += 1;
       if (q <= 0) continue;
       net.set(owner, (net.get(owner) ?? 0) + (String(r.side).toUpperCase() === 'BUY' ? q : -q));
     }
     const holders = Array.from(net.entries()).filter(([, q]) => Math.abs(q) > 1e-12).map(([k]) => k);
     if (holders.length > 0) {
       const why = `${symbol}을(를) 다른 전략(${holders.join(' · ')})이 들고 있습니다 — `
-        + '포지션 소유권이 생기기 전까지 같은 종목에 두 전략이 들어가지 않습니다';
+        + '포지션 소유권이 생기기 전까지 같은 종목에 두 전략이 들어가지 않습니다'
+        + (assumedFills > 0
+          ? ` (체결 수량을 확인하지 못해 요청 수량으로 대신한 주문 ${assumedFills}건이 섞여 있습니다)`
+          : '');
       // 다른 전략이 들고 있는 것도 환경이다. 그 포지션이 닫히면 같은
       // 날 안에 다시 볼 수 있어야 한다 — 거래일을 소비하지 않는다.
       await noteCycle(sb, cycle.id, { last_outcome: 'BLOCKED', last_reason: why });

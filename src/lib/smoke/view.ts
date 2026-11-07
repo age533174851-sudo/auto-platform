@@ -23,6 +23,10 @@ export function viewTest(r: any) {
     id: r?.id, attemptNo: r?.attempt_no ?? null, symbol: r?.symbol, side: r?.side,
     marginUsd: r?.margin_usd, leverage: r?.leverage, holdMin: r?.hold_min,
     state: r?.state, holdUntil: r?.hold_until, source: r?.dispatch_source ?? null,
+    // **우리가 붙인 주문 번호.** 거래소 번호(`entry.orderId`)만 있으면
+    // "그 주문이 우리 것인가"를 대조할 수 없고, 재시도가 같은 주문인지도
+    // 말할 수 없다. 소유권이 새겨진 값이라 비밀이 아니다.
+    clientOrderId: r?.client_order_id ?? null,
     entry: {
       orderId: r?.entry_order_id, avgPrice: r?.entry_avg_price, qty: r?.entry_qty,
       refPrice: r?.ref_price, exitOrderId: r?.exit_order_id, exitAvgPrice: r?.exit_avg_price,

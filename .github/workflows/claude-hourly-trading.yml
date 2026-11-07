@@ -1,0 +1,364 @@
+# 무인 개발 — **거래 엔진 갈래** (주문 · Exact100X · 청산 · TESTNET)
+#
+# 왜 따로인가
+# ───────────
+# 여기서 틀리면 포지션이 방치되거나 중복 주문이 나간다. 화면이 어색해지는
+# 것과는 잃는 것이 다르다. 그래서 같은 저장소를 고치면서도 **다른 검증
+# 단계**를 받는다:
+#
+#   일반 갈래   npm test · tsc · build · 관련 검사기
+#   이 갈래     그 전부 + **검사기 전수** + 변이 하네스 자기 점검
+#               + 워커 빌드 + 변경 안전 관문(trading 모드)
+#
+# 그리고 이 갈래는 **실주문을 낼 수 없다** — 권한과 도구 양쪽에서 막는다.
+#
+#   actions: read         `smoke-test-testnet`(실주문)을 깨울 수 없다
+#   거래소 시크릿 없음     `ADMIN_SECRET`·`EXIT_MONITOR_URL`을 안 받는다.
+#                         배포된 앱에 닿을 길이 없다
+#   curl·wget 차단        거래소로 직접 요청을 만들 수 없다
+#   psql·supabase 차단    운영 DB에 닿을 수 없다
+#
+# **실제 주문 없이 테스트와 코드로만 고친다.** 거래소 응답이 필요한
+# 검증은 이 갈래의 능력 밖이고, 그 사실을 PR에 적게 한다.
+#
+# ⚠ 기본값은 **꺼짐**이다. `CLAUDE_TRADING_AUTODEV_ENABLED=true`를
+#   저장소 변수로 켜기 전에는 예약으로 돌지 않는다. 일반 갈래와 별도
+#   변수인 이유: 화면 작업을 켜는 결정과 엔진 작업을 켜는 결정은
+#   **같은 결정이 아니다.**
+name: Claude Hourly Trading
+
+on:
+  schedule:
+    # 일반 갈래(:17)와 겹치지 않게 반 시간 뒤. 동시에 돌면 같은 파일을
+    # 두 회차가 만질 수 있다.
+    - cron: '47 * * * *'
+  workflow_dispatch:
+    inputs:
+      focus:
+        description: '이번 회차 주제 (비우면 스스로 고른다)'
+        required: false
+        default: ''
+
+concurrency:
+  # 두 갈래를 **한 그룹**에 묶는다. 엔진과 화면이 동시에 돌면 브랜치가
+  # 갈리고 변경 안전 관문이 서로의 변경을 보게 된다.
+  group: claude-hourly-autodev
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: read
+  actions: read            # **read만** — 실주문 워크플로를 못 깨운다
+  id-token: write
+
+jobs:
+  trading:
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.CLAUDE_TRADING_AUTODEV_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    # 검사기 전수와 워커 빌드까지 돌아서 일반 갈래보다 길다.
+    timeout-minutes: 50
+
+    steps:
+      - name: 인증 확인
+        env:
+          OAUTH: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${OAUTH:-}" ]; then
+            echo "::error::CLAUDE_CODE_OAUTH_TOKEN 시크릿이 없습니다 — OAuth 전용 회차를 중단합니다"
+            exit 1
+          fi
+          echo "OAuth 전용 구성: 시크릿 존재 확인 (실제 모델 인증 성공 증거 아님)"
+
+      # OAuth 전용: API 키를 이 회차의 어느 단계에도 전달하지 않습니다.
+      # 실제 모델 인증은 Claude Code 실행 결과와 modelUsage로 검증합니다.
+      # ── main 보호 규칙이 **확인되지 않으면 돌지 않는다** ──
+      #
+      # `contents: write`는 기술적으로 main push를 허용한다. 프롬프트의
+      # "main 직접 수정 금지"는 약속이고, **보호 규칙이 관문**이다.
+      # 관문이 있는지 모르는 채로 무인 회차를 돌리지 않는다.
+      #
+      # 기존 보호 규칙 또는 main에 적용되는 Ruleset을 확인하지 못하면
+      # 예약·수동 실행 모두 차단한다. 우회 입력은 제공하지 않는다.
+      - name: main 보호 규칙 확인
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, sys, urllib.request, urllib.error
+
+          repo = os.environ['GITHUB_REPOSITORY']
+          api = os.environ['GITHUB_API_URL']
+          token = os.environ['GH_TOKEN']
+          headers = {
+              'Authorization': 'Bearer ' + token,
+              'Accept': 'application/vnd.github+json',
+              'X-GitHub-Api-Version': '2022-11-28',
+          }
+
+          def get(path):
+              req = urllib.request.Request(api + '/repos/' + repo + path, headers=headers)
+              try:
+                  with urllib.request.urlopen(req, timeout=15) as res:
+                      return res.status, json.load(res)
+              except urllib.error.HTTPError as err:
+                  return err.code, None
+
+          status, protection = get('/branches/main/protection')
+          if status == 200 and isinstance(protection, dict) and protection.get('required_pull_request_reviews') is not None:
+              print('main: classic branch protection requires pull requests')
+              sys.exit(0)
+
+          # GitHub Rulesets are independent from classic branch protection.
+          # Inspect effective rules for main, not all rulesets (which may target other branches).
+          status, rules = get('/rules/branches/main')
+          if status != 200 or not isinstance(rules, list):
+              print('::error::Cannot verify effective main branch rules (HTTP %s); fail closed' % status)
+              sys.exit(1)
+
+          if any(isinstance(rule, dict) and rule.get('type') == 'pull_request' for rule in rules):
+              print('main: effective ruleset requires pull requests')
+              sys.exit(0)
+
+          print('::error::No effective pull-request requirement for main; fail closed')
+          sys.exit(1)
+          PY
+
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', cache: npm }
+
+      - name: 의존성 설치
+        run: |
+          npm ci
+          npm ci --prefix worker || true
+
+      - name: 기준선 측정
+        id: baseline
+        run: |
+          set -uo pipefail
+          n=$(npx tsc --noEmit 2>&1 | grep -c "error TS" || true)
+          echo "tsc_before=${n}" >> "$GITHUB_OUTPUT"
+          echo "tsc 기준선: ${n}건"
+
+      # OAuth-only preflight: no API-key GET; secret presence is NOT proof of token validity.
+      - name: Claude OAuth 설정 사전 점검 (유효성 미확인)
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          node --test scripts/test-claude-api-preflight.mjs
+          node --test scripts/test-claude-exec-category.mjs
+          node scripts/claude-api-preflight.mjs
+
+      - name: Claude Code — 거래 엔진 개발
+        # 실행 기록 파일의 **출처를 Action이 직접 알려 주게 한다.**
+        # 디렉터리를 뒤져 찾으면 남의 파일을 집을 수 있다.
+        id: claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          base_branch: main
+          branch_prefix: 'claude/trading-'
+          claude_args: |
+            --max-turns 60
+            --model claude-opus-5-5
+            --allowedTools "Bash(npm ci),Bash(npm ci --prefix worker),Bash(npm test),Bash(npm run build),Bash(npm run worker:build),Bash(npx tsc --noEmit),Bash(node scripts/check-:*),Bash(git status),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git fetch:*),Bash(gh pr list:*),Bash(gh pr view:*),Bash(gh issue list:*),Bash(gh api repos/:*)"
+            --disallowedTools "Bash(gh workflow run:*),Bash(gh pr merge:*),Bash(gh api --method POST:*),Bash(gh api -X POST:*),Bash(git push --force:*),Bash(git push origin main:*),Bash(curl:*),Bash(wget:*),Bash(psql:*),Bash(npx supabase:*),Bash(flyctl:*),Bash(vercel:*),Bash(nc:*),Bash(ssh:*)"
+          prompt: |
+            TRAIGO 무인 개발 — **거래 엔진 갈래** 1회차.
+            저장소: ${{ github.repository }}
+            집중 주제: "${{ inputs.focus }}" (비면 스스로 고르세요)
+            tsc 기준선: ${{ steps.baseline.outputs.tsc_before }}건
+
+            ## 0. 먼저 읽습니다
+
+            1. 루트 `CLAUDE.md` — **이 지시보다 우선합니다.**
+            2. 최신 main의 최근 커밋.
+            3. **열린 PR 전체와 각 PR이 바꾸는 파일**
+               (`gh pr list --state open --json number,title,headRefName,files`).
+               이 갈래는 ChatGPT 담당 PR과 가장 겹치기 쉽습니다.
+            4. 열린 이슈, 특히 주문·청산 관련.
+
+            ## 1. 중복을 피합니다 — 말이 아니라 파일로
+
+            열린 PR이 이미 바꾸는 파일은 건드리지 않습니다. 같은 문제에
+            PR이 둘이면 나중 것이 앞의 수정을 덮습니다.
+
+            ## 2. 이 갈래의 범위와 우선순위
+
+            1. **실제 주문 실패·거래소 API 오류** — 거절 코드(-1111 ·
+               -4120 · -2019 등)가 코드나 시험으로 재현되는 것
+            2. **Exact100X 실행 정합성** — ISOLATED 관문, 정확한 100배
+               적용·재확인, 크기 산정
+            3. **진입·청산 안정성** — 중복 청산, 미보호 노출, 재시작
+               복구, 부분 체결
+            4. **TESTNET 자동매매 완성도** — 스모크 경로, 증거 기록
+            5. 일반 자동매매 전략 개선
+
+            "있을 법한 문제"가 아니라 **코드나 실패한 시험으로 확인되는
+            문제**만 고릅니다.
+
+            ## 3. 이 갈래가 **할 수 없는** 것 — 설계상
+
+            거래소로 나가는 요청을 만들 수 없습니다(`curl`·`wget` 차단,
+            거래소 시크릿 없음). 운영 DB에 닿을 수 없습니다. 다른
+            워크플로를 깨울 수 없습니다(`actions: read`).
+
+            그래서 **실제 주문 없이 테스트와 코드로만** 고칩니다.
+            거래소 응답이 필요한 검증은 "미검증"으로 PR에 적습니다 —
+            추측으로 통과시키지 않습니다.
+
+            ## 4. 순서 — RED 먼저
+
+            원인을 특정합니다. 재현 테스트를 **먼저** 쓰고 그것이 실패하는
+            것(RED)을 확인한 뒤, **최소한으로** 고치고 통과(GREEN)를
+            확인합니다. 가능하면 수정을 되돌렸을 때 다시 RED가 되는지도
+            확인해 PR에 적습니다. 원인을 모르면 고치지 않습니다.
+
+            한 회차에 **문제 하나**입니다.
+
+            ## 5. 검증 — 이 갈래는 더 셉니다
+
+            - `npm test` (0 실패)
+            - `npx tsc --noEmit` — 기준선 초과 금지
+            - `npm run build` · `npm run worker:build`
+            - **`scripts/check-*.mjs` 전수** (변이 하네스 제외)
+            - `node scripts/check-100x-mutations.mjs --self-test`
+
+            하나라도 실패하면 **PR을 열지 않습니다.** 무엇이 왜 실패했는지
+            적고 끝냅니다. **실패를 숨기지 않습니다** — 통과한 것만
+            통과했다고 적습니다.
+
+            ## 6. 금지 — 어기면 그 회차는 실패입니다
+
+            - main 직접 수정 금지. 새 브랜치 + **Draft** PR만.
+            - PR 자동 병합 금지.
+            - LIVE 주문 절대 금지. TESTNET 실주문도 이 갈래에서는
+              내지 않습니다.
+            - 운영 DB 변경·마이그레이션 금지.
+            - 다른 워크플로를 실행시키지 않습니다
+              (`smoke-test-testnet` · `ops-runner` · `migrate`).
+            - **기존 안전장치를 제거하지 않습니다.** 시험이 빨갛다고
+              관문·검사기·fail-closed 분기를 지우는 것은 이 저장소에서
+              가장 비싼 실수입니다. 막혔으면 원인을 다시 봅니다.
+            - `NO_FIXED_SL`·`NO_FIXED_TP`·Exact100X 계약, 진입·청산
+              정책, 레버리지·TP/SL 기본값을 **승인 없이 바꾸지 않습니다.**
+              위험을 발견하면 고치지 말고 PR 본문에 **제안으로** 적습니다.
+            - `.github/workflows/`를 건드리지 않습니다 — 제 울타리는
+              스스로 넓힐 수 없습니다.
+            - 키·시크릿·토큰을 로그·코드·PR 본문에 적지 않습니다.
+            - 변이 하네스가 도는 중에는 커밋하지 않습니다(`git status` 확인).
+
+            ## 7. 고칠 것이 없으면 고치지 않습니다
+
+            확인된 문제가 없으면 **억지로 코드를 바꾸지 않습니다.**
+            무엇을 봤고 왜 고칠 것이 없었는지 적고 끝냅니다. 매시간 도는
+            작업이 매시간 무언가를 바꾸면 그 절반은 이유가 없습니다.
+
+            ## 8. 보고
+
+            고른 문제와 **근거**(코드 위치·실패한 시험) · 원인 · 변경 파일 ·
+            실제 실행한 검증 결과 · RED→GREEN 증거 · 브랜치/커밋 SHA ·
+            PR 번호 · **거래소 실측이 필요한 미검증 항목** · 남은 위험.
+
+            테스트를 **작성한 것**과 **실행한 것**을 구분합니다.
+            CI 통과를 실거래 검증으로 적지 않습니다.
+
+      # ── 숨겨진 SDK 오류를 드러낸다 (#533) ──
+      #
+      # `claude-code-action`은 기본값으로 SDK 오류 전문을 삼키고
+      # `result is_error:true`만 남긴다. 실패 회차 40921526704 ·
+      # 40921531797의 로그에 원인이 **한 줄도 없던** 이유가 그것이다.
+      #
+      # 이 단계는 실행 기록에서 **허용한 칸만** 뽑아 적는다 — 키·토큰·
+      # 프롬프트·요청 ID·URL·응답 본문은 담지 않는다. 성공 회차에도 돌려서
+      # 모델이 실제로 불렸는지(`모델 호출 수`)를 증거로 남긴다.
+      - name: Claude 실행 진단 (민감정보 제외)
+        if: always()
+        env:
+          # Action이 돌려주는 경로가 1순위다. 비어 있으면 스크립트가
+          # `$RUNNER_TEMP`를 뒤지고, 그래도 없으면 `no_execution_record`로
+          # 적는다 — **없는 것을 성공으로 적지 않는다.**
+          CLAUDE_EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+        run: |
+          node scripts/claude-exec-category.mjs | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # ── 강화된 검증: 결과물을 기계가 다시 본다 ──
+      # ── 검증은 **워크플로가** 한다 ──
+      #
+      # 에이전트가 "돌렸고 통과했다"고 적는 것과 실제로 통과하는 것은
+      # 다른 사실이다. 여기서 직접 돌리면 에이전트가 무엇을 적었든
+      # 통과하지 못한 변경은 작업이 빨갛게 끝난다.
+      - name: 검증 — 테스트 · 타입 · 빌드
+        if: always()
+        # **`${{ }}`를 셸 비교에 직접 넣지 않는다.** 식이 그대로 치환돼
+        # `[ "3" -gt "" ]` 같은 모양이 될 수 있고, shellcheck가 SC2170으로
+        # 막는다(실제로 CI가 여기서 실패했다). 환경변수로 넘기면 비어 있어도
+        # 셸이 다루고, 식이 명령으로 번지는 길도 없다.
+        env:
+          TSC_BEFORE: ${{ steps.baseline.outputs.tsc_before }}
+        run: |
+          set -uo pipefail
+          fail=0
+          npm test || { echo "::error::npm test 실패"; fail=1; }
+          after=$(npx tsc --noEmit 2>&1 | grep -c "error TS" || true)
+          base="${TSC_BEFORE:-0}"
+          echo "tsc ${base} → ${after}"
+          if [ "${after}" -gt "${base}" ]; then
+            echo "::error::tsc 오류가 기준선(${base})보다 늘었습니다: ${after}"
+            fail=1
+          fi
+          npm run build || { echo "::error::build 실패"; fail=1; }
+          npm run worker:build || { echo "::error::worker:build 실패"; fail=1; }
+          exit $fail
+
+      - name: 변경 안전 관문 (trading)
+        if: always()
+        run: |
+          set -uo pipefail
+          git fetch origin main --quiet || true
+          node scripts/check-autodev-safety.mjs --base origin/main --mode trading
+
+      # 에이전트가 "검사기를 돌렸다"고 적은 것과 실제로 통과하는 것은
+      # 다른 사실이다. 여기서 직접 돌린다.
+      - name: 검사기 전수 재확인
+        if: always()
+        run: |
+          set -uo pipefail
+          fail=0
+          for f in scripts/check-*.mjs; do
+            case "$f" in *check-100x-mutations*) continue;; esac
+            if ! node "$f" >/dev/null 2>&1; then
+              echo "::error::검사기 실패: $f"
+              node "$f" 2>&1 | grep -E '^(❌|   · )' | head -3 || true
+              fail=1
+            fi
+          done
+          node scripts/check-100x-mutations.mjs --self-test || fail=1
+          exit $fail
+
+      # ── 원인을 여기서 **또** 정하지 않는다 ──
+      #
+      # "어느 단계에서 멈췄으면 무엇이다"가 네 줄 있었다. 어느 단계에서
+      # 멈췄는지는 이 단계가 모르고, 원인은 위 **진단** 항목이 이미 범주로
+      # 적는다. 두 곳이 같은 것을 정하면 갈린다(상습 고장 ②) — 실제로
+      # 회차 41264530329에서 갈렸다. 판단은
+      # `scripts/claude-exec-category.mjs` 한 곳에만 둔다.
+      - name: 실패 원인 기록
+        if: failure()
+        run: |
+          {
+            echo "## Claude Hourly Trading 회차 실패"
+            echo ""
+            echo "- 실행: ${{ github.run_id }} (시도 ${{ github.run_attempt }})"
+            echo "- 트리거: ${{ github.event_name }}"
+            echo "- tsc 기준선: ${{ steps.baseline.outputs.tsc_before }}건"
+            echo "- Claude 단계: ${{ steps.claude.outcome }}"
+            echo ""
+            echo "이 회차의 브랜치는 검증을 끝내지 못했습니다 — **병합하지 않습니다.**"
+            echo "에이전트가 통과했다고 적었더라도 통과한 것이 아닙니다."
+          } >> "$GITHUB_STEP_SUMMARY"

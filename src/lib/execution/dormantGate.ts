@@ -58,6 +58,8 @@
 //     그 값 하나뿐이다. 없으면 켜져 있어도 아무것도 못 한다
 
 import { PROFILES } from '../strategies/profiles';
+import { resolveExecutionProfile, isExecutionResolveError } from './profile';
+import { capability, parseMode } from '../engine/operatingMode';
 
 export interface OpenCombo {
   /**
@@ -198,6 +200,57 @@ export function executionGateVerdict(
       reason: `${pid}은(는) ${listed(byVersion.flatMap(c => c.modes))}에서만 켤 수 있습니다`
         + ` (받은 값: ${mode || '없음'})`
         + ' — 고정 손절을 대신할 자동 종료 권한이 배선됐다는 증거가 나오기 전에는 실계좌를 열지 않습니다.' };
+  }
+
+  // ── 계약의 성질로 한 번 더 막는다 (표와 **독립**이다) ──
+  //
+  // 위 모드 검사는 **표에 적힌 것**을 본다. 그래서 `modes`에 'LIVE'를 한
+  // 글자 더하는 것만으로 실계좌가 열린다. 검사기가 그것을 잡지만, 검사기는
+  // 돌려야 의미가 있고 그 사이에 배포가 나갈 수 있다. 체크리스트를 자동으로
+  // 눌러 주는 것보다 **그 칸이 아예 없게 만드는 것**이 낫다.
+  //
+  // **모드를 글자로 비교하지 않는다.** `'LIVE'`라는 모드는 존재하지 않는다 —
+  // 실자금 모드는 `LIVE_SMALL`·`LIVE_LIMITED`다. `mode === 'LIVE'`로 막으면
+  // 둘 다 그대로 통과한다. 그래서 사다리의 정본(`operatingMode.capability`)에
+  // 묻는다: **주문이 실제로 나가고 진짜 돈이 걸리는가.** 모드를 하나 더
+  // 만들어도 그 표의 깃발만 맞게 적으면 이 조건이 자동으로 따라온다.
+  //
+  // `SHADOW_LIVE`는 여기 걸리지 않는다 — 실계좌로 판단하되 주문을 보내지
+  // 않는 모드다(`sendsOrders: false`). 나간 주문이 없으면 닫을 것도 없다.
+  //
+  // 막는 근거는 표가 아니라 계약이다. 고정 손절을 걸지 않는 계약
+  // (`NO_FIXED_SL`)은 지금 종료 수단이 **사람뿐**이다 — 그 계약의 포지션은
+  // net position 보호 때문에 자리 전체가 일반 생명주기에서 유예되고
+  // (`managedPosition`), 그래서 트레일링·본전이동·시간청산이 하나도 돌지
+  // 않는다. 계약이 선언한 `maxHoldSec`조차 읽는 곳이 없다.
+  // `exitCoverage`가 그 사실을 그대로 적는다.
+  //
+  // **두 검사는 같은 판단의 복제가 아니다.** 앞은 "표가 이 조합을 열었는가",
+  // 뒤는 "이 계약을 실계좌에서 켜도 되는가"다. 표를 넓히는 수정이 뒤쪽
+  // 조건을 조용히 지우지 못한다. 이 자리를 열려면 자동 종료 권한을 실제로
+  // 배선하고 — **임의의 exit 문턱을 새로 만드는 것이 아니다** — 커버리지
+  // 표가 그것을 말할 수 있게 된 뒤에, 여기 조건을 함께 고친다.
+  const cap = capability(parseMode(mode));
+  if (cap.sendsOrders && cap.realMoney) {
+    const resolved = resolveExecutionProfile(pid, sid, ver);
+    // **계약을 못 읽으면 통과가 아니다.** 무엇이 도는지 모른 채 실계좌를
+    // 여는 것은 모르는 것에 돈을 거는 것이다.
+    if (isExecutionResolveError(resolved)) {
+      return { allowed: false,
+        reason: `${pid}/${sid} 계약을 읽지 못해 ${mode}에서 켜지 않습니다`
+          + ` (${resolved.code}).` };
+    }
+    if (!resolved.contract) {
+      return { allowed: false,
+        reason: `${pid}/${sid}에 해석된 계약이 없어 ${mode}에서 켜지 않습니다.` };
+    }
+    if (resolved.contract.stopPolicy === 'NO_FIXED_SL') {
+      return { allowed: false,
+        reason: `${pid}/${sid}는 고정 손절을 걸지 않는 계약입니다`
+          + ' — 그것을 대신하는 자동 종료 권한이 아직 배선되지 않아'
+          + ' 지금 이 계약의 종료 수단은 사람이 직접 닫는 것뿐입니다.'
+          + ` 진짜 돈이 걸리는 모드(${mode})에서는 켜지 않습니다.` };
+    }
   }
 
   // **남은 줄 중 하나라도 요구하면 요구한다.** 여기서 "하나라도 안 하면

@@ -183,5 +183,307 @@ if (zeroErrors.length > 0) {
   process.exit(1);
 }
 
+// ── 스모크 주문이 **확인된 테스트넷 연결**에만 나가는가 ──
+//
+// 저장소 전체 규칙은 `is_testnet !== false`를 테스트넷으로 읽는다.
+// 읽기·조회에는 맞다 — 빈 값을 실전으로 읽으면 모르는 연결에 진짜
+// 주문이 나간다.
+//
+// 그런데 스모크는 **없던 주문을 새로 만든다.** 테스트넷 호스트로
+// 나간다는 것과 그 계좌가 테스트넷임이 확인됐다는 것은 다른 사실이다.
+// 그래서 이 경로만 `=== true`를 요구하고, **그 좁힘이 사라지지 않게**
+// 여기서 센다.
+//
+// 그리고 정리되지 않은 노출 위에 새 회차를 열지 않는지도 함께 본다 —
+// `preflightVerdict`는 요청한 종목만 보므로 그것만으로는 부족하다.
+{
+  const F = 'src/lib/smoke/startAttempt.ts';
+  const CANON = 'src/lib/smoke/smokePlan.ts';
+  const strip = (t) => t.split('\n').filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+  const bad = [];
+
+  const rawA = existsSync(F) ? readFileSync(F, 'utf8') : null;
+  if (!rawA) bad.push(`${F}이 없습니다`);
+  else {
+    const a = strip(rawA);
+
+    // ① 테스트넷 판정을 부르고 **그 결과로 되돌아가는가**
+    if (!a.includes('smokeTestnetVerdict(')) {
+      bad.push(`${F}: \`smokeTestnetVerdict\`를 부르지 않습니다 — `
+        + '스모크 주문은 확인된 테스트넷 연결에만 나가야 합니다');
+    } else {
+      const m = a.match(/(?:const|let|var)\s+(\w+)\s*=\s*smokeTestnetVerdict\(/);
+      if (!m) {
+        bad.push(`${F}: 테스트넷 판정 결과를 변수에 받지 않습니다`);
+      } else if (!new RegExp(`if\\s*\\(\\s*!\\s*${m[1]}\\.ok\\s*\\)\\s*return`).test(a)) {
+        bad.push(`${F}: 테스트넷 판정 결과로 되돌아가지 않습니다 — `
+          + '부르기만 하고 버리면 아무것도 막지 않습니다');
+      }
+      // 날것을 봐야 한다. 정규화된 `creds.testnet`을 넘기면 다시
+      // `is_testnet !== false`가 되어 좁힌 의미가 사라진다.
+      // `[^)]*`로는 못 본다 — 실제 인자가 `(creds as any).isTestnetRaw`라
+      // 중간에 닫는 괄호가 있다. 호출 뒤 한 줄 안에서 찾는다.
+      const callAt = a.indexOf('smokeTestnetVerdict(');
+      const callArgs = a.slice(callAt, a.indexOf('\n', callAt) + 1 || callAt + 200);
+      if (!callArgs.includes('isTestnetRaw')) {
+        bad.push(`${F}: 테스트넷 판정에 \`isTestnetRaw\`(날것)를 넘기지 않습니다 — `
+          + '정규화된 값을 넘기면 빈 값이 다시 통과합니다');
+      }
+    }
+
+    // ② 정리되지 않은 노출을 보고 **막는가**
+    if (!a.includes('unresolvedExposureBlock(')) {
+      bad.push(`${F}: \`unresolvedExposureBlock\`을 부르지 않습니다 — `
+        + '보호 없는 노출 위에 새 회차가 열립니다');
+    } else {
+      if (!/if\s*\(\s*\w+\.blocked\s*\)\s*return/.test(a)) {
+        bad.push(`${F}: 노출 차단 결과로 되돌아가지 않습니다`);
+      }
+      // 조회가 실패했을 때 **막는 쪽**으로 가는가.
+      if (!/unresolvedExposureBlock\(\s*\{\s*rows:\s*null/.test(a)) {
+        bad.push(`${F}: 장부 조회 실패를 막는 쪽으로 처리하지 않습니다 — `
+          + '못 읽은 것은 "없음"이 아닙니다');
+      }
+      // 주문을 만드는 것보다 **먼저** 와야 한다.
+      const bIdx = a.indexOf('unresolvedExposureBlock(');
+      for (const sink of ['executeOrder(', "from('smoke_tests').insert("]) {
+        const sIdx = a.indexOf(sink);
+        if (sIdx >= 0 && sIdx < bIdx) {
+          bad.push(`${F}: \`${sink}\`이 노출 차단보다 먼저 옵니다`);
+        }
+      }
+    }
+  }
+
+  const rawC = existsSync(CANON) ? readFileSync(CANON, 'utf8') : null;
+  if (!rawC) bad.push(`${CANON}이 없습니다`);
+  else {
+    const c = strip(rawC);
+    // `=== true`를 실제로 비교하는가. `!== false`로 되돌리면 좁힘이 없어진다.
+    if (!/isTestnetRaw\s*===\s*true/.test(c)) {
+      bad.push(`${CANON}: \`isTestnetRaw === true\`를 비교하지 않습니다 — `
+        + '`!== false`로 되돌리면 확인되지 않은 연결에도 주문이 나갑니다');
+    }
+    // 차단 해제는 PASS에만. 다른 상태를 통과로 읽으면 거래소 확인 없이 풀린다.
+    if (!/pz\s*===\s*'PASS'/.test(c)) {
+      bad.push(`${CANON}: 노출 차단 해제를 \`POSITION_ZERO === 'PASS'\`에 걸지 않습니다 — `
+        + '그 값은 settleAttempt가 거래소 재조회로만 적습니다');
+    }
+  }
+
+  if (bad.length) {
+    console.error('❌ 스모크 주문 관문에 구멍이 있습니다:');
+    for (const b of bad) console.error(`   · ${b}`);
+    process.exit(1);
+  }
+}
+
+// ── 진입이 확정되지 않은 회차가 노출을 방치하지 않는가 ──
+//
+// 무엇이 있었나
+// ─────────────
+// `enteredVerdict`가 `ENTERED_UNPROTECTED`를 주는 경우가 있다 —
+// **체결은 됐는데 보호주문을 확인하지 못한 것이다.** 실행기는
+// `undoEntry()`로 되돌리려 하지만 그 되돌리기도 실패할 수 있다.
+//
+// 그때 `startAttempt`가 줄에 `closed_at`을 적고 끝내면, `/settle`은
+// `state = 'HOLDING'`인 줄만 고르므로 **아무도 그 노출을 다시 보지
+// 않는다.** 거래소에는 보호 없는 포지션이 남는다.
+//
+// 그래서 세 가지를 못 박는다:
+//   ① 줄을 끝내기 전에 포지션을 **다시 읽는가**
+//   ② 그 결과로 `POSITION_ZERO`를 적는가 (못 읽으면 PASS가 아니다)
+//   ③ 넘겨야 할 때 **줄을 닫지 않는가**
+{
+  const F = 'src/lib/smoke/startAttempt.ts';
+  const raw = existsSync(F) ? readFileSync(F, 'utf8') : null;
+  const bad = [];
+  if (!raw) bad.push(`${F}이 없습니다`);
+  else {
+    // 주석을 걷어낸다 — 이 파일은 설명이 길고, 설명이 계약을 대신
+    // 증명하면 검사가 아무것도 막지 않는다.
+    const src = raw.split('\n')
+      .filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+
+    if (!src.includes('unprotectedExposureVerdict(')) {
+      bad.push(`${F}: \`unprotectedExposureVerdict\`를 부르지 않습니다 — `
+        + '진입 미확정 회차가 노출을 방치하지 않는지 판정하는 정본입니다');
+    }
+    // 판정 **뒤에** 포지션을 다시 읽는 호출이 있어야 한다. 실행기 직후의
+    // `posAfter`만 믿으면 되돌리기 실패를 못 본다.
+    const vIdx = src.indexOf('unprotectedExposureVerdict(');
+    const notEnteredIdx = src.indexOf('if (!ev.entered)');
+    if (notEnteredIdx >= 0 && vIdx >= 0) {
+      const branch = src.slice(notEnteredIdx, vIdx);
+      if (!/readOpenPosition\(/.test(branch)) {
+        bad.push(`${F}: 진입 미확정 분기에서 포지션을 다시 읽지 않습니다 — `
+          + '되돌리기가 실패했는지는 재조회만 말해 줍니다');
+      }
+    }
+    // `POSITION_ZERO`를 판정 결과로 적는가. 상수를 그대로 적으면
+    // 못 읽은 것도 PASS가 된다.
+    if (!/steps\.POSITION_ZERO\s*=\s*step\(\s*ex\.positionZero/.test(src)) {
+      bad.push(`${F}: POSITION_ZERO를 판정 결과(\`ex.positionZero\`)로 적지 않습니다 — `
+        + '상수로 적으면 못 읽은 것도 통과가 됩니다');
+    }
+    // 넘겨야 할 때 줄을 닫지 않는가.
+    if (!/ex\.handoff\s*===\s*'SETTLE'/.test(src)) {
+      bad.push(`${F}: 정산으로 넘기는 분기가 없습니다 — `
+        + '줄을 닫으면 /settle이 HOLDING만 보므로 노출을 다시 보지 않습니다');
+    } else {
+      // **분기 몸통만 본다.** 고정 길이로 자르면 바로 아래
+      // CLOSE_RECORD 분기까지 들어오고, 그쪽 `closed_at`은 정상이다 —
+      // 처음 돌렸을 때 그 이유로 잘못 실패했다.
+      const hIdx = src.indexOf("ex.handoff === 'SETTLE'");
+      const settleBranch = (() => {
+        const open = src.indexOf('{', hIdx);
+        if (open < 0) return '';
+        let depth = 0;
+        for (let k = open; k < src.length; k++) {
+          if (src[k] === '{') depth += 1;
+          else if (src[k] === '}') {
+            depth -= 1;
+            if (depth === 0) return src.slice(open, k + 1);
+          }
+        }
+        return src.slice(open);
+      })();
+      if (!settleBranch) {
+        bad.push(`${F}: 정산 분기의 몸통을 읽지 못했습니다 — 검사기가 고장 난 것입니다`);
+      }
+      if (/closed_at/.test(settleBranch)) {
+        bad.push(`${F}: 정산으로 넘기는 분기가 \`closed_at\`을 적습니다 — `
+          + '닫힌 줄은 /settle이 고르지 않습니다');
+      }
+      if (!/state:\s*'HOLDING'/.test(settleBranch)) {
+        bad.push(`${F}: 정산으로 넘기는 분기가 state를 HOLDING으로 두지 않습니다 — `
+          + '/settle은 HOLDING인 줄만 고릅니다');
+      }
+      // **여기서 청산을 직접 보내지 않는다.** 보내는 곳이 둘이면
+      // 중복 청산이 된다.
+      if (/closeSymbolPosition\(/.test(settleBranch)) {
+        bad.push(`${F}: 정산으로 넘기는 분기가 청산을 직접 보냅니다 — `
+          + '보내는 곳은 settleAttempt 하나여야 합니다(둘이면 중복 청산)');
+      }
+    }
+  }
+  if (bad.length) {
+    console.error('❌ 보호 없는 노출이 방치될 길이 있습니다:');
+    for (const b of bad) console.error(`   · ${b}`);
+    console.error('');
+    console.error('   체결은 됐는데 보호주문이 없고, 그 줄이 닫혀 있으면');
+    console.error('   아무도 그 포지션을 다시 보지 않습니다.');
+    process.exit(1);
+  }
+}
+
+// ── 기존 보호주문 취소 결과를 **보고** 새것을 거는가 ──
+//
+// `cancelOpenTPSL`은 기존 TP/SL을 확인하지 못했거나 못 지웠으면
+// `success: false`를 돌려준다. 부르는 쪽이 그 값을 안 보고 바로 새
+// TP/SL을 POST하면 **같은 포지션에 보호주문이 둘**이 된다 — 옛것이 남은
+// 채로 새것이 붙고, 화면에는 `ok: true`가 뜬다.
+//
+// 이 저장소에서 가장 자주 나는 고장 그 자체다: **만들어 놓고 배선을
+// 안 함.** 신호를 만든 쪽만 고치고 부르는 쪽을 안 고치면 그 신호는
+// 아무것도 막지 않는다. 그래서 CI에서 센다.
+//
+// `Cancel All`로 쓸어내는 길은 답이 아니다 — 다른 전략의 보호주문을
+// 지운다(CLAUDE.md 절대 규칙).
+//
+// **목록으로 센다.** `ORDER_ROUTES`와 같은 이유다 — 새로 부르는 곳을
+// 만들면 여기 넣어야 하고, 안 넣으면 이 검사가 그 파일을 못 본다.
+{
+  const CANCEL_FN = 'cancelOpenTPSL(';
+  /** 이 신호를 **판정에 써야 하는** 곳 */
+  const MUST_HONOR = [
+    'src/app/api/binance/futures/tpsl/route.ts',
+  ];
+  /**
+   * 일부러 판정에 쓰지 않는 곳 — **이유가 코드에 적혀 있어야 한다.**
+   *
+   *   `futuresExec.ts`는 `try/catch`로 삼키며 그 선택을 적어 뒀다:
+   *   *"조회 실패 시 건너뛴다 — 남의 주문을 지우는 것보다 중복이 낫다"*.
+   *   그 판단을 이 검사가 뒤집지 않는다. 다만 **적어 둔 이유가 사라지면**
+   *   예외가 아니라 빠뜨린 것이므로 그때는 빨개진다.
+   */
+  const DOCUMENTED_SKIP = [
+    ['src/lib/exchanges/futuresExec.ts', '남의 주문을 지우는 것보다 중복이 낫다'],
+  ];
+
+  /**
+   * **Gate 분기 — 계약 단위 일괄 취소가 되돌아오지 않는지 센다.**
+   *
+   *   예전에는 `futuresCancelProtection`이 Gate에서
+   *   `DELETE /price_orders?contract=…`로 그 계약의 조건부 주문을
+   *   **전부** 지웠다. 그건 `Cancel All`이고 절대 규칙이 금지한다 —
+   *   다른 전략의 보호주문을 지운다.
+   *
+   *   지금은 **읽고 판단**한다. 그 모양이 유지되는지 센다:
+   *     · 일괄 취소를 다시 부르지 않는가
+   *     · 기존 주문을 읽는가 (`getPriceOrdersGateFutures`)
+   *     · 못 읽음(null)과 '있음'을 각각 거절하는가
+   */
+  const GATE_FILE = 'src/app/api/binance/futures/tpsl/route.ts';
+
+  const bad = [];
+  for (const F of MUST_HONOR) {
+    if (!existsSync(F)) { bad.push(`${F}이 없습니다 — 목록이 낡았습니다`); continue; }
+    const raw = readFileSync(F, 'utf8');
+    // 주석이 계약을 대신 증명하지 못하게 걷어낸다.
+    const src = raw.split('\n')
+      .filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+    if (!src.includes(CANCEL_FN)) {
+      bad.push(`${F}: \`cancelOpenTPSL\`을 부르지 않습니다 — 목록이 낡았습니다`);
+      continue;
+    }
+    if (!/cancel\w*\s*(\?\.)?\.?\s*success/.test(src)) {
+      bad.push(`${F}: \`cancelOpenTPSL\`을 부르고 그 \`success\`를 보지 않습니다 — `
+        + '기존 보호주문을 못 지운 채로 새것을 겹쳐 걸 수 있습니다');
+    }
+  }
+  for (const [F, reason] of DOCUMENTED_SKIP) {
+    if (!existsSync(F)) { bad.push(`${F}이 없습니다 — 목록이 낡았습니다`); continue; }
+    const raw = readFileSync(F, 'utf8');
+    if (!raw.includes(CANCEL_FN)) continue;   // 더 안 부르면 예외도 필요 없다
+    if (!raw.includes(reason)) {
+      bad.push(`${F}: \`cancelOpenTPSL\` 결과를 안 보는데 **적어 둔 이유가 없습니다** `
+        + `(찾는 문구: "${reason}") — 예외가 아니라 빠뜨린 것입니다`);
+    }
+  }
+  // ── Gate 분기 ──
+  if (!existsSync(GATE_FILE)) {
+    bad.push(`${GATE_FILE}이 없습니다 — 목록이 낡았습니다`);
+  } else {
+    const raw = readFileSync(GATE_FILE, 'utf8');
+    const src = raw.split('\n')
+      .filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+    if (/futuresCancelProtection\s*\(/.test(src)) {
+      bad.push(`${GATE_FILE}: \`futuresCancelProtection\`을 부릅니다 — Gate에서 그 함수는 `
+        + '계약의 조건부 주문을 **전부** 지웁니다(Cancel All). 다른 전략의 보호주문까지 지웁니다');
+    }
+    if (!src.includes('getPriceOrdersGateFutures(')) {
+      bad.push(`${GATE_FILE}: Gate 기존 보호주문을 읽지 않습니다 — `
+        + '무엇이 걸려 있는지 모르는 채로 겹쳐 걸 수 있습니다');
+    }
+    // 못 읽음(null)과 '있음'을 각각 거절하는가.
+    if (!/existing\s*==\s*null/.test(src) || !/existing\.length\s*>\s*0/.test(src)) {
+      bad.push(`${GATE_FILE}: 기존 보호주문을 읽고도 **거절 분기가 없습니다** — `
+        + '못 읽음과 이미 있음을 각각 막아야 합니다');
+    }
+  }
+  if (bad.length) {
+    console.error('❌ 보호주문 교체가 취소 결과를 보지 않습니다:');
+    for (const b of bad) console.error(`   · ${b}`);
+    console.error('');
+    console.error('   같은 포지션에 보호주문이 둘이 되고, 화면에는 성공이 뜹니다.');
+    process.exit(1);
+  }
+}
+
 console.log(`✅ 실주문 경로 ${ORDER_ROUTES.length}개 · 안전장치 빠진 것 0개`
-  + ' · 조회 실패를 0으로 만드는 길 0개');
+  + ' · 조회 실패를 0으로 만드는 길 0개'
+  + ' · 진입 미확정 노출 방치 경로 0개'
+  + ' · 스모크 주문 관문 구멍 0개'
+  + ' · 보호주문 교체가 취소 결과를 무시하는 길 0개 (Binance·Gate 둘 다)'
+  + ' · Gate 계약 단위 일괄 취소 0개');

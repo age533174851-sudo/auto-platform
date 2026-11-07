@@ -14,15 +14,38 @@
 import type { PositionPlan } from './riskManager';
 import type { ExitPlan } from './exitPlan';
 import { applyTransition, type OrderState as LifecycleState } from './orderLifecycle';
-import { fillBasis, exitFromFill } from './fillBasedExit';
+import { fillBasis, exitFromFill, roundTrigger } from './fillBasedExit';
 import { readbackProtective, type ProtectiveEvidence } from './protectiveReadback';
 import { protectiveClientOrderId } from './orderOwnership';
 import { ownedOrderIds, cancelLedger, rollbackNote, type CancelAttempt } from './protectionLedger';
-import { futuresApplyLeverage } from '../exchanges/futuresExec';
+import { futuresApplyLeverage, unknownResultVerdict } from '../exchanges/futuresExec';
+import { executionIdentityComplete } from '../execution/profile';
 import type { StopPolicy, TakeProfitPolicy } from '../strategies/profiles';
 import { stopReattachVerdict } from './stopReattach';
+import { fillFactsOf } from './orderFillFacts';
+import { RECONCILE_QUERY_STATUSES } from './pendingReconcile';
+import { quantizeOrder } from '../exchanges/quantize';
+import {
+  ledgerStatusOf, ledgerStatusOfBinance, ledgerStatusOfGate, withFillEvidence,
+} from './reconcileLedgerStatus';
 
-export type OrderStatus = 'INTENT' | 'SENT' | 'ACKED' | 'FILLED' | 'REJECTED' | 'FAILED' | 'UNKNOWN' | 'RECONCILED';
+
+// ── 주문 상태 어휘를 **값으로** 둔다 ──
+//
+// 타입만 있으면 `.in('status', [...])`로 질의하는 쪽이 목록을 손으로 적고,
+// 어휘가 늘어도 그 질의는 조용히 옛 목록을 쓴다. PR #313의 계좌 용량
+// 관문이 `ACKED`를 빼먹은 것이 그 모양이었다 — 빠진 방향이 **통과**였다.
+// 값으로 두면 시험이 드리프트를 잡을 수 있다.
+export const ORDER_STATUSES = [
+  'INTENT', 'SENT', 'ACKED', 'FILLED', 'REJECTED', 'FAILED', 'UNKNOWN', 'RECONCILED',
+] as const;
+
+/** 더 움직이지 않는 상태. 이 상태의 주문은 진입을 막지 않는다 */
+export const TERMINAL_ORDER_STATUSES = [
+  'FILLED', 'REJECTED', 'FAILED', 'RECONCILED',
+] as const;
+
+export type OrderStatus = typeof ORDER_STATUSES[number];
 
 export interface ExecuteArgs {
   userId?: string | null;
@@ -32,6 +55,22 @@ export interface ExecuteArgs {
   exchange: 'binance' | 'gate';
   mode: 'TESTNET' | 'LIVE';
   plan: PositionPlan;
+  /**
+   * 이 주문의 의도를 **다른 트랜잭션이 이미 커밋해 두었다.**
+   *
+   * 097의 `ten_slot_claim`은 슬롯 예약과 `live_orders` INTENT를 한
+   * 트랜잭션으로 적는다. 그 뒤에 이 함수가 불리면 같은 `client_order_id`로
+   * INSERT를 또 하게 되고, UNIQUE가 깨져 23505가 난다. 지금까지 그 자리는
+   * **"이미 처리된 주문"으로 끝났다** — 즉 예약은 커밋됐는데 주문은 영원히
+   * 나가지 않는다. 097을 붙이면 그게 기본 동작이 된다.
+   *
+   * 이 값이 `true`면 커밋된 그 줄을 **이어받아** 전송을 계속한다. 다만
+   * 이어받는 조건은 `canAdoptIntent()` 한 곳에만 적는다 — 보낼 주문과
+   * 적힌 의도가 다르면 **다른 주문의 의도로 전송하는 일**이 된다.
+   *
+   * **안 넘기면 지금까지와 똑같다.** 기존 호출부의 바이트는 바뀌지 않는다.
+   */
+  adoptIntent?: boolean;
   /**
    * 이 주문을 낸 것이 누구인가.
    *
@@ -88,6 +127,45 @@ export interface ExecuteArgs {
    * `FIXED_TP`라 기존 호출부의 동작이 바뀌지 않는다.
    */
   takeProfitPolicy?: TakeProfitPolicy;
+  /**
+   * **어느 실행 계약으로 여는 주문인가.** 장부에 그대로 적는다.
+   *
+   * 왜 정책이 아니라 identity를 따로 받는가
+   * ──────────────────────────────────────
+   * `stopPolicy`·`takeProfitPolicy`는 **계약이 정한 행동**이고, 이 값은
+   * **계약 자체의 이름**이다. 행동만 적어 두면 나중에 그 포지션을 보는
+   * 코드가 "손절이 없고 배율이 100이니 Exact100X겠지"로 되돌아간다 —
+   * 이 저장소가 반복해서 금지해 온 추론이다.
+   *
+   * 셋은 조합 키라 **함께** 온다. 하나만으로는 계약이 정해지지 않고
+   * (`MAX_LEV_100X`는 `EXACT_100X`와만 짝이다), 반쪽만 적으면 나머지를
+   * 추측하게 된다 — DB의 `_complete` 제약도 같은 규칙이다.
+   *
+   * 안 넘기면 세 칸 모두 적지 않는다(= 계약 없이 나가던 기존 경로).
+   *
+   * ★ **이 값으로 판단하지 않는다.** 여기서도, 읽는 쪽에서도. 적기만 한다.
+   */
+  executionIdentity?: {
+    profileId: string;
+    presetId: string;
+    contractVersion: number;
+  };
+  /**
+   * **진입 허가가 실제로 쓴 위험 좌표.** 적기만 한다 — 이 값으로
+   * 진입을 막거나 종료를 바꾸지 않는다.
+   *
+   * ★ 반드시 **허가 판정의 결과에서** 와야 한다. 여기서 신호를 다시
+   *   계산하거나 ATR을 새로 재면, 저장된 값이 "허가를 내린 값"이
+   *   아니게 되어 이 칸의 존재 이유가 사라진다.
+   *
+   * 안 넘기면 두 칸 모두 적지 않는다(= 기존 경로 그대로).
+   */
+  entryRiskSnapshot?: {
+    /** 허가 판정이 쓴 변동성 위험 거리(%). 못 구했으면 null */
+    adverseDistancePct: number | null;
+    /** 그 주문이 입장한 RAW 청산여유(%). **EFFECTIVE가 아니다** */
+    liquidationDistancePctRaw: number | null;
+  };
   stopLoss?: number;
   takeProfit?: number;
   /**
@@ -199,17 +277,74 @@ export interface ExecuteResult {
 // 실패하면 새 컬럼만 빼고 다시 쓴다. 마이그레이션이 적용되면 이 경로는 안 돌아간다.
 const RECOVERY_COLS = ['pos_qty_before', 'resolve_attempts', 'last_resolve_at', 'needs_attention'];
 
-async function updateOrderRow(sb: any, id: string, patch: Record<string, any>): Promise<void> {
-  const { error } = await sb.from('live_orders').update(patch).eq('id', id);
-  if (!error) return;
+async function updateOrderRow(
+  sb: any, id: string, patch: Record<string, any>,
+): Promise<{ ok: boolean; reason: string | null }> {
+  const write = async (p: Record<string, any>) => {
+    try {
+      const res: any = await sb.from('live_orders').update(p).eq('id', id).select('id');
+      if (res?.error) {
+        return { ok: false, reason: String(res.error.message || res.error.code || 'DB 오류'),
+          code: String(res.error.code ?? ''), detail: String(res.error.message ?? '') };
+      }
+      // null/undefined는 성공 증거가 아니다. 정확히 대상 id 한 줄만 인정.
+      const rows = res?.data;
+      if (!Array.isArray(rows) || rows.length !== 1 || String(rows[0]?.id) !== String(id)) {
+        return { ok: false, reason: '갱신된 대상 행을 정확히 1개 확인하지 못했습니다',
+          code: '', detail: '' };
+      }
+      return { ok: true, reason: null, code: '', detail: '' };
+    } catch (e: any) {
+      return { ok: false, reason: String(e?.message || e), code: '', detail: '' };
+    }
+  };
+
+  const first = await write(patch);
+  if (first.ok) return first;
+
+  // 복구 전용 칸 누락이 실제로 확인된 경우에만 후퇴한다.
+  // XX000/timeout/RLS 오류나 다른 칼럼 누락은 재시도로 가리지 않는다.
+  const missingRecoveryColumn = (first.code === '42703' || first.code === 'PGRST204')
+    && RECOVERY_COLS.some((col) => first.detail.toLowerCase().includes(col));
+  if (!missingRecoveryColumn) return first;
   const legacy: Record<string, any> = {};
   let stripped = false;
   for (const [k, v] of Object.entries(patch)) {
     if (RECOVERY_COLS.includes(k)) { stripped = true; continue; }
     legacy[k] = v;
   }
-  if (!stripped || Object.keys(legacy).length === 0) return;
-  await sb.from('live_orders').update(legacy).eq('id', id);
+  if (!stripped || Object.keys(legacy).length === 0) return first;
+
+  const second = await write(legacy);
+  if (second.ok) return { ok: true, reason: null };
+  return { ok: false, reason: `${first.reason} · 복구 칸 제외 재시도: ${second.reason}` };
+}
+
+/**
+ * 거래소 POST의 단일 소유권 관문.
+ *
+ * 읽은 INTENT가 여전히 INTENT일 때에만 SENT로 바꾸고, 실제로 변경된
+ * 행 ID를 되읽어 확인한다. 오류·0행·응답 불명은 모두 전송 금지다.
+ * 신규 INSERT와 097 예약 의도 adoption 모두 반드시 이 관문을 통과한다.
+ *
+ * SENT 선점 후 POST 전에 프로세스가 종료되면 주문이 전송되지 않았을 수도
+ * 있다. 자동 재전송하지 않고 대조/사람 확인을 기다리는 보수적 선택이다.
+ * 복구 컬럼(018)은 선점의 필수 조건에 포함하지 않는다.
+ */
+async function claimOrderDispatch(
+  sb: any, id: string, patch: Record<string, any>,
+): Promise<boolean> {
+  try {
+    const { data, error } = await sb.from('live_orders')
+      .update({ ...patch, status: 'SENT' })
+      .eq('id', id)
+      .eq('status', 'INTENT')
+      .select('id')
+      .maybeSingle();
+    return !error && data?.id === id;
+  } catch {
+    return false;
+  }
 }
 
 // 수량 정밀도 보정 — 거래소는 정해진 소수점만 받는다
@@ -296,6 +431,105 @@ async function readRemaining(
   }
 }
 
+/**
+ * 커밋된 의도를 이어받아도 되는가.
+ *
+ * **판단을 한 곳에 둔다.** 이 결정이 틀리면 "A 주문의 의도로 B 주문을
+ * 전송"하거나 "이미 나간 주문을 또 보내는" 일이 된다.
+ *
+ * 거절하는 쪽으로 기울여 둔다:
+ *   · 줄을 못 읽었으면 거절한다 (UNKNOWN을 통과로 적지 않는다)
+ *   · `INTENT`가 아니면 거절한다 — 전송이 이미 있었을 수 있다
+ *   · 거래소 주문 번호·전송 시각·시도 횟수가 남아 있으면 거절한다
+ *   · 보낼 주문과 한 칸이라도 다르면 거절한다
+ */
+export function canAdoptIntent(
+  prev: any,
+  intent: Record<string, any>,
+  expectedLimitPrice?: number | null,
+): { ok: boolean; reason: string } {
+  if (!prev || typeof prev !== 'object') {
+    return { ok: false, reason: '커밋된 의도를 읽지 못했습니다' };
+  }
+  if (prev.status !== 'INTENT') {
+    return { ok: false, reason: `장부 상태가 ${prev.status || '알 수 없음'}입니다 — 전송이 이미 있었을 수 있습니다` };
+  }
+  if (typeof prev.id !== 'string' || prev.id.length === 0) {
+    return { ok: false, reason: '커밋된 의도의 DB 행 ID를 확인하지 못했습니다' };
+  }
+  if (prev.exchange_order_id != null || prev.sent_at != null
+      || Number(prev.attempt_count ?? 0) !== 0) {
+    return { ok: false, reason: '전송 흔적이 남아 있습니다 — 다시 보내지 않습니다' };
+  }
+  // 예약된 INTENT는 service_role로 읽힌다. client_order_id만으로 소유자를
+  // 증명할 수 없으므로 인증된 호출자가 넘긴 정체성과 저장된 정체성을
+  // 모두 요구한다. 어느 쪽이 비었어도 다른 주문을 이어받지 않는다.
+  for (const col of ['user_id', 'connection_id', 'signal_id']) {
+    if (typeof prev[col] !== 'string' || !prev[col].trim()
+        || typeof intent[col] !== 'string' || !intent[col].trim()
+        || prev[col] !== intent[col]) {
+      return { ok: false, reason: `커밋된 의도의 ${col} 정체성을 확인하지 못했습니다` };
+    }
+  }
+  for (const col of ['client_order_id', 'exchange', 'mode', 'symbol', 'side', 'order_type']) {
+    if (String(prev[col]) !== String(intent[col])) {
+      return { ok: false, reason: `적힌 의도의 ${col}가 보낼 주문과 다릅니다` };
+    }
+  }
+  if (Boolean(prev.reduce_only) !== Boolean(intent.reduce_only)) {
+    return { ok: false, reason: '적힌 의도의 청산 여부가 보낼 주문과 다릅니다' };
+  }
+  if (Number(prev.quantity) !== Number(intent.quantity)) {
+    return { ok: false, reason: '적힌 의도의 수량이 보낼 주문과 다릅니다' };
+  }
+  // SQL 097은 price를 따로 저장한다. LIMIT의 가격을 대조하지 않으면
+  // 같은 주문 ID/수량으로 다른 지정가를 보내는 것이 가능하다.
+  // NULL과 0을 같은 값으로 취급하지 않는다.
+  const sameOptionalNumber = (a: unknown, b: unknown): boolean => {
+    if (a == null || b == null) return a == null && b == null;
+    const x = Number(a), y = Number(b);
+    return Number.isFinite(x) && Number.isFinite(y) && x === y;
+  };
+  if (intent.order_type === 'LIMIT'
+      && (expectedLimitPrice == null || !Number.isFinite(Number(expectedLimitPrice)))) {
+    return { ok: false, reason: '지정가 주문의 가격을 확인하지 못했습니다' };
+  }
+  for (const [col, expected] of [
+    ['price', expectedLimitPrice ?? null],
+    ['stop_loss', intent.stop_loss ?? null],
+    ['take_profit', intent.take_profit ?? null],
+    // 091 위험 좌표는 각각 NULL일 수 있다. 존재하는 값은 저장 INTENT와 정확히 같아야 한다.
+    ['entry_adverse_distance_pct', intent.entry_adverse_distance_pct ?? null],
+    ['entry_liquidation_distance_pct_raw', intent.entry_liquidation_distance_pct_raw ?? null],
+  ] as const) {
+    if (!sameOptionalNumber(prev[col], expected)) {
+      return { ok: false, reason: `커밋된 의도의 ${col}가 보낼 주문과 다릅니다` };
+    }
+  }
+  // NO_FIXED_SL/실행 계약은 주문 후 복구의 정체성이다. SQL이 해당 칸을
+  // 아직 저장하지 않는다면 이어받기를 거절하고, 조용히 누락하지 않는다.
+  for (const col of [
+    'stop_policy', 'execution_profile_id', 'execution_preset_id',
+    'execution_contract_version',
+  ]) {
+    if (String(prev[col] ?? '') !== String(intent[col] ?? '')) {
+      return { ok: false, reason: `커밋된 의도의 ${col}가 보낼 계약과 다릅니다` };
+    }
+  }
+  // 진입 주문의 예약 배율은 필수다. SQL 097도 진입의 NULL 배율을
+  // 거절한다. 한쪽이 비었는데도 다른 칸만 같다는 이유로 이어받으면
+  // 예약된 위험 계약을 확인하지 않고 거래소로 전송할 수 있다.
+  // 청산(reduce_only)은 배율이 없을 수 있으므로 기존 허용을 유지한다.
+  if (!intent.reduce_only && (intent.leverage == null || prev.leverage == null)) {
+    return { ok: false, reason: '진입 주문의 예약 배율을 확인하지 못했습니다' };
+  }
+  if (intent.leverage != null && prev.leverage != null
+      && Number(prev.leverage) !== Number(intent.leverage)) {
+    return { ok: false, reason: '적힌 의도의 배율이 보낼 주문과 다릅니다' };
+  }
+  return { ok: true, reason: '커밋된 의도를 이어받습니다' };
+}
+
 export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteResult> {
   const { clientOrderId, plan, exchange, mode, apiKey, apiSecret } = args;
   const testnet = mode !== 'LIVE';
@@ -304,6 +538,29 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
   // **고정 손절을 쓰지 않는 프로필은 여기서 NONE으로 덮는다.** 호출부가
   // 실수로 REQUIRED를 넘겨도 마찬가지다 — 계약이 호출부보다 세다.
   const noFixedSl = args.stopPolicy === 'NO_FIXED_SL';
+
+  // ── 실행 계약 identity — 적을 것인가, 적는다면 온전한가 ──
+  //
+  //   **반쪽은 받지 않는다.** 셋 중 일부만 오면 **호출부가 계약을 잘못
+  //   조립한 것**이다. 그건 이 함수가 고쳐 줄 일이 아니라 거절할 일이다.
+  //
+  //   DB의 `_complete` 제약이 어차피 막지 않느냐고 할 수 있다. 막는다 —
+  //   그리고 그 실패는 거래소 전송보다 먼저 난다(INTENT insert가 앞이다).
+  //   그래도 여기서 따로 막는 이유는 **DB 제약은 마지막 방어선이지
+  //   응용 검증의 대체물이 아니기 때문**이다:
+  //
+  //     · 제약이 없는 배포(090 미적용)에서는 반쪽이 그대로 저장된다
+  //     · 제약 위반은 PostgREST 오류 문자열로 와서 호출부의 실수를
+  //       "DB 오류"처럼 보이게 한다 — 무엇을 고쳐야 하는지 가린다
+  //
+  //   그래서 경계에서 명시적으로 fail-closed한다.
+  // 온전한지는 **계약 정본이 판단한다.** 여기서 다시 세면 적는 쪽과
+  // 읽는 쪽의 기준이 갈린다. (정적 import — 순수 함수 하나에 동적 로딩을
+  // 쓸 이유가 없고, 별칭 동적 import는 시험 하네스에서 풀리지 않는다.)
+  const ident = args.executionIdentity;
+  const identOk = executionIdentityComplete(ident);
+  // 진입 허가가 준 위험 좌표. **여기서 만들지 않는다 — 받기만 한다.**
+  const riskSnap = args.entryRiskSnapshot;
   const policy = noFixedSl ? 'NONE' : (args.protectionPolicy ?? 'REQUIRED');
   // **익절은 따로 판단한다.** `policy === 'NONE'`으로 익절까지 끄면
   // 손절 정책 하나가 두 가지를 뜻하게 되고, 그때 바이낸스와 Gate가
@@ -339,6 +596,36 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
     return { ok: false, status: 'REJECTED', clientOrderId,
       message: '고정 익절을 쓰지 않는 프로필인데 익절가가 함께 넘어왔습니다'
         + ` (${args.takeProfit}) — 어느 쪽이 맞는지 알 수 없어 주문하지 않습니다.` };
+  }
+  // ── 분할 익절 사다리도 익절이다 ──
+  //
+  //   이 관문은 `args.takeProfit`(단일 익절)만 봤다. 그래서 `exitPlan`에
+  //   `PARTIAL_TP`가 담겨 오면 여기를 통과하고, 전송 뒤 보호주문 단계의
+  //   `else if (noFixedTp)` 한 줄에만 막혔다. 그 한 줄을 지우면 **고정
+  //   익절 사다리가 거래소로 나간다** — 변이 검증에서 그 변이가 탈출했고,
+  //   탈출한 이유가 "단일 익절만 넘기는 시험"이었다.
+  //
+  //   경계에서 막는 쪽이 낫다. 여기서 멈추면 계좌에 아무 일도 일어나지
+  //   않는다(거래소 호출 0건). 뒤에서 막으면 진입은 이미 나가 있다.
+  const planTpCount = (args.exitPlan?.orders ?? [])
+    .filter((o: any) => o?.kind === 'PARTIAL_TP').length;
+  if (noFixedTp && planTpCount > 0) {
+    return { ok: false, status: 'REJECTED', clientOrderId,
+      message: '고정 익절을 쓰지 않는 프로필인데 분할 익절 사다리가 함께 넘어왔습니다'
+        + ` (${planTpCount}단) — 어느 쪽이 맞는지 알 수 없어 주문하지 않습니다.` };
+  }
+  // 실행 계약 식별자도 같은 규칙이다. **반쪽은 받지 않는다.**
+  //
+  //   호출부가 계약을 잘못 조립한 것이므로 **경계에서 거절한다.** 거래소
+  //   쓰기(배율 설정·주문 전송)는 전부 이 뒤에 있으므로, 여기서 멈추면
+  //   계좌에 아무 일도 일어나지 않는다 — 시험이 호출 횟수 0으로 확인한다.
+  //
+  //   DB 제약에 기대지 않는 이유는 위 주석에 적었다.
+  if (ident && !identOk) {
+    return { ok: false, status: 'REJECTED', clientOrderId,
+      message: '실행 계약 식별자가 반쪽입니다 — 프로필·프리셋·버전은 함께 와야 합니다'
+        + ` (프로필 ${ident.profileId || '없음'} · 프리셋 ${ident.presetId || '없음'}`
+        + ` · 버전 ${ident.contractVersion ?? '없음'}). 나머지를 추측하지 않고 주문하지 않습니다.` };
   }
   if (!isFinite(plan.quantity) || plan.quantity <= 0) {
     return { ok: false, status: 'REJECTED', clientOrderId, message: `주문 수량이 유효하지 않습니다 (${plan.quantity})` };
@@ -406,28 +693,78 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
     // 읽게 되고, 그건 100배 포지션에 손절을 새로 거는 일이다.
     // 여기서 칸을 떼고 저장하는 후퇴는 만들지 않는다.
     ...(noFixedSl ? { stop_policy: 'NO_FIXED_SL' } : {}),
+    // **계약이 있을 때만 붙인다.** `stop_policy`와 같은 이유다 — 항상
+    // 붙이면 090가 아직인 DB에서 모든 주문이 실패한다. 계약 없이 나가던
+    // 기존 경로의 바이트는 그대로 둔다.
+    //
+    // 반대로 계약이 있는데 못 붙이면 실패하는 것이 **맞다** — 그 칸이 없는
+    // DB에서는 이 포지션이 나중에 "어느 계약의 것인지 모르는 주문"이 되고,
+    // 그러면 다시 배율·손절 조합으로 추론하는 자리로 되돌아간다.
+    ...(ident ? {
+      execution_profile_id: ident.profileId,
+      execution_preset_id: ident.presetId,
+      execution_contract_version: ident.contractVersion,
+    } : {}),
+    // ── 진입 허가가 쓴 위험 좌표 (091) ──
+    //
+    // **값이 있을 때만 붙인다.** `stop_policy`·계약 세 칸과 같은 이유다 —
+    // 항상 붙이면 091이 아직인 DB에서 모든 주문이 실패한다.
+    //
+    // 둘을 따로 붙인다. 한쪽만 구해졌을 때 저장을 통째로 실패시키면
+    // **구한 값까지 버린다**(091이 CHECK 제약을 걸지 않은 것과 같은 이유).
+    //
+    // ★ 여기서 계산하지 않는다. 받은 값을 그대로 적는다.
+    ...(riskSnap?.adverseDistancePct != null
+      ? { entry_adverse_distance_pct: riskSnap.adverseDistancePct } : {}),
+    ...(riskSnap?.liquidationDistancePctRaw != null
+      ? { entry_liquidation_distance_pct_raw: riskSnap.liquidationDistancePctRaw } : {}),
   };
 
-  const { data: row, error: insErr } = await sb.from('live_orders').insert(intent).select('id, status').single();
-  if (insErr) {
-    if (String(insErr.code) === '23505') {
-      // 이미 처리된 주문 — 기존 상태를 그대로 반환 (재시도해도 결과 동일)
-      const { data: prev } = await sb.from('live_orders').select('*').eq('client_order_id', clientOrderId).maybeSingle();
+  // 097이 이미 커밋한 INTENT를 이어받을 때는 새 INTENT를 만들지 않는다.
+  // 이전에는 먼저 INSERT하고 23505가 나야만 예약 의도를 읽었다.
+  // 예약이 없거나 UNIQUE 제약이 없는 DB에서는 adoptIntent:true가 오히려
+  // 새 INTENT를 만들어 거래소에 전송하는 fail-open 경로가 됐다.
+  let row: any = null;
+  let adopted: any = null;
+  if (args.adoptIntent === true) {
+    const { data: prev, error: readErr } = await sb.from('live_orders')
+      .select('*').eq('client_order_id', clientOrderId).maybeSingle();
+    const adopt = readErr
+      ? { ok: false, reason: '커밋된 의도의 DB 조회가 실패했습니다' }
+      : canAdoptIntent(prev, intent, args.limitPrice);
+    if (!adopt.ok) {
+      // 다른 사용자의 과거 체결·거래소 ID도 노출하지 않는다.
       return {
-        ok: prev?.status === 'ACKED' || prev?.status === 'FILLED',
-        status: (prev?.status as OrderStatus) || 'UNKNOWN',
-        clientOrderId,
-        exchangeOrderId: prev?.exchange_order_id,
-        filledQty: prev?.filled_qty != null ? Number(prev.filled_qty) : undefined,
-        avgPrice: prev?.avg_price != null ? Number(prev.avg_price) : undefined,
-        duplicate: true,
-        message: '이미 처리된 주문입니다 (중복 요청)',
+        ok: false, status: 'UNKNOWN', clientOrderId, duplicate: true,
+        message: `커밋된 주문 의도를 안전하게 이어받지 못했습니다 (${adopt.reason})`,
       };
     }
-    return { ok: false, status: 'FAILED', clientOrderId, message: `의도 기록 실패: ${insErr.message}` };
+    adopted = prev;
+  } else {
+    // 레거시 비-adoption 경로의 INSERT 및 중복 응답 의미는 유지한다.
+    const { data: inserted, error: insErr } = await sb.from('live_orders')
+      .insert(intent).select('id, status').single();
+    if (insErr) {
+      if (String(insErr.code) === '23505') {
+        const { data: prev } = await sb.from('live_orders')
+          .select('*').eq('client_order_id', clientOrderId).maybeSingle();
+        return {
+          ok: prev?.status === 'ACKED' || prev?.status === 'FILLED',
+          status: (prev?.status as OrderStatus) || 'UNKNOWN',
+          clientOrderId,
+          exchangeOrderId: prev?.exchange_order_id,
+          filledQty: prev?.filled_qty != null ? Number(prev.filled_qty) : undefined,
+          avgPrice: prev?.avg_price != null ? Number(prev.avg_price) : undefined,
+          duplicate: true,
+          message: '이미 처리된 주문입니다 (중복 요청)',
+        };
+      }
+      return { ok: false, status: 'FAILED', clientOrderId, message: `의도 기록 실패: ${insErr.message}` };
+    }
+    row = inserted;
   }
 
-  const orderRowId = row.id;
+  const orderRowId = adopted ? adopted.id : row.id;
 
   // ── 상태 전이 검증 ──
   // 예전에는 update()가 어떤 status든 그대로 덮어썼다. 그러면 이미 FAILED로
@@ -441,8 +778,16 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
 
   let currentStatus: OrderStatus = 'INTENT';
 
-  const update = async (patch: Record<string, any>) => {
+  /**
+   * 장부에 **적히지 않은** 기록들. 전송 뒤의 실패는 주문을 되돌리지
+   * 못하므로 막는 대신 **크게 남긴다** — 조용히 지나가면 화면의 상태와
+   * 거래소의 상태가 갈린 채로 아무도 모른다.
+   */
+  const persistWarn: string[] = [];
+
+  const update = async (patch: Record<string, any>): Promise<{ ok: boolean; reason: string | null }> => {
     const next = patch.status as OrderStatus | undefined;
+    let advance: OrderStatus | null = null;
     if (next && next !== currentStatus) {
       const t = applyTransition(toLifecycle(currentStatus), toLifecycle(next));
       if (!t.ok) {
@@ -453,15 +798,35 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
           log.warn('order-executor', `${clientOrderId}: ${t.reason}`);
         } catch { /* 로거 실패가 주문을 막지 않는다 */ }
         const { status: _drop, ...rest } = patch;
-        if (Object.keys(rest).length === 0) return;
+        if (Object.keys(rest).length === 0) return { ok: true, reason: null };
         patch = rest;
       } else {
-        currentStatus = next;
+        advance = next;
       }
     }
-    try { await updateOrderRow(sb, orderRowId, { ...patch, updated_at: new Date().toISOString() }); } catch {}
+    const w = await updateOrderRow(sb, orderRowId, { ...patch, updated_at: new Date().toISOString() });
+    // **쓰기를 확인한 뒤에만 메모리 상태를 전진시킨다.**
+    //
+    // 예전에는 DB보다 먼저 전진했다. 그러면 DB는 INTENT인데 메모리는
+    // SENT가 되고, 다음 전이 판정이 **장부에 없는 상태**를 기준으로
+    // 내려진다. 두 상태가 갈리는 바로 그 자리다.
+    if (w.ok && advance) currentStatus = advance;
+    if (!w.ok) {
+      persistWarn.push(`${next ?? '갱신'}: ${w.reason}`);
+      try {
+        const { log } = await import('@/lib/log/logger');
+        log.warn('order-executor', `${clientOrderId}: 장부 기록 실패 — ${w.reason}`);
+      } catch { /* 로거 실패가 주문을 막지 않는다 */ }
+    }
+    return w;
   };
 
+  /** 전송 뒤 기록 실패를 사용자에게 보이는 말에 붙인다 */
+  const withPersistNote = (msg: string) =>
+    persistWarn.length === 0 ? msg
+      : `${msg} · ⚠ 장부에 기록하지 못했습니다 (${persistWarn.join(' · ')}) — 화면과 거래소가 다를 수 있으니 대조가 필요합니다`;
+
+  const result = await (async (): Promise<ExecuteResult> => {
   try {
     if (exchange === 'binance') {
       const bf = await import('@/lib/exchanges/binanceFutures');
@@ -470,17 +835,63 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       try {
         const existing = await bf.findOrderByClientId(apiKey, apiSecret, plan.symbol, clientOrderId, testnet);
         if (existing.found) {
+          // ── 이 자리도 `|| '0'`이었다 ──
+          //
+          //   같은 멱등 키의 주문이 거래소에 이미 있을 때다. 미체결이면
+          //   `avgPrice`가 '0'이고 그것이 **가격으로** 적혔다. 접수 자리와
+          //   대조 자리는 고쳤는데 이 자리는 남아 있었다 — 같은 파일 안에서
+          //   세 번째였다. 정본 하나로 모은다.
+          const exFacts = fillFactsOf(existing.order);
+
+          // ── 찾았다고 끝난 것은 아니다 ──
+          //
+          //   여기는 `status: 'RECONCILED'`를 **무조건** 적었다. 거래소가
+          //   `NEW`(아직 열려 있음)나 `PARTIALLY_FILLED`(잔량이 열려
+          //   있음)를 돌려줘도 종료로 적혔고, `RECONCILED`는 대조 대상이
+          //   아니라 **아무도 그 주문을 다시 조회하지 않았다.** 거래소에
+          //   멀쩡히 살아 있는 주문이 장부에서 끝나고, 나중에 체결돼도 그
+          //   체결은 장부에 영원히 들어오지 않는다. 대조 쓰기와 같은
+          //   결함이 이 자리에도 있었다 — 경로가 셋인데 하나만 고쳤던 것.
+          const dup = ledgerStatusOfBinance(exFacts.exchangeStatus, exFacts.filledQty);
+
+          // ── 상태 기계가 이 쓰기를 **조용히 버리고 있었다** ──
+          //
+          //   장부 줄은 아직 `INTENT`(= 상태 기계의 `APPROVED`)다. 그
+          //   상태에서 나갈 수 있는 길은 `SENT`·`CANCELED`·`FAILED`뿐이라
+          //   `ACKED`로 가는 전이가 거부되고, `update`가 **status만 빼고**
+          //   나머지를 적었다. 그래서 이 분기는 수량·주문번호는 적으면서
+          //   상태는 영원히 `INTENT`로 남겼다 — 예전 코드가 `RECONCILED`를
+          //   적던 시절에도 똑같이 버려지고 있었다(둘 다 `ACKED`로 매핑된다).
+          //
+          //   거래소에서 그 주문을 **찾았다**는 것은 이전 시도가 실제로
+          //   전송됐다는 뜻이다. 그러니 먼저 `SENT`을 적고(사실이다) 그
+          //   다음에 발견한 상태로 간다. 전이표를 넓히지 않고도 네 결과
+          //   (ACKED·FILLED·REJECTED·RECONCILED) 모두 통과한다.
+          await update({ status: 'SENT', sent_at: new Date().toISOString() });
           await update({
-            status: 'RECONCILED', exchange_order_id: String(existing.order?.orderId),
-            filled_qty: parseFloat(existing.order?.executedQty || '0'),
-            avg_price: parseFloat(existing.order?.avgPrice || '0'),
-            reconciled_at: new Date().toISOString(),
+            status: dup.status, exchange_order_id: String(existing.order?.orderId),
+            filled_qty: exFacts.filledQty,
+            avg_price: exFacts.avgPrice,
+            // 끝난 것에만 종료 시각을 적는다.
+            ...(dup.terminal ? { reconciled_at: new Date().toISOString() } : {}),
+            ...(dup.needsAttention
+              ? { needs_attention: true, error_message: dup.attentionReason }
+              : {}),
           });
           return {
-            ok: true, status: 'RECONCILED', clientOrderId,
+            // `ok`는 "이 주문이 살아 있거나 체결됐다"는 뜻이다 — 위 23505
+            // 분기와 같은 규칙을 쓴다. 취소·거절로 끝난 주문을 ok:true로
+            // 돌려주면 호출자가 없는 진입을 기록한다.
+            ok: dup.status === 'ACKED' || dup.status === 'FILLED',
+            status: dup.status, clientOrderId,
             exchangeOrderId: String(existing.order?.orderId),
-            filledQty: parseFloat(existing.order?.executedQty || '0'),
-            duplicate: true, message: '거래소에 이미 존재하는 주문 — 재전송하지 않음',
+            filledQty: exFacts.filledQty ?? undefined,
+            avgPrice: exFacts.avgPrice ?? undefined,
+            duplicate: true,
+            message: '거래소에 이미 존재하는 주문 — 재전송하지 않음'
+              + ` (거래소 상태 ${exFacts.exchangeStatus ?? '불명'}`
+              + `${dup.terminal ? '' : ' · 아직 열려 있음'})`
+              + (dup.needsAttention ? ` · ${dup.attentionReason}` : ''),
           };
         }
       } catch (e: any) {
@@ -567,18 +978,75 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
         }
       } catch { /* 조회 실패 시 null — 교차 확인 없이 판단하게 된다 */ }
 
-      // ── 5) 주문 전송 ──
-      await update({
-        status: 'SENT', sent_at: new Date().toISOString(), attempt_count: 1,
-        pos_qty_before: posQtyBefore,
+      // ── 4.7) 거래소 규격에 맞춘다 ──
+      //
+      // **2026-10-16 TESTNET 실측에서 여기가 비어 있었다.**
+      // 거래소가 `-1111 Precision is over the maximum defined for this
+      // asset`로 거절했다. 보낸 수량은 `(증거금 × 배율) / 기준가`가
+      // 만든 생 부동소수(예: 0.0033333333333333335)였다.
+      //
+      // 규격을 맞추는 정본은 이미 있었다 — `quantizeOrder`가
+      // LOT_SIZE · MARKET_LOT_SIZE · stepSize · minQty · maxQty ·
+      // minNotional · tickSize를 전부 다룬다. `placeFuturesOrderSafe`와
+      // `futuresExec`는 그것을 쓰는데 **이 경로만 안 쓰고 있었다.**
+      // 만들어 놓고 배선을 안 한 것이고, 그래서 실주문이 거절됐다.
+      //
+      // `placeFuturesOrderSafe`로 바꾸지 않는 이유: 그쪽은
+      // `clientOrderId`를 받지 않는다. 멱등 키를 잃으면 재시도가 중복
+      // 주문이 된다 — 정밀도를 고치려다 더 나쁜 것을 만든다.
+      const filters = await bf.getSymbolFilters(plan.symbol, testnet);
+
+      // 최소 명목가 검사에 쓸 기준가는 **거래소에서 읽는다.** 호출부가
+      // 넘긴 값을 쓰면 검사가 검사 대상에게 값을 물어보는 꼴이 된다.
+      // 못 읽으면 null을 넘긴다 — 정본이 "기준가 없음"으로 판정한다.
+      let markPrice: number | null = null;
+      if (orderType === 'MARKET' && args.reduceOnly !== true) {
+        try {
+          const snap = await bf.readMarketSnapshot(plan.symbol, testnet);
+          markPrice = snap.snapshot?.markPrice ?? null;
+        } catch { /* 못 읽으면 null — 지어내지 않는다 */ }
+      }
+
+      const qz = quantizeOrder(
+        plan.quantity,
+        orderType === 'LIMIT' ? (args.limitPrice ?? null) : null,
+        filters,
+        { orderType, reduceOnly: args.reduceOnly === true, marketReferencePrice: markPrice },
+      );
+      if (!qz.ok || !(Number.isFinite(Number(qz.quantity)) && Number(qz.quantity) > 0)) {
+        // **보내기 전에 멈춘다.** `status: 'SENT'`를 적기 전이라
+        // 장부에 "보냈다"가 남지 않는다 — 안 보낸 것을 보냈다고 적으면
+        // 대조가 영영 어긋난다.
+        const reason = `거래소 수량 규격을 맞추지 못해 주문을 보내지 않았습니다`
+          + ` (${qz.code ?? 'QUANTIZE_FAILED'}): ${qz.reason}`;
+        await update({ status: 'FAILED', error_message: reason });
+        return { ok: false, status: 'FAILED', clientOrderId, message: reason };
+      }
+      const sendQty = qz.quantity as number;
+      const sendPrice = orderType === 'LIMIT' ? (qz.price ?? args.limitPrice) : undefined;
+
+      // ── 5) 원자적 전송 선점 → 주문 전송 ──
+      // INTENT를 읽은 실행기가 여럿이어도 DB에서 단 한 실행기만
+      // SENT를 선점할 수 있다. 오류·0행이면 거래소 POST는 0회다.
+      const claimed = await claimOrderDispatch(sb, orderRowId, {
+        sent_at: new Date().toISOString(), attempt_count: 1,
+        // 규격에 맞춘 수량을 실제 전송 전에 같은 원자적 쓰기로 기록한다.
+        ...(qz.changed ? { quantity: sendQty } : {}),
       });
+      if (!claimed) {
+        return { ok: false, status: 'UNKNOWN', clientOrderId,
+          message: '주문 전송 권한을 DB에서 확정하지 못했습니다. 전송하지 않고 대조가 필요합니다.' };
+      }
+      currentStatus = 'SENT';
+      // 018 복구 컬럼은 구형 DB에서도 선택 사항. 선점과 분리해 적는다.
+      if (posQtyBefore !== null) await update({ pos_qty_before: posQtyBefore });
 
       let res: any;
       try {
         res = await bf.placeFuturesOrder(apiKey, apiSecret, {
           symbol: plan.symbol, side, type: orderType,
-          quantity: plan.quantity, clientOrderId,
-          ...(orderType === 'LIMIT' ? { price: args.limitPrice } : {}),
+          quantity: sendQty, clientOrderId,
+          ...(orderType === 'LIMIT' ? { price: sendPrice } : {}),
           ...(args.reduceOnly ? { reduceOnly: true } : {}),
         }, testnet);
       } catch (e: any) {
@@ -589,28 +1057,94 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       }
 
       if (!res?.success) {
+        // ── 실패를 **거부로 단정하지 않는다** ──
+        //
+        //   `placeFuturesOrder`는 타임아웃·연결 끊김도 **내부에서 잡아**
+        //   `{ success: false, message }`로 돌려준다. 그래서 위 catch는
+        //   돌지 않고 여기로 온다. 여기서 무조건 `REJECTED`를 적고 있었다.
+        //
+        //   `REJECTED`는 "거래소가 거부했다"는 뜻이고, 대조 대상도 아니며
+        //   (`RECONCILE_TARGET_STATUSES`에 없다) 계좌 용량 관문의 어느
+        //   목록에도 없다. 즉 **거래소에 살아 있을 수 있는 주문이
+        //   "거부됨"으로 종료되고, 아무도 다시 조회하지 않고, 진입 잠금도
+        //   풀린다.** 자동매매의 주 진입 경로에 그 구멍이 있었다.
+        //
+        //   판정은 `unknownResultVerdict` 하나를 쓴다 — 거래소가 거절한
+        //   모양이 보일 때만 거부로 적는다.
+        const verdict = unknownResultVerdict(res?.message);
+        if (verdict.unknown) {
+          await update({
+            status: 'UNKNOWN',
+            error_message: `결과 미확정(${verdict.evidence}): ${res?.message || '사유 미상'}`,
+          });
+          return { ok: false, status: 'UNKNOWN', clientOrderId,
+            message: '주문 결과를 확정하지 못했습니다. 재시도하지 않고 대조가 필요합니다 — '
+                   + `${res?.message || '사유 미상'}` };
+        }
         await update({ status: 'REJECTED', error_message: res?.message });
         return { ok: false, status: 'REJECTED', clientOrderId, message: `거래소 거부: ${res?.message}` };
       }
 
       // ── 6) 접수 확인 ──
+      //
+      // **접수는 체결이 아니다.** 예전에는 `filled_qty: res.qty`를 적었는데
+      // `placeFuturesOrder`의 `qty`는 `origQty || executedQty`라 **요청
+      // 수량이 먼저** 온다. 한 주도 안 채워진 주문이 "요청만큼 체결됨"으로
+      // 장부에 남고, 그 값을 ledger 세 곳이 보유 수량으로 읽었다.
+      // reconcile은 ACKED를 보지 않으므로 스스로 고쳐지지도 않는다.
+      //
+      // 거래소가 증명한 것만 적는다. 증명하지 못한 것은 null이고 0이 아니다.
+      const fill = fillFactsOf(res.raw);
       await update({
-        status: 'ACKED', exchange_order_id: String(res.orderId),
-        filled_qty: res.qty, avg_price: res.price, acked_at: new Date().toISOString(),
+        status: fill.status, exchange_order_id: String(res.orderId),
+        filled_qty: fill.filledQty, avg_price: fill.avgPrice,
+        acked_at: new Date().toISOString(),
+        ...(fill.exchangeStatus ? { error_message: null } : {}),
       });
 
       // ── 7) 손절·익절 부착 ──
       let slId: string | undefined, tpId: string | undefined;
       const closeSide: 'BUY' | 'SELL' = side === 'BUY' ? 'SELL' : 'BUY';
       let slError = '';
+
+      // ── 보호주문도 거래소 격자 위에 올린다 ──
+      //
+      // 진입 수량만 맞추면 **다음 벽이 여기다.** 손절·익절의
+      // `stopPrice`는 `기준가 × (1 ± 손절%)`가 만든 생 부동소수고
+      // (예: 59400.000000000007), 호가 단위를 벗어나면 똑같이 -1111로
+      // 거절된다. 그러면 **보호 없는 포지션이 열린 채로 남는다** —
+      // 진입이 거절되는 것보다 나쁜 결과다.
+      //
+      // 자릿수를 새로 쓰지 않는다. 방향까지 맞추는 정본이 이미 있다:
+      // `roundTrigger`는 LONG 손절을 **내리고** LONG 익절을 **올린다**
+      // (SHORT는 반대). 반올림으로 처리하면 손절이 한 틱 가까워지거나
+      // 익절이 한 틱 멀어져 **닿지 않는 보호주문**이 된다.
+      const tick = filters?.tickSize && filters.tickSize > 0 ? filters.tickSize : null;
+      /** 조건부 주문의 reduceOnly 수량에도 LOT_SIZE와 MARKET_LOT_SIZE를
+       * **모두** 적용한다. MARKET_LOT_SIZE.stepSize=0은 비활성이라는 뜻이고
+       * 이때도 LOT_SIZE를 반드시 지켜야 한다. 필터 조회 실패 시 청산
+       * 자체를 막지 않는 기존 quantizeOrder의 reduceOnly 계약을 따른다. */
+      const protQty = (q: unknown): number | undefined => {
+        const n = Number(q);
+        if (!Number.isFinite(n) || n <= 0) return undefined;
+        const v = quantizeOrder(n, null, filters, { orderType: 'MARKET', reduceOnly: true });
+        return v.ok && v.quantity != null && Number.isFinite(v.quantity) && v.quantity > 0
+          ? v.quantity : undefined;
+      };
+
       // 청산 주문에는 보호주문을 붙이지 않는다. 붙이면 포지션이 없어진 뒤에도
       // 남아서 다음 진입을 예상치 못하게 닫는다.
       if (!args.reduceOnly && args.stopLoss && policy !== 'NONE') {
-        const sl = await bf.placeFuturesTPSL(apiKey, apiSecret, {
-          symbol: plan.symbol, side: closeSide, stopPrice: args.stopLoss, type: 'STOP_MARKET',
-          // 1차는 closePosition(그때 있는 전량)이 맞다. 그게 이 환경에서
-          // 거절되면(-4120) 체결 수량으로 한 번 더 시도한다.
-          fallbackQuantity: res.qty || plan.quantity,
+        const slTrig = roundTrigger(args.stopLoss, plan.side, 'STOP', tick);
+        const sl = slTrig.price == null
+          ? { success: false, message: `손절가를 호가 단위에 맞추지 못했습니다: ${slTrig.note}` } as any
+          : await bf.placeFuturesTPSL(apiKey, apiSecret, {
+          symbol: plan.symbol, side: closeSide, stopPrice: slTrig.price, type: 'STOP_MARKET',
+          // 1차는 closePosition(그때 있는 전량)이 맞다. -4120 대체 방식은
+          // 거래소가 **증명한 체결 수량**만 사용한다. res.qty는 origQty를
+          // 우선 돌려줄 수 있어 실제 체결 수량이 아니다. 체결 증거가 없으면
+          // 추정 수량으로 reduceOnly 주문을 보내지 않는다.
+          fallbackQuantity: protQty(fill.filledQty) ?? null,
         }, testnet);
         if ((sl as any)?.success) slId = String((sl as any).orderId);
         else {
@@ -638,9 +1172,15 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       } else if (args.exitPlan) {
         for (const o of args.exitPlan.orders) {
           if (o.kind !== 'PARTIAL_TP') continue;   // 손절은 위에서 이미 걸었다
+          const pTrig = roundTrigger(o.price, plan.side, 'TAKE_PROFIT', tick);
+          if (pTrig.price == null) continue;   // 격자에 못 올리면 안 보낸다
+          const partialQty = protQty(o.quantity);
+          // PARTIAL_TP에 quantity를 생략하면 closePosition=true가 되어
+          // 부분 익절이 전량 청산으로 바뀐다. 절대로 그대로 보내지 않는다.
+          if (partialQty == null) continue;
           const r = await bf.placeFuturesTPSL(apiKey, apiSecret, {
-            symbol: plan.symbol, side: closeSide, stopPrice: o.price,
-            type: 'TAKE_PROFIT_MARKET', quantity: o.quantity,
+            symbol: plan.symbol, side: closeSide, stopPrice: pTrig.price,
+            type: 'TAKE_PROFIT_MARKET', quantity: partialQty,
           }, testnet);
           if ((r as any)?.success) tpIds.push(String((r as any).orderId));
           // 분할 익절 실패는 진입을 되돌릴 사유가 아니다 — 손절은 이미 걸려
@@ -648,8 +1188,11 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
         }
         tpId = tpIds[0];
       } else if (args.takeProfit) {
-        const tp = await bf.placeFuturesTPSL(apiKey, apiSecret, {
-          symbol: plan.symbol, side: closeSide, stopPrice: args.takeProfit, type: 'TAKE_PROFIT_MARKET',
+        const tpTrig = roundTrigger(args.takeProfit, plan.side, 'TAKE_PROFIT', tick);
+        const tp = tpTrig.price == null
+          ? { success: false, message: `익절가를 호가 단위에 맞추지 못했습니다: ${tpTrig.note}` } as any
+          : await bf.placeFuturesTPSL(apiKey, apiSecret, {
+          symbol: plan.symbol, side: closeSide, stopPrice: tpTrig.price, type: 'TAKE_PROFIT_MARKET',
         }, testnet);
         if ((tp as any)?.success) tpId = String((tp as any).orderId);
       }
@@ -723,10 +1266,17 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
 
       if (args.stopLoss && !slId) {
         let closed = false, closeErr = '';
+        // reduceOnly 수량은 origQty(res.qty)가 아니라 체결 사실을 우선한다.
+        // 필터를 알고 있으면 LOT_SIZE+MARKET_LOT_SIZE 격자에 내리고,
+        // 필터 미상/잔량 dust는 청산 시도 자체를 막지 않는다.
+        const closeQuantity = (raw: number): number => {
+          const q = quantizeOrder(raw, null, filters, { orderType: 'MARKET', reduceOnly: true });
+          return q.ok && q.quantity != null && q.quantity > 0 ? q.quantity : raw;
+        };
         try {
           const close = await bf.placeFuturesOrder(apiKey, apiSecret, {
             symbol: plan.symbol, side: closeSide, type: 'MARKET',
-            quantity: res.qty || plan.quantity, reduceOnly: true,
+            quantity: closeQuantity(fill.filledQty && fill.filledQty > 0 ? fill.filledQty : sendQty), reduceOnly: true,
             clientOrderId: `${clientOrderId}X`.slice(0, 36),
           }, testnet);
           closed = !!(close as any)?.success;
@@ -789,7 +1339,7 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
             try {
               const retry = await bf.placeFuturesOrder(apiKey, apiSecret, {
                 symbol: plan.symbol, side: closeSide, type: 'MARKET',
-                quantity: posAmt, reduceOnly: true,
+                quantity: closeQuantity(posAmt), reduceOnly: true,
                 clientOrderId: `${clientOrderId}Y`.slice(0, 36),
               }, testnet);
               if ((retry as any)?.success) { closed = true; closeErr = ''; }
@@ -966,9 +1516,41 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
     }
     if (lookup.order) {
       const existing = lookup.order;
-      await update({ status: 'RECONCILED', exchange_order_id: String(existing.id), reconciled_at: new Date().toISOString() });
-      return { ok: true, status: 'RECONCILED', clientOrderId, exchangeOrderId: String(existing.id),
-        duplicate: true, message: '거래소에 이미 존재하는 주문' };
+
+      // 바이낸스 멱등 경로와 **같은 규칙**이다. 여기도 찾으면 무조건
+      // `RECONCILED`를 적었다. Gate는 어휘가 달라서(`open`/`finished` +
+      // `finish_as`) 바이낸스 표로는 해석되지 않으므로 Gate 전용 변환을
+      // 쓴다 — 예전 대조 경로가 `status:'NEW'`를 지어낸 자리가 그것이다.
+      const gFill = gp.gateFillOf(existing);
+      const dup = ledgerStatusOfGate({
+        status: existing.status, finishAs: (existing as any).finish_as,
+        filledQty: gFill.filledQty,
+      });
+      // 바이낸스 쪽과 같은 이유로 먼저 `SENT`을 적는다 — 찾았다는 것은
+      // 이전 시도가 실제로 전송됐다는 뜻이고, `INTENT → ACKED` 전이는
+      // 상태 기계가 거부해 이 쓰기가 조용히 버려졌다.
+      await update({ status: 'SENT', sent_at: new Date().toISOString() });
+      await update({
+        status: dup.status, exchange_order_id: String(existing.id),
+        filled_qty: gFill.filledQty,
+        avg_price: gFill.avgPrice,
+        ...(dup.terminal ? { reconciled_at: new Date().toISOString() } : {}),
+        ...(dup.needsAttention
+          ? { needs_attention: true, error_message: dup.attentionReason }
+          : {}),
+      });
+      return {
+        ok: dup.status === 'ACKED' || dup.status === 'FILLED',
+        status: dup.status, clientOrderId, exchangeOrderId: String(existing.id),
+        filledQty: gFill.filledQty ?? undefined,
+        avgPrice: gFill.avgPrice ?? undefined,
+        duplicate: true,
+        message: '거래소에 이미 존재하는 주문'
+          + ` (Gate ${existing.status ?? '불명'}`
+          + `${(existing as any).finish_as ? `/${(existing as any).finish_as}` : ''}`
+          + `${dup.terminal ? '' : ' · 아직 열려 있음'})`
+          + (dup.needsAttention ? ` · ${dup.attentionReason}` : ''),
+      };
     }
 
     // ── 레버리지 + 격리 확인 ──
@@ -1004,10 +1586,16 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       gatePosBefore = before ? Number(before.size) || 0 : 0;
     } catch { /* 조회 실패 시 null — 교차 확인 없이 판단하게 된다 */ }
 
-    await update({
-      status: 'SENT', sent_at: new Date().toISOString(), attempt_count: 1,
-      pos_qty_before: gatePosBefore,
+    // Gate도 Binance와 동일한 INTENT → SENT 원자적 전송 선점을 통과한다.
+    const claimed = await claimOrderDispatch(sb, orderRowId, {
+      sent_at: new Date().toISOString(), attempt_count: 1,
     });
+    if (!claimed) {
+      return { ok: false, status: 'UNKNOWN', clientOrderId,
+        message: 'Gate 주문 전송 권한을 DB에서 확정하지 못했습니다. 전송하지 않고 대조가 필요합니다.' };
+    }
+    currentStatus = 'SENT';
+    if (gatePosBefore !== null) await update({ pos_qty_before: gatePosBefore });
 
     let gres: any;
     try {
@@ -1020,8 +1608,19 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
         clientOrderId,
       }, testnet);
     } catch (e: any) {
-      await update({ status: 'UNKNOWN', error_message: `응답 없음: ${e?.message || e}` });
-      return { ok: false, status: 'UNKNOWN', clientOrderId, message: '응답 없음 — 대조 필요' };
+      // Gate는 HTTP 오류에서 **던진다**(`gateReq`). 그래서 정상 거절
+      // (`Gate 400: BALANCE_NOT_ENOUGH`)도 여기로 온다. 전부 UNKNOWN으로
+      // 묶으면 나간 적 없는 주문이 미확정으로 쌓여 다음 진입을 막는다.
+      // 바이낸스 쪽과 **같은 정본**으로 가른다.
+      const msg = String(e?.message || e);
+      const verdict = unknownResultVerdict(msg);
+      if (!verdict.unknown) {
+        await update({ status: 'REJECTED', error_message: msg });
+        return { ok: false, status: 'REJECTED', clientOrderId, message: `거래소 거부: ${msg}` };
+      }
+      await update({ status: 'UNKNOWN', error_message: `결과 미확정(${verdict.evidence}): ${msg}` });
+      return { ok: false, status: 'UNKNOWN', clientOrderId,
+        message: `주문 결과를 확정하지 못했습니다 — 대조 필요: ${msg}` };
     }
 
     // ── 체결됐는가 ──
@@ -1388,6 +1987,8 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
     await update({ status: 'FAILED', error_message: e?.message || String(e) });
     return { ok: false, status: 'FAILED', clientOrderId, message: e?.message || '주문 실패' };
   }
+  })();
+  return { ...result, message: withPersistNote(result.message) };
 }
 
 // ── 재시작 복구: UNKNOWN/SENT 상태 주문을 거래소와 대조 ──
@@ -1401,6 +2002,14 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
 // 넘긴다 — 규칙이 코드 안에 흩어져 있으면 테스트로 확인할 수가 없다.
 export interface ReconcileResult {
   checked: number; resolved: number; stillUnknown: number;
+  /**
+   * 거래소에 **아직 열려 있다고 확인된** 건수.
+   *
+   * 미확정(`stillUnknown`)과 다르다. 이쪽은 상태를 알았고, 그 상태가
+   * "아직 안 끝났다"인 것이다. 둘을 한 칸에 담으면 "모름"으로 보여서
+   * 사람이 손을 대게 된다.
+   */
+  stillOpen: number;
   /** 자동 판단이 불가능해 사람이 봐야 하는 건수 */
   needsAttention: number;
   details: string[];
@@ -1484,9 +2093,19 @@ async function attachStopIfMissing(
       return `손절 복구 안 함 — 기록은 ${posSide}인데 거래소 포지션은 ${amt > 0 ? 'LONG' : 'SHORT'}입니다`;
     }
 
+    // 복구 시에도 최초 손절 부착과 동일한 격자/방향 정본을 사용한다.
+    // 필터 미상 시 기존 closePosition 우선 시도는 유지한다.
+    const filters = await bf.getSymbolFilters(symbol, creds.testnet);
+    const tick = filters?.tickSize && filters.tickSize > 0 ? filters.tickSize : null;
+    const trigger = roundTrigger(stop, posSide, 'STOP', tick);
+    if (trigger.price == null) return `손절 복구 실패 — 트리거 가격을 확인할 수 없습니다: ${trigger.note}`;
+    const quantized = quantizeOrder(Math.abs(amt), null, filters,
+      { orderType: 'MARKET', reduceOnly: true });
+    const fallbackQuantity = quantized.ok && quantized.quantity != null && quantized.quantity > 0
+      ? quantized.quantity : Math.abs(amt);
     const sl: any = await bf.placeFuturesTPSL(creds.apiKey, creds.apiSecret, {
-      symbol, side: closeSide, stopPrice: stop, type: 'STOP_MARKET',
-      fallbackQuantity: Math.abs(amt),
+      symbol, side: closeSide, stopPrice: trigger.price, type: 'STOP_MARKET',
+      fallbackQuantity,
     }, creds.testnet);
     if (!sl?.success) return `손절 복구 실패 — ${sl?.message || '원인 불명'}`;
     await updateOrderRow(sb, o.id, { sl_order_id: String(sl.orderId) });
@@ -1522,7 +2141,7 @@ export async function reconcilePendingOrders(
     connectionId?: string | null;
   }
 ): Promise<ReconcileResult> {
-  const out: ReconcileResult = { checked: 0, resolved: 0, stillUnknown: 0, needsAttention: 0, details: [] };
+  const out: ReconcileResult = { checked: 0, resolved: 0, stillUnknown: 0, stillOpen: 0, needsAttention: 0, details: [] };
 
   // **ACKED가 빠져 있었다.**
   //
@@ -1536,7 +2155,7 @@ export async function reconcilePendingOrders(
   // 그 버튼이 여기를 부르는데 ACKED를 조회하지 않았으니까.
   let q = sb.from('live_orders')
     .select('*')
-    .in('status', ['SENT', 'UNKNOWN', 'ACKED'])
+    .in('status', [...RECONCILE_QUERY_STATUSES])
     .eq('exchange', creds.exchange);
   // **모르면 좁히지 않는다.** 좁히지 않으면 과하게 대조할 뿐이지만,
   // 잘못 좁히면 진짜 미확정 주문을 놓친다.
@@ -1617,16 +2236,40 @@ export async function reconcilePendingOrders(
           ? resolveAcked(args)
           : resolveUnknown(args);
 
-        if (verdict.resolved) {
-          const st = verdict.state === 'FILLED' ? 'FILLED'
-            : verdict.state === 'FAILED' ? 'FAILED'
-            : verdict.state === 'REJECTED' ? 'REJECTED'
-            : 'RECONCILED';
+        const reFacts = query.order ? fillFactsOf(query.order) : null;
+
+        // ── `resolved`는 "끝났다"가 아니다 ──
+        //
+        //   여기 있던 식은 FILLED/FAILED/REJECTED가 아닌 **모든** 확정을
+        //   `RECONCILED`로 적었다. 거래소가 `NEW`를 돌려주면 판정은
+        //   `ACKED`(아직 열려 있음)인데도 종료로 적힌 것이다. 그리고
+        //   `RECONCILED`는 대조 대상이 아니라 아무도 다시 조회하지 않는다
+        //   — 살아 있는 주문이 장부에서 사라졌다. 부분 체결도 같았다.
+        //   판정→장부 변환은 reconcileLedgerStatus 하나에만 둔다.
+        //   그리고 상태와 수량을 따로 적던 자리이기도 하다. 거래소가
+        //   `FILLED`를 돌려주면서 수량을 주지 않으면 `status:'FILLED'` +
+        //   `filled_qty: null`이라는 모순이 적혔다 — 체결 증거 없이
+        //   체결을 적는 것이다. 같은 증거 규칙(withFillEvidence)을 쓴다.
+        const decision = verdict.resolved
+          ? withFillEvidence(ledgerStatusOf(verdict.state), reFacts ? reFacts.filledQty : null)
+          : null;
+        if (decision && decision.terminal) {
+          const st = decision.status;
           await updateOrderRow(sb, o.id, {
             status: st,
             exchange_order_id: query.order?.orderId != null ? String(query.order.orderId) : o.exchange_order_id,
-            filled_qty: query.order ? parseFloat(query.order.executedQty || '0') : o.filled_qty,
-            avg_price: query.order ? parseFloat(query.order.avgPrice || '0') : o.avg_price,
+            // ── 여기도 `|| '0'`이었다 ──
+            //
+            //   미체결·취소된 주문의 `avgPrice`는 `'0'`이고, 그것을 가격으로
+            //   적으면 0이 값이 된다. 접수 단계는 이미 고쳤는데 이 자리는
+            //   남아 있었다 — 경로가 둘인데 한쪽만 고친 것이다.
+            //
+            //   상태는 `verdict`가 정본이고, 수량·가격은 거래소 응답이
+            //   정본이다. 둘을 섞지 않는다. 부분 체결 뒤 취소된 주문의
+            //   채워진 수량은 **사실이므로 보존된다**(fillFactsOf가 상태와
+            //   무관하게 executedQty를 읽는다).
+            filled_qty: reFacts ? reFacts.filledQty : o.filled_qty,
+            avg_price: reFacts ? reFacts.avgPrice : o.avg_price,
             error_message: verdict.resolved && st === 'FAILED' ? verdict.reason : o.error_message,
             reconciled_at: new Date().toISOString(),
             resolve_attempts: attempts + 1,
@@ -1639,6 +2282,39 @@ export async function reconcilePendingOrders(
           // 주문은 손절 부착 단계에 도달한 적이 없다 — 포지션은 열렸는데
           // 보호가 없는 상태로 남는다. 여기서 한 번 더 건다.
           if (st === 'FILLED' || st === 'RECONCILED') {
+            const rep = await attachStopIfMissing(sb, creds, o);
+            if (rep) out.details.push(`${o.symbol} ${rep}`);
+          }
+        } else if (decision) {
+          // ── 상태는 알았지만 아직 안 끝났다 ──
+          //
+          //   거래소가 `NEW`(열려 있음) 또는 `PARTIALLY_FILLED`(잔량이
+          //   열려 있음)를 돌려준 경우다. 수량·가격 사실은 지금 갱신하되
+          //   `reconciled_at`은 찍지 않는다 — 다음 대조가 이 줄을 다시
+          //   조회해서 끝낸다. UNKNOWN으로도 적지 않는다(모르는 게 아니다).
+          await updateOrderRow(sb, o.id, {
+            status: decision.status,
+            exchange_order_id: query.order?.orderId != null ? String(query.order.orderId) : o.exchange_order_id,
+            filled_qty: reFacts ? reFacts.filledQty : o.filled_qty,
+            avg_price: reFacts ? reFacts.avgPrice : o.avg_price,
+            resolve_attempts: attempts + 1,
+            last_resolve_at: new Date().toISOString(),
+            needs_attention: false,
+          });
+          out.stillOpen++;
+          if (decision.needsAttention) {
+            // 상태와 수량이 모순이다. 열린 주문으로 두되 사람이 보게 한다.
+            await updateOrderRow(sb, o.id, {
+              needs_attention: true, error_message: decision.attentionReason,
+            });
+            out.needsAttention++;
+          }
+          out.details.push(
+            `${o.symbol} ${o.client_order_id} → ${verdict.state} · 거래소에 아직 열려 있음`
+            + ` (${decision.needsAttention ? decision.attentionReason : verdict.reason})`);
+          // **부분 체결은 포지션이 생긴 것이다.** 주문이 안 끝났다는
+          // 이유로 보호를 미루면 보호 없는 포지션이 남는다.
+          if (reFacts && reFacts.filledQty != null && reFacts.filledQty > 0) {
             const rep = await attachStopIfMissing(sb, creds, o);
             if (rep) out.details.push(`${o.symbol} ${rep}`);
           }
@@ -1677,34 +2353,83 @@ export async function reconcilePendingOrders(
           qtyNow: posBySymbol ? (posBySymbol.get(String(o.symbol).toUpperCase()) ?? 0) : null,
         };
 
+        // ── 주문을 찾았으면 Gate 어휘로 판정한다 ──
+        //
+        //   여기는 찾은 주문을 `{ status: 'NEW' }`로 **지어내서**
+        //   `resolveUnknown`에 넘겼다. 바이낸스 상태표에 Gate의
+        //   `open`/`finished`를 넣으면 전부 해석 불가가 되기 때문에 생긴
+        //   우회였는데, 그 우회가 **끝난 주문·체결된 주문·취소된 주문을
+        //   전부 "열려 있음"으로 읽게** 만들었다. 그리고 그 뒤에 장부엔
+        //   종료가 적혔으니 두 거짓이 서로를 가렸다.
+        //
+        //   찾지 못한 경우(유예·미발견·조회 실패)의 판단은 그대로
+        //   `resolveUnknown`이 한다 — 그쪽은 Gate 어휘와 무관하다.
+        const gFill = hit.ok && hit.order ? gp.gateFillOf(hit.order) : null;
+        let gDecision: ReturnType<typeof ledgerStatusOfGate> | null = null;
+        let gReason = '';
+        if (hit.ok && hit.order) {
+          const finishAs = (hit.order as any).finish_as as string | undefined;
+          gDecision = ledgerStatusOfGate({
+            status: hit.order.status, finishAs, filledQty: gFill ? gFill.filledQty : null,
+          });
+          gReason = `Gate 조회로 확정: ${hit.order.status ?? '불명'}`
+            + `${finishAs ? `/${finishAs}` : ''}`
+            + (gDecision.needsAttention ? ` · ${gDecision.attentionReason}` : '');
+        }
         const verdict = resolveUnknown({
           clientOrderId: o.client_order_id || null, elapsedMs,
           // 조회 실패를 '주문 없음'으로 넘기지 않는다 — resolveUnknown이
           // ok:false를 '확인 못 함'으로 다룬다.
           query: hit.ok
-            ? { ok: true, order: hit.order ? { status: 'NEW', orderId: hit.order.id } : null }
+            ? { ok: true, order: null }
             : { ok: false, order: null, error: hit.error },
           position,
         });
-
-        if (verdict.resolved) {
+        if (gDecision == null && verdict.resolved) {
+          gDecision = { ...ledgerStatusOf(verdict.state), needsAttention: false, attentionReason: null };
+          gReason = verdict.reason;
+        }
+        if (gDecision && gDecision.terminal) {
           await updateOrderRow(sb, o.id, {
-            status: verdict.state === 'FAILED' ? 'FAILED' : 'RECONCILED',
+            status: gDecision.status,
             exchange_order_id: hit.order ? String(hit.order.id) : o.exchange_order_id,
-            error_message: verdict.state === 'FAILED' ? verdict.reason : null,
+            // **체결 수량을 여기서 처음 적는다.** 예전에는 Gate 대조가
+            // 수량을 아예 쓰지 않아, 부분 체결된 주문의 채워진 수량이
+            // 장부에 들어오지 않았다.
+            ...(gFill ? { filled_qty: gFill.filledQty, avg_price: gFill.avgPrice } : {}),
+            error_message: gDecision.status === 'FAILED' ? gReason : null,
             reconciled_at: new Date().toISOString(),
             resolve_attempts: attempts + 1, last_resolve_at: new Date().toISOString(),
             needs_attention: false,
           });
           out.resolved++;
-          out.details.push(`${o.symbol} ${o.client_order_id} → ${verdict.state} (Gate)`);
+          out.details.push(`${o.symbol} ${o.client_order_id} → ${gDecision.status} (Gate: ${gReason})`);
           // 실패로 확정된 것은 포지션이 없다. 그 외에는 열려 있을 수 있으므로
           // 손절이 비어 있으면 지금 건다 — attachStopIfMissing이 포지션
           // 존재를 다시 확인한다.
-          if (verdict.state !== 'FAILED') {
+          if (gDecision.status !== 'FAILED') {
             const rep = await attachStopIfMissing(sb, creds, o);
             if (rep) out.details.push(`${o.symbol} ${rep}`);
           }
+        } else if (gDecision) {
+          // 거래소에 아직 열려 있다. 끝났다고 적지 않고 다음 대조에 넘긴다.
+          await updateOrderRow(sb, o.id, {
+            status: gDecision.status,
+            exchange_order_id: hit.order ? String(hit.order.id) : o.exchange_order_id,
+            ...(gFill ? { filled_qty: gFill.filledQty, avg_price: gFill.avgPrice } : {}),
+            resolve_attempts: attempts + 1, last_resolve_at: new Date().toISOString(),
+            ...(gDecision.needsAttention
+              ? { needs_attention: true, error_message: gDecision.attentionReason }
+              : { needs_attention: false }),
+          });
+          out.stillOpen++;
+          if (gDecision.needsAttention) out.needsAttention++;
+          out.details.push(
+            `${o.symbol} ${o.client_order_id} → ${gDecision.status} · 거래소에 아직 열려 있음 (Gate: ${gReason})`);
+          // 부분 체결이면 포지션이 생긴 것이다. 포지션 존재 확인은
+          // attachStopIfMissing이 직접 한다.
+          const rep = await attachStopIfMissing(sb, creds, o);
+          if (rep) out.details.push(`${o.symbol} ${rep}`);
         } else {
           const escalate = verdict.action === 'ESCALATE' || shouldEscalate(attempts + 1);
           await updateOrderRow(sb, o.id, {

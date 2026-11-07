@@ -147,12 +147,36 @@ export async function GET(req: NextRequest) {
             exec = { ran: false, error: creds.error,
               message: creds.message || 'API 키를 읽지 못해 취소·종료를 실행하지 못했습니다' };
           } else {
-            const r = await executeKillActions(sb, uid, connectionId, {
-              key: creds.key!, secret: creds.secret!, testnet: creds.testnet!,
-              exchange: creds.exchange!,
-              actionMode: state.actionMode,
+            // ── 긴급 선점 임차 — **거래소를 바꾸기 전에** ──
+            //
+            //   자동 발동도 청산 감시와 같은 포지션을 닫을 수 있다. 수동
+            //   발동(trigger)과 **같은 줄**을 잡아 선점한다 — 표를 읽고
+            //   쓰는 코드는 `exitLeaseStore` 한 곳이다.
+            const { acquireExitLease, LEASE_TTL_MS } =
+              await import('@/lib/engine/exitMonitorLease');
+            const { exitLeaseStore, exitFenceChecker } =
+              await import('@/lib/engine/exitLeaseStore');
+            const autoLease = await acquireExitLease({
+              me: `kill-auto:${String(uid).slice(0, 8)}:${connectionId}`,
+              nowMs: Date.now(), ttlMs: LEASE_TTL_MS,
+              store: exitLeaseStore(sb), preempt: true,
             });
-            exec = { ran: true, ...r };
+            if (!autoLease.granted) {
+              // 상태를 못 읽었다 → 울타리를 확인할 수 없다 → **쓰지 않는다.**
+              exec = { ran: false, error: 'lease_unknown',
+                message: `${autoLease.reason} — 자동 종료를 보내지 않았습니다` };
+            } else {
+              const r = await executeKillActions(sb, uid, connectionId, {
+                key: creds.key!, secret: creds.secret!, testnet: creds.testnet!,
+                exchange: creds.exchange!,
+                actionMode: state.actionMode,
+                stillMine: exitFenceChecker(sb, autoLease.myFence, autoLease.tracked),
+              });
+              exec = { ran: true, ...r,
+                lease: autoLease.tracked
+                  ? `${autoLease.code}(울타리 ${autoLease.myFence})`
+                  : '임차 표가 없는 배포 — 상호 배제가 보장되지 않습니다' };
+            }
           }
         } catch (e: any) {
           exec = { ran: false, error: 'execute_failed', message: e?.message || '취소·종료 실행 실패' };

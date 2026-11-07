@@ -13,22 +13,67 @@ export default function FearDcaPage() {
   const [cfg, setCfg] = useState<FearDcaConfig>(DEFAULT_FEAR_DCA);
   const [fng, setFng] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [fngError, setFngError] = useState<string | null>(null);
+
+  const refreshFearGreed = useCallback(async () => {
+    try {
+      const r = await fetch('/api/feargreed', { cache: 'no-store' });
+      const d = await r.json().catch(() => null);
+      if (!r.ok || d?.crypto?.value == null) {
+        throw new Error(String(d?.error || 'fear_greed_unavailable'));
+      }
+      setFng(d);
+      setFngError(null);
+    } catch {
+      // 마지막 값을 계속 전략 판단에 쓰지 않는다. 최신 여부를 확인하지
+      // 못했으면 '모름'이고, 모르는 값으로 매수/청산하면 안 된다.
+      setFng(null);
+      setFngError('공포·탐욕 지수를 확인하지 못했습니다');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     try { const r = localStorage.getItem(CFG_KEY); if (r) setCfg({ ...DEFAULT_FEAR_DCA, ...JSON.parse(r) }); } catch {}
-    fetch('/api/feargreed').then(r => r.json()).then(d => setFng(d)).catch(() => {}).finally(() => setLoading(false));
-  }, []);
+    void refreshFearGreed();
+
+    // 페이지를 계속 열어 둬도 값이 바뀌면 반영한다.
+    const timer = window.setInterval(() => { void refreshFearGreed(); }, 60_000);
+    const onFocus = () => { void refreshFearGreed(); };
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') void refreshFearGreed();
+    };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [refreshFearGreed]);
 
   const update = useCallback((patch: Partial<FearDcaConfig>) => {
     setCfg(prev => { const next = { ...prev, ...patch }; try { localStorage.setItem(CFG_KEY, JSON.stringify(next)); } catch {} return next; });
   }, []);
 
-  const fngVal = fng?.crypto?.value ?? 50;
-  const decision = evaluateFearDca(cfg, fngVal, 1);
+  const rawFng = Number(fng?.crypto?.value);
+  const fngVal = Number.isFinite(rawFng) && rawFng >= 0 && rawFng <= 100 ? rawFng : null;
+  const decision = fngVal == null
+    ? { action: 'blocked' as const, reason: '공포·탐욕 지수를 확인할 수 없어 판단을 중지했습니다', investedPct: 0 }
+    : evaluateFearDca(cfg, fngVal, 1);
   const st = typeof window !== 'undefined' ? getDcaState(cfg.asset) : { invested: 0, buyCount: 0 };
 
-  const zoneColor = fngVal <= 20 ? T.red : fngVal <= 40 ? T.ylw : fngVal <= 60 ? T.muted : fngVal <= 80 ? T.acl : T.grn;
-  const zoneLabel = fngVal <= 20 ? '극단적 공포' : fngVal <= 40 ? '공포' : fngVal <= 60 ? '중립' : fngVal <= 80 ? '탐욕' : '극단적 탐욕';
+  const zoneColor = fngVal == null ? T.muted
+    : fngVal <= 20 ? T.red : fngVal <= 40 ? T.ylw : fngVal <= 60 ? T.muted : fngVal <= 80 ? T.acl : T.grn;
+  const zoneLabel = fngVal == null ? '확인 불가'
+    : fngVal <= 20 ? '극단적 공포' : fngVal <= 40 ? '공포' : fngVal <= 60 ? '중립' : fngVal <= 80 ? '탐욕' : '극단적 탐욕';
+  const observedAt = Number(fng?.crypto?.observedAt);
+  const observedLabel = Number.isFinite(observedAt) && observedAt > 0
+    ? new Date(observedAt).toLocaleString('ko-KR', {
+        month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit',
+      })
+    : null;
 
   return (
     <div style={{ padding: '4px 0 20px' }}>
@@ -46,12 +91,24 @@ export default function FearDcaPage() {
               <span style={{ color: T.muted, fontSize: 11, fontWeight: 700 }}>현재 공포·탐욕 지수</span>
               <span style={{ color: zoneColor, fontWeight: 900, fontSize: 13 }}>{zoneLabel}</span>
             </div>
-            <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 8 }}>
-              <span style={{ color: zoneColor, fontSize: 38, fontWeight: 900, fontFamily: 'monospace' }}>{fngVal}</span>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 4 }}>
+              <span style={{ color: zoneColor, fontSize: 38, fontWeight: 900, fontFamily: 'monospace' }}>{fngVal ?? '—'}</span>
               <span style={{ color: T.muted, fontSize: 12 }}>/ 100</span>
             </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+              <span style={{ color: fngError ? T.ylw : T.muted, fontSize: 9 }}>
+                {fngError || `Alternative.me${observedLabel ? ` · ${observedLabel} 기준` : ''}`}
+              </span>
+              <button type="button" onClick={() => { void refreshFearGreed(); }}
+                style={{ minHeight: 0, padding: '2px 6px', borderRadius: 6, border: `1px solid ${T.border}`,
+                  background: T.alt, color: T.sub, fontSize: 9, fontWeight: 700, cursor: 'pointer' }}>
+                새로고침
+              </button>
+            </div>
             <div style={{ height: 8, background: T.alt, borderRadius: 4, overflow: 'hidden', position: 'relative' }}>
-              <div style={{ position: 'absolute', left: `${fngVal}%`, top: -2, width: 3, height: 12, background: '#fff', borderRadius: 2 }} />
+              {fngVal != null && (
+                <div style={{ position: 'absolute', left: `${fngVal}%`, top: -2, width: 3, height: 12, background: '#fff', borderRadius: 2 }} />
+              )}
               <div style={{ height: '100%', width: '100%', background: 'linear-gradient(90deg,#EF4444,#F59E0B,var(--t-sub),#60A5FA,#10B981)' }} />
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>

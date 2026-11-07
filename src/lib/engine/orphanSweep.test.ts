@@ -7,7 +7,7 @@
 //   · 안 지우면 다음 진입이 옛 주문에 맞아 예상치 못하게 닫힌다
 import { test, eq, assert } from '../../test/harness';
 import {
-  sweepTargets, sweepDecision, sweepSummary,
+  sweepTargets, sweepDecision, sweepSummary, sweepCredentialDisposition,
 } from './orphanSweep';
 import { exitCoverage, exitCoverageGaps, exitCoverageLine } from './exitCoverage';
 import { lifecyclePolicyOf } from '../strategies/lifecyclePolicy';
@@ -127,6 +127,33 @@ export function runOrphanSweepTests() {
     assert(blind.includes('3'), blind);
   });
 
+  console.log('[고아 보호주문 — 삭제된 연결과 현재 연결 장애를 가른다]');
+
+  test('삭제된 연결은 실패가 아니라 과거 대상 skip이다', () => {
+    const d = sweepCredentialDisposition('NO_CONNECTION');
+    eq(d.code, 'CONNECTION_GONE');
+    eq(d.skip, true);
+    eq(d.failure, false);
+    assert(d.reason.includes('다른 연결로 추측하지'), d.reason);
+  });
+
+  test('현재 연결의 키·시크릿 장애는 계속 실패다', () => {
+    for (const code of ['UNSUPPORTED_EXCHANGE', 'WITHDRAWAL_ENABLED', 'KEY_MISSING',
+      'SECRET_MISSING', 'DECRYPT_FAILED'] as const) {
+      const d = sweepCredentialDisposition(code);
+      eq(d.skip, false, code);
+      eq(d.failure, true, code);
+      eq(d.code, 'CREDENTIAL_UNREADABLE', code);
+    }
+  });
+
+  test('정상 자격을 stale로 분류하지 않는다', () => {
+    const d = sweepCredentialDisposition('READY');
+    eq(d.skip, false);
+    eq(d.failure, false);
+    eq(d.code, 'READY');
+  });
+
   console.log('[청산 감시 커버리지 — 안 보는 것을 정상이라 적지 않는다]');
 
   test('실행 경로가 있는 전략은 전부 표에 있다', () => {
@@ -139,8 +166,17 @@ export function runOrphanSweepTests() {
   // 이 테스트는 예전에 **반대**를 고정하고 있었다:
   //   scalp.trailing === false · my-original-v1.timeExit === false
   // 그 빈 칸을 이번에 닫았으므로 지금은 세 전략 모두 true여야 한다.
-  test('세 실행 전략 모두 트레일링·본전이동·시간청산을 받는다', () => {
-    const by = new Map(exitCoverage().map(c => [String(c.strategyId), c]));
+  test('세 실행 전략의 기본 예약은 모두 트레일링·본전이동·시간청산을 받는다', () => {
+    // **표의 키는 이제 전략 하나가 아니다.** 같은 전략이 실행 계약에 따라
+    // 다른 감시를 받으므로 `strategyId`만으로 Map을 만들면 뒤 줄이 앞 줄을
+    // 덮는다 — 실제로 그렇게 덮여서 이 시험이 한 번 빨갰다.
+    //
+    // 이 시험이 고정하려는 것은 **기본 예약**(실행 계약 없는 줄)의 커버리지다.
+    // 계약 줄은 그쪽 시험(`exitCoverage.test.ts`)이 본다. 단정을 약하게 하는
+    // 것이 아니라 보는 줄을 정확히 고른다.
+    const by = new Map(exitCoverage()
+      .filter(c => c.contract == null)
+      .map(c => [String(c.strategyId), c]));
     for (const id of ['daily-ladder', 'scalp', 'my-original-v1']) {
       const c = by.get(id);
       assert(c != null, `${id}가 표에 없다`);

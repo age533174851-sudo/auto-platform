@@ -43,6 +43,12 @@ const pos = (v: any): number | null => {
   const n = Number(v);
   return Number.isFinite(n) && n > 0 ? n : null;
 };
+/** MARKET_LOT_SIZE의 0은 "못 읽음"이 아니라 해당 제한 비활성이다. */
+const nonNeg = (v: any): number | null => {
+  if (v == null || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+};
 
 /** 시험이 캐시 상태를 만들 수 있게. 제품 코드에서는 부르지 않는다. */
 export function __seedSpecCache(spec: VenueSpec, testnet = false): void {
@@ -108,8 +114,9 @@ async function readSpec(
       stepSize: pos(f.limitQty?.stepSize),
       minQty: pos(f.limitQty?.minQty),
       minNotional: pos(f.minNotional),
-      marketStepSize: pos(f.marketQty?.stepSize),
-      marketMinQty: pos(f.marketQty?.minQty),
+      marketStepSize: nonNeg(f.marketQty?.stepSize),
+      marketMinQty: nonNeg(f.marketQty?.minQty),
+      marketMaxQty: nonNeg(f.marketQty?.maxQty),
     };
   }
 
@@ -123,8 +130,9 @@ async function readSpec(
       stepSize: pos(f.stepSize),
       minQty: pos(f.minQty),
       minNotional: pos(f.minNotional),
-      marketStepSize: pos(f.marketStepSize),
-      marketMinQty: pos(f.marketMinQty),
+      marketStepSize: nonNeg(f.marketStepSize),
+      marketMinQty: nonNeg(f.marketMinQty),
+      marketMaxQty: nonNeg(f.marketMaxQty),
     };
   }
 

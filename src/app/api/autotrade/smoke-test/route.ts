@@ -25,7 +25,7 @@ import {
   HOLD_CHOICES, SMOKE_SYMBOLS, DEFAULT_HOLD_MIN, STEP_LABEL, STEP_ORDER,
 } from '@/lib/smoke/smokePlan';
 import {
-  runRequestVerdict, sideForAttempt,
+  runRequestVerdict, sideForAttempt, headlessStartVerdict,
   ATTEMPT_CHOICES, MAX_ATTEMPTS, DEFAULT_ATTEMPTS,
 } from '@/lib/smoke/smokeRun';
 import { viewRun, viewTest } from '@/lib/smoke/view';
@@ -36,18 +36,52 @@ export const runtime = 'nodejs';
 
 const isMissing = (m: any) => /does not exist|schema cache|relation/i.test(String(m));
 
+/** 길이는 숨기지 못하지만 **값을 한 글자씩 흘리지는 않는다.** */
+function safeEqual(a: any, b: any): boolean {
+  const x = String(a ?? ''); const y = String(b ?? '');
+  if (!x || !y || x.length !== y.length) return false;
+  let d = 0;
+  for (let i = 0; i < x.length; i++) d |= x.charCodeAt(i) ^ y.charCodeAt(i);
+  return d === 0;
+}
+
 export async function POST(req: NextRequest) {
-  const userId = await resolveUserId(
-    req.headers.get('authorization'), req.headers.get('x-user-id'), req.headers.get('x-dev-token'));
-  if (!userId) return NextResponse.json({ ok: false, error: 'auth_required' }, { status: 401 });
-
-  const sb = getSupabaseAdmin();
-  if (!sb) return NextResponse.json({ ok: false, error: 'supabase_not_configured' }, { status: 503 });
-
+  // **본문을 먼저 읽는다.** 무인 호출은 대상 사용자를 본문에 적고,
+  // 그 값이 없으면 인증을 통과해도 주문을 내지 않는다.
   let body: any;
   try { body = await req.json(); } catch {
     return NextResponse.json({ ok: false, error: 'invalid_json' }, { status: 400 });
   }
+
+  // ── 누가 불렀는가 ──
+  //
+  // **시작도 무인으로 열린다.** `/advance` · `/settle` · `/cancel`은
+  // 이미 `x-admin-secret`을 받는데 **시작만** 사람의 JWT를 요구했다.
+  // 그래서 "브라우저에서 버튼을 눌러 주세요"가 남아 있었고, 신호가
+  // 없는 날에는 실제 주문 경로가 한 번도 돌지 않았다 — 배관을 쓰지
+  // 않으면 배관이 막힌 것도 모른다.
+  //
+  // 무인 경로가 더 깐깐한 이유와 판정은 `headlessStartVerdict`에 있다.
+  // 여기서는 부르고 결과를 따를 뿐이다.
+  const adminSecret = process.env.ADMIN_SECRET || '';
+  const byAdmin = !!adminSecret && safeEqual(req.headers.get('x-admin-secret'), adminSecret);
+
+  let userId: string | null;
+  if (byAdmin) {
+    const hv = headlessStartVerdict(body);
+    if (!hv.ok || !hv.userId) {
+      return NextResponse.json({ ok: false, error: hv.code.toLowerCase(), message: hv.message },
+        { status: 400 });
+    }
+    userId = hv.userId;
+  } else {
+    userId = await resolveUserId(
+      req.headers.get('authorization'), req.headers.get('x-user-id'), req.headers.get('x-dev-token'));
+    if (!userId) return NextResponse.json({ ok: false, error: 'auth_required' }, { status: 401 });
+  }
+
+  const sb = getSupabaseAdmin();
+  if (!sb) return NextResponse.json({ ok: false, error: 'supabase_not_configured' }, { status: 503 });
 
   // ── 1. 한 회차의 설정 ──
   const rv = smokeRequestVerdict(body);
@@ -103,7 +137,7 @@ export async function POST(req: NextRequest) {
     userId, connectionId, symbol,
     side: sideForAttempt(directionMode, 1, side) ?? side,
     marginUsd, leverage, holdMin,
-    runId: run.id, attemptNo: 1, source: 'USER',
+    runId: run.id, attemptNo: 1, source: byAdmin ? 'GITHUB_DISPATCH' : 'USER',
     exitPolicyId: body?.exitPolicyId ?? null,
   });
 
@@ -129,9 +163,33 @@ export async function POST(req: NextRequest) {
 
 /** 진행 상태 */
 export async function GET(req: NextRequest) {
-  const userId = await resolveUserId(
-    req.headers.get('authorization'), req.headers.get('x-user-id'), req.headers.get('x-dev-token'));
-  if (!userId) return NextResponse.json({ ok: false, error: 'auth_required' }, { status: 401 });
+  // ── 무인 조회 ──
+  //
+  // **증거는 시작할 때가 아니라 닫은 뒤에 생긴다.** 체결 수량은
+  // 시작 응답에 있지만 "청산 후 포지션 잔량 0"은 마감 뒤에야 적힌다.
+  // 읽을 길이 없으면 사람이 화면을 열어 옮겨 적게 되고, 그러면 또
+  // 사람 할 일이 남는다.
+  //
+  // 쓰기와 달리 **대상 사용자를 반드시 적게만 한다.** 비우면
+  // 전체 사용자의 장부가 한 번에 나가므로, 그건 조회라도 열지 않는다.
+  const adminSecret = process.env.ADMIN_SECRET || '';
+  const readByAdmin = !!adminSecret && safeEqual(req.headers.get('x-admin-secret'), adminSecret);
+
+  let userId: string | null;
+  if (readByAdmin) {
+    userId = String(req.nextUrl.searchParams.get('userId') ?? '').trim() || null;
+    if (!userId) {
+      return NextResponse.json({
+        ok: false, error: 'user_required',
+        message: '무인 조회는 userId를 적어야 합니다 — 비우면 전체 사용자의 장부가 됩니다',
+      }, { status: 400 });
+    }
+  } else {
+    userId = await resolveUserId(
+      req.headers.get('authorization'), req.headers.get('x-user-id'), req.headers.get('x-dev-token'));
+    if (!userId) return NextResponse.json({ ok: false, error: 'auth_required' }, { status: 401 });
+  }
+
   const sb = getSupabaseAdmin();
   if (!sb) return NextResponse.json({ ok: false, error: 'supabase_not_configured' }, { status: 503 });
 

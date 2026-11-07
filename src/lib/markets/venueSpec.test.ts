@@ -158,6 +158,27 @@ export function runVenueSpecTests() {
     eq(r.code, 'QTY_FILTER_UNKNOWN');
   });
 
+  test('★ 시장가 추가 규칙의 0은 필터를 읽었다는 사실로 남는다', () => {
+    const f = filtersOf(spec({
+      stepSize: 0.00001, minQty: 0.00001,
+      marketStepSize: 0, marketMinQty: 0, marketMaxQty: 1000,
+    }));
+    assert(f?.marketQty != null, '명시적 0을 규격 미상(null)으로 접었습니다');
+    eq(f!.marketQty!.stepSize, 0);
+    eq(f!.marketQty!.minQty, 0);
+    eq(f!.marketQty!.maxQty, 1000);
+
+    const r = normalizeForVenue({
+      spec: spec({
+        stepSize: 0.00001, minQty: 0.00001,
+        marketStepSize: 0, marketMinQty: 0, marketMaxQty: 1000,
+      }),
+      quantity: 0.06028672, orderType: 'MARKET', referencePrice: 82937.01,
+    });
+    assert(r.ok, r.reason);
+    eq(r.quantity, 0.06028);
+  });
+
   test('★ venue가 값에 실려 다닌다 — 현물 격자를 선물에 쓸 수 없다', () => {
     const s = normalizeForVenue({ spec: spec({ venue: 'BINANCE_SPOT' }), quantity: 1, referencePrice: 100000 });
     const f = normalizeForVenue({ spec: spec({ venue: 'BINANCE_USDM' }), quantity: 1, referencePrice: 100000 });
@@ -208,7 +229,7 @@ export function runVenueSpecTests() {
     const u = unknownSpec('KIS_KR', '005930');
     assert(!specUsable(u), '못 읽은 스펙이 쓸 수 있다고 나왔습니다');
     for (const k of ['tickSize', 'stepSize', 'minQty', 'maxQty', 'minNotional',
-                     'marketStepSize', 'marketMinQty', 'multiplier'] as const) {
+                     'marketStepSize', 'marketMinQty', 'marketMaxQty', 'multiplier'] as const) {
       eq(u[k], null, `${k}가 null이 아닙니다`);
     }
     eq(filtersOf(u), null);

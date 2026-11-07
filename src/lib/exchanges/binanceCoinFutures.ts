@@ -12,6 +12,7 @@
 // 주문이 된다. 반대로 BTCUSD_PERP에 0.003을 보내면 소수 계약이라 거부된다.
 // 전자는 사고고 후자는 그나마 거부다.
 import { createHmac } from 'crypto';
+import { numOrNull } from '../engine/orderFillFacts';
 import { parseLossless } from './losslessJson';
 
 const DAPI = 'https://dapi.binance.com';
@@ -145,26 +146,82 @@ export interface CoinMPosition {
   unrealizedPnlCoin: number;
 }
 
+/**
+ * **계약 수를 못 읽으면 0이 아니라 `null`이다.**
+ *
+ *   `Number('bad')`는 `NaN`이고 `NaN || 0`은 **0**이다. 그래서 깨진 본문이
+ *   "포지션 없음"이라는 **가짜 관측**이 된다. 그 0은 라우트를 거쳐
+ *   `existingPositionQty: 0`이 되고, `preTradeChecklist`는 그걸 보고
+ *   보호 주문 점검을 **PASS로 적는다**:
+ *
+ *       if (existingPositionQty != null && Math.abs(…) === 0) {
+ *         push(PROTECTIVE_ORDER, 'pass', '열린 포지션이 없어 …');
+ *
+ *   열려 있는 포지션에 손절이 하나도 없어도 통과한다. CLAUDE.md의
+ *   "UNKNOWN을 0으로 적지 않는다"와 "증거 없이 PASS를 적지 않는다"를
+ *   한 번에 밟는 자리다.
+ *
+ *   `parseFloat`이 아니라 `Number`를 쓴다 — `parseFloat('3XYZ')`는 3을
+ *   주지만 그건 우리가 이해한 본문이 아니다.
+ */
+function coinMQtyOrNull(raw: unknown): number | null {
+  if (typeof raw === 'number') return Number.isFinite(raw) ? raw : null;
+  if (typeof raw !== 'string') return null;
+  const t = raw.trim();
+  if (t === '') return null;
+  const n = Number(t);
+  return Number.isFinite(n) ? n : null;
+}
+
 export async function getCoinMPositions(
   key: string, secret: string, testnet = false,
-): Promise<{ success: boolean; positions: CoinMPosition[]; message?: string }> {
+): Promise<{
+  success: boolean; positions: CoinMPosition[]; message?: string;
+  /**
+   * 계약 수를 못 읽어 **목록에서 빠진** 심볼.
+   *
+   *   `message`만 두면 안 된다 — 검수에서 드러난 그대로, 상위 계좌 API는
+   *   성공 응답에 `message`를 싣지 않아 경고가 **경계에서 소실됐다.**
+   *   부르는 쪽이 `positionsReadable`을 내릴 수 있도록 **셀 수 있는
+   *   형태**로 돌려준다. 사람이 읽는 문장과 기계가 보는 값을 분리한다.
+   */
+  unreadable: string[];
+}> {
   try {
     const d = await dapiSigned('GET', '/dapi/v1/positionRisk', key, secret, testnet);
+    /** 계약 수를 못 읽은 심볼. **조용히 버리지 않는다** */
+    const unreadable: string[] = [];
     const positions = (Array.isArray(d) ? d : [])
-      .map((p: any) => ({
-        symbol: String(p.symbol),
-        contracts: Number(p.positionAmt) || 0,
-        entryPrice: Number(p.entryPrice) || 0,
-        markPrice: Number(p.markPrice) || 0,
-        liquidationPrice: Number(p.liquidationPrice) || 0,
-        leverage: Number(p.leverage) || 0,
-        marginType: String(p.marginType || ''),
-        unrealizedPnlCoin: Number(p.unRealizedProfit) || 0,
-      }))
+      .map((p: any) => {
+        const contracts = coinMQtyOrNull(p.positionAmt);
+        if (contracts === null) {
+          unreadable.push(String(p?.symbol ?? '(심볼 미상)'));
+          return null;
+        }
+        return {
+          symbol: String(p.symbol),
+          contracts,
+          entryPrice: Number(p.entryPrice) || 0,
+          markPrice: Number(p.markPrice) || 0,
+          liquidationPrice: Number(p.liquidationPrice) || 0,
+          leverage: Number(p.leverage) || 0,
+          marginType: String(p.marginType || ''),
+          unrealizedPnlCoin: Number(p.unRealizedProfit) || 0,
+        };
+      })
+      .filter((p): p is CoinMPosition => p != null)
       .filter(p => Math.abs(p.contracts) > 0);
-    return { success: true, positions };
+    // 옛 코드는 못 읽은 줄을 0으로 적었고, 그 0이 `|contracts| > 0`
+    // 필터에 걸려 **목록에서 사라졌다.** 보유 중인 포지션이 화면에서
+    // 없어지는 것이다. 지우는 것은 같지만 **사유를 남긴다.**
+    return unreadable.length > 0
+      ? { success: true, positions, unreadable,
+          message: `계약 수를 읽지 못한 포지션이 있습니다 — ${unreadable.join(', ')} `
+                 + '(거래소에서 직접 확인하세요. 목록에 없다고 포지션이 없는 것이 아닙니다)' }
+      : { success: true, positions, unreadable };
   } catch (e: any) {
-    return { success: false, positions: [], message: e?.message || 'COIN-M 포지션 조회 실패' };
+    return { success: false, positions: [], unreadable: [],
+      message: e?.message || 'COIN-M 포지션 조회 실패' };
   }
 }
 
@@ -186,12 +243,23 @@ export async function getCoinMSymbolRisk(
     const rows = Array.isArray(d) ? d : [d];
     // 헤지 모드에서는 같은 심볼이 LONG/SHORT 두 행으로 온다. 수량이 있는 행을
     // 먼저 고르고, 없으면 첫 행(설정값만 있는 행)을 쓴다.
-    const row = rows.find((p: any) => Math.abs(Number(p?.positionAmt) || 0) > 0)
-      ?? rows.find((p: any) => String(p?.symbol || '').toUpperCase() === symbol.toUpperCase());
+    //
+    // **열린 행은 읽을 수 있는 수량으로만 고른다.** 옛 코드도 결과가
+    // 같았지만 이유가 달랐다 — `Number('bad') || 0`이 0이라 깨진 행이
+    // "닫힌 행"으로 보였고, 그 뒤 심볼 대조에서 **다시 뽑혀** 수량 0으로
+    // 내려왔다.
+    const row = rows.find((p: any) => {
+      const a = coinMQtyOrNull(p?.positionAmt);
+      return a !== null && Math.abs(a) > 0;
+    }) ?? rows.find((p: any) => String(p?.symbol || '').toUpperCase() === symbol.toUpperCase());
     if (!row) return null;
+    const contracts = coinMQtyOrNull(row.positionAmt);
+    // 못 읽었으면 **관측이 아니다.** 호출자는 null을 '모름'으로 읽고
+    // 멈춘다 (이 함수의 주석이 약속한 그대로다).
+    if (contracts === null) return null;
     return {
       symbol: String(row.symbol),
-      contracts: Number(row.positionAmt) || 0,
+      contracts,
       entryPrice: Number(row.entryPrice) || 0,
       markPrice: Number(row.markPrice) || 0,
       // 0은 거래소가 주지 않은 것이다. 0을 청산가로 쓰면 청산거리가 100%로 계산된다.
@@ -305,10 +373,48 @@ export async function setCoinMMarginType(
 export interface CoinMOrderResult {
   success: boolean;
   orderId?: number;
-  /** 체결된 계약 수 */
-  filledContracts?: number;
-  avgPrice?: number;
+  /**
+   * 체결된 계약 수. **모르면 null이다.**
+   *
+   * 예전에는 `Number(d.executedQty) || 0`이었다. 응답에 수량이 없으면
+   * 0이 되고, 호출자는 그 0을 "체결 0"이라는 **사실**로 읽는다. 모른
+   * 것과 0인 것은 다르다.
+   */
+  filledContracts?: number | null;
+  /**
+   * 평균 체결가. **모르면 null이다.**
+   *
+   * 예전에는 `parseFloat(d.avgPrice || d.price || '0')`이었다. 미체결
+   * 주문의 `avgPrice`는 `'0'`이므로 **지정가(`d.price`)가 체결가로**
+   * 적혔다. 0보다 나쁘다 — 그럴듯해 보여서 아무도 의심하지 않는다.
+   * 그 값으로 증거금까지 계산됐다.
+   */
+  avgPrice?: number | null;
+  /** 거래소가 돌려준 주문 상태 원문 (NEW·PARTIALLY_FILLED·FILLED…) */
+  exchangeStatus?: string | null;
   message?: string;
+}
+
+/**
+ * 거래소 응답에서 체결 사실만 읽는다. 없는 값을 지어내지 않는다.
+ *
+ * **내보내는 이유**: 내보내지 않았더니 시험을 붙일 수 없었고, 변이
+ * 하나(`avgPrice || price || '0'` 복원)가 시험·검사기 **양쪽을 다
+ * 빠져나갔다.** 순수 함수의 결함을 grep 규칙 하나로만 막으면, 그
+ * 규칙이 문법 한 글자(`d?.avgPrice`)에 비껴간다.
+ */
+export function coinMFillOf(d: any): {
+  filledContracts: number | null; avgPrice: number | null; exchangeStatus: string | null;
+} {
+  const st = d?.status == null || String(d.status).trim() === ''
+    ? null : String(d.status).trim().toUpperCase();
+  return {
+    // `Number(null)`은 0이다. 그 함정을 어댑터마다 다시 쓰지 않는다.
+    filledContracts: numOrNull(d?.executedQty),
+    // 미체결 주문의 avgPrice는 '0'이다. 그것을 가격으로 적지 않는다.
+    avgPrice: numOrNull(d?.avgPrice, { positive: true }),
+    exchangeStatus: st,
+  };
 }
 
 /**
@@ -343,11 +449,16 @@ export async function placeCoinMOrder(
       const existing = await findCoinMOrderByClientId(
         key, secret, opts.symbol, opts.clientOrderId, testnet);
       if (existing) {
+        // 상태를 그대로 올린다. 여기는 상태를 **보지 않고** success를
+        // 돌려줬다 — 취소·거절로 끝난 기존 주문도 성공으로 읽혔다.
+        const f = coinMFillOf(existing);
         return {
           success: true, orderId: existing.orderId,
-          filledContracts: Number(existing.executedQty) || 0,
-          avgPrice: parseFloat(existing.avgPrice || existing.price || '0'),
-          message: '거래소에 이미 존재하는 주문 — 재전송하지 않음',
+          filledContracts: f.filledContracts,
+          avgPrice: f.avgPrice,
+          exchangeStatus: f.exchangeStatus,
+          message: '거래소에 이미 존재하는 주문 — 재전송하지 않음'
+            + ` (거래소 상태 ${f.exchangeStatus ?? '불명'})`,
         };
       }
     }
@@ -367,11 +478,13 @@ export async function placeCoinMOrder(
     if (opts.clientOrderId) params.newClientOrderId = opts.clientOrderId;
 
     const d = await dapiSigned('POST', '/dapi/v1/order', key, secret, testnet, params);
+    const f = coinMFillOf(d);
     return {
       success: true,
       orderId: d.orderId,
-      filledContracts: Number(d.executedQty) || 0,
-      avgPrice: parseFloat(d.avgPrice || d.price || '0'),
+      filledContracts: f.filledContracts,
+      avgPrice: f.avgPrice,
+      exchangeStatus: f.exchangeStatus,
     };
   } catch (e: any) {
     return { success: false, message: e?.message || 'COIN-M 주문 실패' };

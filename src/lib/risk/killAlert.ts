@@ -67,17 +67,47 @@ export function killTriggerAlert(i: {
   reason: string | null | undefined;
   equity: number | null;
   /** 실행 결과. `ran === false`면 실행 자체를 못 한 것이다 */
-  exec: { ran?: boolean; message?: string | null; error?: string | null } | null | undefined;
+  exec: {
+    ran?: boolean; message?: string | null; error?: string | null;
+    /**
+     * 안전 관문·보호 상태. **없으면 예전 문구 그대로다.**
+     *
+     * ★ 이 칸이 필요한 이유: 가장 나쁜 상태(보호주문을 취소했는데
+     *   포지션이 남음)가 예전 문구에서는 **정상 실행과 똑같이** 보였다.
+     *   "실행함 (결과 확인 중)" 한 줄로는 운영자가 즉시 개입해야 하는지
+     *   알 수 없다.
+     */
+    safety?: {
+      protectionCode?: string | null;
+      unprotected?: boolean | null;
+      manualInterventionRequired?: boolean | null;
+      planCode?: string | null;
+      reason?: string | null;
+    } | null;
+  } | null | undefined;
 }): AlertPayload {
   const ran = i.exec?.ran === true;
   const intended = intendedActions(i.actionMode);
+  const safety = i.exec?.safety ?? null;
+  // **가장 나쁜 상태를 가장 크게 적는다.** 보호주문을 벗긴 뒤 포지션이
+  // 남았으면 되돌릴 수 없고 사람이 즉시 거래소로 가야 한다.
+  const unprotected = safety?.unprotected === true;
+  const needsHand = unprotected || safety?.manualInterventionRequired === true;
 
   // **"실행 예정"이라고 쓰지 않는다.** 이 알림은 실행한 뒤에 나간다.
-  const message = ran
-    ? '자동 손실 한도를 넘어 킬스위치가 발동했습니다. '
-      + '신규 주문은 차단됐으며 거래소 작업 결과를 확인 중입니다.'
-    : '자동 손실 한도를 넘어 킬스위치가 발동했습니다. '
-      + '신규 주문은 차단됐지만 **거래소 작업을 실행하지 못했습니다** — 거래소에서 직접 확인하세요.';
+  const message = unprotected
+    ? '🚨 킬스위치가 발동했고 **보호주문을 취소한 뒤 포지션이 남았습니다.** '
+      + '지금 거래소에서 직접 닫거나 보호주문을 다시 걸어야 합니다 — '
+      + '이 포지션은 자동 보호를 받지 못합니다.'
+    : ran && needsHand
+      ? '자동 손실 한도를 넘어 킬스위치가 발동했습니다. 신규 주문은 차단됐지만 '
+        + '**거래소 종료를 안전하게 보낼 수 없어 주문을 내지 않았습니다** — '
+        + '기존 보호주문은 그대로 남아 있습니다. 거래소에서 직접 확인하세요.'
+      : ran
+        ? '자동 손실 한도를 넘어 킬스위치가 발동했습니다. '
+          + '신규 주문은 차단됐으며 거래소 작업 결과를 확인 중입니다.'
+        : '자동 손실 한도를 넘어 킬스위치가 발동했습니다. '
+          + '신규 주문은 차단됐지만 **거래소 작업을 실행하지 못했습니다** — 거래소에서 직접 확인하세요.';
 
   const fields: Record<string, string | number> = {
     Reason: String(i.reason || '한도 초과'),
@@ -94,6 +124,15 @@ export function killTriggerAlert(i: {
   }
   if (!ran && (i.exec?.message || i.exec?.error)) {
     fields.Error = String(i.exec.message || i.exec.error).slice(0, 200);
+  }
+  if (safety != null) {
+    // 보호 상태를 **칸으로도** 남긴다. 문구만 바뀌면 알림 목록에서는 묻힌다.
+    fields.Protection = unprotected
+      ? 'UNPROTECTED_EXPOSURE — 즉시 개입'
+      : String(safety.protectionCode || '확인 못 함');
+    if (safety.planCode) fields.Gate = String(safety.planCode);
+    if (needsHand) fields.Manual = '수동 개입 필요';
+    if (safety.reason) fields.Detail = String(safety.reason).slice(0, 200);
   }
 
   return {

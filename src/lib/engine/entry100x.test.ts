@@ -18,14 +18,53 @@ import {
 } from './entry100x';
 import { validateMarginAllocation, planSize100x, verifyLeverageExact } from './sizing100x';
 
-const C = { leverage: 100, sizingPolicy: 'MARGIN_ALLOCATION' as const, marginModes: ['isolated'] };
+const C = {
+  leverage: 100, sizingPolicy: 'MARGIN_ALLOCATION' as const, marginModes: ['isolated'],
+  side: 'LONG' as const,
+  fillKind: 'TAKER' as const,
+  maxHoldSec: 14_400,
+};
 
 const baseDeps = () => ({
   observeMarginMode: async (): Promise<'isolated' | 'cross' | null> => 'isolated',
   applyLeverage: async (lev: number) => ({ ok: true, observed: lev, message: '' }),
   availableUsd: async () => 1000,
-  referencePrice: async () => 50_000,
+  referenceMark: async () => ({
+    price: 50_000,
+    // 거래소가 적어 준 시각과 우리가 받은 시각은 **다른 값이다**.
+    exchangeTimeMs: Date.now() - 100,
+    observedAtMs: Date.now(),
+    source: 'EXCHANGE_PREMIUM_INDEX', cache: 'FRESH' as const,
+  }),
   quantize: async (q: number) => ({ qty: q, message: '' }),
+  // 거래소 브래킷 첫 구간: MMR 0.4% · 공제액 0.
+  maintenanceTiers: async () => ({
+    tiers: [[50_000_000, 0.004, 0]] as Array<[number, number, number]>,
+    observedAtMs: Date.now(), freshness: 'FRESH' as const,
+  }),
+  // **손절이 아니라** 변동성 기준 참고 위험 거리(%)다.
+  adverseDistancePct: async (): Promise<number | null> => 0.3,
+  commissionRates: async () => ({
+    takerRate: 0.0004, makerRate: 0.0002,
+    source: 'EXCHANGE_ACCOUNT' as const, observedAtMs: Date.now(),
+  }),
+  // 수량 0.2를 받아낼 깊이. 기준가 50,000에서 매도호가가 한 칸 위다.
+  orderBookDepth: async () => ({
+    bids: [[49_995, 50] as [number, number]],
+    asks: [[50_005, 50] as [number, number]],
+    source: 'EXCHANGE_DEPTH' as const,
+    observedAtMs: Date.now(), exchangeTimeMs: Date.now() - 100,
+  }),
+  fundingContext: async () => ({
+    rate: 0.0001, nextFundingTimeMs: Date.now() + 3_600_000, intervalHours: 8,
+    // 1회 최대 지불 요율의 근거 — 지금 요율이 아니다.
+    capRate: 0.0005, floorRate: -0.0005,
+    source: 'EXCHANGE_FUNDING_INFO' as const,
+    // **합치지 않는다** — 다른 엔드포인트의 다른 순간이다.
+    premiumObservedAtMs: Date.now(), premiumExchangeTimeMs: Date.now() - 100,
+    premiumCache: 'FRESH' as const,
+    fundingBoundsObservedAtMs: Date.now(),
+  }),
 });
 
 /** 의존을 감싸서 읽기/쓰기를 나눠 센다. 분류에 없는 의존은 즉시 실패다. */
@@ -164,16 +203,49 @@ export function runEntry100xTests() {
     const base: any = {
       observeMarginMode: async () => 'isolated',
       availableUsd: async () => 1000,
-      referencePrice: async () => 50_000,
+      referenceMark: async () => ({
+        price: 50_000,
+        exchangeTimeMs: Date.now() - 100, observedAtMs: Date.now(),
+        source: 'EXCHANGE_PREMIUM_INDEX', cache: 'FRESH' as const,
+      }),
       quantize: async (q: number) => ({ qty: q, message: '' }),
+      maintenanceTiers: async () => ({
+        tiers: [[50_000_000, 0.004, 0]] as Array<[number, number, number]>,
+        observedAtMs: Date.now(), freshness: 'FRESH' as const,
+      }),
+      adverseDistancePct: async () => 0.3,
+      commissionRates: async () => ({
+        takerRate: 0.0004, makerRate: 0.0002,
+        source: 'EXCHANGE_ACCOUNT' as const, observedAtMs: Date.now(),
+      }),
+      // 수량 0.2를 받아낼 깊이. 기준가 50,000에서 매도호가가 한 칸 위다.
+      orderBookDepth: async () => ({
+        bids: [[49_995, 50] as [number, number]],
+        asks: [[50_005, 50] as [number, number]],
+        source: 'EXCHANGE_DEPTH' as const,
+        observedAtMs: Date.now(), exchangeTimeMs: Date.now() - 100,
+      }),
+      fundingContext: async () => ({
+        rate: 0.0001, nextFundingTimeMs: Date.now() + 3_600_000, intervalHours: 8,
+        capRate: 0.0005, floorRate: -0.0005,
+        source: 'EXCHANGE_FUNDING_INFO' as const,
+        premiumObservedAtMs: Date.now(), premiumExchangeTimeMs: Date.now() - 100,
+        premiumCache: 'FRESH' as const,
+        fundingBoundsObservedAtMs: Date.now(),
+      }),
       applyLeverage: async (lev: number) => ({ ok: true, observed: lev, message: '' }),
       ...over,
     };
     const label: Record<string, string[]> = {
       observeMarginMode: ['marginMode:read'],
       availableUsd: ['balance:read'],
-      referencePrice: ['price:read'],
+      referenceMark: ['mark:read'],
       quantize: ['quantize'],
+      maintenanceTiers: ['bracket:read'],
+      adverseDistancePct: ['adverse:read'],
+      commissionRates: ['commission:read'],
+      orderBookDepth: ['book:read'],
+      fundingContext: ['funding:read'],
       applyLeverage: ['leverage:write', 'leverage:readback'],
     };
     const d: any = {};
@@ -193,24 +265,32 @@ export function runEntry100xTests() {
     assert(prep.ok, `준비 단계가 막혔다 — ${prep.message}`);
 
     // 준비 단계가 끝난 시점에 쓰기는 하나도 없어야 한다.
-    eq(log.join(' > '), 'marginMode:read > balance:read > price:read > quantize',
+    // ★ 청산거리 입력(브래킷·변동성 거리)을 **준비 단계 안에서** 읽는다.
+    //   이 두 칸이 `leverage:write` 앞에 있다는 것이 이번 보호의 핵심이다 —
+    //   첫 거래소 쓰기보다 뒤에서 재면 "청산당할 자리를 알고도 들어간"
+    //   요청이 이미 계좌 배율을 바꾼 뒤가 된다.
+    eq(log.join(' > '),
+      'marginMode:read > balance:read > mark:read > quantize > bracket:read > adverse:read'
+      + ' > commission:read > book:read > funding:read',
       '준비 단계의 호출 순서가 다르다 — 쓰기가 섞여 있으면 여기서 드러난다');
 
     const done = await commitEntry100x(prep, d, { disposition: 'SEND', reason: '' });
     assert(done.ok, `확정 단계가 막혔다 — ${done.message}`);
     eq(log.join(' > '),
-      'marginMode:read > balance:read > price:read > quantize > leverage:write > leverage:readback',
-      '전체 호출 순서가 계약과 다르다');
+      'marginMode:read > balance:read > mark:read > quantize > bracket:read > adverse:read'
+      + ' > commission:read > book:read > funding:read'
+      + ' > leverage:write > leverage:readback',
+      '전체 호출 순서가 계약과 다르다 — 청산거리 판정이 배율 쓰기보다 뒤면 실패다');
   });
 
   // 읽기 실패는 전부 쓰기 0이어야 한다. 하나씩 실패시켜 순서를 확인한다.
   for (const [label, over, wantLog] of [
     ['잔고를 못 읽음', { availableUsd: async () => null },
-      'marginMode:read > balance:read > price:read'],
-    ['기준가를 못 읽음', { referencePrice: async () => null },
-      'marginMode:read > balance:read > price:read'],
+      'marginMode:read > balance:read > mark:read'],
+    ['기준 마크가를 못 읽음', { referenceMark: async () => null },
+      'marginMode:read > balance:read > mark:read'],
     ['규격에 못 맞춤', { quantize: async () => ({ qty: null, message: '규격 없음' }) },
-      'marginMode:read > balance:read > price:read > quantize'],
+      'marginMode:read > balance:read > mark:read > quantize'],
     ['마진 모드가 교차', { observeMarginMode: async () => 'cross' },
       'marginMode:read'],
     ['마진 모드를 못 읽음', { observeMarginMode: async () => null },
@@ -319,5 +399,103 @@ export function runEntry100xTests() {
     assert(done.ok, `통과해야 하는데 막혔다 — ${done.message}`);
     eq(log.filter(x => x === 'leverage:write').length, 1,
       'SEND인데 배율을 걸지 않았거나 두 번 걸었다');
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // ④ 시장 데이터 신선도 — **첫 거래소 쓰기보다 앞이다**
+  // ══════════════════════════════════════════════════════════
+  //
+  // 여기서 보는 것은 "신선도 판정이 있는가"가 아니라 **그 판정이 어느
+  // 자리에 있는가**다. 라우트의 `if` 한 줄로 두면 그 줄을 아래로 옮기는
+  // 변경이 조용히 통과한다. 준비 단계가 막는다면 배율은 영영 안 걸린다.
+
+  /** 신선도 하나만 망가뜨린 어댑터들. 나머지는 전부 정상이다 */
+  const STALE_CASES: Array<[string, any]> = [
+    ['마크가에 거래소 시각이 없음', { referenceMark: async () => ({
+      price: 50_000, exchangeTimeMs: null, observedAtMs: Date.now(),
+      source: 'EXCHANGE_PREMIUM_INDEX', cache: 'FRESH' }) }],
+    ['마크가에 수신 시각이 없음', { referenceMark: async () => ({
+      price: 50_000, exchangeTimeMs: Date.now() - 100, observedAtMs: null,
+      source: 'EXCHANGE_PREMIUM_INDEX', cache: 'FRESH' }) }],
+    ['마크가가 10초 전 값', { referenceMark: async () => ({
+      price: 50_000, exchangeTimeMs: Date.now() - 10_100, observedAtMs: Date.now() - 10_000,
+      source: 'EXCHANGE_PREMIUM_INDEX', cache: 'FRESH' }) }],
+    ['마크가가 미래 시각', { referenceMark: async () => ({
+      price: 50_000, exchangeTimeMs: Date.now() + 60_000, observedAtMs: Date.now() + 60_000,
+      source: 'EXCHANGE_PREMIUM_INDEX', cache: 'FRESH' }) }],
+    ['호가에 거래소 시각이 없음', { orderBookDepth: async () => ({
+      bids: [[49_995, 50]], asks: [[50_005, 50]],
+      source: 'EXCHANGE_DEPTH', observedAtMs: Date.now(), exchangeTimeMs: null }) }],
+    ['호가가 10초 전 값', { orderBookDepth: async () => ({
+      bids: [[49_995, 50]], asks: [[50_005, 50]], source: 'EXCHANGE_DEPTH',
+      observedAtMs: Date.now() - 10_000, exchangeTimeMs: Date.now() - 10_100 }) }],
+    ['premium이 만료된 캐시', { fundingContext: async () => ({
+      rate: 0.0001, nextFundingTimeMs: Date.now() + 3_600_000, intervalHours: 8,
+      capRate: 0.0005, floorRate: -0.0005, source: 'EXCHANGE_FUNDING_INFO',
+      premiumObservedAtMs: Date.now(), premiumExchangeTimeMs: Date.now() - 100,
+      premiumCache: 'STALE_CACHE', fundingBoundsObservedAtMs: Date.now() }) }],
+    ['브래킷이 만료된 캐시', { maintenanceTiers: async () => ({
+      tiers: [[50_000_000, 0.004, 0]], observedAtMs: Date.now(),
+      freshness: 'STALE_CACHE' }) }],
+    ['브래킷에 수신 시각이 없음', { maintenanceTiers: async () => ({
+      tiers: [[50_000_000, 0.004, 0]], observedAtMs: null, freshness: 'FRESH' }) }],
+    ['수수료에 수신 시각이 없음', { commissionRates: async () => ({
+      takerRate: 0.0004, makerRate: 0.0002,
+      source: 'EXCHANGE_ACCOUNT', observedAtMs: null }) }],
+    ['마크가와 호가가 5초 떨어진 시점', {
+      referenceMark: async () => ({
+        price: 50_000, exchangeTimeMs: Date.now() - 200, observedAtMs: Date.now() - 100,
+        source: 'EXCHANGE_PREMIUM_INDEX', cache: 'FRESH' }),
+      orderBookDepth: async () => ({
+        bids: [[49_995, 50]], asks: [[50_005, 50]], source: 'EXCHANGE_DEPTH',
+        observedAtMs: Date.now() - 2_600, exchangeTimeMs: Date.now() - 5_200 }),
+    }],
+  ];
+
+  for (const [label, over] of STALE_CASES) {
+    test(`${label} → 진입을 막고 **배율을 걸지 않는다**`, async () => {
+      const { d, log } = logged(over);
+      const prep = await prepareEntry100x(C as any, 10, d);
+      assert(!prep.ok, `${label}인데 통과했다`);
+      eq(prep.code, 'MARKET_DATA_STALE',
+        `${label}은 "값이 없다"가 아니라 "언제의 값인지 모른다"로 막혀야 한다`);
+      assert(!log.includes('leverage:write'),
+        `${label}으로 막힐 요청이 계좌 배율을 바꿨다 — ${log.join(' > ')}`);
+
+      // 확정 단계에 넘겨도 쓰지 않는다 — 호출부가 순서를 어겨도 막힌다.
+      const done = await commitEntry100x(prep, d, { disposition: 'SEND', reason: '' });
+      assert(!done.ok, '막힌 계획이 확정 단계에서 통과했다');
+      assert(!log.includes('leverage:write'),
+        '막힌 계획으로 거래소에 썼다');
+    });
+  }
+
+  test('신선도 판정은 청산거리·비용 판정보다 **앞**이다', async () => {
+    // 마크가가 낡았으면 청산거리를 "계산해 보고" 막는 것이 아니라
+    // 아예 계산 전에 막힌다. 낡은 값으로 계산한 0.59%는 숫자로서
+    // 의미가 없고, 기록에 남으면 누군가 그것을 근거로 읽는다.
+    const { d } = logged({ referenceMark: async () => ({
+      price: 50_000, exchangeTimeMs: Date.now() - 10_100, observedAtMs: Date.now() - 10_000,
+      source: 'EXCHANGE_PREMIUM_INDEX', cache: 'FRESH' }) });
+    const prep = await prepareEntry100x(C as any, 10, d);
+    eq(prep.code, 'MARKET_DATA_STALE');
+    eq(prep.liquidation, null, '낡은 값으로 잰 청산거리가 기록에 남았다');
+    eq(prep.cost, null, '낡은 값으로 잰 비용이 기록에 남았다');
+    assert(prep.freshness != null, '무엇이 낡았는지는 남아야 한다');
+  });
+
+  test('통과한 계획에는 출처별 관측 시각이 **따로** 남는다', async () => {
+    const { d } = logged();
+    const prep = await prepareEntry100x(C as any, 10, d);
+    assert(prep.ok, `막혔다 — ${prep.message}`);
+    const p = prep.freshness?.provenance;
+    assert(p != null, '통과한 계획에 신선도 기록이 없다');
+    for (const k of ['referenceMarkObservedAtMs', 'referenceMarkExchangeTimeMs',
+                     'bookObservedAtMs', 'bookExchangeTimeMs',
+                     'premiumObservedAtMs', 'fundingBoundsObservedAtMs',
+                     'commissionObservedAtMs', 'bracketObservedAtMs'] as const) {
+      assert((p as any)[k] != null, `${k}가 비어 있다 — 출처를 따로 적어야 한다`);
+    }
+    eq(p!.bracketFreshness, 'FRESH');
   });
 }

@@ -8,6 +8,7 @@ import {
   modeForDestination, notionalCapOf, modeNeedsConfirmation,
   LADDER, type OperatingMode, type ModeEvidence,
 } from './operatingMode';
+import { isProvenFill } from './holdingEvidence';
 
 const CLEAN: ModeEvidence = {
   completedTrades: 999, daysInMode: 999,
@@ -291,5 +292,92 @@ export function runOperatingModeTests() {
   test('1회 상한 판정은 명목가가 있어야 한다', () => {
     eq(gateOrder('LIVE_SMALL', 1, { equityUsd: 1_000_000 }).disposition, 'SEND');
     eq(gateOrder('LIVE_SMALL', 1e9, { equityUsd: 1_000_000 }).disposition, 'BLOCK');
+  });
+
+  // ── 승급 표본은 "증명된 체결"만 센다 ──
+  //
+  //   `/api/autotrade/mode`가 표본을 `['FILLED','RECONCILED']`로 셌다.
+  //   `RECONCILED`는 최종 체결 결과를 **모르는** 상태다. 그걸 표본으로
+  //   세면 체결된 적 없는 주문이 실전 승급의 근거가 된다. 집계 쪽을
+  //   고쳤으므로 승급·강등 판정이 그 집계로 어떻게 움직이는지 못박는다.
+  console.log('[운영 모드 — 승급 표본은 증명된 체결만]');
+
+  /** 라우트와 같은 규칙으로 센다 (라우트는 isProvenFill을 쓴다) */
+  const countSample = (rows: any[]) => {
+    const kept = rows.filter(isProvenFill);
+    return {
+      completedTrades: kept.length,
+      daysInMode: new Set(kept.map((r) => String(r.created_at).slice(0, 10))).size,
+    };
+  };
+
+  test('RECONCILED 10건만으로는 섀도우로 올라가지 못한다', () => {
+    const rows = Array.from({ length: 10 }, (_, i) => ({
+      status: 'RECONCILED', filled_qty: 0.068,
+      created_at: `2026-10-${String(i + 1).padStart(2, '0')}T00:00:00Z`,
+    }));
+    const ev = { ...CLEAN, ...countSample(rows) };
+    eq(ev.completedTrades, 0, 'RECONCILED가 표본으로 셌다');
+    eq(ev.daysInMode, 0);
+    const r = canChangeMode('TESTNET', 'SHADOW_LIVE', ev);
+    eq(r.allowed, false, '체결이 증명되지 않은 주문으로 승급됐다');
+    assert(r.reasons.some((x) => x.includes('표본 부족')), r.reasons.join(' / '));
+  });
+
+  test('증명된 체결 10건·10일이면 섀도우로 올라간다', () => {
+    const rows = Array.from({ length: 10 }, (_, i) => ({
+      status: 'FILLED', filled_qty: 0.068,
+      created_at: `2026-10-${String(i + 1).padStart(2, '0')}T00:00:00Z`,
+    }));
+    const ev = { ...CLEAN, ...countSample(rows) };
+    eq(ev.completedTrades, 10);
+    eq(ev.daysInMode, 10);
+    eq(canChangeMode('TESTNET', 'SHADOW_LIVE', ev).allowed, true);
+  });
+
+  test('상태가 FILLED여도 수량 증거가 없으면 표본이 아니다', () => {
+    const rows = Array.from({ length: 20 }, (_, i) => ({
+      status: 'FILLED', filled_qty: null,
+      created_at: `2026-10-${String(i + 1).padStart(2, '0')}T00:00:00Z`,
+    }));
+    const ev = { ...CLEAN, ...countSample(rows) };
+    eq(ev.completedTrades, 0);
+    eq(canChangeMode('TESTNET', 'SHADOW_LIVE', ev).allowed, false);
+  });
+
+  test('섞여 있으면 증명된 것만 센다 — 하루에 몰아넣어도 기간은 안 찬다', () => {
+    const rows = [
+      { status: 'FILLED', filled_qty: 1, created_at: '2026-10-01T01:00:00Z' },
+      { status: 'FILLED', filled_qty: 1, created_at: '2026-10-01T02:00:00Z' },
+      { status: 'RECONCILED', filled_qty: 1, created_at: '2026-10-02T00:00:00Z' },
+      { status: 'ACKED', filled_qty: 1, created_at: '2026-10-03T00:00:00Z' },
+      { status: 'FILLED', filled_qty: 0, created_at: '2026-10-04T00:00:00Z' },
+    ];
+    const ev = { ...CLEAN, ...countSample(rows) };
+    eq(ev.completedTrades, 2);
+    eq(ev.daysInMode, 1, '하루에 여러 건을 넣어 기간을 채울 수 있었다');
+  });
+
+  test('강등은 표본과 무관하게 항상 허용된다', () => {
+    // 안전 밸브에 조건을 달면 정작 급할 때 못 내려간다.
+    const empty = { ...CLEAN, completedTrades: 0, daysInMode: 0,
+      unresolvedOrders: 99, criticalMismatches: 99, hasLiveKey: false, liveUnlocked: false };
+    for (const [from, to] of [
+      ['LIVE_LIMITED', 'LIVE_SMALL'], ['LIVE_SMALL', 'SHADOW_LIVE'],
+      ['SHADOW_LIVE', 'TESTNET'], ['LIVE_LIMITED', 'TESTNET'],
+    ] as [OperatingMode, OperatingMode][]) {
+      eq(canChangeMode(from, to, empty).allowed, true, `${from} → ${to} 강등이 막혔다`);
+    }
+  });
+
+  test('미확정 주문이 남아 있으면 표본이 충분해도 올라가지 못한다', () => {
+    const rows = Array.from({ length: 30 }, (_, i) => ({
+      status: 'FILLED', filled_qty: 1,
+      created_at: `2026-09-${String(i % 30 + 1).padStart(2, '0')}T00:00:00Z`,
+    }));
+    const ev = { ...CLEAN, ...countSample(rows), unresolvedOrders: 1 };
+    const r = canChangeMode('TESTNET', 'SHADOW_LIVE', ev);
+    eq(r.allowed, false);
+    assert(r.reasons.some((x) => x.includes('미확정')), r.reasons.join(' / '));
   });
 }

@@ -20,8 +20,26 @@
 name: ci
 
 on:
+  # ── base를 가리지 않는다 ──
+  #
+  # 예전에는 `branches: [main]`이었다. 그래서 **main이 아닌 브랜치 위에
+  # 쌓은 PR에서는 이 워크플로가 생성조차 되지 않았다.** 실패한 것도
+  # 큐에 걸린 것도 아니고 **없었다** — 그리고 없는 검사는 초록처럼 보인다.
+  #
+  # 실측(2026-10-18):
+  #   #347  fix/smoke-openorder-read-failclosed-20261016 위에 쌓임
+  #         → verify 없음. 스모크 경로의 ORDERS_ZERO 증거 요건을 바꾸는
+  #           PR이 한 번도 CI 검증을 받지 못한 채 검토 대기 중이었다.
+  #   #352  fix/binance-positionrisk-failclosed-20261017 위에 쌓임
+  #         → verify 없음. 손으로 dispatch해서 겨우 돌렸다.
+  #
+  # 이 저장소는 같은 모양으로 이미 한 번 당했다 — `mutation-100x-pr313.yml`이
+  # PR 번호를 박았다가 #315에서 전부 skipped였고, 그 주석이 "skipped는
+  # 초록처럼 보인다"로 남아 있다.
+  #
+  # 겹쳐 쌓은 PR은 **검증이 더 필요한 쪽**이지 덜 필요한 쪽이 아니다.
+  # 그래서 base로 거르지 않는다. 넓게 도는 쪽이 안전한 방향이다.
   pull_request:
-    branches: [main]
   push:
     branches: [main]
   # **손으로도 돌릴 수 있어야 한다.**
@@ -81,6 +99,14 @@ jobs:
       # 그래서 테스트 대상 모듈은 상대 경로 import만 쓴다 (scripts/run-tests.mjs 참조).
       - name: 유닛 테스트
         run: npm test
+
+      # Claude 무인 회차 진단기 — #533.
+      # `npm test`는 TypeScript 러너라 `.mjs` 시험이 안 걸린다. 여기서
+      # 돌리지 않으면 **PR에서 한 번도 안 돈다** — 이 저장소가 이미 당한 모양이다.
+      - name: Claude 회차 진단기 회귀 (민감정보 유출 0 포함)
+        run: |
+          node --test scripts/test-claude-api-preflight.mjs
+          node --test scripts/test-claude-exec-category.mjs
 
       # ── 워커 빌드 ──
       #
@@ -412,6 +438,16 @@ jobs:
       # 한다** — 실행이 연구 모듈을 import 하는 것 자체를 막는다.
       - name: 연구/실행 분리 검사
         run: node scripts/check-research-isolation.mjs
+      # ── 연구/실행 공통 커널 검사 ──
+      #
+      # 위 검사는 "실행이 연구를 읽지 않는다"를 본다. 그런데 연구가
+      # 실행을 **읽지도 못하게** 하면 수수료·수량 규격·청산 거리 계산이
+      # 두 벌이 되고, 그러면 백테스트가 통과시킨 수량이 거래소에서
+      # 거부되고 연구가 "50배도 버틴다"고 적은 자리에서 실행이 청산된다.
+      # 그래서 양쪽이 쓰는 순수 계산만 `src/lib/kernel/`에 두고, 그 바닥이
+      # 실행 경로도 I/O도 가정값도 끌고 오지 않는지 센다.
+      - name: 연구/실행 공통 커널 (바닥은 한 파일 · 양쪽 어디도 안 읽는다)
+        run: node scripts/check-research-kernel.mjs
       # ── 브라우저 주문 권한 검사 ──
       # `AutoTradeEngine.tsx`가 60초 타이머로 전략을 평가하고 실제 주문을
       # 냈다. 전략 목록은 localStorage에 있었고, 워커가 지키는 관문
@@ -700,10 +736,34 @@ jobs:
       # base는 **이벤트가 알려 준다.** 검사기가 origin/main을 먼저 고르면
       # push main 실행에서 origin/main == HEAD가 되어 자기 자신과 비교한다
       # — 정작 우리가 신뢰하는 exact-main에서 버전 검사가 꺼진다.
+      # 계약 검사기 **앞**에 둔다. 배선이 끊긴 것이면 아래 검사가
+      # "기준선에서 멈췄다"는 모양으로 실패하는데, 그 로그만 보면
+      # 원인이 계약인지 배선인지 사람이 다시 파야 한다.
+      - name: 계약 기준 커밋 배선 (워크플로가 base를 넘기는가)
+        run: node scripts/check-contract-base-wiring.mjs
+
       - name: 실행 프로필 계약 (세 축 · fallback 없음 · dormant)
         env:
           EXECUTION_CONTRACT_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: node scripts/check-execution-profile.mjs
+
+      # ── 청산 경로 권한 배선 ──
+      #
+      #   이 검사기는 **만들어졌는데 CI에 배선되지 않았다.** 그래서 ⑤B-3A-1이
+      #   sweep 시그니처에 wake 인자를 끼워 넣어 `stillMine`이 4번째로 밀렸을
+      #   때 2건 실패 상태로 들어갔고, main에서 계속 실패한 채로 아무도
+      #   보지 않았다. 거래소 쓰기는 되돌릴 수 없는 경로다 — 돌려야 한다.
+      - name: 종료 권한 배선 (임차 CAS · 권한 주입 · 판단 뒤 선점)
+        run: node scripts/check-exit-authority.mjs
+
+      - name: 대조 진실성 (열린 주문을 종료로 적지 않는다)
+        run: node scripts/check-reconcile-truth.mjs
+
+      - name: 자격증명 노출 (키·시크릿·토큰 값을 어디에도 남기지 않는다)
+        run: node scripts/check-credential-exposure.mjs
+
+      - name: 보유 연장 (기본 꺼짐 · 소급 금지 · 주문 수단 없음 · 배선)
+        run: node scripts/check-hold-extension.mjs
 
       - name: 전용 100배 계약 (정확 100 · 고정 손절 없음 · 누출 0)
         run: node scripts/check-100x-contract.mjs
@@ -758,6 +818,31 @@ jobs:
       - name: 킬스위치 배선 계약
         run: node scripts/check-kill-switch-contract.mjs
 
+      - name: 긴급 종료 안전성 (모드 관문 우선 · 닫을 수 없으면 취소 없음)
+        run: node scripts/check-kill-close-safety.mjs
+
+      # 전수 실행: node scripts/kill-close-mutations.mjs (안전 조건이 바뀐 라운드에 사람이 부른다)
+      - name: 긴급 종료 변이 자기 점검 (전수 실행은 수동)
+        run: node scripts/kill-close-mutations.mjs --self-test
+
+      # ── TESTNET 진단 (읽기 전용 · UNKNOWN을 READY로 적지 않는다) ──
+      #
+      # 진단이 설정을 바꾸면 사람은 "진단했더니 통과"를 보는데 실제로는
+      # 진단이 그렇게 만든 것이 된다. 그 경로가 생기지 않는지 본다.
+      - name: TESTNET 진단 계약 (설정 변경 없음 · 관문·배선)
+        run: node scripts/check-testnet-diagnose.mjs
+
+      # 전수 실행: node scripts/testnet-diagnose-mutations.mjs (판정이 바뀐 라운드에 사람이 부른다)
+      - name: TESTNET 진단 변이 자기 점검 (전수 실행은 수동)
+        run: node scripts/testnet-diagnose-mutations.mjs --self-test
+
+      # ── 운영 감사가 읽기만 하는가 ──
+      #
+      # 감사 SQL은 운영 DB에 붙는다. 한 줄이 쓰기로 바뀌어도 로컬 시험은
+      # 아무것도 말해 주지 않는다 — 그 SQL은 시험에서 돌지 않는다.
+      - name: 운영 감사 읽기 전용 계약 (쓰기 0 · 비밀 칸 미선택)
+        run: node scripts/check-audit-readonly.mjs
+
       # ── 관리자 인증 계약 (같은 비밀에 이름을 둘 붙이지 않는다) ──
       #
       # x-admin-secret 호출자가 `EXIT_MONITOR_SECRET`이라는 다른 GitHub secret
@@ -770,6 +855,14 @@ jobs:
       # 나머지 둘 중 하나가 바뀌었을 때 놓친다.
       - name: 관리자 인증 계약 (호출자 · 서버 · 동기화가 같은 이름을 보는가)
         run: node scripts/check-admin-auth-contract.mjs
+
+      # ── 무인 회차의 울타리 ──
+      #
+      # `claude-hourly-*`는 사람이 보지 않는 시간에 코드를 바꾼다.
+      # 그 울타리(권한·도구 차단·검증 단계·금지 지시)가 조용히 사라지면
+      # **사라진 것을 아무도 보지 못한다.** 그래서 CI에서 센다.
+      - name: 무인 회차 울타리 (두 갈래의 권한 · 도구 차단 · 검증 단계)
+        run: node scripts/check-claude-hourly.mjs
 
       # ── 연습 장부 환경 격리 ──
       #
@@ -959,13 +1052,44 @@ jobs:
           # 파싱이 **중단되는** 코드만 고른다. TS1117(중복 프로퍼티) 같은
           # 문법 오류는 파싱을 멈추지 않으므로 개수 검사에 맡긴다 —
           # 여기 넣으면 기준선에 이미 있는 것 때문에 매번 빨개진다.
-          PARSE_CODES='TS1002|TS1003|TS1005|TS1011|TS1109|TS1128|TS1131|TS1160|TS1161'
+          # TS1127(Invalid character)이 빠져 있어서 같은 사고가 다시 났다:
+          # PR #313의 시험 파일에서 정규식 리터럴이 조기 종료되자 tsc가
+          # 73건 → 2건으로 멈췄고, 이 검사는 "줄었으니 기준선을 내려 주세요"
+          # 알림만 띄우고 **통과했다.**
+          PARSE_CODES='TS1002|TS1003|TS1005|TS1011|TS1109|TS1127|TS1128|TS1131|TS1160|TS1161'
           SYNTAX=$(grep -cE "error (${PARSE_CODES}):" ts.log || true)
           if [ "$SYNTAX" -gt 0 ]; then
             echo "::error::파싱이 중단된 파일이 있습니다 (${SYNTAX}건) — 개수 검사보다 우선합니다"
             grep -E "error (${PARSE_CODES}):" ts.log | head -20
             exit 1
           fi
+          # ── 목록을 늘리는 것만으로는 또 샌다 ──
+          #
+          # 중단 코드를 하나씩 추가하는 방식은 처음 보는 코드가 오면 똑같이
+          # 뚫린다(TS1127이 그랬다). 그래서 **원리로** 한 겹 더 둔다:
+          # TS1xxx는 전부 문법 계열이다. 기준선에 상주하는 비중단 코드만
+          # 허용 목록에 두고, **그 밖의 TS1xxx는 개수와 무관하게 실패**시킨다.
+          #
+          # 개수가 '줄었는가'에 기대지 않는 이유: TS1117이 기준선에 상주하므로
+          # 누가 다른 타입 오류를 정당하게 고쳐 개수가 줄기만 해도 터진다.
+          # 그것은 오탐이고, 오탐이 한 번 나면 다음부터 아무도 안 본다.
+          SYNTAX_ALLOW='TS1117'
+          # 빈 검색 결과는 정상이다. pipefail 아래에서 grep -v가 1을
+          # 반환해 CI 전체가 중단되는 사고를 막는다. awk는 매칭 0건도 exit 0.
+          SYNTAX_NEW=$(awk -v allow="${SYNTAX_ALLOW}" '
+            match($0, /error TS1[0-9][0-9][0-9]:/) {
+              code = substr($0, RSTART + 6, RLENGTH - 7)
+              if (code != allow) unknown[code] = 1
+            }
+            END { for (code in unknown) printf "%s ", code }
+          ' ts.log)
+          if [ -n "${SYNTAX_NEW}" ]; then
+            echo "::error::허용 목록에 없는 문법 계열 오류가 있습니다: ${SYNTAX_NEW}"
+            echo "            — tsc가 파일을 끝까지 읽지 못했을 수 있습니다. 개수 검사보다 우선합니다."
+            grep -E "error TS1[0-9]{3}:" ts.log | grep -vE "error (${SYNTAX_ALLOW}):" | head -20
+            exit 1
+          fi
+
           if [ "$COUNT" -gt "$TS_ERROR_BASELINE" ]; then
             echo "::error::타입 에러가 ${TS_ERROR_BASELINE}건에서 ${COUNT}건으로 늘었습니다"
             # 늘어난 줄만 보여준다. 전체 로그는 80줄이라 새 에러가 묻힌다.

@@ -163,7 +163,7 @@ export function StockTradingScreen(p: StockScreenProps) {
       switchBlockedReason={p.switchBlockedReason}
       instrumentReason={p.instrumentReason}
       symbol={sym ?? '종목 없음'} name={p.name}
-      marketLabel={capability('STOCK').label}
+      marketLabel={venue === 'KRX' ? '국장' : venue === 'US' ? '미장' : capability('STOCK').label}
       price={locked ? null : p.price} changePct={locked ? null : p.changePct}
       changeLabel={p.changeLabel}
       onBack={p.onBack} headerRight={p.headerRight}

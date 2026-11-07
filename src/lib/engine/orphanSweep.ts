@@ -1,4 +1,5 @@
 // src/lib/engine/orphanSweep.ts
+import type { CredentialDiagnosis } from './testnetReadiness';
 //
 // **포지션이 0인데 남아 있는 보호주문을, 전략을 가리지 않고 치운다.**
 //
@@ -66,6 +67,42 @@ export type SweepSkipCode =
 export interface SweepSelection {
   targets: SweepTarget[];
   skipped: Array<{ code: SweepSkipCode; count: number; reason: string }>;
+}
+
+/**
+ * 보호주문 고아 정리에서 연결 자격을 어떻게 취급할지.
+ *
+ * NO_CONNECTION은 **현재 연결의 장애가 아니다.** live_orders에는 과거
+ * connection_id가 남을 수 있고, 연결 row가 이미 삭제됐으면 그 자격으로
+ * 거래소를 읽거나 주문을 취소할 방법이 없다. 이때 다른 활성 연결을
+ * 추측해서 쓰는 것이 가장 위험하다.
+ *
+ * 반대로 row는 있는데 키/시크릿/거래소가 깨진 경우는 현재 연결 장애다.
+ * 그것까지 조용히 넘기면 실제 관리 실패를 숨긴다.
+ */
+export function sweepCredentialDisposition(code: CredentialDiagnosis): {
+  skip: boolean;
+  failure: boolean;
+  code: 'READY' | 'CONNECTION_GONE' | 'CREDENTIAL_UNREADABLE';
+  reason: string;
+} {
+  if (code === 'READY') {
+    return { skip: false, failure: false, code: 'READY', reason: '' };
+  }
+  if (code === 'NO_CONNECTION') {
+    return {
+      skip: true,
+      failure: false,
+      code: 'CONNECTION_GONE',
+      reason: '연결 기록이 삭제된 과거 보호주문 후보라 건드리지 않습니다 — 다른 연결로 추측하지 않습니다',
+    };
+  }
+  return {
+    skip: false,
+    failure: true,
+    code: 'CREDENTIAL_UNREADABLE',
+    reason: '현재 연결의 거래소 자격을 읽지 못했습니다',
+  };
 }
 
 const SKIP_REASON: Record<SweepSkipCode, string> = {

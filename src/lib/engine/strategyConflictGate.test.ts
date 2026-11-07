@@ -77,6 +77,26 @@ export function runStrategyConflictGateTests() {
 
   // ── 전략 계좌 ──
 
+  test('전략 계좌 조회는 041 정본 sleeve_id를 쓴다', async () => {
+    const seen: Array<[string, any]> = [];
+    const chain: any = {
+      select: () => chain,
+      eq: (col: string, val: any) => { seen.push([col, val]); return chain; },
+      maybeSingle: async () => ({ data: null, error: null }),
+    };
+    const sb = { from: (table: string) => {
+      eq(table, 'strategy_accounts');
+      return chain;
+    } } as any;
+
+    const v = await sleeveCapitalGate(sb, { userId: 'u1', strategyId: 'scalp' });
+    eq(v.allowed, true);
+    assert(seen.some(([c, v]) => c === 'sleeve_id' && v === 'scalp'),
+      `sleeve_id 조건이 없습니다: ${JSON.stringify(seen)}`);
+    assert(!seen.some(([c]) => c === 'strategy_id'),
+      `041에 없는 strategy_id를 조회합니다: ${JSON.stringify(seen)}`);
+  });
+
   test('전략 계좌가 없으면 막지 않는다 — 돌던 전략이 갑자기 멈추면 안 된다', async () => {
     const sb = fakeSb({ strategy_accounts: { data: null, error: null } });
     const v = await sleeveCapitalGate(sb, { userId: 'u1', strategyId: 'x' });

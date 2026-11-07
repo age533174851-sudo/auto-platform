@@ -28,6 +28,8 @@
 // **비밀 값은 읽지도 출력하지도 않는다.** 이 검사가 보는 것은 이름뿐이다.
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { stripJsComments } from './lib/strip-comments.mjs';
+import { functionBody } from './lib/function-body.mjs';
 
 let bad = 0;
 const err = (m) => { console.error(`❌ ${m}`); console.error(`::error::${m}`); bad += 1; };
@@ -203,6 +205,129 @@ for (const f of files) {
     if (/sha256sum|cut -c/.test(line)) continue;          // 지문은 허용
     if (/\$\{?SECRET\}?|\$\{\{\s*secrets\./.test(line)) {
       err(`${f}: 비밀 값을 그대로 출력하는 줄이 있습니다 — 지문만 남기세요\n    ${line.trim().slice(0, 80)}`);
+    }
+  }
+}
+
+// ── ⑧ 주문을 **만드는** 관리자 경로는 관문이 하나 더 있어야 한다 ──
+//
+// `/advance` · `/settle` · `/cancel`은 **이미 열린** 묶음을 이어 가거나
+// 닫는다. 대상을 비워 두면 "도는 것 전부"가 되고 그게 맞다.
+//
+// **시작은 다르다.** 대상을 비우면 없던 주문이 생긴다. 그래서 무인
+// 시작은 사용자·연결·확인 문구 셋을 요구하고, 그 판정은
+// `headlessStartVerdict` 한 곳에 있다.
+//
+// 여기서 보는 것은 **그 판정을 불렀는가가 아니라 그 결과를 따랐는가**다.
+// 부르기만 하고 결과를 버리는 모양으로 새 나간 적이 있다(TD-18).
+{
+  const ROUTE = 'src/app/api/autotrade/smoke-test/route.ts';
+  const CANON_MODULE = 'src/lib/smoke/smokeRun.ts';
+  const raw = read(ROUTE);
+  if (!raw) err(`${ROUTE}이 없습니다 — 스모크 시작 경로가 사라졌습니다`);
+  else {
+    const whole = stripJsComments(raw);
+    // **POST 본문만 본다.** 파일 전체에서 찾으면 `import`에 남은
+    // 이름과 GET의 로그인 확인이 POST의 것을 대신 증명해 버린다 —
+    // 음성 시험에서 실제로 그렇게 새 나갔다.
+    const fb = functionBody(raw, 'POST');
+    const src = fb.ok ? stripJsComments(fb.body) : '';
+    if (!fb.ok) err(`${ROUTE}: POST 본문을 읽지 못했습니다 — ${fb.reason}`);
+    void whole;
+
+    if (!/x-admin-secret/.test(src) || !new RegExp(`process\\.env\\.${CANON}`).test(src)) {
+      err(`${ROUTE}: 무인 시작이 \`x-admin-secret\`·\`process.env.${CANON}\`을 보지 않습니다 — `
+        + `시작만 사람의 JWT를 요구하면 신호 없는 날에는 실주문 경로가 한 번도 돌지 않습니다`);
+    }
+
+    const vIdx = src.indexOf('headlessStartVerdict(');
+    // 판정을 받은 **그 변수 이름**을 집는다. 이름을 모른 채
+    // "`!무엇.ok`로 분기하는 줄이 있는가"만 보면 바로 아래
+    // `smokeRequestVerdict`의 거절 분기가 대신 증명해 준다 —
+    // 음성 시험에서 그렇게 통과했다.
+    const vm = src.match(/(?:const|let|var)\s+(\w+)\s*=\s*headlessStartVerdict\(/);
+    if (vIdx < 0) {
+      err(`${ROUTE}: \`headlessStartVerdict\`를 부르지 않습니다 — `
+        + `무인 시작 판정을 라우트에 직접 적으면 시험이 붙지 않습니다`);
+    } else if (!vm) {
+      err(`${ROUTE}: 무인 시작 판정의 결과를 변수에 받지 않습니다 — `
+        + `받지 않으면 결과를 따를 수도 없습니다`);
+    } else {
+      // 판정 결과로 **분기하고 그 안에서 반환**해야 한다.
+      //
+      // "판정 뒤 어딘가에 `return NextResponse.json(`이 있는가"로 보면
+      // 바로 아래에 있는 `supabase_not_configured` 503이 대신 증명해
+      // 준다 — 음성 시험에서 그렇게 통과했다. 그래서 **거절 분기의
+      // 모양 자체**를 본다.
+      const v = vm[1];
+      const rejectBranch = new RegExp(
+        `if\\s*\\(\\s*!\\s*${v}\\.ok[^)]*\\)\\s*\\{[^}]*return\\s+NextResponse\\.json\\(`);
+      if (!rejectBranch.test(src)) {
+        err(`${ROUTE}: 무인 시작 판정 결과로 분기해 거절하지 않습니다 — `
+          + `부르기만 하고 결과를 버리면 아무것도 막지 않습니다`);
+      }
+
+      // 그리고 그 반환이 **주문을 만드는 것들보다 먼저** 와야 한다.
+      for (const sink of ['startAttempt(', ".from('smoke_runs').insert(", '.insert(']) {
+        const sIdx = src.indexOf(sink);
+        if (sIdx >= 0 && sIdx < vIdx) {
+          err(`${ROUTE}: \`${sink}\`이 무인 시작 판정보다 먼저 옵니다 — `
+            + `판정이 막기로 한 요청이 이미 장부와 거래소를 건드립니다`);
+        }
+      }
+    }
+
+    // ── 무인 **조회**는 대상을 비울 수 없다 ──
+    //
+    // 쓰기와 달리 조회는 열어 줄 만하지만, 대상을 비우면 전체
+    // 사용자의 장부가 한 번에 나간다. 그래서 `userId`가 없으면
+    // 400으로 돌려보내는 분기가 있어야 한다.
+    const gb = functionBody(raw, 'GET');
+    if (!gb.ok) err(`${ROUTE}: GET 본문을 읽지 못했습니다 — ${gb.reason}`);
+    else {
+      const g = stripJsComments(gb.body);
+      if (/x-admin-secret/.test(g)) {
+        if (!/searchParams\.get\('userId'\)/.test(g)) {
+          err(`${ROUTE} GET: 무인 조회가 대상 사용자를 받지 않습니다 — `
+            + `비우면 전체 사용자의 장부가 됩니다`);
+        }
+        if (!/user_required/.test(g)) {
+          err(`${ROUTE} GET: 대상 사용자가 없을 때의 거절(user_required)이 없습니다`);
+        }
+        if (!/\.eq\('user_id', userId\)/.test(g)) {
+          err(`${ROUTE} GET: 조회를 대상 사용자로 좁히지 않습니다`);
+        }
+      }
+    }
+
+    // 무인 경로가 대상 사용자를 본문에서 가져가는 자리이므로, 사람
+    // 경로의 JWT 확인이 사라지면 안 된다.
+    if (!/resolveUserId\(/.test(src)) {
+      err(`${ROUTE}: \`resolveUserId\`가 사라졌습니다 — 사람 경로의 로그인 확인입니다`);
+    }
+    if (!/auth_required/.test(src)) {
+      err(`${ROUTE}: 사람 경로의 401(auth_required)이 사라졌습니다`);
+    }
+  }
+
+  // 판정 정본이 **확인 문구를 실제로 비교하는가.** 상수만 선언해 두고
+  // 비교하지 않으면 문구는 장식이 된다.
+  const canon = read(CANON_MODULE);
+  if (!canon) err(`${CANON_MODULE}이 없습니다`);
+  else {
+    const c = stripJsComments(canon);
+    if (!/HEADLESS_START_CONFIRM\s*=\s*'[^']+'/.test(c)) {
+      err(`${CANON_MODULE}: HEADLESS_START_CONFIRM 상수가 없습니다`);
+    }
+    if (!/!==\s*HEADLESS_START_CONFIRM|HEADLESS_START_CONFIRM\s*!==/.test(c)) {
+      err(`${CANON_MODULE}: 확인 문구를 비교하는 줄이 없습니다 — `
+        + `선언만 있고 비교가 없으면 스케줄러가 긁어도 주문이 나갑니다`);
+    }
+    // TESTNET 판정을 이 정본이 대신 말하면 두 곳이 갈린다. 거래소
+    // 연결을 실제로 읽는 `startAttempt`가 정한다.
+    if (/is_testnet/.test(c)) {
+      err(`${CANON_MODULE}: 무인 시작 판정이 \`is_testnet\`을 직접 봅니다 — `
+        + `그 판단은 거래소 연결을 읽는 startAttempt 한 곳에 있어야 합니다`);
     }
   }
 }

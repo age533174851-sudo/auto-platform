@@ -151,53 +151,13 @@ export function getCooldownRemaining(userId: string): number {
 // ─────────────────────────────────────────────────────────────
 // Liquidation Price Calculator
 // ─────────────────────────────────────────────────────────────
-// Binance USDT-M 유지증거금 계단 (BTCUSDT 대표값, 명목가 USDT 기준)
-// [상한 명목가, MMR, 유지증거금 공제액(누적)] — 심볼/시점따라 다르므로 추정치
-const MMR_BRACKETS: Array<[number, number, number]> = [
-  [50_000,       0.004, 0],
-  [500_000,      0.005, 50],
-  [1_000_000,    0.010, 2_550],
-  [5_000_000,    0.025, 17_550],
-  [20_000_000,   0.050, 142_550],
-  [50_000_000,   0.100, 1_142_550],
-  [100_000_000,  0.125, 2_392_550],
-  [Infinity,     0.150, 4_892_550],
-];
-export type BracketTier = [cap: number, mmr: number, maintAmount: number];
-
-export function getMaintMargin(
-  notional: number,
-  brackets?: BracketTier[] | null,   // 실제 거래소 브래킷 (없으면 하드코딩 fallback)
-): { mmr: number; maintAmount: number } {
-  const table = (brackets && brackets.length) ? brackets : MMR_BRACKETS;
-  for (const [cap, mmr, amt] of table) {
-    if (notional <= cap) return { mmr, maintAmount: amt };
-  }
-  const last = table[table.length - 1];
-  return { mmr: last[1], maintAmount: last[2] };
-}
-
-export function calcLiquidationPrice(
-  entryPrice: number,
-  leverage:   number,
-  side:       'buy' | 'sell',
-  quantity?:  number,            // 제공 시 계단식 MMR + 유지증거금 공제 반영 (Futures 정밀식)
-  brackets?:  BracketTier[] | null,  // 실제 거래소 leverageBracket (없으면 fallback 테이블)
-): number {
-  if (leverage <= 1 || entryPrice <= 0) return 0;
-  // quantity 없으면: 평탄 MMR(0.5%) 근사식 (하위호환)
-  if (!quantity || quantity <= 0) {
-    const factor = (1 - 0.005) / leverage;
-    return side === 'buy' ? entryPrice * (1 - factor) : entryPrice * (1 + factor);
-  }
-  // quantity 있으면: 계단식 유지증거금 기반 정밀식 (실제 브래킷 우선)
-  const notional = entryPrice * quantity;
-  const { mmr, maintAmount } = getMaintMargin(notional, brackets);
-  const lp = side === 'buy'
-    ? (entryPrice * (1 - 1 / leverage) - maintAmount / quantity) / (1 - mmr)
-    : (entryPrice * (1 + 1 / leverage) + maintAmount / quantity) / (1 + mmr);
-  return lp > 0 ? lp : 0;
-}
+// **식은 `./liquidationPrice`에 산다.** 여기서는 다시 내보내기만 한다 —
+// `@/lib/safety`에서 가져다 쓰던 자리가 그대로 돌아야 하고, 식을 복사하면
+// 두 벌이 되어 언젠가 한쪽만 고쳐진다.
+export {
+  MMR_BRACKETS, getMaintMargin, calcLiquidationPrice, type BracketTier,
+} from './liquidationPrice';
+import { getMaintMargin, calcLiquidationPrice } from './liquidationPrice';
 
 // ─────────────────────────────────────────────────────────────
 // PRE-ORDER VALIDATION (Main Safety Gate)

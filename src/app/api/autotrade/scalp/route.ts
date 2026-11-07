@@ -231,14 +231,70 @@ export async function POST(req: NextRequest) {
   }
 
   // ── 진입 자리인가 ──
-  const scalp = scalpSignal(bars, cfg);
+  let scalp = scalpSignal(bars, cfg);
   const timeframeInfo = { intervalMin, interval, ...verdict };
+
+  // ── 09:00 KST 강제 진입 (Exact100X TESTNET 전용) ──
+  //
+  // 신호가 나지 않는 날에도 **하루 한 번은 시도한다.** 지금까지는
+  // 돌파·거래량·비용 세 필터를 통과해야만 주문이 만들어졌고, 그래서
+  // 진입이 한 번도 나지 않았다.
+  //
+  // 여기서 건너뛰는 것은 **그 재량 필터 셋뿐**이다. 아래의 위험 관문
+  // (dormantGate · riskManager · 청산가 · 기존 포지션/미결 주문 ·
+  // 보호주문 · killSwitch · 수량 양자화)은 **전부 그대로 지난다.**
+  // 크기도 같은 ATR 수치로 계산한다 — 강제 진입만 다른 크기로 나가면
+  // 그 숫자의 뜻이 둘로 갈린다.
+  let forced: any = null;
   if (!scalp.signal) {
+    const { forcedEntryVerdict, forcedEntrySignal, forcedWindowStartMs } =
+      await import('@/lib/strategies/dailyForcedEntry');
+    const forcedNowMs = Date.now();
+
+    // 오늘 창에서 이미 냈는가. **못 읽으면 null이다** — 0건으로 접으면
+    // 같은 창에서 두 번 진입한다. 판정기가 null을 받으면 막는다.
+    let ordersTodayInWindow: number | null = null;
+    const sinceMs = forcedWindowStartMs(forcedNowMs);
+    if (sinceMs != null && body.connectionId && userId) {
+      const { count, error } = await (sb as any).from('live_orders')
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', userId)
+        .eq('connection_id', body.connectionId)
+        .eq('symbol', symbol)
+        .eq('mode', 'TESTNET')
+        .eq('reduce_only', false)
+        .gte('created_at', new Date(sinceMs).toISOString());
+      ordersTodayInWindow = error || count == null ? null : count;
+    }
+
+    forced = forcedEntryVerdict({
+      nowMs: forcedNowMs,
+      mode: opMode,
+      profileId: epContract?.profileId,
+      presetId: epContract?.presetId,
+      ordersTodayInWindow,
+    });
+    if (forced.due) {
+      scalp = forcedEntrySignal(bars, cfg);
+      if (!scalp.signal) {
+        // ATR을 못 읽었다. **강제라고 해서 모르는 크기로 내지 않는다.**
+        forced = { ...forced, due: false, code: 'SIZING_UNKNOWN', reason: scalp.reason };
+      }
+    }
+  }
+
+  if (!scalp.signal) {
+    const { diagnoseScalpSignal } = await import('@/lib/strategies/scalpSignalDiagnosis');
+    const diagnosis = diagnoseScalpSignal(scalp);
     // **신호 없음은 실패가 아니다.** ok:true로 돌려준다 — 대부분의 봉에서
     // 신호는 나지 않고, 그걸 실패로 적으면 실행 기록이 빨간색으로 가득 찬다.
     return NextResponse.json({
       ok: true, executed: false, symbol, mode: opMode,
-      signal: null, reason: scalp.reason, timeframe: timeframeInfo,
+      signal: null, reason: scalp.reason, reasonCode: diagnosis.code, timeframe: timeframeInfo,
+      // **왜 강제 진입도 안 했는지**가 여기 남아야 한다. 없으면
+      // "신호가 없었다"와 "창 밖이었다"와 "이미 냈다"가 구분되지 않는다.
+      forcedEntry: forced == null ? null
+        : { due: forced.due, code: forced.code, tradingDay: forced.tradingDay, reason: forced.reason },
     }, { headers: { 'Cache-Control': 'no-store' } });
   }
 
@@ -283,6 +339,10 @@ export async function POST(req: NextRequest) {
       stopPct: scalp.signal.stopPct, targetPct: scalp.signal.targetPct,
       notes: scalp.signal.notes,
     },
+    // **이 진입이 신호에서 왔는지 09:00 강제에서 왔는지**를 값으로 남긴다.
+    // 사람이 notes 문장을 읽어 되짚게 하면 문장이 바뀔 때 조용히 틀린다.
+    forcedEntry: forced == null ? null
+      : { due: forced.due, code: forced.code, tradingDay: forced.tradingDay, reason: forced.reason },
     // 계좌를 어디서 읽었는지와 못 읽은 것들. **이게 없으면 폴백 $10,000으로
     // 계산된 결과를 실계좌 결과로 읽게 된다.**
     account: { source: ctx.source, equity: ctx.config.accountEquity, warnings: ctx.warnings },
@@ -303,6 +363,58 @@ export async function POST(req: NextRequest) {
     }, { status: 400, headers: { 'Cache-Control': 'no-store' } });
   }
   const connIsLive = conn.isTestnet === false;
+
+  // ── Exact100X TESTNET 준비 상태: 실제 진입 경계에서 정본을 호출한다 ──
+  //
+  // loadConnection은 범용 구형 경로와의 호환을 위해 is_testnet=NULL을
+  // TESTNET으로, is_active=NULL을 활성으로 해석할 수 있다. 정확 100배는
+  // 그 폴백을 승인 사실로 취급하면 안 된다. 따라서 여기서는 연결 원본의
+  // 환경·권한을 범위 제한해서 다시 읽는다. 키/시크릿 값은 조회하지 않는다.
+  // 복호화 성공 사실만 conn의 존재에서 가져온다.
+  if (epContract?.profileId === 'MAX_LEV_100X') {
+    const { binanceTestnetReadiness } = await import('@/lib/engine/testnetReadiness');
+    let rawReadiness: any = null;
+    try {
+      const { data, error } = await sb.from('exchange_connections')
+        .select('id, exchange_id, is_testnet, is_active, perm_read, perm_trading, has_withdrawal')
+        .eq('id', body.connectionId).eq('user_id', userId).maybeSingle();
+      if (error) {
+        return NextResponse.json({
+          ...preBase, ok: false, executed: false,
+          blocked: 'TESTNET_READINESS_UNKNOWN',
+          error: 'TESTNET 연결 원본의 환경·권한을 읽지 못했습니다 — 주문하지 않습니다',
+        }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
+      }
+      rawReadiness = data;
+    } catch {
+      return NextResponse.json({
+        ...preBase, ok: false, executed: false,
+        blocked: 'TESTNET_READINESS_UNKNOWN',
+        error: 'TESTNET 연결 준비 상태를 확인하지 못했습니다 — 주문하지 않습니다',
+      }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
+    }
+
+    // 여기에는 비밀 값도 암호문도 넘기지 않는다. conn은 loadConnection이
+    // 키 존재·시크릿 복호화를 통과한 결과지만 거래소 실인증 증거는 아니다.
+    const readiness = binanceTestnetReadiness(rawReadiness ? [{
+      connectionId: String(rawReadiness.id),
+      exchange: rawReadiness.exchange_id,
+      testnet: rawReadiness.is_testnet,
+      active: rawReadiness.is_active,
+      permissionRead: rawReadiness.perm_read,
+      permissionTrade: rawReadiness.perm_trading,
+      hasWithdrawal: rawReadiness.has_withdrawal,
+      credential: conn.apiKey && conn.apiSecret ? 'READY' : 'DECRYPT_FAILED',
+    }] : []);
+    if (!readiness.ready) {
+      return NextResponse.json({
+        ...preBase, ok: false, executed: false,
+        blocked: 'TESTNET_NOT_READY',
+        readinessCode: readiness.code, error: readiness.reason,
+      }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+    }
+  }
+
 
   // ── 신규 진입 권한 ──
   //
@@ -541,11 +653,42 @@ export async function POST(req: NextRequest) {
       return { ok: v.ok, observed: v.observed, message: v.message };
     };
 
+    // ── 이 진입이 쓰는 **시장 스냅숏 하나** ──
+    //
+    // 마크가와 premium은 `/fapi/v1/premiumIndex` **같은 응답**에 있다.
+    // 따로 읽으면 한 진입 안에서 청산거리는 T0의 마크가로, 펀딩은 T1의
+    // 요율로 계산된다 — ④가 막으려는 바로 그 모양("서로 다른 시점을
+    // 하나의 시장 상태처럼")을 ④ 자신이 만드는 꼴이다.
+    //
+    // 그래서 Promise를 **한 번만** 만들어 두 의존이 같은 것을 기다리게
+    // 한다. 호출 횟수가 아니라 **같은 순간**이라는 것이 요점이다.
+    let marketSnapshotOnce: Promise<any> | null = null;
+    const marketSnapshot = () => {
+      if (!marketSnapshotOnce) {
+        marketSnapshotOnce = (async () => {
+          if (ex !== 'binance') return null;   // Gate는 이 경로가 없다
+          const bf = await import('@/lib/exchanges/binanceFutures');
+          const r = await bf.readMarketSnapshot(symbol, !connIsLive).catch(() => null);
+          return r?.snapshot ?? null;
+        })();
+      }
+      return marketSnapshotOnce;
+    };
+
     let entry = await prepareEntry100x(
       {
         leverage: epContract!.leverage,
         sizingPolicy: epSizingPolicy,
         marginModes: epContract!.marginModes,
+        // 청산은 방향이 있어야 거리를 잴 수 있다. 신호가 정한 방향 그대로.
+        side: scalp.signal.side === 'SHORT' ? 'SHORT' : 'LONG',
+        // **계약의 주문 유형에서 온다.** MAX_LEV_100X는 'market'이므로
+        // 호가를 먹는 쪽(taker)이다 — maker를 임의로 고르면 비용이 작아진다.
+        fillKind: String(epContract!.orderType).toLowerCase().includes('market')
+          ? 'TAKER' : null,
+        // 펀딩 평가 구간. **"이 시간에 자동 청산된다"는 뜻이 아니다** —
+        // 그 배선은 아직 없다. 계약이 선언한 보유 상한일 뿐이다.
+        maxHoldSec: epContract!.maxHoldSec ?? null,
       },
       epMarginAllocationPct,
       {
@@ -557,10 +700,119 @@ export async function POST(req: NextRequest) {
         },
         availableUsd: () => futuresAvailableUsd(ex, conn.apiKey, conn.apiSecret, !connIsLive),
         // **서버가 읽은 값이다.** 신호가 들고 온 진입가를 쓰지 않는다.
-        referencePrice: async () => {
-          const rr = await futuresPositionRisk(ex, conn.apiKey, conn.apiSecret, symbol, !connIsLive);
-          const m = Number(rr.risk?.markPrice);
-          return Number.isFinite(m) && m > 0 ? m : null;
+        //
+        // ★ **계좌/포지션 응답에서 떼어 오지 않는다.** 예전에는
+        //   `positionRisk.markPrice` 숫자 하나였다. 그 응답은 계좌 상태라
+        //   시장 가격의 관측 시각을 물을 자리가 없고, 거기 있는
+        //   `updateTime`은 **포지션이 갱신된 시각**이지 마크가가 만들어진
+        //   시각이 아니다 — 서로의 timestamp가 될 수 없다.
+        //
+        //   마진 모드(위)는 계좌 상태라 `positionRisk`에서 읽고, 기준
+        //   마크가는 시장 데이터 엔드포인트에서 읽는다. 두 질문이므로
+        //   두 조회다.
+        referenceMark: async () => {
+          const snap = await marketSnapshot();
+          if (!snap) return null;
+          // **시각을 여기서 붙이지 않는다** — 읽는 쪽이 응답에 넣어 준다.
+          return {
+            price: snap.markPrice,
+            exchangeTimeMs: snap.stamps.exchangeTimeMs,
+            receivedAtMs: snap.stamps.receivedAtMs,
+            observedAtMs: snap.stamps.observedAtMs,
+            source: snap.source, cache: snap.stamps.cache,
+          };
+        },
+        // 구간별 유지증거금은 **거래소에서 읽는다.** 추정 표로 100배
+        // 청산가를 정하지 않는다 — 못 읽으면 `prepareEntry100x`가 막는다.
+        maintenanceTiers: async () => {
+          if (ex !== 'binance') return null;   // Gate는 브래킷 경로가 없다
+          const bf = await import('@/lib/exchanges/binanceFutures');
+          const r = await bf.readBracket(symbol, conn.apiKey, conn.apiSecret, !connIsLive)
+            .catch(() => ({ tiers: null, freshness: 'NONE', observedAtMs: null } as any));
+          // ★ **신선도를 여기서 판정하지 않는다 — 있는 그대로 넘긴다.**
+          //   예전에는 이 줄에서 `FRESH`가 아니면 null로 바꿔 버렸다.
+          //   막는 결과는 같았지만 판정이 두 곳(라우트와 엔진)이 되고,
+          //   무엇보다 **왜 막혔는지가 사라졌다** — 엔진에는 "브래킷을
+          //   못 읽음"으로만 보였다. 신선도 판정은 ④의 정본 한 곳이다.
+          return { tiers: r.tiers, observedAtMs: r.observedAtMs ?? null,
+                   freshness: r.freshness };
+        },
+        // **손절 주문이 아니다.** 신호가 ATR로 잰 참고 위험 거리이고,
+        // `NO_FIXED_SL`에서는 거래소로 나가지 않는다(아래 주문 조립에서
+        // stopLoss를 빼는 자리 참조). 청산거리와 비교할 기준으로만 쓴다.
+        adverseDistancePct: async () => {
+          const p = Number(scalp.signal.stopPct);
+          return Number.isFinite(p) && p > 0 ? p : null;
+        },
+        // ── 비용 입력 셋 ──
+        //
+        // 전부 **거래소에서 읽는다.** 기본 수수료 표나 `0.05% 슬리피지`
+        // 같은 상수로 때우지 않는다 — 못 읽으면 진입이 막힌다.
+        commissionRates: async () => {
+          if (ex !== 'binance') return null;
+          const bf = await import('@/lib/exchanges/binanceFutures');
+          const r = await bf.getCommissionRate(conn.apiKey, conn.apiSecret, symbol, !connIsLive)
+            .catch(() => ({ rate: null, error: 'x' } as any));
+          // **시각을 여기서 붙이지 않는다** — 조회가 응답에 넣어 준다.
+          // 여기서 `Date.now()`를 붙이면 언제 읽었든 항상 "방금"이 되어
+          // 신선도 검사가 자기 자신을 속인다.
+          return r.rate == null ? null : {
+            takerRate: r.rate.takerRate, makerRate: r.rate.makerRate,
+            source: 'EXCHANGE_ACCOUNT' as const, observedAtMs: r.rate.observedAtMs,
+          };
+        },
+        orderBookDepth: async () => {
+          if (ex !== 'binance') return null;
+          const bf = await import('@/lib/exchanges/binanceFutures');
+          const r = await bf.getOrderBookDepth(symbol, !connIsLive)
+            .catch(() => ({ depth: null, error: 'x' } as any));
+          return r.depth == null ? null : {
+            bids: r.depth.bids, asks: r.depth.asks,
+            source: 'EXCHANGE_DEPTH' as const,
+            observedAtMs: r.depth.observedAtMs,
+            // 거래소가 적어 준 시각(`T`). 수신 시각만으로는 늦게 도착한
+            // 호가를 구분할 수 없다.
+            exchangeTimeMs: r.depth.exchangeTimeMs,
+          };
+        },
+        fundingContext: async () => {
+          if (ex !== 'binance') return null;
+          const bf = await import('@/lib/exchanges/binanceFutures');
+          // ★ **마크가와 같은 스냅숏이다.** `readPremiumIndex`(45초 캐시)를
+          //   따로 부르지 않는다 — 그러면 청산거리는 T0, 펀딩은 T1이 되어
+          //   서로 다른 시점을 하나의 시장 상태로 합치게 된다.
+          const [snap, fb] = await Promise.all([
+            marketSnapshot(),
+            bf.getFundingBounds(symbol, !connIsLive)
+              .catch(() => ({ bounds: null } as any)),
+          ]);
+          // 값이 아예 없으면 비용을 계산할 수 없다. **신선도 판정은
+          // 하지 않는다** — ④의 정본이 본다. 여기서 또 보면 판정이 두
+          // 곳이 되고 사유가 "펀딩을 못 읽음"으로 뭉개진다.
+          if (snap == null || fb?.bounds == null) return null;
+          return {
+            // 관측·방향 표시용이다. **미래 정산 비용의 상한이 아니다.**
+            rate: snap.lastFundingRate,
+            nextFundingTimeMs: snap.nextFundingTimeMs,
+            // **8시간을 박지 않는다** — 대상 종목에서 직접 읽은 값이다.
+            intervalHours: fb.bounds.intervalHours,
+            // 1회 최대 지불 요율의 근거.
+            capRate: fb.bounds.capRate,
+            floorRate: fb.bounds.floorRate,
+            source: fb.bounds.source,
+            // **세탁하지 않는다** — 실제로 읽은 시각 그대로.
+            //
+            // ★ **premium과 펀딩 상한을 한 칸에 합치지 않는다.** 둘은
+            //   다른 엔드포인트에서 온다(premium은 시장 스냅숏, 상한은
+            //   `fundingInfo`). 합치면 한쪽의 신선함이 다른 쪽을 덮어
+            //   "어느 쪽이 낡았는가"를 영영 물을 수 없게 된다.
+            premiumObservedAtMs: snap.stamps.observedAtMs,
+            premiumExchangeTimeMs: snap.stamps.exchangeTimeMs,
+            // 캐시 상태를 **그대로** 넘긴다. 여기서 'FRESH'로 적으면
+            // 만료된 캐시가 새 데이터가 된다.
+            premiumCache: snap.stamps.cache,
+            fundingBoundsObservedAtMs: fb.bounds.observedAtMs,
+          };
         },
         quantize: async (qty: number) => {
           // 규격을 못 읽으면 `quantizeOrder`가 신규 진입을 막는다 —
@@ -603,7 +855,21 @@ export async function POST(req: NextRequest) {
           quantity: entry.quantity as number,
           requiredMargin: entry.requiredMargin as number,
           leverage: entry.leverage as number,
-          liquidationPrice: 0, liquidationDistancePct: 0,
+          // **0을 적지 않는다.** 예전에는 둘 다 0이었는데, 0은 "0달러에
+          // 청산"으로 읽혀 청산거리가 100%가 된다 — 가장 위험한 주문이
+          // 가장 안전해 보인다. 모르면 null이고, 통과한 계획에는 실제로
+          // 계산한 값이 들어 있다.
+          liquidationPrice: entry.liquidation?.estimatedLiquidationPrice ?? null,
+          liquidationDistancePct: entry.liquidation?.liquidationDistancePct ?? null,
+          // **RAW를 덮어쓰지 않는다.** 비용이 여유를 얼마나 먹었는지
+          // 운영자가 둘을 비교할 수 있어야 한다.
+          effectiveLiquidationDistancePct:
+            entry.effectiveLiquidation?.liquidationDistancePct ?? null,
+          totalCostNotionalPct: entry.cost?.totalCostNotionalPct ?? null,
+          // **출처별 관측 시각을 합치지 않고 그대로 싣는다.** 운영자가
+          // "무엇이 몇 ms 전 값이었나"를 계획만 보고 말할 수 있어야 한다.
+          marketDataProvenance: entry.freshness?.provenance ?? null,
+          marketDataSkewMs: entry.freshness?.maxCrossSourceSkewMs ?? null,
           notes: entry.notes,
         }
       : {
@@ -611,7 +877,18 @@ export async function POST(req: NextRequest) {
           symbol, side: scalp.signal.side === 'SHORT' ? 'SHORT' : 'LONG',
           riskAmount: 0, riskAmountWithCosts: 0, stopDistancePct: 0, effectiveStopPct: 0,
           positionSize: 0, quantity: 0, requiredMargin: 0, leverage: 0,
-          liquidationPrice: 0, liquidationDistancePct: 0, notes: entry.notes,
+          // 막힌 계획도 **계산한 데까지는 말한다.** 청산거리가 모자라서
+          // 막힌 경우와 아예 계산을 못 한 경우를 운영자가 구별해야 한다.
+          liquidationPrice: entry.liquidation?.estimatedLiquidationPrice ?? null,
+          liquidationDistancePct: entry.liquidation?.liquidationDistancePct ?? null,
+          effectiveLiquidationDistancePct:
+            entry.effectiveLiquidation?.liquidationDistancePct ?? null,
+          totalCostNotionalPct: entry.cost?.totalCostNotionalPct ?? null,
+          // **출처별 관측 시각을 합치지 않고 그대로 싣는다.** 운영자가
+          // "무엇이 몇 ms 전 값이었나"를 계획만 보고 말할 수 있어야 한다.
+          marketDataProvenance: entry.freshness?.provenance ?? null,
+          marketDataSkewMs: entry.freshness?.maxCrossSourceSkewMs ?? null,
+          notes: entry.notes,
         };
   } else {
     const { planPosition } = await import('@/lib/engine/riskManager');
@@ -867,6 +1144,64 @@ export async function POST(req: NextRequest) {
     }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
   }
 
+  // ── 이미 열려 있는 포지션의 **방향**을 본다 ──
+  //
+  // **여기까지 아무도 그것을 보지 않았다.**
+  //
+  // 위의 관문 여섯(정지 · 마이그레이션 · 전략겹침 · 증거금 · 패리티 ·
+  // 청산감시)은 전부 계좌·시스템 관문이다. 거래소에 지금 무엇이 어느
+  // 방향으로 열려 있는지는 그 여섯 중 아무것도 묻지 않는다.
+  //
+  // ONE_WAY 계좌에서 그게 무슨 뜻인가: SHORT가 열려 있는데 LONG 진입을
+  // 내면 거래소가 **그 숏을 상계해서 조용히 닫는다.** 반대도 같다.
+  // 사용자는 숏을 들고 있다고 믿는 채로 포지션이 사라지고, 걸어 둔
+  // 보호주문은 고아로 남는다. 그런데 응답에는 "진입 성공"이 적힌다.
+  //
+  // 판정은 **만들지 않는다.** `positionLifecycle.entryGate()`가 이미
+  // 있고 `my-original-v1`은 그것을 부르고 있었다 — 이 경로만 빠져 있었다
+  // (`CLAUDE.md` 상습 고장 ②: 경로가 둘인데 한쪽만 고침).
+  //
+  // **반전은 여기서 하지 않는다.** 반대 방향이면 막고 끝낸다. 반전은
+  // 닫고-확인하고-열는 절차이고 이 경로에는 그 절차가 없다. 절차 없이
+  // 시장가로 상계하면 그게 바로 위에 적은 사고다. 못 하는 것을
+  // 막는 쪽이 하는 척하는 쪽보다 낫다.
+  {
+    const { futuresExchangeOf } = await import('@/lib/exchanges/futuresAdapter');
+    const dirEx = futuresExchangeOf(conn.exchange);
+    if (!dirEx) {
+      return NextResponse.json({
+        ...base, executed: false, blocked: 'POSITION_UNKNOWN',
+        error: `선물 거래소를 알아보지 못했습니다 (${conn.exchange}) — `
+          + '열린 포지션의 방향을 모르는 채로 진입하지 않습니다',
+      }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+    }
+
+    const ops = await import('@/lib/engine/venuePositionOps');
+    const { entryGate } = await import('@/lib/engine/positionLifecycle');
+
+    // 조회가 **실패하면 `ok:false`로 온다.** 그것을 '포지션 없음'으로
+    // 읽지 않는다 — `entryGate`가 `POSITION_UNKNOWN`으로 막는다.
+    const before = await ops.readOpenPosition(
+      { exchange: dirEx, apiKey: conn.apiKey, apiSecret: conn.apiSecret, testnet: !connIsLive },
+      symbol,
+    );
+    const dirGate = entryGate({ read: before, desiredSide: plan.side });
+
+    // 무엇을 읽었고 무엇을 못 읽었는지 응답에 남긴다. 이게 없으면
+    // "방향을 확인했다"와 "확인하지 못했다"가 화면에서 같아 보인다.
+    (base as any).lifecycle = {
+      before: { ok: before.ok, found: before.found, side: before.side, qty: before.qty },
+      gate: { ok: dirGate.ok, code: dirGate.code, needsReversal: dirGate.needsReversal },
+    };
+
+    if (!dirGate.ok) {
+      return NextResponse.json({
+        ...base, executed: false, blocked: dirGate.code,
+        error: dirGate.reason,
+      }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+    }
+  }
+
   // ── 숏은 롱의 부호 반전이 아니다 ──
   //
   // 지금까지 `allowShort`는 켜고 끄는 스위치일 뿐이었고, 진입 검사는
@@ -996,6 +1331,72 @@ export async function POST(req: NextRequest) {
   // 하나 남는다.
   const barBucket = Math.floor(Date.now() / (intervalMin * 60_000));
 
+  // ── Exact100X 계좌 전체 포지션 최대 1개 ──
+  //
+  // BTC/ETH 별개 멱등 키로는 동시 진입을 막지 못한다. 거래소 연결 하나에
+  // 공통 원자적 claim을 취득한 뒤에만 배율 설정 및 주문 전송으로 간다.
+  // 관측 오류, DB 잠금 오류, 지원하지 않는 환경은 fail-closed.
+  if (epContract?.profileId === 'MAX_LEV_100X') {
+    const {
+      maxOpenPositionsGate, UNRESOLVED_ENTRY_STATUSES, ACCEPTED_ENTRY_STATUSES,
+      CAPACITY_WINDOW_SEC,
+    } = await import('@/lib/engine/maxOpenPositionsGate');
+    const { claimSignal } = await import('@/lib/risk/idempotency');
+    const capacity = await maxOpenPositionsGate(
+      { maxOpenPositions: epContract.maxOpenPositions, mode: opMode },
+      {
+        observeExposure: async () => {
+          if (conn.exchange !== 'binance' || connIsLive) return null;
+          const bf = await import('@/lib/exchanges/binanceFutures');
+          const [p, o] = await Promise.all([
+            bf.getFuturesPositions(conn.apiKey, conn.apiSecret, true),
+            bf.getFuturesOpenOrders(conn.apiKey, conn.apiSecret, true),
+          ]);
+          if (!p?.success || !o?.success
+              || !Array.isArray(p.positions) || !Array.isArray(o.orders)) return null;
+          return { positions: p.positions.length, openOrders: o.orders.length };
+        },
+        countPendingEntries: async () => {
+          const { count, error } = await sb.from('live_orders')
+            .select('id', { count: 'exact', head: true })
+            .eq('user_id', userId!)
+            .eq('connection_id', body.connectionId)
+            .eq('mode', 'TESTNET')
+            .eq('reduce_only', false)
+            .in('status', [...UNRESOLVED_ENTRY_STATUSES]);
+          return error || count == null ? null : count;
+        },
+        // 거래소가 접수한(ACKED) 진입. reconcile이 해소하지 않는 상태라
+        // 잠금 창 안의 것만 센다 — 그러지 않으면 한 번 진입하고 영구 차단된다.
+        countRecentAcceptedEntries: async () => {
+          const since = new Date(Date.now() - CAPACITY_WINDOW_SEC * 1000).toISOString();
+          const { count, error } = await sb.from('live_orders')
+            .select('id', { count: 'exact', head: true })
+            .eq('user_id', userId!)
+            .eq('connection_id', body.connectionId)
+            .eq('mode', 'TESTNET')
+            .eq('reduce_only', false)
+            .in('status', [...ACCEPTED_ENTRY_STATUSES])
+            .gte('created_at', since);
+          return error || count == null ? null : count;
+        },
+        claimSlot: async () => claimSignal(sb, {
+          key: `x100-capacity:${userId}:${body.connectionId}`,
+          neighbors: [], clientScoped: true,
+        }, CAPACITY_WINDOW_SEC),
+      },
+    );
+    if (!capacity.allowed) {
+      return NextResponse.json({
+        ...base, executed: false, blocked: capacity.code, error: capacity.reason,
+      }, {
+        status: capacity.code === 'CAPACITY_UNKNOWN'
+          || capacity.code === 'CAPACITY_CLAIM_FAILED' ? 503 : 409,
+        headers: { 'Cache-Control': 'no-store' },
+      });
+    }
+  }
+
   // ── 같은 봉에서 두 번 들어가지 않는다 (멱등 키) ──
   //
   // **이 경로에는 중복 차단이 없었다.** 웹훅에는 webhook_dedup을 쓰는
@@ -1114,6 +1515,39 @@ export async function POST(req: NextRequest) {
     // 상태를 만드느니 멈추는 편이 낫다.
     stopPolicy: epStopPolicy,
     takeProfitPolicy: epTakeProfitPolicy,
+    // ★ **어느 계약으로 여는지 장부에 남긴다.**
+    //
+    //   이 값이 없으면 나중에 이 포지션을 보는 코드가 "배율 100 · 격리 ·
+    //   손절 없음"으로 Exact100X를 **추론**하게 된다 — PR-E와 PR1이 둘 다
+    //   금지한 그 추론이다. 계약이 있을 때만 붙고, 계약이 없던 예전 경로는
+    //   그대로다.
+    //
+    //   적기만 한다 — 이 값으로 진입을 막거나 종료를 바꾸지 않는다.
+    ...(epContract ? {
+      executionIdentity: {
+        profileId: epContract.profileId,
+        presetId: epContract.presetId,
+        contractVersion: epContract.contractVersion,
+      },
+    } : {}),
+    // ★ **진입 허가가 쓴 위험 좌표를 그 판정 결과에서 그대로 꺼낸다** (091)
+    //
+    //   `prepared100x.liquidation`은 `prepareEntry100x`가 통과시킨 바로 그
+    //   판정이다. 여기서 `scalp.signal.stopPct`를 다시 읽거나 ATR을 새로
+    //   재지 **않는다** — 그러면 저장된 값이 "허가를 내린 값"이 아니게
+    //   되고, 신호가 그 사이에 바뀌었으면 장부가 거짓말을 한다.
+    //
+    //   `headroomKind`가 'RAW'인 것만 적는다. `effectiveLiquidation`은
+    //   비용을 반영한 다른 값이고, 둘을 한 칸에 섞으면 나중에 무엇을
+    //   저장한 것인지 알 수 없다.
+    //
+    //   적기만 한다 — 이 값으로 진입을 막거나 종료를 바꾸지 않는다.
+    ...(prepared100x?.liquidation?.headroomKind === 'RAW' ? {
+      entryRiskSnapshot: {
+        adverseDistancePct: prepared100x.liquidation.adverseDistancePct ?? null,
+        liquidationDistancePctRaw: prepared100x.liquidation.liquidationDistancePct ?? null,
+      },
+    } : {}),
     // **손절은 반드시 함께 낸다.** 단타에서 손절 없는 진입은 배율이
     // 붙어 있어 청산까지 간다. 고정 손절을 쓰지 않는 계약만 예외다.
     //

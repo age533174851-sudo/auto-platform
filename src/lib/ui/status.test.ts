@@ -5,6 +5,9 @@
 //   `column paper_accounts.started_at does not exist`가 빨간 박스에 있었고,
 //   '확인 불가'가 한 화면에 열다섯 번 있었다.
 import { test, eq, assert } from '../../test/harness';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { showBinanceTestnetDiagnosis } from './binanceDiagnosisGate';
 import {
   STATUS_TONE, STATUS_LABEL, envView, ENV_VIEW,
   accountStatusOf, unknownSummaryOf, looksLikeRawError, splitDiagnostics, statusNotice,
@@ -12,6 +15,28 @@ import {
 import { UNKNOWN_LABEL } from './display';
 
 export function runStatusTests() {
+
+  test('TESTNET 조회 진단 버튼은 Binance TESTNET에만 표시한다', () => {
+    eq(showBinanceTestnetDiagnosis('binance', true), true);
+    for (const exchange of ['binance', 'gate', 'bybit', '', null, undefined]) {
+      if (exchange === 'binance') continue;
+      eq(showBinanceTestnetDiagnosis(exchange, true), false);
+    }
+    for (const flag of [false, null, undefined]) {
+      eq(showBinanceTestnetDiagnosis('binance', flag), false);
+    }
+  });
+
+  test('연결 화면의 진단 버튼 배선·키 비노출·실전 권유 금지를 지킨다', () => {
+    const component = readFileSync(resolve(__dirname, '../../components/ExchangeConnectPage.tsx'), 'utf8');
+    assert(component.includes('showBinanceTestnetDiagnosis(selConn.exchange, selConn.isTestnet) && ('),
+      'TESTNET 전용 진단 버튼 표시 관문이 연결되지 않았다');
+    assert(!component.includes('diag.keyPrefix'), '진단 화면에서 API 키 일부를 출력한다');
+    assert(!component.includes('소액 실전 테스트 가능'), 'TESTNET 진단을 실전 거래 승인으로 안내한다');
+    assert(component.includes('diag.forConnectionId === selConn.id'),
+      '다른 연결에서 받은 진단 응답이 현재 연결에 섞일 수 있다');
+  });
+
   console.log('\n🧪 상태 표현 — 없음·못 읽음·0을 섞지 않는다');
 
   // ══ ① 상태 색조 ══

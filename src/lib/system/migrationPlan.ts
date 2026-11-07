@@ -260,6 +260,46 @@ const CONTROL_FLOW = new RegExp(
 /** `v := expr` 같은 대입 */
 const ASSIGNMENT = /^[A-Za-z_][\w.]*\s*(?::=|=[^=])/;
 
+// ── DECLARE 구역은 문장이 아니라 선언이 있는 곳이다 ──
+//
+// `splitStatements()`는 `;`로 자르므로 DECLARE 구역의 변수 선언이 문장
+// 하나처럼 떨어져 나온다:
+//
+//     DO $$ DECLARE bad_groups integer; sample text; BEGIN … END $$;
+//        → ['DECLARE bad_groups integer', 'sample text', 'BEGIN …', …]
+//
+// 첫 조각은 `DECLARE`로 시작해서 CONTROL_FLOW가 받았지만 **두 번째부터는
+// 아무 규칙에도 걸리지 않아 UNKNOWN이 됐다.** 그래서 변수를 둘 이상 선언한
+// DO 블록은 내용이 전부 안전해도 자동 적용 대상에서 빠졌다(096이 그랬다).
+// 위험해서 막힌 것이 아니라 **읽지 못해서** 막힌 것이고, 둘은 다르다.
+
+/** DECLARE 구역에서도 문장으로 읽어야 하는 것 — 선언 모양을 흉내 내도 통과시키지 않는다 */
+const SQL_COMMAND_HEAD = new RegExp('^(?:' + [
+  'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'MERGE', 'ALTER', 'CREATE', 'DROP', 'TRUNCATE',
+  'GRANT', 'REVOKE', 'COMMENT', 'COPY', 'CALL', 'DO', 'EXECUTE', 'PERFORM', 'RAISE',
+  'SET', 'RESET', 'LOCK', 'ANALYZE', 'VACUUM', 'REFRESH', 'REINDEX', 'CLUSTER',
+  'IMPORT', 'LISTEN', 'NOTIFY', 'PREPARE', 'BEGIN', 'COMMIT', 'ROLLBACK', 'SAVEPOINT',
+  'RETURN', 'IF', 'LOOP', 'WHILE', 'FOR', 'CASE', 'WITH', 'DECLARE',
+].join('|') + ')\\b', 'i');
+
+/**
+ * 변수 선언 한 줄 — `이름 타입`, `이름 CONSTANT 타입 := 식`, `이름 타입 DEFAULT 식`.
+ *
+ * 타입 자리는 `%TYPE`·배열·정밀도까지 쓰이므로 넓게 보되 `*`·`:`·연산자는
+ * 받지 않는다. 그리고 **이 모양은 DECLARE와 BEGIN 사이에서만 인정한다.**
+ * 그 구역에 선언이 아닌 것을 쓰면 PL/pgSQL이 문법 오류로 멈추므로, 조용히
+ * 실행되는 경로가 아니다. 위험 문장·EXECUTE 검사는 이것보다 **앞에서**
+ * 끝나므로 선언으로 읽혀도 위험한 내용이 통과하지는 않는다.
+ */
+const DECLARATION =
+  /^[A-Za-z_][\w$]*\s+(?:CONSTANT\s+)?[A-Za-z_][\w$ \t.%()[\],"]*?(?:\s+NOT\s+NULL)?(?:\s*(?::=|\bDEFAULT\b)\s*[\s\S]+)?$/i;
+
+/** DECLARE 구역 안에서 선언으로 인정할 수 있는가 */
+function isDeclaration(st: string): boolean {
+  if (SQL_COMMAND_HEAD.test(st)) return false;
+  return DECLARATION.test(st);
+}
+
 /**
  * DO 블록 안을 본다.
  *
@@ -277,9 +317,15 @@ function classifyDoBody(body: string): { risk: MigrationRisk; reasons: string[] 
     return { risk: 'UNKNOWN', reasons: scan.errors.map(e => `DO 블록을 끝까지 읽지 못했습니다 — ${e}`) };
   }
 
+  // 지금 DECLARE 구역 안인가. `DECLARE`에서 열리고 `BEGIN`에서 닫힌다.
+  let inDeclare = false;
+
   for (const piece of scan.pieces) {
     const st = piece.code.replace(/\s+/g, ' ').trim();
     if (!st || !/[A-Za-z]/.test(st)) continue;
+
+    if (/^DECLARE\b/i.test(st)) inDeclare = true;
+    else if (/^BEGIN\b/i.test(st)) inDeclare = false;
 
     // 동적 실행. 무엇이 돌지 정적으로 알 수 없다
     if (/\bEXECUTE\b/i.test(st)) {
@@ -291,6 +337,8 @@ function classifyDoBody(body: string): { risk: MigrationRisk; reasons: string[] 
     if (hit.length > 0) { danger.push(...hit.map(h => `DO 블록 안에서 ${h.why}`)); continue; }
     if (ADDITIVE_PATTERNS.some(re => re.test(st))) continue;
     if (CONTROL_FLOW.test(st) || ASSIGNMENT.test(st)) continue;
+    // **DECLARE 구역 안에서만** 선언 모양을 인정한다. 구역 밖에서는 그대로 UNKNOWN이다.
+    if (inDeclare && isDeclaration(st)) continue;
 
     unknown.push(`DO 블록 안에 알아보지 못한 문장이 있습니다: ${st.slice(0, 60)}`);
   }

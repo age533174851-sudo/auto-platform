@@ -1,0 +1,2753 @@
+// src/test/integration/orderPathIntegration.test.ts
+//
+// **실제 실행 경로를 돌린다.** 순수 판정 함수를 이어 붙인 것이 아니다.
+//
+// 여기서 실제로 도는 것
+// ─────────────────────
+//   `executeOrder`            (의도 기록 → 중복 확인 → 전송 → 결과 기록)
+//   `reconcilePendingOrders`  (대상 선별 → 조회 → 판정 → 장부 쓰기)
+//   `placeSpotOrder`          (바이낸스·Gate 현물)
+//   그 안에서 불리는 서명 생성 · 질의 조립 · 응답 파싱 · 체결 사실 추출
+//   (`fillFactsOf`·`gateFillOf`) · 장부 상태 판정(`ledgerStatusOf*`) ·
+//   상태 전이 검증 · **DB 쓰기 호출**
+//
+// 가짜로 바꾼 것은 두 경계뿐이다: `fetch` 한 겹과 Supabase 한 겹.
+// 그래서 "검사기만 RED"였던 자리가 이제 시험으로 덮인다.
+import { test, eq, assert } from '../harness';
+import { FakeVenue, FakeDb, withCryptoEnv } from './venueHarness';
+// ── **정적 상대 경로로 가져온다** ──
+//
+//   동적 `await import('@/…')`만 쓰면 tsc가 그 파일을 **컴파일 대상에
+//   넣지 않는다**(run.ts에서 도달 불가). 그러면 런타임에 "Cannot find
+//   module"이 난다. 정적으로 가져오면 컴파일되고, 그 파일 안의 `@/`
+//   동적 import는 러너의 해석 shim이 처리한다.
+import { executeOrder, reconcilePendingOrders, canAdoptIntent } from '../../lib/engine/orderExecutor';
+import { closeAllPositions, cancelAllOpenOrders, cancelOpenTPSL } from '../../lib/exchanges/binanceFutures';
+import { placeSpotOrder } from '../../lib/exchanges/spotOrderExecutor';
+import { RECONCILE_TARGET_STATUSES } from '../../lib/engine/pendingReconcile';
+import { isProvenFill } from '../../lib/engine/holdingEvidence';
+import { encryptSecret } from '../../lib/exchanges/crypto';
+
+const BN_ORDER = '/fapi/v1/order';
+const BN_POS = '/fapi/v2/positionRisk';
+const BN_LEV = '/fapi/v1/leverage';
+const BN_DUAL = '/fapi/v1/positionSide/dual';
+const BN_EXINFO = '/fapi/v1/exchangeInfo';
+
+/** 거래소가 돌려주는 주문 응답 모양 */
+const bnOrder = (o: Partial<Record<string, any>> = {}) => ({
+  orderId: 7001, symbol: 'BTCUSDT', status: 'NEW',
+  executedQty: '0', origQty: '0.010', avgPrice: '0', price: '0',
+  ...o,
+});
+
+/** 진입 계획. 승인된 것만 실행기를 통과한다 */
+const plan = (over: Partial<Record<string, any>> = {}) => ({
+  approved: true, symbol: 'BTCUSDT', side: 'LONG' as const,
+  riskAmount: 10, riskAmountWithCosts: 10,
+  stopDistancePct: 1, effectiveStopPct: 1,
+  positionSize: 1000, quantity: 0.01, requiredMargin: 10,
+  leverage: 100, liquidationPrice: 90000, liquidationDistancePct: 1,
+  notes: [], ...over,
+}) as any;
+
+/** 거래소 규격·레버리지·포지션 모드 조회에 성공 응답을 깔아 둔다 */
+function baseVenue(): FakeVenue {
+  return new FakeVenue()
+    .on(BN_EXINFO, { json: { symbols: [{
+      symbol: 'BTCUSDT', filters: [
+        { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001' },
+        { filterType: 'MIN_NOTIONAL', notional: '5' },
+        { filterType: 'PRICE_FILTER', tickSize: '0.10' },
+      ],
+    }] } })
+    .on('/fapi/v1/marginType', { json: { code: 200, msg: 'success' } })
+    .on('/fapi/v1/account', { json: { positions: [], assets: [] } })
+    .on(BN_DUAL, { json: { dualSidePosition: false } })
+    .on(BN_LEV, { json: { leverage: 100, symbol: 'BTCUSDT' } })
+    .on(BN_POS, { json: [{ symbol: 'BTCUSDT', positionAmt: '0', entryPrice: '0',
+      leverage: '100', marginType: 'isolated', liquidationPrice: '0' }] });
+}
+
+async function exec(db: FakeDb, args: any) {
+  return executeOrder(db as any, {
+    userId: 'u1', connectionId: 'c1',
+    signalId: 'sig-1', clientOrderId: args.clientOrderId ?? 'COID-1',
+    exchange: 'binance', mode: 'TESTNET',
+    plan: args.plan ?? plan(),
+    apiKey: 'K'.repeat(64), apiSecret: 'S'.repeat(64),
+    stopPolicy: 'NO_FIXED_SL', takeProfitPolicy: 'NO_FIXED_TP',
+    protectionPolicy: 'NONE',
+    ...args,
+  });
+}
+
+/**
+ * 시나리오 하나를 **단독으로** 돌린다.
+ *
+ * `test()`는 async 본문을 pending에 넣고 바로 돌아온다. 그래서 여러
+ * 시나리오를 `test()`로 띄우면 **서로의 fetch 스텁을 덮어쓴다** — 실제로
+ * 그렇게 돼서 "거래소 호출이 하나도 없다"로 보였다. 그러니 실행은 여기서
+ * 순차로 하고, 판정만 `test()`에 넣는다.
+ */
+async function scenario<T>(venue: FakeVenue, body: () => Promise<T>): Promise<T | Error> {
+  const restore = venue.install();
+  const unenv = withCryptoEnv();
+  try { return await body(); }
+  catch (e: any) { return e instanceof Error ? e : new Error(String(e)); }
+  finally { restore(); unenv(); }
+}
+
+export async function runOrderPathIntegrationTests() {
+  console.log('[통합 — 실제 실행 경로 (fetch·DB만 가짜)]');
+
+  // ══════════ ⓿ 전체 청산: 못 읽은 것을 "전부 닫혔다"로 적지 않는다 ══════════
+  //
+  //   검수 지적이 맞았다. `closeAllPositions`는 조회의 `success`를 보지
+  //   않고 `positions || []`로 읽었고, `Math.abs(p.amount || 0) > 0`으로
+  //   열린 포지션을 셌다. 두 길로 **거짓 SUCCESS**가 됐다:
+  //
+  //     (a) 수량이 깨진 줄 — `NaN || 0`은 0이라 필터에서 사라진다
+  //     (b) 조회 실패 — `{ success: false, message }`에는 `positions`가
+  //         **아예 없다.** `|| []`가 빈 배열이 된다
+  //
+  //   그러면 `open.length === 0` → `{ success: true, remaining: 0 }`이고,
+  //   화면은 "포지션 전체 종료 완료"를 띄운다. 상위 어댑터의 계약은 이미
+  //   맞았다 — *"남은 포지션 수. 못 읽으면 null이다 — 0으로 적으면
+  //   '전부 닫혔다'가 된다"*. **아래가 그 계약을 어기고 있었다.**
+  //
+  //   시험을 여기(통합)에 두는 이유: 전역 `fetch`를 바꾸므로 단위 파일에
+  //   두면 다른 파일의 async 시험과 섞인다. 실제로 그렇게 19건이
+  //   오염됐다.
+  {
+    const POS = '/fapi/v2/positionRisk';
+    const ORDER = '/fapi/v1/order';
+    const ROW = (over: any) => ({
+      symbol: 'BTCUSDT', positionAmt: '0', entryPrice: '95000', markPrice: '95000',
+      unRealizedProfit: '0', leverage: '100', liquidationPrice: '90000',
+      marginType: 'isolated', ...over,
+    });
+
+    const run = async (reply: any) => {
+      const venue = new FakeVenue().on(POS, reply, 'GET')
+        .on(ORDER, { json: { orderId: 1, status: 'FILLED', executedQty: '0.5', avgPrice: '95000' } }, 'POST');
+      const r = await scenario(venue,
+        () => closeAllPositions('K'.repeat(64), 'S'.repeat(64), true, 1) as any);
+      return { r, venue };
+    };
+
+    const broken = await run({ json: [ROW({ positionAmt: 'bad' })] });
+    const downed = await run({ status: 503, json: { code: -1001, msg: 'down' } });
+    const opened = await run({ json: [ROW({ positionAmt: '0.5' })] });
+    const flat = await run({ json: [ROW({ positionAmt: '0' })] });
+
+    test('★★ (a) 수량이 깨진 줄을 "전부 닫혔다"로 적지 않는다', () => {
+      const { r, venue } = broken;
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const o = r as any;
+      assert(!(o.success === true && o.remaining === 0),
+        `수량을 못 읽었는데 전부 닫혔다고 적었다: ${JSON.stringify(o)}`);
+      eq(o.remaining, null, `못 읽은 줄의 remaining이 null이 아니다: ${JSON.stringify(o)}`);
+      eq(venue.countOf(ORDER, 'POST'), 0, '수량을 모르는데 주문을 보냈다');
+      assert(/확인하지 못/.test(String(o.message)), `사유가 없다: ${o.message}`);
+    });
+
+    test('★★ (b) 조회 실패를 "전부 닫혔다"로 적지 않는다', () => {
+      const { r, venue } = downed;
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const o = r as any;
+      eq(o.success, false, `조회 실패인데 성공으로 적었다: ${JSON.stringify(o)}`);
+      eq(o.remaining, null, `조회 실패를 남은 0으로 적었다: ${JSON.stringify(o)}`);
+      eq(venue.countOf(ORDER, 'POST'), 0, '조회 실패인데 주문을 보냈다');
+    });
+
+    test('★ (c) 열린 포지션은 그대로 닫는다 — 과잉 차단하지 않는다', () => {
+      const { r, venue } = opened;
+      assert(!(r instanceof Error), String((r as any)?.message));
+      assert(venue.countOf(ORDER, 'POST') >= 1,
+        `열린 포지션인데 청산 주문이 0건이다: ${JSON.stringify(r)}`);
+    });
+
+    test('★ (d) 진짜 0은 성공이고 남은 0이다', () => {
+      const { r, venue } = flat;
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const o = r as any;
+      eq(o.success, true, `진짜 0인데 성공이 아니다: ${JSON.stringify(o)}`);
+      eq(o.remaining, 0);
+      eq(venue.countOf(ORDER, 'POST'), 0, '닫을 것이 없는데 주문을 보냈다');
+    });
+
+    // ── HTTP 200인데 **본문이 배열이 아니면** ──
+    //
+    //   조회 함수들이 `(Array.isArray(data) ? data : [])`로 받고
+    //   **`success: true`**를 돌려준다. 즉 200에 엉뚱한 본문이 오면
+    //   "포지션 없음"·"미결 주문 없음"이 **관측으로 적힌다.** 503은
+    //   throw되어 막히지만 이 길은 막히지 않는다.
+    //
+    //   정상 빈 배열(진짜 없음)과 **구분**해야 한다 — 둘을 같게 다루면
+    //   과잉 차단이고, 섞으면 거짓 완료다.
+    const ORDERS = '/fapi/v1/openOrders';
+    const DEL = '/fapi/v1/allOpenOrders';
+
+    const nonArrayClose = await run({ json: { code: 0, unexpected: true } });
+    const nullClose = await run({ json: null });
+
+    test('★★ 200 비배열 본문을 "전부 닫혔다"로 적지 않는다', () => {
+      for (const [label, got] of [['객체', nonArrayClose], ['null', nullClose]] as const) {
+        const { r, venue } = got;
+        assert(!(r instanceof Error), String((r as any)?.message));
+        const o = r as any;
+        assert(o.success !== true,
+          `${label} 본문인데 성공으로 적었다: ${JSON.stringify(o)}`);
+        assert(o.remaining !== 0,
+          `${label} 본문을 남은 0으로 적었다: ${JSON.stringify(o)}`);
+        eq(venue.countOf(ORDER, 'POST'), 0, `${label} 본문인데 주문을 보냈다`);
+      }
+    });
+
+    const cancelOn = async (posReply: any, ordReply: any) => {
+      const venue = new FakeVenue()
+        .on(POS, posReply, 'GET').on(ORDERS, ordReply, 'GET')
+        .on(DEL, { json: { code: 200, msg: 'success' } }, 'DELETE');
+      const r = await scenario(venue,
+        () => cancelAllOpenOrders('K'.repeat(64), 'S'.repeat(64), true) as any);
+      return { r, venue };
+    };
+
+    const cancelBadOrders = await cancelOn({ json: [] }, { json: { code: 0 } });
+    const cancelCleanEmpty = await cancelOn({ json: [] }, { json: [] });
+
+    test('★★ 전체 취소: 200 비배열 미결 본문을 "전부 취소됨"으로 적지 않는다', () => {
+      const { r, venue } = cancelBadOrders;
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const o = r as any;
+      eq(o.success, false, `목록을 못 읽었는데 성공으로 적었다: ${JSON.stringify(o)}`);
+      eq(o.listComplete, false);
+      eq(venue.countOf(DEL, 'DELETE'), 0, '대상을 모르는데 취소를 보냈다');
+    });
+
+    test('★ 전체 취소: 정상 빈 목록은 성공이다 — 과잉 차단하지 않는다', () => {
+      const { r } = cancelCleanEmpty;
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const o = r as any;
+      eq(o.success, true, `정상 빈 목록인데 실패로 적었다: ${JSON.stringify(o)}`);
+      eq(o.listComplete, true);
+    });
+
+    // ── 기존 TP/SL 취소: 못 읽음과 "없음"을 섞지 않는다 ──
+    //
+    //   `cancelOpenTPSL`은 `success`를 보지 않고 `orders.filter(...)`를
+    //   한 뒤 `{ success: true, cancelled: targets.length }`를 돌려준다.
+    //   게다가 개별 취소 예외를 **무시**하고 `targets.length`를 그대로
+    //   센다 — 못 지운 보호주문이 "취소됨"으로 적힌다.
+    const tpsl = async (ordReply: any, delReply: any) => {
+      const venue = new FakeVenue()
+        .on(ORDERS, ordReply, 'GET')
+        .on('/fapi/v1/order', delReply, 'DELETE');
+      const r = await scenario(venue,
+        () => cancelOpenTPSL('K'.repeat(64), 'S'.repeat(64), 'BTCUSDT', true) as any);
+      return { r, venue };
+    };
+    const SL_ROW = {
+      orderId: 11, symbol: 'BTCUSDT', type: 'STOP_MARKET', side: 'SELL',
+      stopPrice: '90000', closePosition: true, reduceOnly: true,
+      origQty: '0', price: '0', workingType: 'MARK_PRICE', time: 1, status: 'NEW',
+    };
+    const tpslBad = await tpsl({ json: { code: 0 } }, { json: { code: 200 } });
+    const tpslDelFails = await tpsl(
+      { json: [SL_ROW] }, { status: 400, json: { code: -2011, msg: 'Unknown order' } });
+
+    test('★★ TP/SL 취소: 미결 목록을 못 읽으면 "없음"으로 적지 않는다', () => {
+      const { r } = tpslBad;
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const o = r as any;
+      assert(!(o.success === true && o.cancelled === 0),
+        `목록을 못 읽었는데 "취소 0건 성공"으로 적었다: ${JSON.stringify(o)}`);
+    });
+
+    test('★★ TP/SL 취소: 못 지운 보호주문을 취소됨으로 세지 않는다', () => {
+      const { r } = tpslDelFails;
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const o = r as any;
+      assert(!(o.success === true && o.cancelled === 1),
+        `취소가 실패했는데 1건 취소됨으로 적었다: ${JSON.stringify(o)}`);
+    });
+
+    // ── 배열 **모양**만 보고 각 행의 수량 형식은 안 봤다 ──
+    //
+    //   비배열 200은 막았지만 `getFuturesPositions`의 **행 파싱**은
+    //   아직 `parseFloat`이다:
+    //
+    //       .filter((p) => parseFloat(p.positionAmt) !== 0)
+    //       .map((p) => { const amt = parseFloat(p.positionAmt); … })
+    //
+    //   같은 파일에 엄격 파서(`qtyEvidence`)를 만들어 놓고 **이 경계에서
+    //   부르지 않았다.** 실제 `parseFloat` 값:
+    //
+    //       '0junk'    → 0       행이 **필터에서 사라진다** → "포지션 없음"
+    //       '0x10'     → 0       같음
+    //       '1.25junk' → 1.25    **증명되지 않은 수량**으로 청산 수량이 된다
+    //       '1e-8oops' → 1e-8    같음
+    //
+    //   앞선 수정이 `NaN`만 잡았던 이유다 — `parseFloat`은 앞부분이
+    //   숫자면 `NaN`을 주지 않는다.
+    for (const bad of ['0junk', '0x10']) {
+      const got = await run({ json: [ROW({ positionAmt: bad })] });
+      test(`★★ 부분 숫자 '${bad}'를 "포지션 없음"으로 읽지 않는다`, () => {
+        const { r, venue } = got;
+        assert(!(r instanceof Error), String((r as any)?.message));
+        const o = r as any;
+        assert(!(o.success === true && o.remaining === 0),
+          `'${bad}'를 전부 닫혔다고 적었다: ${JSON.stringify(o)}`);
+        eq(venue.countOf(ORDER, 'POST'), 0, `'${bad}'인데 주문을 보냈다`);
+      });
+    }
+
+    for (const bad of ['1.25junk', '1e-8oops']) {
+      const got = await run({ json: [ROW({ positionAmt: bad })] });
+      test(`★★ 증명되지 않은 수량 '${bad}'으로 청산 주문을 만들지 않는다`, () => {
+        const { r, venue } = got;
+        assert(!(r instanceof Error), String((r as any)?.message));
+        const o = r as any;
+        eq(venue.countOf(ORDER, 'POST'), 0,
+          `'${bad}'를 수량으로 읽어 주문을 보냈다: ${JSON.stringify(o)}`);
+        assert(o.success !== true, `'${bad}'인데 성공으로 적었다: ${JSON.stringify(o)}`);
+      });
+    }
+
+    test('★ 정상 수량·정상 0은 회귀 없이 유지된다', () => {
+      // (c)(d)가 이미 그것을 센다 — 여기서는 한 번 더 못으로 박는다.
+      const okOpen = opened.r as any;
+      assert(!(okOpen instanceof Error));
+      assert(opened.venue.countOf(ORDER, 'POST') >= 1, '정상 수량이 막혔다');
+      const okFlat = flat.r as any;
+      eq(okFlat.success, true, '정상 0이 막혔다');
+      eq(okFlat.remaining, 0);
+    });
+
+    // ── 미결 주문 행이 **주소를 못 가진** 경우 ──
+    //
+    //   `getFuturesOpenOrders`는 `[{}]`을 `symbol: undefined`로 매핑하고도
+    //   `success: true`를 준다. `cancelAllOpenOrders`는 `.filter(Boolean)`로
+    //   그 행을 **버리고** `listComplete: true`를 적는다 — 취소할 수 없는
+    //   주문이 "없는 것"이 된다.
+    const cancelHeadless = await cancelOn({ json: [] }, { json: [{ orderId: 7 }] });
+
+    test('★★ 취소할 주소가 없는 미결 행을 "대상 없음"으로 적지 않는다', () => {
+      const { r, venue } = cancelHeadless;
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const o = r as any;
+      assert(!(o.success === true && o.listComplete === true),
+        `주소 없는 주문을 버리고 완료로 적었다: ${JSON.stringify(o)}`);
+      eq(venue.countOf(DEL, 'DELETE'), 0, '주소를 모르는데 취소를 보냈다');
+    });
+
+    // `closePosition`이 **빠진** TP/SL형 행 — 분할 익절(false)과 다르다.
+    const tpslNoFlag = await tpsl(
+      { json: [{ ...SL_ROW, closePosition: undefined }] }, { json: { code: 200 } });
+
+    test('★★ closePosition이 없는 손절형 행을 "기존 TP/SL 없음"으로 적지 않는다', () => {
+      const { r } = tpslNoFlag;
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const o = r as any;
+      assert(!(o.success === true && o.cancelled === 0),
+        `전량 여부를 모르는 손절형 행을 "없음"으로 적었다: ${JSON.stringify(o)}`);
+    });
+  }
+
+  // ══════════ ① 정상 접수 — 의도 기록이 전송보다 앞인가 ══════════
+  {
+    const db = new FakeDb();
+    const venue = baseVenue()
+      .on(BN_ORDER, { status: 400, json: { code: -2013, msg: 'Order does not exist.' } }, 'GET')
+      .on(BN_ORDER, { json: bnOrder({ status: 'NEW', executedQty: '0' }) }, 'POST');
+    const r = await scenario(venue, () => exec(db, {}));
+
+    test('★ 실행기가 실제로 돌고 의도를 먼저 기록한다', () => {
+      assert(!(r instanceof Error), `실행기가 던졌다: ${(r as any)?.message}`);
+      assert(venue.calls.length > 0, '거래소 호출이 하나도 없다 — 실행기가 안 돌았다');
+      const inserts = db.writes.filter((w) => w.kind === 'insert');
+      assert(inserts.length >= 1, '의도 기록(insert)이 없다');
+      eq(inserts[0].table, 'live_orders');
+      eq(inserts[0].patch.status, 'INTENT');
+      eq(inserts[0].patch.client_order_id, 'COID-1');
+      // 의도 기록이 **첫 쓰기**여야 한다. 전송 뒤에 적으면 응답을 못
+      // 받은 주문이 장부에 아예 없다.
+      eq(db.writes[0].patch.status, 'INTENT');
+    });
+
+    test('★ 미체결 접수를 장부에 FILLED로 적지 않는다 (실제 쓰기)', () => {
+      const row = db.table('live_orders')[0];
+      assert(row, '장부 줄이 없다');
+      assert(row.status !== 'FILLED', `미체결인데 장부에 ${row.status}가 적혔다`);
+      assert(row.filled_qty === 0 || row.filled_qty == null,
+        `체결 수량이 지어졌다: ${row.filled_qty}`);
+      assert(row.avg_price == null, `미체결인데 평균가가 적혔다: ${row.avg_price}`);
+      eq(venue.orderSends().length, 1);
+    });
+  }
+
+  // ══════════ ② 체결 — 증거가 있을 때만 FILLED ══════════
+  {
+    const db = new FakeDb();
+    const venue = baseVenue()
+      .on(BN_ORDER, { status: 400, json: { code: -2013, msg: 'Order does not exist.' } }, 'GET')
+      .on(BN_ORDER, { json: bnOrder({ status: 'FILLED', executedQty: '0.010', avgPrice: '95000' }) }, 'POST');
+    const r = await scenario(venue, () => exec(db, {}));
+
+    test('★ 체결 증거가 있으면 장부에 FILLED와 실제 수량이 적힌다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const row = db.table('live_orders')[0];
+      eq(row.status, 'FILLED');
+      eq(Number(row.filled_qty), 0.01);
+      eq(Number(row.avg_price), 95000);
+    });
+  }
+
+  // ══════════ ③ 상태는 FILLED인데 수량 증거가 없다 ══════════
+  {
+    const db = new FakeDb();
+    const venue = baseVenue()
+      .on(BN_ORDER, { status: 400, json: { code: -2013, msg: 'Order does not exist.' } }, 'GET')
+      .on(BN_ORDER, { json: { orderId: 7001, symbol: 'BTCUSDT', status: 'FILLED', origQty: '0.010' } }, 'POST');
+    const r = await scenario(venue, () => exec(db, {}));
+
+    test('★ 상태만 FILLED이고 수량이 없으면 체결로 적지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const row = db.table('live_orders')[0];
+      assert(row.status !== 'FILLED',
+        `수량 증거 없이 ${row.status}가 적혔다 — 거래소가 FILLED만 돌려준 경우다`);
+      // 요청 수량(origQty)으로 메우지 않는다.
+      assert(row.filled_qty == null || Number(row.filled_qty) === 0,
+        `요청 수량이 체결 수량으로 적혔다: ${row.filled_qty}`);
+    });
+  }
+
+  // ══════════ ④ 전송 후 응답 유실 (타임아웃) ══════════
+  {
+    const db = new FakeDb();
+    const venue = baseVenue()
+      .on(BN_ORDER, { status: 400, json: { code: -2013, msg: 'Order does not exist.' } }, 'GET')
+      .on(BN_ORDER, { timeout: true }, 'POST');
+    const r = await scenario(venue, () => exec(db, {}));
+
+    test('★ 전송 타임아웃을 UNKNOWN으로 적고 재전송하지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const row = db.table('live_orders')[0];
+      eq(row.status, 'UNKNOWN', `타임아웃인데 장부가 ${row.status}다`);
+      assert(row.status !== 'FAILED', 'FAILED로 적으면 재시도가 열린다');
+      eq(venue.orderSends().length, 1, `주문이 ${venue.orderSends().length}번 나갔다`);
+      eq((r as any).status, 'UNKNOWN');
+    });
+  }
+
+  // ══════════ ⑤ 같은 clientOrderId가 거래소에 이미 있다 ══════════
+  {
+    const db = new FakeDb();
+    const venue = baseVenue()
+      .on(BN_ORDER, { json: bnOrder({ status: 'NEW' }) }, 'GET')     // 중복 확인에서 발견
+      .on(BN_ORDER, { json: bnOrder() }, 'POST');
+    const r = await scenario(venue, () => exec(db, {}));
+
+    test('★ 이미 있는 주문은 재전송하지 않고, 열려 있으면 종료로 적지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 0, '이미 있는 주문을 다시 보냈다');
+      eq((r as any).duplicate, true);
+      const row = db.table('live_orders')[0];
+      eq(row.status, 'ACKED');
+      assert(row.status !== 'RECONCILED',
+        '거래소에 열려 있는데 장부에 RECONCILED(끝남)가 적혔다');
+      assert(row.reconciled_at == null, '끝나지 않은 주문에 종료 시각이 적혔다');
+    });
+  }
+
+  // ══════════ ⑥ 중복 확인 조회 실패 — 보내지 않는다 ══════════
+  {
+    const db = new FakeDb();
+    const venue = baseVenue()
+      .on(BN_ORDER, { status: 503, json: { code: -1000, msg: 'Service unavailable' } }, 'GET')
+      .on(BN_ORDER, { json: bnOrder() }, 'POST');
+    const r = await scenario(venue, () => exec(db, {}));
+
+    test('★ 중복 확인에 실패하면 주문하지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 0,
+        '중복 확인 실패인데 주문을 보냈다 — 레이트리밋 한 번이 중복 체결이 된다');
+      eq((r as any).ok, false);
+    });
+  }
+
+  // ══════════ ⑦ DB 선점 실패 — 거래소에 아예 보내지 않는다 ══════════
+  {
+    const db = new FakeDb({ failUpdatesOn: 'live_orders' });
+    const venue = baseVenue()
+      .on(BN_ORDER, { status: 400, json: { code: -2013, msg: 'Order does not exist.' } }, 'GET')
+      .on(BN_ORDER, { json: bnOrder({ status: 'FILLED', executedQty: '0.010', avgPrice: '95000' }) }, 'POST');
+    const r = await scenario(venue, () => exec(db, {}));
+
+    test('★ SENT 선점 DB 오류에서는 신규 주문도 POST하지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 0, 'SENT 기록 실패인데 거래소에 전송했다');
+      eq((r as any).ok, false);
+      eq((r as any).status, 'UNKNOWN');
+      eq(db.table('live_orders')[0].status, 'INTENT');
+    });
+  }
+
+
+  // ══════════ ⑦-b 전송 뒤 ACK 기록 실패는 주문을 재전송하지 않고 경고 ══════════
+  for (const mode of ['error', 'zero-rows', 'throw'] as const) {
+    const db = new FakeDb({ failAckUpdate: mode });
+    const venue = baseVenue()
+      .on(BN_ORDER, { status: 400, json: { code: -2013, msg: 'Order does not exist.' } }, 'GET')
+      .on(BN_ORDER, { json: bnOrder({ status: 'NEW', executedQty: '0' }) }, 'POST');
+    const r = await scenario(venue, () => exec(db, { clientOrderId: `ACK-FAULT-${mode}` }));
+
+    test(`★ Binance ACK 장부 ${mode} 실패는 POST 1회 유지·대조 경고`, () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 1, 'ACK 기록 실패를 이유로 재전송해서는 안 된다');
+      const row = db.table('live_orders')[0];
+      eq(row?.status, 'SENT', 'ACK 기록 실패인데 DB 상태가 전진했다');
+      assert(/장부에 기록하지 못했습니다/.test(String((r as any).message)),
+        `ACK 기록 실패가 호출자에게 표시되지 않았다: ${(r as any).message}`);
+      assert((r as any).status !== 'FAILED' && (r as any).status !== 'REJECTED',
+        '이미 거래소에 전송한 주문을 실패·거부로 단정했다');
+    });
+  }
+
+  // ══════════ ⑧ 장부 유니크 충돌 — 같은 키 재사용 ══════════
+  {
+    const db = new FakeDb({ failInsertCode: { table: 'live_orders', code: '23505' } })
+      .seed('live_orders', [{
+        id: 'prev-1', client_order_id: 'COID-1', status: 'ACKED',
+        filled_qty: 0, avg_price: null, quantity: 0.01, symbol: 'BTCUSDT',
+      }]);
+    const venue = baseVenue()
+      .on(BN_ORDER, { json: bnOrder() }, 'GET')
+      .on(BN_ORDER, { json: bnOrder() }, 'POST');
+    const r = await scenario(venue, () => exec(db, {}));
+
+    test('★ 같은 clientOrderId로 두 번 부르면 거래소에 가지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 0, '멱등 키가 겹쳤는데 주문이 또 나갔다');
+      eq((r as any).duplicate, true);
+      // 기존 줄의 상태를 그대로 돌려준다 — 지어내지 않는다.
+      eq((r as any).status, 'ACKED');
+    });
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// 대조(reconcile) 경로 — 실제 `reconcilePendingOrders`를 돌린다
+// ══════════════════════════════════════════════════════════════════
+
+/** 장부에 남아 있는 미확정/접수 줄 하나 */
+const pendingRow = (over: Record<string, any> = {}) => ({
+  id: 'ord-1', client_order_id: 'COID-R1', symbol: 'BTCUSDT',
+  exchange: 'binance', mode: 'TESTNET', side: 'BUY', quantity: 0.01,
+  status: 'ACKED', filled_qty: 0, avg_price: null,
+  // 유예(5초)를 지난 시각 — 전송 직후가 아니다
+  sent_at: new Date(Date.now() - 10 * 60_000).toISOString(),
+  created_at: new Date(Date.now() - 10 * 60_000).toISOString(),
+  pos_qty_before: 0, resolve_attempts: 0, user_id: 'u1', connection_id: 'c1',
+  ...over,
+});
+
+async function reconcile(db: FakeDb, exchange: 'binance' | 'gate' = 'binance') {
+  return reconcilePendingOrders(db as any, {
+    exchange, apiKey: 'K'.repeat(64), apiSecret: 'S'.repeat(64),
+    testnet: true, userId: 'u1', connectionId: 'c1',
+  });
+}
+
+export async function runReconcileIntegrationTests() {
+  console.log('[통합 — 대조 경로 (실제 reconcilePendingOrders)]');
+
+  // ══════════ ① 부분 체결 후 취소 — 수량 보존 ══════════
+  {
+    const db = new FakeDb().seed('live_orders', [pendingRow()]);
+    const venue = baseVenue()
+      // 거래소: 부분 체결된 뒤 취소됐다. 채워진 수량은 **사실이다**
+      .on(BN_ORDER, { json: bnOrder({
+        status: 'CANCELED', executedQty: '0.004', avgPrice: '95100', origQty: '0.010',
+      }) }, 'GET');
+    const r = await scenario(venue, () => reconcile(db));
+
+    test('★ 부분 체결 후 취소 — 채워진 수량이 보존되고 종료로 적힌다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const row = db.row('live_orders', { id: 'ord-1' })!;
+      eq(row.status, 'RECONCILED', `취소인데 ${row.status}가 적혔다`);
+      eq(Number(row.filled_qty), 0.004, '채워진 수량이 사라졌다');
+      eq(Number(row.avg_price), 95100);
+      assert(row.reconciled_at != null, '종료인데 종료 시각이 없다');
+      // 체결로 단정하지 않는다 — 성과로 세지 않는다.
+      eq(row.status === 'FILLED', false);
+    });
+  }
+
+  // ══════════ ② 조회 실패 후 복구 ══════════
+  {
+    const db = new FakeDb().seed('live_orders', [pendingRow()]);
+    const venue = baseVenue()
+      .on(BN_ORDER, { status: 503, json: { code: -1001, msg: 'Internal error' } }, 'GET');
+    const first = await scenario(venue, () => reconcile(db));
+
+    test('★ 조회 실패에서는 아무것도 확정하지 않는다', () => {
+      assert(!(first instanceof Error), String((first as any)?.message));
+      const row = db.row('live_orders', { id: 'ord-1' })!;
+      eq(row.status, 'UNKNOWN', `조회 실패인데 ${row.status}로 확정됐다`);
+      assert(row.reconciled_at == null, '확정하지 않았는데 종료 시각이 적혔다');
+      eq((first as any).resolved, 0);
+    });
+
+    // 같은 줄을 다시 대조한다 — 이번엔 거래소가 답한다.
+    const venue2 = baseVenue()
+      .on(BN_ORDER, { json: bnOrder({
+        status: 'FILLED', executedQty: '0.010', avgPrice: '95000',
+      }) }, 'GET');
+    const second = await scenario(venue2, () => reconcile(db));
+
+    test('★ 다음 대조에서 복구된다 — 그 사이 주문을 다시 보내지 않는다', () => {
+      assert(!(second instanceof Error), String((second as any)?.message));
+      const row = db.row('live_orders', { id: 'ord-1' })!;
+      eq(row.status, 'FILLED');
+      eq(Number(row.filled_qty), 0.01);
+      // 대조는 **조회만** 한다. 주문 전송이 한 건도 없어야 한다.
+      eq(venue.orderSends().length, 0, '대조가 주문을 보냈다');
+      eq(venue2.orderSends().length, 0, '대조가 주문을 보냈다');
+    });
+  }
+
+  // ══════════ ③ ACKED 이후 서버 재시작 ══════════
+  {
+    // 재시작 = 메모리 상태 전부 날아감. 장부에 ACKED 줄만 남아 있다.
+    const db = new FakeDb().seed('live_orders', [pendingRow({ status: 'ACKED' })]);
+    const venue = baseVenue()
+      .on(BN_ORDER, { json: bnOrder({ status: 'NEW', executedQty: '0' }) }, 'GET');
+    const r = await scenario(venue, () => reconcile(db));
+
+    test('★ 재시작 뒤 ACKED 줄이 실제로 대조된다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq((r as any).checked, 1, 'ACKED 줄이 대조 대상에 안 들어왔다');
+      assert(venue.countOf(BN_ORDER, 'GET') >= 1, '거래소에 묻지 않았다');
+    });
+
+    test('★ 거래소에 아직 열려 있으면 종료로 적지 않는다 (실제 쓰기)', () => {
+      const row = db.row('live_orders', { id: 'ord-1' })!;
+      eq(row.status, 'ACKED');
+      assert(row.reconciled_at == null, '열려 있는 주문에 종료 시각이 적혔다');
+      eq((r as any).stillOpen, 1, '열린 주문으로 세지 않았다');
+      eq((r as any).resolved, 0);
+    });
+  }
+
+  // ══════════ ④ 타임아웃 뒤 실제로는 체결됐다 ══════════
+  {
+    // ①에서 타임아웃으로 UNKNOWN이 된 줄. 거래소에는 체결돼 있다.
+    const db = new FakeDb().seed('live_orders', [pendingRow({ status: 'UNKNOWN' })]);
+    const venue = baseVenue()
+      .on(BN_ORDER, { json: bnOrder({
+        status: 'FILLED', executedQty: '0.010', avgPrice: '95000',
+      }) }, 'GET');
+    const r = await scenario(venue, () => reconcile(db));
+
+    test('★ 타임아웃 뒤 체결된 주문을 재전송 없이 복구한다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const row = db.row('live_orders', { id: 'ord-1' })!;
+      eq(row.status, 'FILLED');
+      eq(Number(row.filled_qty), 0.01);
+      eq(venue.orderSends().length, 0, '복구가 주문을 다시 보냈다 — 중복 체결이다');
+      eq((r as any).resolved, 1);
+    });
+  }
+
+  // ══════════ ⑤ 주문 미발견 + 유예 경과 → RECONCILED ══════════
+  {
+    const db = new FakeDb().seed('live_orders', [pendingRow({ status: 'ACKED' })]);
+    const venue = baseVenue()
+      .on(BN_ORDER, { status: 400, json: { code: -2013, msg: 'Order does not exist.' } }, 'GET')
+      .on(BN_POS, { json: [{ symbol: 'BTCUSDT', positionAmt: '0', entryPrice: '0',
+        leverage: '100', marginType: 'isolated', liquidationPrice: '0' }] });
+    const r = await scenario(venue, () => reconcile(db));
+
+    test('★ 미발견 + 유예 경과는 RECONCILED이고 체결로 단정하지 않는다', async () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const row = db.row('live_orders', { id: 'ord-1' })!;
+      eq(row.status, 'RECONCILED');
+      eq(isProvenFill(row), false, 'RECONCILED가 체결 증거로 쓰였다');
+    });
+  }
+
+  // ══════════ ⑤-b 실제 대조 → 손절 재부착 → -4120 대체 전송 ══════════
+  {
+    // 처음 부착되지 않은 ACKED 진입이 뒤늦게 FILLED로 확인된다.
+    // 대조 자체가 실행기의 attachStopIfMissing을 호출해야 한다.
+    const SYM = 'PRECLREATTUSDT';
+    const db = new FakeDb().seed('live_orders', [pendingRow({
+      symbol: SYM, stop_policy: 'FIXED_SL', stop_loss: 58920.981,
+      sl_order_id: null, reduce_only: false,
+    })]);
+    const venue = new FakeVenue()
+      .on(BN_POS, { json: [{ symbol: SYM, positionAmt: '0.0033333333333333335',
+        entryPrice: '60000', leverage: '100', marginType: 'isolated', liquidationPrice: '57000' }] })
+      .on(BN_ORDER, { json: bnOrder({ symbol: SYM, status: 'FILLED',
+        executedQty: '0.0033333333333333335', origQty: '0.010', avgPrice: '60000' }) }, 'GET')
+      .on(BN_EXINFO, { json: { symbols: [{ symbol: SYM, filters: [
+        { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001', maxQty: '100' },
+        { filterType: 'MARKET_LOT_SIZE', stepSize: '0', minQty: '0', maxQty: '0' },
+        { filterType: 'PRICE_FILTER', tickSize: '0.1' },
+      ] }] } })
+      .onParams(BN_ORDER, 'POST', { type: 'STOP_MARKET', closePosition: 'true' },
+        { status: 400, json: { code: -4120, msg: 'not supported for this endpoint' } })
+      .onParams(BN_ORDER, 'POST', { type: 'STOP_MARKET', reduceOnly: 'true' },
+        { json: bnOrder({ symbol: SYM, orderId: 9501 }) });
+    const result = await scenario(venue, () => reconcile(db));
+
+    test('★ 대조에서 복구한 LONG 손절은 아래 틱 58920.9, 대체 수량은 0.003', () => {
+      assert(!(result instanceof Error), String((result as any)?.message));
+      eq((result as any).resolved, 1, '체결 주문을 대조하지 못했다');
+      const stopCalls = venue.orderSends().filter(c => c.params.type === 'STOP_MARKET');
+      eq(stopCalls.length, 2, 'closePosition 실패 후 대체 주문 경로가 돌지 않았다');
+      eq(stopCalls[0].params.stopPrice, '58920.9');
+      eq(stopCalls[0].params.closePosition, 'true');
+      eq(stopCalls[1].params.stopPrice, '58920.9');
+      eq(stopCalls[1].params.quantity, '0.003');
+      eq(stopCalls[1].params.reduceOnly, 'true');
+      eq(db.row('live_orders', { id: 'ord-1' })?.sl_order_id, '9501');
+    });
+  }
+
+  // ══════════ ⑤-c NO_FIXED_SL 계약은 대조에서도 손절을 걸지 않는다 ══════════
+  {
+    const SYM = 'PRECMREATTUSDT';
+    const db = new FakeDb().seed('live_orders', [pendingRow({
+      symbol: SYM, stop_policy: 'NO_FIXED_SL', stop_loss: 58920.981,
+      sl_order_id: null, reduce_only: false,
+    })]);
+    const venue = new FakeVenue()
+      .on(BN_POS, { json: [{ symbol: SYM, positionAmt: '0.003',
+        entryPrice: '60000', leverage: '100', marginType: 'isolated', liquidationPrice: '57000' }] })
+      .on(BN_ORDER, { json: bnOrder({ symbol: SYM, status: 'FILLED',
+        executedQty: '0.003', avgPrice: '60000' }) }, 'GET');
+    const result = await scenario(venue, () => reconcile(db));
+    test('★ NO_FIXED_SL 회차는 손절가가 기록돼도 복구 주문 0건', () => {
+      assert(!(result instanceof Error), String((result as any)?.message));
+      eq((result as any).resolved, 1);
+      eq(venue.orderSends().length, 0, 'NO_FIXED_SL인데 복구가 STOP_MARKET을 보냈다');
+      assert((result as any).details.some((d: string) => d.includes('고정 손절을 쓰지 않는')),
+        '정책에 따른 의도적 미부착 이유가 누락됐다');
+    });
+  }
+
+  // ══════════ ⑥ Gate 선물 상태 어휘 ══════════
+  {
+    const db = new FakeDb().seed('live_orders', [
+      pendingRow({ exchange: 'gate', symbol: 'BTCUSDT', status: 'ACKED' }),
+    ]);
+    const venue = new FakeVenue()
+      // Gate는 open/finished 두 묶음을 각각 조회한다
+      .on('/api/v4/futures/usdt/orders', { json: (i: number) => (i === 0
+        // status=open: 아직 열려 있는 주문으로 발견된다
+        ? [{ id: 9001, contract: 'BTC_USDT', size: 1, price: '0', status: 'open',
+             text: 't-COID-R1', left: 1 }]
+        : []) }, 'GET')
+      .on('/api/v4/futures/usdt/positions', { json: [] });
+    const r = await scenario(venue, () => reconcile(db, 'gate'));
+
+    test('★ Gate의 open을 "열려 있음"으로 읽는다 (NEW를 지어내지 않는다)', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const row = db.row('live_orders', { id: 'ord-1' })!;
+      eq(row.status, 'ACKED', `Gate open인데 ${row.status}가 적혔다`);
+      assert(row.reconciled_at == null, '열려 있는데 종료 시각이 적혔다');
+      eq((r as any).stillOpen, 1);
+    });
+  }
+
+  // ══════════ ⑦ Gate 선물 — finished/filled ══════════
+  {
+    const db = new FakeDb().seed('live_orders', [
+      pendingRow({ exchange: 'gate', status: 'ACKED' }),
+    ]);
+    const venue = new FakeVenue()
+      .on('/api/v4/futures/usdt/orders', { json: (i: number) => (i === 0
+        ? []
+        : [{ id: 9002, contract: 'BTC_USDT', size: 2, price: '0', status: 'finished',
+             finish_as: 'filled', text: 't-COID-R1', left: 0, fill_price: '95000' }]) }, 'GET')
+      .on('/api/v4/futures/usdt/positions', { json: [] });
+    const r = await scenario(venue, () => reconcile(db, 'gate'));
+
+    test('★ Gate finished/filled은 수량 증거와 함께 체결로 적힌다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const row = db.row('live_orders', { id: 'ord-1' })!;
+      eq(row.status, 'FILLED');
+      eq(Number(row.filled_qty), 2);
+      eq(Number(row.avg_price), 95000);
+      assert(row.reconciled_at != null);
+    });
+  }
+
+  // ══════════ ⑧ Gate 선물 — ioc 미체결 ══════════
+  {
+    const db = new FakeDb().seed('live_orders', [
+      pendingRow({ exchange: 'gate', status: 'ACKED' }),
+    ]);
+    const venue = new FakeVenue()
+      .on('/api/v4/futures/usdt/orders', { json: (i: number) => (i === 0
+        ? []
+        : [{ id: 9003, contract: 'BTC_USDT', size: 2, price: '0', status: 'finished',
+             finish_as: 'ioc', text: 't-COID-R1', left: 2 }]) }, 'GET')
+      .on('/api/v4/futures/usdt/positions', { json: [] });
+    const r = await scenario(venue, () => reconcile(db, 'gate'));
+
+    test('★ Gate ioc 미체결은 끝났지만 체결도 거부도 아니다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const row = db.row('live_orders', { id: 'ord-1' })!;
+      eq(row.status, 'RECONCILED');
+      eq(Number(row.filled_qty), 0, '체결 0이 사실인데 적히지 않았다');
+      assert(row.status !== 'FAILED', 'FAILED는 재시도가 열리는 상태다');
+      assert(row.status !== 'FILLED');
+    });
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// 현물 경로 — 실제 `placeSpotOrder`를 돌린다 (DB 쓰기까지)
+// ══════════════════════════════════════════════════════════════════
+
+/** 암호화된 시크릿이 담긴 연결 줄. 실행기가 실제 복호화를 거친다 */
+async function connRow(exchange: 'binance' | 'gate') {
+  return {
+    id: 'c1', user_id: 'u1', exchange_id: exchange,
+    api_key: 'K'.repeat(64),
+    api_secret_enc: encryptSecret('S'.repeat(64)),
+    has_withdrawal: false, is_testnet: true,
+  };
+}
+
+const SPOT_ORDER = '/api/v3/order';
+const SPOT_EXINFO = '/api/v3/exchangeInfo';
+const SPOT_ACCOUNT = '/api/v3/account';
+
+export async function runSpotIntegrationTests() {
+  console.log('[통합 — 현물 경로 (실제 placeSpotOrder · DB 쓰기)]');
+
+  // ══════════ ① 바이낸스 현물 지정가 대기 — 체결로 적지 않는다 ══════════
+  {
+    const unenv = withCryptoEnv();
+    const db = new FakeDb().seed('exchange_connections', [await connRow('binance')]);
+    unenv();
+    const venue = new FakeVenue()
+      .on(SPOT_EXINFO, { json: { symbols: [{
+        symbol: 'BTCUSDT', status: 'TRADING', baseAsset: 'BTC', quoteAsset: 'USDT',
+        filters: [
+          { filterType: 'LOT_SIZE', stepSize: '0.00001', minQty: '0.00001' },
+          { filterType: 'NOTIONAL', minNotional: '5' },
+          { filterType: 'PRICE_FILTER', tickSize: '0.01' },
+        ],
+      }] } })
+      .on(SPOT_ACCOUNT, { json: { balances: [
+        { asset: 'USDT', free: '10000', locked: '0' },
+        { asset: 'BTC', free: '1', locked: '0' },
+      ] } })
+      .on(SPOT_ORDER, { status: 400, json: { code: -2013, msg: 'Order does not exist.' } }, 'GET')
+      // 지정가 주문이 **대기**로 접수됐다: status NEW, 체결 0, fills 없음
+      .on(SPOT_ORDER, { json: {
+        orderId: 5001, symbol: 'BTCUSDT', status: 'NEW',
+        executedQty: '0.00000', origQty: '0.00100', price: '90000.00',
+        cummulativeQuoteQty: '0.00000', fills: [],
+      } }, 'POST');
+
+    const r = await scenario(venue, () => placeSpotOrder(db as any, {
+      userId: 'u1', connectionId: 'c1', symbol: 'BTCUSDT',
+      side: 'BUY', type: 'LIMIT', quantity: 0.001, price: 90000,
+    }));
+
+    test('★ 현물 지정가 대기 주문을 장부에 FILLED로 적지 않는다 (실제 쓰기)', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const rows = db.table('live_orders');
+      assert(rows.length > 0, '현물 장부 줄이 없다 — 실행기가 안 돌았다');
+      const row = rows[rows.length - 1];
+      assert(row.status !== 'FILLED', `대기 주문인데 장부에 ${row.status}가 적혔다`);
+      eq(row.status, 'ACKED');
+      // **지정가를 체결가로 적지 않는다.**
+      assert(row.avg_price == null, `지정가가 체결가로 적혔다: ${row.avg_price}`);
+      eq(Number(row.filled_qty), 0);
+      // 반환 상태와 장부 상태가 같아야 한다.
+      eq((r as any).status, row.status, '반환 상태와 장부 상태가 다르다');
+    });
+
+    test('★ 응답 문장이 체결됐다고 말하지 않는다', () => {
+      const msg = String((r as any)?.message ?? '');
+      assert(!/체결 /.test(msg) || /미확정/.test(msg),
+        `대기 주문인데 "체결"이라고 적혔다: ${msg}`);
+    });
+  }
+
+  // ══════════ ② 바이낸스 현물 즉시 체결 — 가중평균 ══════════
+  //
+  //   **시장가가 아니라 지정가 즉시 체결로 검증한다.** 시장가 경로는
+  //   `MARKET_LOT_SIZE` 격자를 실제로 적용해야 통과하는데, 이 하네스의
+  //   규격 픽스처로는 그 적용까지 재현하지 못했다(`ORDER_TYPE_GRID_UNKNOWN`
+  //   으로 막힌다 — 규격을 못 맞추면 신규 주문을 보내지 않는 쪽이 맞는
+  //   동작이다). 쓰기 경로·체결가 계산은 지정가와 **같은 코드**를 지난다.
+  //   시장가 현물 경로는 통합 계층 **미검증**으로 남긴다.
+  {
+    const unenv = withCryptoEnv();
+    const db = new FakeDb().seed('exchange_connections', [await connRow('binance')]);
+    unenv();
+    const venue = new FakeVenue()
+      .on(SPOT_EXINFO, { json: { symbols: [{
+        symbol: 'BTCUSDT', status: 'TRADING', baseAsset: 'BTC', quoteAsset: 'USDT',
+        filters: [
+          { filterType: 'LOT_SIZE', stepSize: '0.00001', minQty: '0.00001', maxQty: '9000' },
+          { filterType: 'MARKET_LOT_SIZE', stepSize: '0.00001', minQty: '0.00001', maxQty: '100' },
+          { filterType: 'NOTIONAL', minNotional: '5' },
+          { filterType: 'PRICE_FILTER', tickSize: '0.01' },
+        ],
+      }] } })
+      .on(SPOT_ACCOUNT, { json: { balances: [
+        { asset: 'USDT', free: '10000', locked: '0' },
+        { asset: 'BTC', free: '1', locked: '0' },
+      ] } })
+      .on(SPOT_ORDER, { status: 400, json: { code: -2013, msg: 'Order does not exist.' } }, 'GET')
+      .on(SPOT_ORDER, { json: {
+        orderId: 5002, symbol: 'BTCUSDT', status: 'FILLED',
+        executedQty: '0.00300', origQty: '0.00300', price: '95500.00',
+        cummulativeQuoteQty: '285.00',
+        // 쪼개 체결: 첫 조각 가격(94000)이 평균가가 되면 안 된다
+        fills: [{ qty: '0.00100', price: '94000' }, { qty: '0.00200', price: '95500' }],
+      } }, 'POST');
+
+    const r = await scenario(venue, () => placeSpotOrder(db as any, {
+      userId: 'u1', connectionId: 'c1', symbol: 'BTCUSDT',
+      side: 'BUY', type: 'LIMIT', quantity: 0.003, price: 95500,
+    }));
+
+    test('★ 현물 체결가는 가중평균이고 첫 조각 가격이 아니다 (실제 쓰기)', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const rows = db.table('live_orders');
+      const row = rows[rows.length - 1];
+      eq(row.status, 'FILLED');
+      eq(Number(row.filled_qty), 0.003);
+      // (0.001·94000 + 0.002·95500) / 0.003 = 95000
+      eq(Number(row.avg_price), 95000);
+      assert(Number(row.avg_price) !== 94000, '첫 조각 가격이 평균가로 적혔다');
+      eq((r as any).status, row.status, '반환 상태와 장부 상태가 다르다');
+    });
+  }
+
+  // ══════════ ③ Gate 현물 IOC 미체결 — 장부와 응답이 같은 답 ══════════
+  {
+    const unenv = withCryptoEnv();
+    const db = new FakeDb().seed('exchange_connections', [await connRow('gate')]);
+    unenv();
+    const venue = new FakeVenue()
+      .on('/api/v4/spot/currency_pairs/BTC_USDT', { json: {
+        id: 'BTC_USDT', trade_status: 'tradable',
+        amount_precision: 5, precision: 2, min_base_amount: '0.0001', min_quote_amount: '1',
+      } })
+      .on('/api/v4/spot/accounts', { json: [
+        { currency: 'USDT', available: '10000', locked: '0' },
+        { currency: 'BTC', available: '1', locked: '0' },
+      ] })
+      // 단건 조회(`/orders/<text>`)는 목록 조회와 경로가 겹친다. 먼저
+      // 등록해 404(ORDER_NOT_FOUND)로 답한다 — 중복이 **없는** 상황이다.
+      .on('/api/v4/spot/orders/', { status: 404, json: { label: 'ORDER_NOT_FOUND' } }, 'GET')
+      .on('/api/v4/spot/orders', { json: [] }, 'GET')
+      // 시장가 IOC가 **한 개도 안 붙고** 끝났다
+      .on('/api/v4/spot/orders', { json: {
+        id: '7001', currency_pair: 'BTC_USDT', status: 'cancelled',
+        amount: '0.003', left: '0.003', filled_total: '0', avg_deal_price: '0',
+        text: 't-SPOT-1',
+      } }, 'POST');
+
+    const r = await scenario(venue, () => placeSpotOrder(db as any, {
+      userId: 'u1', connectionId: 'c1', symbol: 'BTCUSDT',
+      side: 'BUY', type: 'MARKET', quantity: 0.003,
+    }));
+
+    test('★ Gate 현물 미체결에서 장부와 응답이 같은 답을 적는다 (실제 쓰기)', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const rows = db.table('live_orders');
+      assert(rows.length > 0, 'Gate 현물 장부 줄이 없다 — 실행기가 안 돌았다');
+      const row = rows[rows.length - 1];
+      assert(row.status !== 'FILLED', `미체결인데 장부에 ${row.status}가 적혔다`);
+      // 장부와 반환이 **같아야** 한다 — 예전에는 장부 FILLED / 응답 REJECTED였다.
+      eq((r as any).status, row.status,
+        `장부(${row.status})와 반환(${(r as any).status})이 다르다`);
+    });
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// 청산 경로 — 실제 `closeSymbolPosition`을 돌린다 (거래소 전송까지)
+// ══════════════════════════════════════════════════════════════════
+
+export async function runCloseIntegrationTests() {
+  console.log('[통합 — 청산 경로 (실제 closeSymbolPosition)]');
+
+  const creds = {
+    exchange: 'binance' as const, apiKey: 'K'.repeat(64),
+    apiSecret: 'S'.repeat(64), testnet: true,
+  };
+
+  /** 포지션이 열려 있는 계좌 */
+  function openPositionVenue(): FakeVenue {
+    return new FakeVenue()
+      .on(BN_DUAL, { json: { dualSidePosition: false } })
+      .on(BN_POS, { json: [{ symbol: 'BTCUSDT', positionAmt: '0.010', entryPrice: '95000',
+        leverage: '100', marginType: 'isolated', liquidationPrice: '94000', markPrice: '95000' }] })
+      .on(BN_EXINFO, { json: { symbols: [{ symbol: 'BTCUSDT', filters: [
+        { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001' },
+        { filterType: 'MIN_NOTIONAL', notional: '5' },
+      ] }] } })
+      .on(BN_ORDER, { json: bnOrder({ status: 'FILLED', executedQty: '0.010', avgPrice: '95050' }) }, 'POST');
+  }
+
+  // ══════════ ① 동일 포지션 동시 청산 — 전송 1회 ══════════
+  {
+    const venue = openPositionVenue();
+    // 두 실행자가 **같은 순간** 같은 포지션을 닫으려 한다. 임차는 하나다.
+    const lease = { holder: 'A' as string | null };
+    const r = await scenario(venue, async () => {
+      const { closeSymbolPosition } = await import('@/lib/engine/venuePositionOps');
+      const { applyLifecycleClose } = await import('@/lib/engine/lifecycleAction');
+      const runner = (who: string) => applyLifecycleClose({
+        stillMine: async () => lease.holder === who,
+        // **실제 청산 전송**이다 — 거래소 어댑터를 지난다.
+        close: () => closeSymbolPosition(creds, 'BTCUSDT', 'LONG'),
+        readAfter: async () => {
+          const { readOpenPosition } = await import('@/lib/engine/venuePositionOps');
+          const p = await readOpenPosition(creds, 'BTCUSDT');
+          return { ok: p.ok, found: p.found };
+        },
+      });
+      return Promise.all([runner('A'), runner('B')]);
+    });
+
+    test('★ 동시 청산에서 거래소 전송은 최대 1회다 (실제 전송 경로)', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const sends = venue.orderSends().length;
+      assert(sends <= 1, `청산 주문이 ${sends}번 나갔다 — 반대 포지션이 열린다`);
+      const [a, b] = r as any[];
+      eq(b.code, 'LEASE_LOST');
+      eq(b.attempted, false, '권한이 없는데 주문을 보냈다');
+      assert(a.code === 'CLOSED_VERIFIED' || a.code === 'CLOSE_INCOMPLETE'
+        || a.code === 'CLOSE_UNVERIFIED', `임차 보유자의 결과가 ${a.code}다`);
+    });
+  }
+
+  // ══════════ ② 청산 전송 타임아웃 — 거부로 적지 않는다 ══════════
+  {
+    const venue = openPositionVenue();
+    // 전송만 타임아웃. 주문은 거래소에 들어갔을 수 있다.
+    (venue as any).rules.unshift({
+      label: 'timeout-order',
+      match: (c: any) => c.method === 'POST' && c.path.includes('/fapi/v1/order'),
+      reply: { timeout: true },
+    });
+    const r = await scenario(venue, async () => {
+      const { closeSymbolPosition } = await import('@/lib/engine/venuePositionOps');
+      return closeSymbolPosition(creds, 'BTCUSDT', 'LONG');
+    });
+
+    test('★ 청산 전송 타임아웃을 "거부"로 적지 않는다 (실제 전송 경로)', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const v = r as any;
+      eq(v.ok, false);
+      eq(v.ambiguous, true,
+        '타임아웃을 거부로 단정하면 안 나간 것으로 읽혀 같은 자리에 또 보낸다');
+      eq(venue.orderSends().length, 1);
+    });
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// 상태 전이 거부가 **감지되는가**
+// ══════════════════════════════════════════════════════════════════
+
+export async function runTransitionIntegrationTests() {
+  console.log('[통합 — 상태 전이 거부 감지]');
+
+  // 거래소에 이미 주문이 있는 경로는 장부 줄이 INTENT인 상태에서
+  // ACKED로 가야 한다. 상태 기계가 그 전이를 거부하면 예전에는 **status만
+  // 조용히 빠지고** 나머지가 적혔다 — 장부는 INTENT, 반환은 ACKED였다.
+  {
+    const db = new FakeDb();
+    const venue = baseVenue()
+      .on(BN_ORDER, { json: bnOrder({ status: 'NEW' }) }, 'GET')
+      .on(BN_ORDER, { json: bnOrder() }, 'POST');
+    const r = await scenario(venue, () => exec(db, {}));
+
+    test('★ 반환 상태와 장부 상태가 일치한다 (멱등 중복 경로)', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const row = db.table('live_orders')[0];
+      eq((r as any).status, row.status,
+        `반환(${(r as any).status})과 장부(${row.status})가 다르다`);
+      // 전이가 실제로 적용됐다 — 조용히 버려지지 않았다.
+      eq(row.status, 'ACKED');
+      // SENT을 먼저 적은 사실이 쓰기 기록에 남아야 한다 (전이 경로의 증거).
+      const statuses = db.writes.filter((w) => w.patch.status).map((w) => w.patch.status);
+      assert(statuses.includes('SENT'),
+        `전이 경로가 SENT을 거치지 않았다: ${statuses.join(' → ')}`);
+      assert(statuses.includes('ACKED'),
+        `ACKED가 적히지 않았다: ${statuses.join(' → ')}`);
+    });
+  }
+
+  // 체결까지 간 경로도 같다.
+  {
+    const db = new FakeDb();
+    const venue = baseVenue()
+      .on(BN_ORDER, { json: bnOrder({
+        status: 'FILLED', executedQty: '0.010', avgPrice: '95000',
+      }) }, 'GET')
+      .on(BN_ORDER, { json: bnOrder() }, 'POST');
+    const r = await scenario(venue, () => exec(db, {}));
+
+    test('★ 이미 체결된 중복 주문도 장부와 반환이 일치한다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const row = db.table('live_orders')[0];
+      eq((r as any).status, row.status,
+        `반환(${(r as any).status})과 장부(${row.status})가 다르다`);
+      eq(row.status, 'FILLED');
+      eq(Number(row.filled_qty), 0.01);
+      eq(venue.orderSends().length, 0, '이미 체결된 주문을 또 보냈다');
+    });
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// COIN-M 라우트 — 실제 라우트 핸들러를 돌린다 (DB 쓰기까지)
+// ══════════════════════════════════════════════════════════════════
+//
+// 이 자리가 "정적 검사기 한 겹"에만 의존하던 대표 사례다. 라우트는
+// `getSupabaseAdmin`을 **정적으로** 가져오므로, 모듈을 불러오기 전에
+// `require.cache`에 가짜를 심고 그 뒤에 라우트를 불러온다. 그러면
+// 라우트 본문·어댑터·장부 쓰기가 전부 실제로 돈다.
+
+declare const require: any;
+
+const DAPI_ORDER = '/dapi/v1/order';
+
+function fakeRequest(body: any): any {
+  const headers = new Map<string, string>([['authorization', 'Bearer t']]);
+  return {
+    json: async () => body,
+    headers: { get: (k: string) => headers.get(k.toLowerCase()) ?? null },
+  };
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Gate 직접 TPSL 라우트 — **기존 보호주문을 읽고 판단하는가**
+// ══════════════════════════════════════════════════════════════════
+//
+// 검사기는 모양을 세고, 이것은 **행동**을 센다. 둘은 서로 대체하지
+// 않는다(검수 조건 그대로다).
+//
+// 예전 Gate 분기는 `futuresCancelProtection`으로 계약의 조건부 주문을
+// **전부** 지웠다(Cancel All · 절대 규칙 위반) + 그 결과를 보지 않고
+// 새 주문을 걸었다. 지금은 **읽고 판단한다**:
+//
+//   못 읽음(null) → 502 거절 · 새 주문 0
+//   하나라도 있음 → 502 거절 · 새 주문 0
+//   비어 있음     → 그대로 건다
+export async function runGateTpslRouteTests() {
+  console.log('[통합 — Gate 직접 TPSL 라우트 (실제 핸들러)]');
+
+  const adminPath = require.resolve('../../lib/supabase/admin');
+  const routePath = require.resolve('../../app/api/binance/futures/tpsl/route');
+
+  function loadRoute(db: FakeDb) {
+    const prev = require.cache[adminPath];
+    require.cache[adminPath] = {
+      id: adminPath, filename: adminPath, loaded: true, exports: {
+        getSupabaseAdmin: () => db,
+        resolveUserId: async () => 'u1',
+        getUserIdFromRequest: async () => 'u1',
+      },
+    } as any;
+    delete require.cache[routePath];
+    const mod = require(routePath);
+    return {
+      POST: mod.POST as (req: any) => Promise<any>,
+      restore: () => {
+        delete require.cache[routePath];
+        if (prev) require.cache[adminPath] = prev; else delete require.cache[adminPath];
+      },
+    };
+  }
+
+  const PRICE_ORDERS = '/api/v4/futures/usdt/price_orders';
+  const BODY = {
+    connectionId: 'g1', symbol: 'BTCUSDT', positionSide: 'LONG', slPrice: 90000,
+  };
+
+  async function run(priceOrdersReply: any) {
+    const unenv = withCryptoEnv();
+    const db = new FakeDb().seed('exchange_connections', [{
+      id: 'g1', user_id: 'u1', exchange_id: 'gate',
+      api_key: 'K'.repeat(64), api_secret_enc: encryptSecret('S'.repeat(64)),
+      has_withdrawal: false, is_testnet: true, perm_trading: true, is_active: true,
+    }]);
+    unenv();
+    const venue = new FakeVenue()
+      .on('/api/v4/futures/usdt/positions/BTC_USDT', { json: {
+        contract: 'BTC_USDT', size: 1, entry_price: '95000', mark_price: '95000',
+        liq_price: '85000', leverage: '10', mode: 'single',
+      } }, 'GET')
+      // 기준가(마크)를 못 읽으면 라우트가 Gate 분기 **앞에서** 멈춘다.
+      // 처음에 이걸 빼먹어서 세 시험이 전부 **거짓 초록**이었다 —
+      // 변이 확인(옛 동작 복원)에서 똑같이 통과해 들통났다.
+      .on('/api/v4/futures/usdt/tickers', { json: [{
+        contract: 'BTC_USDT', mark_price: '95000', last: '95000',
+      }] }, 'GET')
+      .on('/api/v4/futures/usdt/contracts/BTC_USDT', { json: {
+        name: 'BTC_USDT', quanto_multiplier: '0.0001', order_size_min: 1,
+        order_size_max: 1000000, order_price_round: '0.1', mark_price: '95000',
+      } }, 'GET')
+      .on(PRICE_ORDERS, priceOrdersReply, 'GET')
+      .on(PRICE_ORDERS, { json: { id: 123 } }, 'POST')
+      .on(PRICE_ORDERS, { json: [] }, 'DELETE');
+    const r = await scenario(venue, async () => {
+      const { POST, restore } = loadRoute(db);
+      try {
+        const res = await POST(fakeRequest(BODY));
+        return { status: res.status ?? 200, body: await res.json() };
+      } finally { restore(); }
+    });
+    return { r, venue };
+  }
+
+  const unreadable = await run({ status: 503, json: { label: 'SERVICE_UNAVAILABLE' } });
+  // ── HTTP **200인데 본문이 목록이 아닌** 경우 ──
+  //
+  //   `getPriceOrdersGateFutures`는 `Array.isArray(rows) ? rows : []`다.
+  //   200에 `{label:'UNKNOWN'}`·`null`·빈 본문이 오면 **빈 목록이
+  //   "기존 보호주문 없음"으로 확정**되고 새 보호주문이 나간다.
+  //   503은 throw되어 막히지만 이 길은 막히지 않는다.
+  //
+  //   같은 파일의 `getAllPriceOrdersGateFutures`는 이미 비배열을
+  //   `null`로 돌려준다 — 선례가 옆에 있는데 이 함수만 빠져 있었다.
+  const bad200 = await run({ json: { label: 'UNKNOWN' } });
+  const null200 = await run({ json: null });
+  const existing = await run({ json: [{ id: 7, contract: 'BTC_USDT', rule: 1, trigger: {} }] });
+  const empty = await run({ json: [] });
+
+  test('★★ Gate: 기존 보호주문을 못 읽으면 새 주문을 보내지 않는다', () => {
+    const { r, venue } = unreadable;
+    assert(!(r instanceof Error), String((r as any)?.message));
+    const b = (r as any).body;
+    assert(b?.ok !== true, `못 읽었는데 성공으로 적었다: ${JSON.stringify(b).slice(0, 220)}`);
+    assert(b?.executed !== true, '못 읽었는데 executed:true다');
+    eq(b?.error, 'gate_protective_lookup_failed',
+      `사유가 '못 읽음'이 아니다: ${JSON.stringify(b).slice(0, 220)}`);
+    eq((r as any).status, 502);
+    eq(venue.countOf(PRICE_ORDERS, 'POST'), 0, '못 읽었는데 새 보호주문을 보냈다');
+    eq(venue.countOf(PRICE_ORDERS, 'DELETE'), 0, '일괄 취소를 보냈다');
+  });
+
+  test('★★ Gate: 기존 보호주문이 있으면 겹쳐 걸지 않고 지우지도 않는다', () => {
+    const { r, venue } = existing;
+    assert(!(r instanceof Error), String((r as any)?.message));
+    const b = (r as any).body;
+    assert(b?.ok !== true, `이미 있는데 성공으로 적었다: ${JSON.stringify(b).slice(0, 220)}`);
+    eq(b?.error, 'gate_protective_exists',
+      `사유가 '이미 있음'이 아니다: ${JSON.stringify(b).slice(0, 220)}`);
+    eq(b?.existingProtective, 1, '몇 건인지 알려 주지 않았다');
+    eq(venue.countOf(PRICE_ORDERS, 'POST'), 0, '겹쳐 걸었다');
+    // **남의 보호주문을 지우지 않는다** — 절대 규칙.
+    eq(venue.countOf(PRICE_ORDERS, 'DELETE'), 0, '계약 단위 일괄 취소를 보냈다');
+  });
+
+  test('★★ Gate: 200인데 목록이 아니면 "기존 보호주문 없음"으로 확정하지 않는다', () => {
+    for (const [label, got] of [['객체', bad200], ['null', null200]] as const) {
+      const { r, venue } = got;
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const b = (r as any).body;
+      assert(b?.ok !== true,
+        `${label} 본문인데 성공으로 적었다: ${JSON.stringify(b).slice(0, 220)}`);
+      eq(venue.countOf(PRICE_ORDERS, 'POST'), 0,
+        `${label} 본문인데 새 보호주문을 보냈다`);
+      eq(venue.countOf(PRICE_ORDERS, 'DELETE'), 0, '일괄 취소를 보냈다');
+    }
+  });
+
+  test('★ Gate: 기존 보호주문이 없으면 그대로 건다 — 과잉 차단하지 않는다', () => {
+    const { r, venue } = empty;
+    assert(!(r instanceof Error), String((r as any)?.message));
+    const b = (r as any).body;
+    // 정상 경로는 막히지 않아야 한다. 주문이 나가거나, 적어도
+    // '기존 보호주문' 사유로 막히지는 않는다.
+    eq(b?.ok, true, `빈 목록인데 막혔다: ${JSON.stringify(b).slice(0, 220)}`);
+    eq(b?.executed, true);
+    eq(b?.sl?.success, true, '손절이 걸리지 않았다');
+    // **주문이 실제로 나갔는지** 센다 — 안 세면 "막지 않았다"가
+    // "걸었다"와 구별되지 않는다.
+    assert(venue.countOf(PRICE_ORDERS, 'POST') >= 1, '정상 경로인데 주문이 0건이다');
+    eq(venue.countOf(PRICE_ORDERS, 'DELETE'), 0, '일괄 취소를 보냈다');
+  });
+}
+
+export async function runCoinMRouteIntegrationTests() {
+  console.log('[통합 — COIN-M 라우트 (실제 핸들러 · DB 쓰기)]');
+
+  const serverPath = require.resolve('../../lib/supabase/server');
+  const routePath = require.resolve('../../app/api/binance/coinm/order/route');
+
+  /** 라우트를 가짜 DB에 붙여 **새로** 불러온다 */
+  function loadRoute(db: FakeDb) {
+    const prevServer = require.cache[serverPath];
+    require.cache[serverPath] = {
+      id: serverPath, filename: serverPath, loaded: true, exports: {
+        getSupabaseAdmin: () => db,
+        resolveUserId: async () => 'u1',
+        getUserIdFromRequest: async () => 'u1',
+        serviceRoleKeyRole: () => 'service_role',
+      },
+    };
+    delete require.cache[routePath];
+    const mod = require(routePath);
+    return {
+      POST: mod.POST as (req: any) => Promise<any>,
+      restore: () => {
+        delete require.cache[routePath];
+        if (prevServer) require.cache[serverPath] = prevServer;
+        else delete require.cache[serverPath];
+      },
+    };
+  }
+
+  async function connRowCoinM() {
+    return {
+      id: 'c1', user_id: 'u1', exchange_id: 'binance',
+      api_key: 'K'.repeat(64),
+      api_secret_enc: encryptSecret('S'.repeat(64)),
+      has_withdrawal: false, is_testnet: true, perm_trading: true, is_active: true,
+    };
+  }
+
+  /** COIN-M 규격·레버리지 조회를 깔아 둔다 */
+  function coinMVenue(): FakeVenue {
+    return new FakeVenue()
+      .on('/dapi/v1/exchangeInfo', { json: { symbols: [{
+        symbol: 'BTCUSD_PERP', contractSize: 100, pricePrecision: 1, quantityPrecision: 0,
+        filters: [{ filterType: 'LOT_SIZE', stepSize: '1', minQty: '1' }],
+      }] } })
+      .on('/dapi/v1/leverage', { json: { leverage: 20, symbol: 'BTCUSD_PERP' } })
+      .on('/dapi/v1/marginType', { json: { code: 200, msg: 'success' } })
+      .on('/dapi/v1/positionRisk', { json: [{ symbol: 'BTCUSD_PERP', positionAmt: '0',
+        leverage: '20', marginType: 'isolated', liquidationPrice: '0', entryPrice: '0' }] })
+      .on('/dapi/v1/premiumIndex', { json: { symbol: 'BTCUSD_PERP', markPrice: '95000' } })
+      .on('/dapi/v1/ticker/price', { json: { symbol: 'BTCUSD_PERP', price: '95000' } })
+      .on('/dapi/v1/account', { json: { assets: [{ asset: 'BTC', availableBalance: '1' }],
+        positions: [] } })
+      .on('/dapi/v1/openOrders', { json: [] })
+      .on('/dapi/v1/time', { json: { serverTime: Date.now() } })
+      .on('/dapi/v1/balance', { json: [{ asset: 'BTC', availableBalance: '1', balance: '1' }] })
+      .on('/fapi/v1/income', { json: [] });
+  }
+
+  const BODY = {
+    confirmToken: 'COINM_ORDER_CONFIRMED', connectionId: 'c1',
+    symbol: 'BTCUSD_PERP', side: 'BUY', type: 'MARKET', contracts: 1,
+    leverage: 20, stopPrice: 90000,
+  };
+
+  // ══════════ ⓪ COIN-M 포지션 수량: 못 읽음 ≠ 0 ══════════
+  //
+  //   `preTradeChecklist`의 계약은 명시돼 있다 (`existingPositionQty`):
+  //
+  //       /** 지금 열려 있는 포지션 수량. 0이면 없음, null이면 모름 */
+  //
+  //   그리고 0은 **보호 주문 점검을 통과시킨다**:
+  //
+  //       if (existingPositionQty != null && Math.abs(...) === 0) {
+  //         push(PROTECTIVE_ORDER, 'pass', '열린 포지션이 없어 …');
+  //
+  //   그런데 COIN-M 리더는 수량을 `Number(row.positionAmt) || 0`으로
+  //   읽는다. `Number('bad')`는 `NaN`이고 `NaN || 0`은 **0**이다. 즉
+  //   **모름이 0으로 적히고**, 그 0이 라우트를 거쳐
+  //   `existingPositionQty: 0`이 되어 **보호 주문 점검을 PASS로 만든다.**
+  //   실제로 포지션이 열려 있고 손절이 하나도 없어도 그렇다.
+  //
+  //   CLAUDE.md의 두 줄을 한 번에 밟는다 — "UNKNOWN을 0으로 적지
+  //   않는다"와 "실제 거래소 증거 없이 PASS를 적지 않는다".
+  //
+  //   USDⓈ-M 경로는 같은 자리를 이미 막아 뒀다 (`futures/order/route.ts`):
+  //       existingPositionQty: risk?.positionAmt != null ? Math.abs(…) : null
+  //   COIN-M만 `risk ? Math.abs(risk.contracts) : null`이라 0을 통과시킨다.
+  {
+    const dapi = require('../../lib/exchanges/binanceCoinFutures');
+    const BAD_ROW = {
+      symbol: 'BTCUSD_PERP', positionAmt: 'bad', leverage: '20',
+      marginType: 'isolated', liquidationPrice: '90000', entryPrice: '95000',
+    };
+
+    const one = await scenario(
+      new FakeVenue().on('/dapi/v1/positionRisk', { json: [BAD_ROW] }),
+      () => dapi.getCoinMSymbolRisk('K'.repeat(64), 'S'.repeat(64), 'BTCUSD_PERP', true));
+
+    test('★★ COIN-M 단건: 못 읽은 수량은 0이 아니라 모름(null)이다', () => {
+      assert(!(one instanceof Error), String((one as any)?.message));
+      // 0을 적었다면 여기서 잡힌다 — 그 0이 보호 주문 점검을 통과시킨다.
+      assert((one as any)?.contracts !== 0,
+        '못 읽은 수량을 0으로 적었다 — 보호 주문 점검이 PASS가 된다');
+      eq(one, null, '깨진 수량을 관측으로 인정했다');
+    });
+
+    const list = await scenario(
+      new FakeVenue().on('/dapi/v1/positionRisk', { json: [
+        BAD_ROW,
+        { ...BAD_ROW, symbol: 'ETHUSD_PERP', positionAmt: '3' },
+      ] }),
+      () => dapi.getCoinMPositions('K'.repeat(64), 'S'.repeat(64), true));
+
+    test('★★ COIN-M 목록: 못 읽은 줄을 조용히 지우지 않는다', () => {
+      assert(!(list instanceof Error), String((list as any)?.message));
+      const l = list as any;
+      // 멀쩡한 줄은 그대로 보인다.
+      eq(l.positions.filter((p: any) => p.symbol === 'ETHUSD_PERP').length, 1,
+        '멀쩡한 포지션이 사라졌다');
+      // 깨진 줄은 0으로 적혀 `|contracts| > 0` 필터에 걸려 **목록에서
+      // 사라졌다.** 보유 중인 포지션이 화면에서 없어지는 것이다.
+      assert(!l.positions.some((p: any) => p.symbol === 'BTCUSD_PERP' && p.contracts === 0),
+        '못 읽은 수량을 0으로 적어 목록에 남겼다');
+      assert(typeof l.message === 'string' && /BTCUSD_PERP/.test(l.message),
+        `못 읽은 줄을 조용히 버렸다 — 사유가 없다 (message: ${String(l.message)})`);
+    });
+  }
+
+  // ══════════ ⓪-b 경고가 계좌 API 경계에서 소실되던 자리 ══════════
+  //
+  //   검수 지적(#541)이 맞았다. 리더에 `message`를 남긴 것으로는
+  //   **화면이 소비하는 계층**에서 아무 일도 일어나지 않았다:
+  //
+  //       // coinm/account/route.ts — 정상 응답
+  //       positions: pos.success ? positions : null,
+  //       positionsReadable: pos.success,        // ← true
+  //
+  //   `pos.message`는 **잔고와 포지션이 모두 실패한 경우에만** 쓰인다.
+  //   그래서 보유 포지션 한 줄의 수량을 못 읽으면:
+  //
+  //       positions: []            (그 줄이 빠진다)
+  //       positionsReadable: true  ("목록을 다 읽었다"는 주장)
+  //       message: 없음            (경계에서 사라진다)
+  //
+  //   즉 **API가 "포지션 0개를 관측했다"고 단정한다.** 리더만 고친
+  //   것으로는 #541의 목적("조용히 사라지지 않는다")이 미충족이었다.
+  //
+  //   전체 조회 실패(502)·정상 0포지션·일부 수량 불명 **셋을 구분**해야
+  //   한다. 그래서 라우트까지 관통하는 RED를 둔다 — 리더의 `message`만
+  //   단언하면 이 구멍이 다시 열린다.
+  {
+    const acctPath = require.resolve('../../app/api/binance/coinm/account/route');
+
+    function loadAcctRoute(db: FakeDb) {
+      const prevServer = require.cache[serverPath];
+      require.cache[serverPath] = {
+        id: serverPath, filename: serverPath, loaded: true, exports: {
+          getSupabaseAdmin: () => db,
+          resolveUserId: async () => 'u1',
+          getUserIdFromRequest: async () => 'u1',
+          serviceRoleKeyRole: () => 'service_role',
+        },
+      } as any;
+      delete require.cache[acctPath];
+      const mod = require(acctPath);
+      return {
+        GET: mod.GET as (req: any) => Promise<any>,
+        restore: () => {
+          delete require.cache[acctPath];
+          if (prevServer) require.cache[serverPath] = prevServer;
+          else delete require.cache[serverPath];
+        },
+      };
+    }
+
+    const acctRequest = (): any => ({
+      headers: { get: (k: string) => (k.toLowerCase() === 'authorization' ? 'Bearer t' : null) },
+      nextUrl: { searchParams: new URLSearchParams({ connectionId: 'c1' }) },
+    });
+
+    const BALANCE = [{ asset: 'BTC', availableBalance: '1', balance: '1' }];
+
+    async function acctWith(positionRisk: any[]) {
+      const unenv = withCryptoEnv();
+      const db = new FakeDb().seed('exchange_connections', [await connRowCoinM()]);
+      unenv();
+      const venue = new FakeVenue()
+        .on('/dapi/v1/balance', { json: BALANCE })
+        .on('/dapi/v1/positionRisk', { json: positionRisk });
+      return scenario(venue, async () => {
+        const { GET, restore } = loadAcctRoute(db);
+        try {
+          const res = await GET(acctRequest());
+          return { status: res.status ?? 200, body: await res.json() };
+        } finally { restore(); }
+      });
+    }
+
+    const OPEN_ETH = {
+      symbol: 'ETHUSD_PERP', positionAmt: '3', leverage: '20',
+      marginType: 'isolated', liquidationPrice: '1800', entryPrice: '2000',
+    };
+    const BAD_BTC = {
+      symbol: 'BTCUSD_PERP', positionAmt: 'bad', leverage: '20',
+      marginType: 'isolated', liquidationPrice: '90000', entryPrice: '95000',
+    };
+
+    const partial = await acctWith([BAD_BTC, OPEN_ETH]);
+    const cleanZero = await acctWith([{ ...OPEN_ETH, positionAmt: '0' }]);
+
+    test('★★ COIN-M 계좌 API: 한 줄을 못 읽었으면 "목록을 다 읽었다"고 하지 않는다', () => {
+      assert(!(partial instanceof Error), String((partial as any)?.message));
+      const b = (partial as any).body;
+      assert(b?.ok === true, `정상 응답이 아니다: ${JSON.stringify(b).slice(0, 200)}`);
+      // 핵심: 못 읽은 줄이 있는데 "읽었다"고 단정하면 소비자는 빈
+      // 목록을 "포지션 없음"으로 읽는다.
+      eq(b.positionsReadable, false,
+        '수량을 못 읽은 줄이 있는데 목록을 다 읽었다고 단정했다');
+      // 사유가 응답에 실제로 실려 있어야 한다 — 경계에서 사라지지 않는다.
+      const text = JSON.stringify(b);
+      assert(/BTCUSD_PERP/.test(text),
+        `못 읽은 심볼이 응답에 없다: ${text.slice(0, 300)}`);
+      // 멀쩡한 줄은 보존한다 — 과잉 차단하지 않는다.
+      assert(Array.isArray(b.positions)
+        && b.positions.some((p: any) => p.symbol === 'ETHUSD_PERP'),
+        '멀쩡한 포지션까지 버렸다');
+    });
+
+    test('★★ COIN-M 계좌 API: 진짜 0포지션과 일부 수량 불명을 구분한다', () => {
+      assert(!(cleanZero instanceof Error), String((cleanZero as any)?.message));
+      const b = (cleanZero as any).body;
+      assert(b?.ok === true, `정상 응답이 아니다: ${JSON.stringify(b).slice(0, 200)}`);
+      // 전부 멀쩡하게 읽었고 열린 포지션이 없다 — 이건 관측이다.
+      eq(b.positionsReadable, true, '멀쩡한 0포지션 조회를 미확인으로 막았다');
+      eq(Array.isArray(b.positions) ? b.positions.length : -1, 0);
+      assert(!/BTCUSD_PERP/.test(JSON.stringify(b)), '없는 경고를 지어냈다');
+    });
+  }
+
+  // ══════════ ① 미체결 접수를 FILLED로 적지 않는다 ══════════
+  {
+    const unenv = withCryptoEnv();
+    const db = new FakeDb().seed('exchange_connections', [await connRowCoinM()]);
+    unenv();
+    const venue = coinMVenue()
+      .on(DAPI_ORDER, { status: 400, json: { code: -2013, msg: 'Order does not exist.' } }, 'GET')
+      // 거래소가 접수만 했다: status NEW, 체결 0, avgPrice '0'
+      .on(DAPI_ORDER, { json: {
+        orderId: 8001, symbol: 'BTCUSD_PERP', status: 'NEW',
+        executedQty: '0', origQty: '1', avgPrice: '0', price: '95000',
+      } }, 'POST');
+
+    const out = await scenario(venue, async () => {
+      const { POST, restore } = loadRoute(db);
+      try {
+        const res = await POST(fakeRequest(BODY));
+        return { status: res.status, body: await res.json() };
+      } finally { restore(); }
+    });
+
+    // ── 이 시나리오가 **실제로 증명하는 것** ──
+    //
+    //   라우트 본문이 돌고(거래소 조회 9건), 거래 전 점검 14항목이
+    //   판정하고, 막히면 **주문을 보내지 않고 체결을 적지 않는다.**
+    //
+    //   점검을 통과시키려면 운영 모드·시계·손절 거리·증거금·일/주 손실
+    //   한도·연속 손절 등 일곱 개 하위 계통의 픽스처가 더 필요하다. 그
+    //   **성공 경로는 통합 계층 미검증**으로 남긴다 — 어댑터의 체결 사실
+    //   추출(`coinMFillOf`)은 단위 시험이, 라우트의 쓰기는 검사기가 덮는다.
+    test('★ COIN-M 라우트가 실제로 돌고 점검에 막히면 주문을 보내지 않는다', () => {
+      assert(!(out instanceof Error), String((out as any)?.message));
+      const o = out as any;
+      // 라우트가 실제로 거래소를 조회했다 — 핸들러가 돌았다는 증거다.
+      assert(venue.calls.length >= 5,
+        `거래소 조회가 ${venue.calls.length}건이다 — 라우트가 안 돌았다`);
+      // 점검이 막았으면 주문은 0건이어야 한다.
+      if (o.status !== 200) {
+        eq(venue.countOf(DAPI_ORDER, 'POST'), 0,
+          '점검이 막았는데 주문이 나갔다');
+      }
+    });
+
+    test('★ 막힌 주문을 장부에 체결로 적지 않는다 (실제 라우트)', () => {
+      const rows = db.table('live_orders');
+      for (const row of rows) {
+        assert(row.status !== 'FILLED',
+          `주문이 나가지 않았는데 장부에 ${row.status}가 적혔다`);
+        assert(row.avg_price == null,
+          `체결가가 지어졌다: ${row.avg_price}`);
+      }
+    });
+
+    test('★ 막힌 이유를 숨기지 않는다', () => {
+      const b = (out as any)?.body ?? {};
+      if ((out as any)?.status === 200) return;
+      assert(typeof b.message === 'string' && b.message.length > 0,
+        '막혔는데 사유가 없다');
+      assert(b.checklist != null, '점검 결과를 응답에 담지 않았다');
+      // **확인하지 못한 항목을 통과로 세지 않는다.**
+      assert(typeof b.checklist.unknownCount === 'number',
+        '확인 불가 항목 수를 세지 않는다');
+    });
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Gate 선물 **전송** 경로 — 실제 `executeOrder(exchange:'gate')`
+// ══════════════════════════════════════════════════════════════════
+//
+// 변이 I-2(Gate 전송 실패를 무조건 REJECTED로)가 **탈출했다.** Gate
+// 커버리지가 대조 경로에만 있었고 전송 경로에는 없었기 때문이다.
+// 거절과 타임아웃은 서로 반대 방향으로 틀릴 수 있으므로 둘 다 본다.
+
+function gateBaseVenue(): FakeVenue {
+  return new FakeVenue()
+    .on('/api/v4/futures/usdt/contracts/BTC_USDT', { json: {
+      name: 'BTC_USDT', quanto_multiplier: '0.0001', order_size_min: 1,
+      order_size_max: 1000000, order_price_round: '0.1', mark_price: '95000',
+    } })
+    .on('/api/v4/futures/usdt/positions/BTC_USDT', { json: {
+      contract: 'BTC_USDT', size: 0, leverage: '100', liq_price: '0', entry_price: '0',
+    } })
+    .on('/api/v4/futures/usdt/positions', { json: [] })
+    .on('/api/v4/futures/usdt/accounts', { json: { total: '1000', available: '1000' } })
+    .on('/api/v4/futures/usdt/orders', { json: [] }, 'GET');
+}
+
+/**
+ * Gate 시나리오는 **고정 손절을 주고** 돌린다.
+ *
+ * Gate 진입 경로의 손절 관문(`orderExecutor.ts:1154`)은 `stopPolicy`를
+ * 보지 않는다 — 바이낸스 쪽은 `noFixedSl`을 보고 `protectionPolicy`를
+ * `NONE`으로 덮는데 Gate 쪽에는 그 분기가 없다(**D22**). 그래서
+ * `NO_FIXED_SL`로는 Gate 진입이 통째로 막힌다.
+ *
+ * 막히는 방향이라 돈이 새지는 않지만 경로가 갈린 것은 사실이다. **이
+ * PR에서 고치지 않는다**: 고치면 Gate에서 고정 손절 없는 포지션이 열리게
+ * 되고, Gate의 전용 종료 권한 도달 가능성은 아직 별도 감사 대상이다
+ * (`venuePositionOps.ts`의 주석). 종료가 보장되지 않은 거래소에서 보호
+ * 없는 포지션을 열 수 있게 만드는 것이 더 위험하다.
+ *
+ * 여기서 검증하는 것은 **전송 결과 분류**이므로 손절을 주고 돌린다.
+ */
+const GATE_ARGS = { exchange: 'gate' as const, stopPolicy: 'FIXED_SL' as const,
+  takeProfitPolicy: 'NO_FIXED_TP' as const, protectionPolicy: 'NONE' as const,
+  // 청산가(90000)보다 위여야 한다 — 손절이 청산 너머면 영원히 안 걸린다.
+  stopLoss: 92000 };
+
+export async function runGateExecIntegrationTests() {
+  console.log('[통합 — Gate 선물 전송 경로 (실제 executeOrder)]');
+
+  // ══════════ ① Gate 정상 거절 — REJECTED로 적는다 ══════════
+  {
+    const db = new FakeDb();
+    const venue = gateBaseVenue()
+      .on('/api/v4/futures/usdt/positions/BTC_USDT/leverage', { json: { leverage: '100' } })
+      // 거래소가 **명시적으로 거절**했다. 모양이 `Gate 400: <label>`이다.
+      .on('/api/v4/futures/usdt/orders',
+        { status: 400, json: { label: 'BALANCE_NOT_ENOUGH', message: 'not enough balance' } }, 'POST');
+    const r = await scenario(venue, () => exec(db, { ...GATE_ARGS, clientOrderId: 'GCOID-1' }));
+
+    test('★ Gate 정상 거절은 REJECTED로 적는다 (미확정으로 쌓지 않는다)', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const row = db.table('live_orders')[0];
+      assert(row, '장부 줄이 없다 — 실행기가 안 돌았다');
+      eq(row.status, 'REJECTED',
+        `명시적 거절인데 ${row.status}다 — UNKNOWN으로 묶으면 미확정이 쌓여 진입이 막힌다`);
+      eq((r as any).status, row.status, '반환과 장부가 다르다');
+    });
+  }
+
+  // ══════════ ② Gate 전송 타임아웃 — UNKNOWN으로 적는다 ══════════
+  {
+    const db = new FakeDb();
+    const venue = gateBaseVenue()
+      .on('/api/v4/futures/usdt/positions/BTC_USDT/leverage', { json: { leverage: '100' } })
+      .on('/api/v4/futures/usdt/orders', { timeout: true }, 'POST');
+    const r = await scenario(venue, () => exec(db, { ...GATE_ARGS, clientOrderId: 'GCOID-2' }));
+
+    test('★ Gate 전송 타임아웃을 거절로 적지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const row = db.table('live_orders')[0];
+      assert(row, '장부 줄이 없다');
+      eq(row.status, 'UNKNOWN',
+        `타임아웃인데 ${row.status}다 — REJECTED는 대조 대상이 아니고 진입 잠금을 푼다`);
+      assert(row.status !== 'REJECTED');
+      eq((r as any).status, 'UNKNOWN');
+      // 주문은 한 번만 나갔다.
+      eq(venue.countOf('/api/v4/futures/usdt/orders', 'POST'), 1);
+    });
+  }
+
+  // ══════════ ③ Gate 5xx — 접수 뒤 응답만 잃었을 수 있다 ══════════
+  {
+    const db = new FakeDb();
+    const venue = gateBaseVenue()
+      .on('/api/v4/futures/usdt/positions/BTC_USDT/leverage', { json: { leverage: '100' } })
+      .on('/api/v4/futures/usdt/orders',
+        { status: 502, json: { label: 'INTERNAL', message: 'bad gateway' } }, 'POST');
+    const r = await scenario(venue, () => exec(db, { ...GATE_ARGS, clientOrderId: 'GCOID-3' }));
+
+    test('★ Gate 5xx를 거절로 단정하지 않는다 (게이트웨이는 접수 뒤에도 죽는다)', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const row = db.table('live_orders')[0];
+      eq(row.status, 'UNKNOWN', `5xx인데 ${row.status}로 확정됐다`);
+    });
+  }
+
+  // ══════════ ④ Gate 전송 후 ACK 기록 실패 — venue POST는 재시도 금지 ══════════
+  // Binance만 있던 ACK 쓰기 실패 통합 회귀를 Gate의 실제 executeOrder로 확장한다.
+  // reduceOnly로 보호주문 경로를 피하되, 주문 전송/ACK/장부 기록은 실제 경로를 탄다.
+  // 이 시험은 오프라인 FakeVenue 전용이며 실제 청산 주문을 보내지 않는다.
+  for (const mode of ['error', 'zero-rows', 'throw'] as const) {
+    const db = new FakeDb({ failAckUpdate: mode });
+    const venue = gateBaseVenue()
+      .on('/api/v4/futures/usdt/orders', { json: {
+        id: 9101, contract: 'BTC_USDT', size: -100, left: 0,
+        status: 'finished', finish_as: 'filled', fill_price: '95000',
+      } }, 'POST');
+    const r = await scenario(venue, () => exec(db, {
+      ...GATE_ARGS, reduceOnly: true, clientOrderId: `GATE-ACK-FAULT-${mode}`,
+    }));
+
+    test(`★ Gate ACK 장부 ${mode} 실패는 POST 1회·SENT 유지·대조 경고`, () => {
+      assert(!(r instanceof Error), `Gate 실행기가 던졌다: ${(r as any)?.message}`);
+      eq(venue.countOf('/api/v4/futures/usdt/orders', 'POST'), 1,
+        'Gate ACK 기록 실패 후 거래소 주문을 재전송했다');
+      const row = db.table('live_orders')[0];
+      assert(row, 'Gate 주문 의도 행이 없다');
+      eq(row.status, 'SENT', 'ACK 기록 실패인데 Gate 장부 상태가 전진했다');
+      assert(/장부에 기록하지 못했습니다/.test(String((r as any).message)),
+        `Gate ACK 기록 실패 경고가 호출자에게 없다: ${(r as any).message}`);
+      assert((r as any).status !== 'FAILED' && (r as any).status !== 'REJECTED',
+        '거래소 전송 후 ACK 기록 실패를 확정 거부로 단정했다');
+    });
+  }
+}
+
+export async function runGateDupIntegrationTests() {
+  console.log('[통합 — Gate 멱등 중복 · Gate 현물 중복]');
+
+  // ══════════ ④ Gate 선물 멱등 중복 — 전이가 적용되는가 ══════════
+  //
+  //   변이 I-4(SENT 선행 전이 제거)가 **탈출했다.** Gate 멱등 경로에
+  //   시나리오가 없었다. `INTENT → ACKED`는 상태 기계가 거부하므로,
+  //   SENT을 먼저 적지 않으면 그 쓰기가 조용히 버려진다.
+  {
+    const db = new FakeDb();
+    const venue = gateBaseVenue()
+      .on('/api/v4/futures/usdt/positions/BTC_USDT/leverage', { json: { leverage: '100' } });
+    // 중복 확인(GET)에서 **발견**된다: 아직 열려 있는 주문
+    (venue as any).rules.unshift({
+      label: 'gate-dup-found',
+      match: (c: any) => c.method === 'GET' && c.path.includes('/api/v4/futures/usdt/orders'),
+      reply: { json: [{ id: 9100, contract: 'BTC_USDT', size: 1, price: '0',
+        status: 'open', text: 't-GCOID-9', left: 1 }] },
+    });
+    const r = await scenario(venue, () => exec(db, { ...GATE_ARGS, clientOrderId: 'GCOID-9' }));
+
+    test('★ Gate 멱등 중복에서 전이가 실제로 적용된다 (장부 = 반환)', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const row = db.table('live_orders')[0];
+      assert(row, '장부 줄이 없다');
+      eq((r as any).duplicate, true, '중복으로 판정하지 않았다');
+      eq(venue.countOf('/api/v4/futures/usdt/orders', 'POST'), 0,
+        '이미 있는 주문을 다시 보냈다');
+      eq((r as any).status, row.status,
+        `반환(${(r as any).status})과 장부(${row.status})가 다르다`);
+      assert(row.status !== 'INTENT',
+        '상태 쓰기가 상태 기계에 버려졌다 — SENT 선행 전이가 없다');
+      eq(row.status, 'ACKED');
+      const statuses = db.writes.filter((w) => w.patch.status).map((w) => w.patch.status);
+      assert(statuses.includes('SENT'), `전이 경로가 SENT을 거치지 않았다: ${statuses.join(' → ')}`);
+    });
+  }
+
+  // ══════════ ⑤ Gate 현물 중복 발견 — 장부와 반환이 같은 답 ══════════
+  //
+  //   변이 I-5(D21 복원)가 **탈출했다.** 픽스처를 404로 바꾸면서 중복
+  //   분기 자체가 커버되지 않았다 — D21이 살던 자리다.
+  {
+    const unenv = withCryptoEnv();
+    const db = new FakeDb().seed('exchange_connections', [{
+      id: 'c1', user_id: 'u1', exchange_id: 'gate',
+      api_key: 'K'.repeat(64), api_secret_enc: encryptSecret('S'.repeat(64)),
+      has_withdrawal: false, is_testnet: true,
+    }]);
+    unenv();
+    const venue = new FakeVenue()
+      .on('/api/v4/spot/currency_pairs/BTC_USDT', { json: {
+        id: 'BTC_USDT', trade_status: 'tradable',
+        amount_precision: 5, precision: 2, min_base_amount: '0.0001', min_quote_amount: '1',
+      } })
+      .on('/api/v4/spot/accounts', { json: [
+        { currency: 'USDT', available: '10000', locked: '0' },
+        { currency: 'BTC', available: '1', locked: '0' },
+      ] })
+      // 단건 조회에서 **발견**된다: 아직 열려 있는 주문
+      .on('/api/v4/spot/orders/', { json: {
+        id: '7100', currency_pair: 'BTC_USDT', status: 'open',
+        amount: '0.003', left: '0.003', filled_total: '0', avg_deal_price: '0',
+      } }, 'GET')
+      .on('/api/v4/spot/orders', { json: {} }, 'POST');
+
+    const r = await scenario(venue, () => placeSpotOrder(db as any, {
+      userId: 'u1', connectionId: 'c1', symbol: 'BTCUSDT',
+      side: 'BUY', type: 'LIMIT', quantity: 0.003, price: 90000,
+    }));
+
+    test('★ Gate 현물 중복 발견에서 장부와 반환이 같은 답을 적는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const rows = db.table('live_orders');
+      assert(rows.length > 0, '장부 줄이 없다');
+      const row = rows[rows.length - 1];
+      eq((r as any).code, 'duplicate', '중복으로 판정하지 않았다');
+      eq((r as any).status, row.status,
+        `장부(${row.status})와 반환(${(r as any).status})이 다르다`);
+      // 열려 있는 주문을 종료로도 거부로도 적지 않는다.
+      eq(row.status, 'ACKED');
+      assert(row.status !== 'RECONCILED' && row.status !== 'REJECTED');
+      eq(venue.countOf('/api/v4/spot/orders', 'POST'), 0, '중복인데 주문을 보냈다');
+    });
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// `NO_FIXED_TP`가 **실행 경로까지** 유지되는가
+// ══════════════════════════════════════════════════════════════════
+//
+// 선언과 실행은 다른 것이다. 프로필에 `NO_FIXED_TP`라고 적혀 있다는
+// 사실은 "거래소에 익절 주문이 안 나간다"를 증명하지 않는다 — 실제로
+// 예전에 Gate 갈래에 정책 검사가 없어서 익절이 그대로 나갔다(코드 주석
+// 835~841행이 그 사고를 적고 있다).
+//
+// 그래서 **거래소에 나간 주문을 세어** 확인한다.
+
+export async function runNoFixedTpIntegrationTests() {
+  console.log('[통합 — NO_FIXED_TP가 실행 경로까지 유지되는가]');
+
+  /** 조건부 주문(손절·익절) 전송 횟수 */
+  const condSends = (v: FakeVenue) => v.calls.filter(
+    (c) => c.method === 'POST' && /\/fapi\/v1\/order\b/.test(c.path)
+      && /STOP|TAKE_PROFIT/.test(String(c.params.type ?? ''))).length;
+
+  // ══════════ ① 익절 주문이 한 건도 나가지 않는다 ══════════
+  {
+    const db = new FakeDb();
+    const venue = baseVenue()
+      .on(BN_ORDER, { status: 400, json: { code: -2013, msg: 'Order does not exist.' } }, 'GET')
+      .on(BN_ORDER, { json: bnOrder({
+        status: 'FILLED', executedQty: '0.010', avgPrice: '95000',
+      }) }, 'POST');
+    const r = await scenario(venue, () => exec(db, {}));   // 기본값이 NO_FIXED_SL/NO_FIXED_TP다
+
+    test('★ NO_FIXED_TP 주문은 거래소에 익절을 한 건도 보내지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const tp = venue.calls.filter((c) => c.method === 'POST'
+        && /TAKE_PROFIT/.test(String(c.params.type ?? '')));
+      eq(tp.length, 0, `익절 주문이 ${tp.length}건 나갔다 — 선언과 실행이 갈렸다`);
+      eq(condSends(venue), 0, '고정 손절·익절이 함께 나갔다');
+      // 장부에도 익절 주문 번호가 남지 않아야 한다.
+      const row = db.table('live_orders')[0];
+      assert(row.tp_order_id == null || row.tp_order_id === '',
+        `장부에 익절 주문 번호가 적혔다: ${row.tp_order_id}`);
+    });
+
+    test('★ 진입은 정상 체결된다 — 익절이 없다고 진입을 막지 않는다', () => {
+      const row = db.table('live_orders')[0];
+      eq(row.status, 'FILLED');
+      eq(Number(row.filled_qty), 0.01);
+    });
+  }
+
+  // ══════════ ② 익절가를 함께 넘기면 **주문 자체를 거절한다** ══════════
+  {
+    const db = new FakeDb();
+    const venue = baseVenue()
+      .on(BN_ORDER, { json: bnOrder() }, 'GET')
+      .on(BN_ORDER, { json: bnOrder() }, 'POST');
+    const r = await scenario(venue, () => exec(db, { takeProfit: 96000 }));
+
+    test('★ NO_FIXED_TP에 익절가가 함께 오면 주문하지 않는다 (모순 거절)', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq((r as any).ok, false);
+      eq((r as any).status, 'REJECTED');
+      // **거래소에 아무것도 나가지 않았다.**
+      eq(venue.calls.length, 0, `모순인데 거래소 호출이 ${venue.calls.length}건 있었다`);
+      assert(/고정 익절/.test(String((r as any).message)), String((r as any).message));
+    });
+  }
+
+  // ══════════ ②-2 분할 익절 사다리도 모순으로 거절한다 ══════════
+  //
+  //   변이 T-1(보호주문 단계의 `else if (noFixedTp)` 제거)이 **탈출했다.**
+  //   단일 익절만 넘기는 시험에서는 그 분기를 지워도 아무 일이 안 일어난다
+  //   (`exitPlan`도 `takeProfit`도 없으니 어느 분기도 안 탄다). 그런데
+  //   `exitPlan`에 `PARTIAL_TP`가 담겨 오면 그 한 줄이 **유일한** 방어였다.
+  {
+    const db = new FakeDb();
+    const venue = baseVenue()
+      .on(BN_ORDER, { json: bnOrder() }, 'GET')
+      .on(BN_ORDER, { json: bnOrder() }, 'POST');
+    const r = await scenario(venue, () => exec(db, {
+      exitPlan: { orders: [
+        { kind: 'PARTIAL_TP', price: 96000, quantity: 0.005 },
+        { kind: 'PARTIAL_TP', price: 97000, quantity: 0.005 },
+      ] },
+    }));
+
+    test('★ NO_FIXED_TP에 분할 익절 사다리가 오면 주문하지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq((r as any).status, 'REJECTED');
+      eq(venue.calls.length, 0,
+        `모순인데 거래소 호출이 ${venue.calls.length}건 있었다 — 경계에서 막지 못했다`);
+      const tp = venue.calls.filter((c) => /TAKE_PROFIT/.test(String(c.params.type ?? '')));
+      eq(tp.length, 0, `분할 익절이 ${tp.length}건 나갔다`);
+      assert(/분할 익절/.test(String((r as any).message)), String((r as any).message));
+    });
+  }
+
+  // ══════════ ③ 수익이 커져도 자동 종료 수단은 시간청산뿐이다 ══════════
+  {
+    test('★ Exact100X 자리에 열린 자동 종료는 시간청산 하나뿐이다', async () => {
+      const { seatExitCapabilities } = await import('@/lib/engine/managedPosition');
+      const r = seatExitCapabilities({
+        stopPolicy: 'NO_FIXED_SL', hasStopValue: false,
+        executionIdentity: {
+          profileId: 'MAX_LEV_100X', presetId: 'EXACT_100X', contractVersion: 1,
+        } as any,
+      });
+      eq(r.exposureClass, 'NO_FIXED_SL_EXACT100X');
+      // 이익을 제한할 수 있는 수단이 전부 닫혀 있어야 한다.
+      eq(r.capabilities.fixedStopAtEntry, false);
+      eq(r.capabilities.breakEven, false, '본전 이동이 열리면 수익이 0에서 잘린다');
+      eq(r.capabilities.trailing, false, '트레일링이 열리면 수익이 되돌림에서 잘린다');
+      eq(r.capabilities.emergency, false);
+      // 열려 있는 것은 보유 시간 하나다 — 이익과 무관한 기준이다.
+      eq(r.capabilities.timeExit, true);
+    });
+  }
+}
+
+/**
+ * **2026-10-16 TESTNET 실측 회귀.**
+ *
+ * 실제 Binance TESTNET이 `-1111 Precision is over the maximum defined
+ * for this asset`로 주문을 거절했다. 보낸 수량은
+ * `(증거금 × 배율) / 기준가`가 만든 생 부동소수였고, 실행기는 거래소
+ * 규격을 맞추는 단계를 **아예 거치지 않았다.**
+ *
+ * 규격 정본(`quantizeOrder`)은 이미 있었고 `placeFuturesOrderSafe`와
+ * `futuresExec`는 그것을 썼다. 이 경로만 안 쓰고 있었다.
+ *
+ * 그래서 이 시험들은 "정본이 맞게 계산하는가"가 아니라
+ * **"실행기가 실제로 보낸 값이 격자 위에 있는가"**를 본다.
+ */
+export async function runPrecisionIntegrationTests() {
+  console.log('[통합 — 수량 정밀도 (-1111 회귀)]');
+
+  // **시나리오마다 다른 심볼을 쓴다.**
+  //
+  // `getSymbolFilters`는 `demo:심볼`로 5분 캐시한다. 처음에 전부
+  // BTCUSDT로 썼더니 두 번째 시나리오부터 **첫 시나리오의 규격**을
+  // 봤고, 그래서 MARKET_LOT_SIZE 시험과 "규격 미상" 시험이 둘 다
+  // 엉뚱하게 실패했다. 캐시는 옳게 동작한 것이고 시험이 틀렸다.
+  const venueFor = (symbol: string, filters: any[], exInfoFails = false): FakeVenue => {
+    const v = new FakeVenue();
+    v.on(BN_EXINFO, exInfoFails
+      ? { status: 500, json: { msg: 'down' } }
+      : { json: { symbols: [{ symbol, filters }] } });
+    return v
+      .on('/fapi/v1/marginType', { json: { code: 200, msg: 'success' } })
+      .on('/fapi/v1/account', { json: { positions: [], assets: [] } })
+      .on(BN_DUAL, { json: { dualSidePosition: false } })
+      .on(BN_LEV, { json: { leverage: 100, symbol } })
+      .on(BN_POS, { json: [{ symbol, positionAmt: '0', entryPrice: '0',
+        leverage: '100', marginType: 'isolated', liquidationPrice: '0' }] })
+      .on('/fapi/v1/premiumIndex', { json: { symbol, markPrice: '60000' } })
+      .on(BN_ORDER, { status: 400, json: { code: -2013, msg: 'Order does not exist.' } }, 'GET');
+  };
+
+  /** 거래소에 실제로 간 수량 문자열 */
+  const sentQty = (venue: FakeVenue): string | null => {
+    const c = venue.orderSends()[0];
+    return c ? String((c.params as any)?.quantity ?? '') : null;
+  };
+  const decimalsOfStr = (v: string) => {
+    const dot = v.indexOf('.');
+    return dot < 0 ? 0 : v.slice(dot + 1).replace(/0+$/, '').length;
+  };
+
+  // ══════════ ① 생 부동소수가 격자로 내려간다 ══════════
+  {
+    const SYM = 'PRECAUSDT';
+    const db = new FakeDb();
+    const venue = venueFor(SYM, [
+      { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001' },
+      { filterType: 'MARKET_LOT_SIZE', stepSize: '0', minQty: '0' },
+      { filterType: 'MIN_NOTIONAL', notional: '5' },
+      { filterType: 'PRICE_FILTER', tickSize: '0.10' },
+    ]).on(BN_ORDER, { json: bnOrder({ symbol: SYM, status: 'FILLED', executedQty: '0.003', avgPrice: '60000' }) }, 'POST');
+    // 실측과 같은 모양: (20 × 10) / 60000
+    const raw = (20 * 10) / 60000;
+    const r = await scenario(venue, () => exec(db, { plan: plan({ symbol: SYM, quantity: raw }) }));
+
+    test('★ 실측 회귀 — 생 부동소수를 그대로 보내지 않는다 (-1111)', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 1);
+      const q = sentQty(venue)!;
+      assert(!q.includes('0.0033333'), `생 부동소수가 그대로 나갔다: ${q}`);
+      assert(decimalsOfStr(q) <= 3, `자리수가 규격을 넘었다: ${q}`);
+      eq(Number(q), 0.003);
+    });
+
+    test('★ 규격에 맞춘 수량을 장부에도 적는다', () => {
+      const row = db.table('live_orders')[0];
+      assert(row, '장부 줄이 없다');
+      eq(Number(row.quantity), 0.003);
+    });
+  }
+
+  // ══════════ ② MARKET_LOT_SIZE가 더 좁으면 그쪽을 따른다 ══════════
+  {
+    const SYM = 'PRECBUSDT';
+    const db = new FakeDb();
+    const venue = venueFor(SYM, [
+      { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001' },
+      { filterType: 'MARKET_LOT_SIZE', stepSize: '0.01', minQty: '0.01' },
+      { filterType: 'MIN_NOTIONAL', notional: '5' },
+      { filterType: 'PRICE_FILTER', tickSize: '0.10' },
+    ]).on(BN_ORDER, { json: bnOrder({ symbol: SYM, status: 'FILLED', executedQty: '0.03', avgPrice: '60000' }) }, 'POST');
+    const r = await scenario(venue, () => exec(db, { plan: plan({ symbol: SYM, quantity: 0.0333 }) }));
+
+    test('★ 시장가는 MARKET_LOT_SIZE까지 적용한다 (0.0333 → 0.03)', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 1);
+      eq(Number(sentQty(venue)), 0.03);
+    });
+  }
+
+  // ══════════ ②-b 보호주문 대체 수량도 LOT_SIZE 적용 ══════════
+  {
+    const { quantizeOrder } = await import('../../lib/exchanges/quantize');
+    const filters: any = {
+      limitQty: { stepSize: 0.001, minQty: 0.001 },
+      // MARKET_LOT_SIZE가 비활성(0)이어도 LOT_SIZE는 살아 있다.
+      marketQty: { stepSize: 0, minQty: 0 }, tickSize: 0.1,
+    };
+    test('★ 손절 fallback 0.0033333333은 reduceOnly에서도 0.003', () => {
+      const q = quantizeOrder(0.0033333333333333335, null, filters,
+        { orderType: 'MARKET', reduceOnly: true });
+      eq(q.ok, true); eq(q.quantity, 0.003);
+    });
+    test('★ 분할 익절 수량이 격자 아래면 실패 (전량 closePosition 승격 금지)', () => {
+      const q = quantizeOrder(0.0005, null, filters,
+        { orderType: 'MARKET', reduceOnly: true });
+      eq(q.ok, false); eq(q.quantity, null);
+    });
+    test('★ 청산 중 거래소 필터를 못 읽어도 원수량을 유지한다', () => {
+      const q = quantizeOrder(0.0033333333333333335, null, null,
+        { orderType: 'MARKET', reduceOnly: true });
+      eq(q.ok, true); eq(q.quantity, 0.0033333333333333335);
+    });
+  }
+
+  // ══════════ ②-c 실제 보호주문 fallback HTTP 전송 — -4120 이후 수량 ══════════
+  {
+    const SYM = 'PRECHUSDT';
+    const db = new FakeDb();
+    const venue = venueFor(SYM, [
+      { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001' },
+      { filterType: 'MARKET_LOT_SIZE', stepSize: '0', minQty: '0' },
+      { filterType: 'PRICE_FILTER', tickSize: '0.10' },
+    ])
+      .onParams(BN_ORDER, 'POST', { type: 'STOP_MARKET', closePosition: 'true' },
+        { status: 400, json: { code: -4120, msg: 'not supported for this endpoint' } })
+      .onParams(BN_ORDER, 'POST', { type: 'STOP_MARKET', reduceOnly: 'true' },
+        { json: bnOrder({ symbol: SYM, orderId: 9001 }) })
+      .on(BN_ORDER, { json: bnOrder({ symbol: SYM, status: 'FILLED',
+        executedQty: '0.003', avgPrice: '60000' }) }, 'POST')
+      .on('/fapi/v1/openOrders', { json: [{ orderId: 9001, symbol: SYM,
+        type: 'STOP_MARKET', side: 'SELL', stopPrice: '59000', reduceOnly: true }] });
+    const r = await scenario(venue, () => exec(db, {
+      plan: plan({ symbol: SYM, quantity: 0.0033333333333333335,
+        liquidationPrice: 58000, liquidationDistancePct: 3 }),
+      stopLoss: 59000, stopPolicy: 'FIXED_STOP',
+      protectionPolicy: 'OPTIONAL',
+    }));
+    test('★ -4120 후 실제 fallback 주문의 수량은 LOT_SIZE 격자 위', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const fallback = venue.orderSends().filter(c => c.params.type === 'STOP_MARKET'
+        && c.params.reduceOnly === 'true');
+      eq(fallback.length, 1, '손절 대체 주문이 실제로 나가지 않았다');
+      eq(fallback[0].params.quantity, '0.003');
+      assert(!fallback[0].params.quantity.includes('33333'), '생 부동소수가 나갔다');
+    });
+  }
+
+  // ══════════ ②-c2 미체결 주문의 origQty는 fallback 수량 증거가 아니다 ══════════
+  {
+    const SYM = 'PRECJUSDT';
+    const db = new FakeDb();
+    const venue = venueFor(SYM, [
+      { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001' },
+      { filterType: 'MARKET_LOT_SIZE', stepSize: '0', minQty: '0' },
+      { filterType: 'PRICE_FILTER', tickSize: '0.10' },
+    ])
+      .onParams(BN_ORDER, 'POST', { type: 'STOP_MARKET', closePosition: 'true' },
+        { status: 400, json: { code: -4120, msg: 'not supported for this endpoint' } })
+      .on(BN_ORDER, { json: bnOrder({ symbol: SYM, status: 'NEW',
+        executedQty: '0', origQty: '0.010' }) }, 'POST');
+    const r = await scenario(venue, () => exec(db, {
+      plan: plan({ symbol: SYM, quantity: 0.0033333333333333335,
+        liquidationPrice: 58000, liquidationDistancePct: 3 }),
+      stopLoss: 59000, stopPolicy: 'FIXED_STOP',
+      protectionPolicy: 'OPTIONAL',
+    }));
+    test('★ 미체결 origQty=0.010을 손절 대체 수량으로 보내지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const fallback = venue.orderSends().filter(c => c.params.type === 'STOP_MARKET'
+        && c.params.reduceOnly === 'true');
+      eq(fallback.length, 0, '미체결 주문의 요청 수량으로 손절 대체 주문을 보냈다');
+    });
+  }
+
+  // ══════════ ②-c3 손절 부착 실패 후 REQUIRED 청산도 체결량/격자 사용 ══════════
+  {
+    const SYM = 'PRECKUSDT';
+    const db = new FakeDb();
+    const venue = venueFor(SYM, [
+      { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001' },
+      { filterType: 'MARKET_LOT_SIZE', stepSize: '0', minQty: '0' },
+      { filterType: 'PRICE_FILTER', tickSize: '0.10' },
+    ])
+      .onParams(BN_ORDER, 'POST', { type: 'STOP_MARKET' },
+        { status: 400, json: { code: -4120, msg: 'not supported for this endpoint' } })
+      .onParams(BN_ORDER, 'POST', { type: 'MARKET', reduceOnly: 'true' },
+        { json: bnOrder({ symbol: SYM, status: 'FILLED', executedQty: '0.003', avgPrice: '60000' }) })
+      .on(BN_ORDER, { json: bnOrder({ symbol: SYM, status: 'FILLED',
+        executedQty: '0.003', origQty: '0.010', avgPrice: '60000' }) }, 'POST');
+    const r = await scenario(venue, () => exec(db, {
+      plan: plan({ symbol: SYM, quantity: 0.0033333333333333335,
+        liquidationPrice: 58000, liquidationDistancePct: 3 }),
+      stopLoss: 59000, stopPolicy: 'FIXED_STOP',
+      protectionPolicy: 'REQUIRED',
+    }));
+    test('★ REQUIRED 손절 실패 청산은 origQty 0.010 아닌 체결 0.003을 전송', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const close = venue.orderSends().filter(c => c.params.type === 'MARKET'
+        && c.params.reduceOnly === 'true');
+      eq(close.length, 1, '손절 실패 후 reduceOnly 청산이 전송되지 않았다');
+      eq(close[0].params.quantity, '0.003');
+    });
+  }
+
+  // ══════════ ②-d 잘못된 PARTIAL_TP는 closePosition으로 승격되지 않는다 ══════════
+  {
+    const SYM = 'PRECIUSDT';
+    const db = new FakeDb();
+    const venue = venueFor(SYM, [
+      { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001' },
+      { filterType: 'MARKET_LOT_SIZE', stepSize: '0', minQty: '0' },
+      { filterType: 'PRICE_FILTER', tickSize: '0.10' },
+    ])
+      .onParams(BN_ORDER, 'POST', { type: 'STOP_MARKET' },
+        { json: bnOrder({ symbol: SYM, orderId: 9002 }) })
+      .on(BN_ORDER, { json: bnOrder({ symbol: SYM, status: 'FILLED',
+        executedQty: '0.003', avgPrice: '60000' }) }, 'POST')
+      .on('/fapi/v1/openOrders', { json: [{ orderId: 9002, symbol: SYM,
+        type: 'STOP_MARKET', side: 'SELL', stopPrice: '59000', closePosition: true }] });
+    const r = await scenario(venue, () => exec(db, {
+      plan: plan({ symbol: SYM, quantity: 0.0033333333333333335,
+        liquidationPrice: 58000, liquidationDistancePct: 3 }),
+      stopLoss: 59000, stopPolicy: 'FIXED_STOP',
+      takeProfitPolicy: 'FIXED_TP', protectionPolicy: 'OPTIONAL',
+      exitPlan: { orders: [{ kind: 'PARTIAL_TP', price: 61000, quantity: 0.0005 }] },
+    }));
+    test('★ 격자 미만 PARTIAL_TP는 주문 0건 (전량 청산 전환 금지)', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const tp = venue.orderSends().filter(c => c.params.type === 'TAKE_PROFIT_MARKET');
+      eq(tp.length, 0, '수량 없는 분할 익절이 closePosition으로 전송됐다');
+    });
+  }
+
+  // ══════════ ③ 격자 아래 수량은 **보내지 않는다** ══════════
+  {
+    const SYM = 'PRECCUSDT';
+    const db = new FakeDb();
+    const venue = venueFor(SYM, [
+      { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001' },
+      { filterType: 'MARKET_LOT_SIZE', stepSize: '0', minQty: '0' },
+      { filterType: 'MIN_NOTIONAL', notional: '5' },
+    ]).on(BN_ORDER, { json: bnOrder({ symbol: SYM }) }, 'POST');
+    const r = await scenario(venue, () => exec(db, { plan: plan({ symbol: SYM, quantity: 0.00005 }) }));
+
+    test('★ 격자보다 작은 수량은 주문을 보내지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 0);
+      eq((r as any).status, 'FAILED');
+    });
+
+    test('★ 안 보낸 주문을 SENT로 적지 않는다', () => {
+      // 장부에 "보냈다"가 남으면 대조가 영영 어긋난다.
+      const sent = db.writes.filter((w) => w.patch?.status === 'SENT');
+      eq(sent.length, 0);
+      eq(db.table('live_orders')[0].status, 'FAILED');
+    });
+  }
+
+  // ══════════ ④ 최소 명목가 미달도 보내지 않는다 ══════════
+  {
+    const SYM = 'PRECDUSDT';
+    const db = new FakeDb();
+    const venue = venueFor(SYM, [
+      { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001' },
+      { filterType: 'MARKET_LOT_SIZE', stepSize: '0', minQty: '0' },
+      // 0.003 × 60000 = $180 < $500
+      { filterType: 'MIN_NOTIONAL', notional: '500' },
+    ]).on(BN_ORDER, { json: bnOrder({ symbol: SYM }) }, 'POST');
+    const r = await scenario(venue, () => exec(db, { plan: plan({ symbol: SYM, quantity: 0.0033333 }) }));
+
+    test('★ 최소 명목가에 못 미치면 보내지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 0);
+      eq((r as any).status, 'FAILED');
+    });
+  }
+
+  // ══════════ ⑤ 규격을 못 읽으면 신규 진입을 보내지 않는다 ══════════
+  {
+    const SYM = 'PRECEUSDT';
+    const db = new FakeDb();
+    const venue = venueFor(SYM, [], true)
+      .on(BN_ORDER, { json: bnOrder({ symbol: SYM }) }, 'POST');
+    const r = await scenario(venue, () => exec(db, { plan: plan({ symbol: SYM, quantity: 0.0033333 }) }));
+
+    test('★ 규격 미상이면 신규 진입을 막는다 — 모르는 규격으로 열지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 0);
+      eq((r as any).status, 'FAILED');
+      assert(/규격/.test(String((r as any).message)), String((r as any).message));
+    });
+  }
+
+  // ══════════ ⑥ 지정가는 tickSize에 맞춘다 ══════════
+  {
+    const SYM = 'PRECFUSDT';
+    const db = new FakeDb();
+    const venue = venueFor(SYM, [
+      { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001' },
+      { filterType: 'MARKET_LOT_SIZE', stepSize: '0', minQty: '0' },
+      { filterType: 'MIN_NOTIONAL', notional: '5' },
+      { filterType: 'PRICE_FILTER', tickSize: '0.10' },
+    ]).on(BN_ORDER, { json: bnOrder({ symbol: SYM, status: 'NEW' }) }, 'POST');
+    const r = await scenario(venue, () => exec(db, {
+      plan: plan({ symbol: SYM, quantity: 0.0033333 }),
+      orderType: 'LIMIT', limitPrice: 60000.07,
+    }));
+
+    test('★ 지정가는 tickSize 격자로 간다 (60000.07 → 60000.1)', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      const c = venue.orderSends()[0];
+      assert(c != null, '주문이 안 나갔다');
+      eq(Number((c.params as any).price), 60000.1);
+      eq(Number((c.params as any).quantity), 0.003);
+    });
+  }
+
+  // ══════════ ⑦ MARKET_LOT_SIZE가 아예 없으면 시장가를 막는다 ══════════
+  {
+    // 실제 바이낸스 USDⓈ-M 무기한은 이 필터를 **항상** 준다(꺼져 있으면
+    // 0으로). 아예 없다는 것은 규격을 다 읽지 못했다는 뜻이고, 그때
+    // `LOT_SIZE`를 복사해 쓰면 거래소가 두지 않은 규칙을 지어내는 것이다.
+    // 그래서 신규 진입은 막는다 — 거부당하는 것보다 안 보내는 것이 낫다.
+    const SYM = 'PRECGUSDT';
+    const db = new FakeDb();
+    const venue = venueFor(SYM, [
+      { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001' },
+      { filterType: 'MIN_NOTIONAL', notional: '5' },
+      { filterType: 'PRICE_FILTER', tickSize: '0.10' },
+    ]).on(BN_ORDER, { json: bnOrder({ symbol: SYM }) }, 'POST');
+    const r = await scenario(venue, () => exec(db, { plan: plan({ symbol: SYM, quantity: 0.0033333 }) }));
+
+    test('★ 시장가 격자가 없으면 신규 진입을 막는다 (LOT_SIZE를 복사하지 않는다)', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 0);
+      eq((r as any).status, 'FAILED');
+    });
+  }
+}
+
+/**
+ * **실제 심볼 × 방향 × 배율 전수.**
+ *
+ * 합성 심볼로만 보면 "BTCUSDT에서도 되는가"를 못 말한다. 실제 바이낸스
+ * USDⓈ-M 규격으로 BTCUSDT·ETHUSDT를 LONG/SHORT · 10배/100배로 돌려
+ * **거래소에 간 수량과 보호주문 가격이 전부 격자 위에 있는지** 본다.
+ */
+export async function runPrecisionMatrixTests() {
+  console.log('[통합 — 정밀도 전수 (BTC·ETH × LONG·SHORT × 10·100배)]');
+
+  /** 실제 바이낸스 USDⓈ-M 규격 (MARKET_LOT_SIZE의 0은 '꺼짐') */
+  const SPECS: Record<string, { step: string; minQty: string; tick: string; px: number }> = {
+    // **기준가를 딱 떨어지는 값으로 두지 않는다.**
+    //   60000 × 0.98 = 58800 — 이미 0.10 격자 위라 반올림을 떼도 시험이
+    //   통과한다. 실제로 그렇게 써서 음성 시험이 0건을 잡았다.
+    //   실측의 `59400.000000000007`처럼 **어긋나는 값**이어야 한다.
+    MTXBTCUSDT: { step: '0.001', minQty: '0.001', tick: '0.10', px: 60123.45 },
+    MTXETHUSDT: { step: '0.001', minQty: '0.001', tick: '0.01', px: 3012.37 },
+  };
+
+  const onGrid = (v: number, step: number) => {
+    const k = Math.round(v / step);
+    return Math.abs(k * step - v) < step * 1e-6;
+  };
+
+  for (const [SYM, spec] of Object.entries(SPECS)) {
+    for (const side of ['LONG', 'SHORT'] as const) {
+      for (const leverage of [10, 100]) {
+        const db = new FakeDb();
+        const marginUsd = 20;
+        // 스모크가 쓰는 바로 그 식 — 생 부동소수가 나온다
+        const rawQty = (marginUsd * leverage) / spec.px;
+
+        // **손절은 청산가 안쪽이어야 한다.** 배율이 높을수록 청산까지의
+        // 거리가 짧다(100배면 약 1%). 처음엔 손절을 1%로 고정하고
+        // 청산가를 아무 값이나 넣었다가, 청산가 관문이 옳게 막았다 —
+        // 코드가 아니라 픽스처가 틀렸던 것이다.
+        const liqPct = 0.9 * (100 / leverage);          // 10배 9% · 100배 0.9%
+        const stopPct = leverage >= 100 ? 0.3 : 2;
+        const sgn = side === 'LONG' ? -1 : 1;
+        const liqPrice = spec.px * (1 + sgn * liqPct / 100);
+        const rawStop = spec.px * (1 + sgn * stopPct / 100);
+        const rawTp = spec.px * (1 - sgn * stopPct / 100);
+
+        const venue = new FakeVenue()
+          .on(BN_EXINFO, { json: { symbols: [{ symbol: SYM, filters: [
+            { filterType: 'LOT_SIZE', stepSize: spec.step, minQty: spec.minQty },
+            { filterType: 'MARKET_LOT_SIZE', stepSize: '0', minQty: '0' },
+            { filterType: 'PRICE_FILTER', tickSize: spec.tick },
+            { filterType: 'MIN_NOTIONAL', notional: '5' },
+          ] }] } })
+          .on('/fapi/v1/marginType', { json: { code: 200, msg: 'success' } })
+          .on('/fapi/v1/account', { json: { positions: [], assets: [] } })
+          .on(BN_DUAL, { json: { dualSidePosition: false } })
+          .on(BN_LEV, { json: { leverage, symbol: SYM } })
+          .on(BN_POS, { json: [{ symbol: SYM, positionAmt: '0', entryPrice: '0',
+            leverage: String(leverage), marginType: 'isolated', liquidationPrice: '0' }] })
+          .on('/fapi/v1/premiumIndex', { json: { symbol: SYM, markPrice: String(spec.px) } })
+          .on('/fapi/v1/openOrders', { json: [] })
+          .on(BN_ORDER, { status: 400, json: { code: -2013, msg: 'Order does not exist.' } }, 'GET')
+          .on(BN_ORDER, { json: bnOrder({ symbol: SYM, status: 'FILLED',
+            executedQty: String(rawQty), avgPrice: String(spec.px) }) }, 'POST');
+
+        const r = await scenario(venue, () => exec(db, {
+          plan: plan({ symbol: SYM, side, quantity: rawQty, leverage,
+            stopDistancePct: stopPct, effectiveStopPct: stopPct,
+            liquidationPrice: liqPrice, liquidationDistancePct: liqPct }),
+          stopLoss: rawStop, takeProfit: rawTp,
+          stopPolicy: 'FIXED_STOP', takeProfitPolicy: 'FIXED_TP',
+          protectionPolicy: 'OPTIONAL',
+        }));
+
+        const label = `${SYM} ${side} ${leverage}배`;
+
+        test(`★ ${label} — 진입 수량이 stepSize 격자 위에 있다`, () => {
+          assert(!(r instanceof Error), String((r as any)?.message));
+          const sends = venue.orderSends();
+          assert(sends.length >= 1, `주문이 안 나갔다 (${String((r as any)?.message)})`);
+          const q = Number((sends[0].params as any).quantity);
+          const step = Number(spec.step);
+          assert(onGrid(q, step), `${label}: 수량 ${q}이 격자 ${step} 위에 없다`);
+          assert(q > 0, `${label}: 수량이 0이다`);
+          // 생 부동소수가 그대로 나가지 않았다
+          assert(q !== rawQty || onGrid(rawQty, step),
+            `${label}: 생 부동소수 ${rawQty}가 그대로 나갔다`);
+        });
+
+        test(`★ ${label} — 보호주문 가격이 tickSize 격자 위에 있다`, () => {
+          const tick = Number(spec.tick);
+          // **이 시험이 공허하지 않다는 확인.** 원본이 이미 격자 위면
+          // 반올림을 떼도 통과하므로 아무것도 막지 못한다.
+          assert(!onGrid(rawStop, tick) || !onGrid(rawTp, tick),
+            `${label}: 원본 가격이 이미 격자 위다 — 이 시험은 아무것도 막지 못한다`);
+          const conds = venue.calls.filter((c) => c.method === 'POST'
+            && /\/order\b/.test(c.path) && (c.params as any)?.stopPrice != null);
+          assert(conds.length >= 1, `${label}: 조건부 주문이 안 나갔다`);
+          for (const c of conds) {
+            const sp = Number((c.params as any).stopPrice);
+            assert(onGrid(sp, tick), `${label}: stopPrice ${sp}이 호가 단위 ${tick} 위에 없다`);
+          }
+        });
+
+        test(`★ ${label} — 손절은 불리한 쪽, 익절은 유리한 쪽으로 맞춘다`, () => {
+          // 반올림하면 손절이 한 틱 가까워지거나 익절이 한 틱 멀어진다.
+          const conds = venue.calls.filter((c) => c.method === 'POST'
+            && /\/order\b/.test(c.path) && (c.params as any)?.stopPrice != null);
+          for (const c of conds) {
+            const sp = Number((c.params as any).stopPrice);
+            const type = String((c.params as any).type);
+            if (type === 'STOP_MARKET') {
+              if (side === 'LONG') assert(sp <= rawStop, `${label}: LONG 손절이 올라갔다 ${rawStop}→${sp}`);
+              else assert(sp >= rawStop, `${label}: SHORT 손절이 내려갔다 ${rawStop}→${sp}`);
+            } else if (type === 'TAKE_PROFIT_MARKET') {
+              if (side === 'LONG') assert(sp >= rawTp, `${label}: LONG 익절이 내려갔다 ${rawTp}→${sp}`);
+              else assert(sp <= rawTp, `${label}: SHORT 익절이 올라갔다 ${rawTp}→${sp}`);
+            }
+          }
+        });
+      }
+    }
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// 097이 커밋해 둔 의도를 이어받는 경로 (#531)
+//
+// 097의 `ten_slot_claim`은 슬롯 예약과 `live_orders` INTENT를 한
+// 트랜잭션으로 적는다. 그 뒤에 `executeOrder`가 같은 `client_order_id`로
+// 불리면 INSERT가 23505로 깨진다. **그 자리의 기존 동작은 "이미 처리된
+// 주문"으로 끝나는 것이고, 그러면 예약은 커밋됐는데 주문은 영원히 나가지
+// 않는다.** 이어받기는 그 자리를 여는데, 조건이 느슨하면 다른 주문의
+// 의도로 전송하거나 이미 나간 주문을 또 보낸다.
+// ══════════════════════════════════════════════════════════════════
+
+/** 097이 커밋해 둔 INTENT 줄. `exec()`가 조립하는 의도와 같은 값이다 */
+const committedIntent = (over: Record<string, any> = {}) => ({
+  id: 'claim-1', client_order_id: 'COID-1', status: 'INTENT',
+  user_id: 'u1', connection_id: 'c1', signal_id: 'sig-1',
+  exchange: 'binance', mode: 'TESTNET', symbol: 'BTCUSDT', side: 'BUY',
+  order_type: 'MARKET', quantity: 0.01, leverage: 100, reduce_only: false,
+  price: null, stop_loss: null, take_profit: null, stop_policy: 'NO_FIXED_SL',
+  entry_adverse_distance_pct: null, entry_liquidation_distance_pct_raw: null,
+  exchange_order_id: null, sent_at: null, attempt_count: 0,
+  ...over,
+});
+
+/** 예약된 의도가 있는 상태. INSERT는 유니크로 깨진다 */
+const adoptDb = (row: Record<string, any> = {}) =>
+  new FakeDb({ failInsertCode: { table: 'live_orders', code: '23505' } })
+    .seed('live_orders', [committedIntent(row)]);
+
+const sendableVenue = () => baseVenue()
+  .on(BN_ORDER, { status: 400, json: { code: -2013, msg: 'Order does not exist.' } }, 'GET')
+  .on(BN_ORDER, { json: bnOrder({ status: 'NEW', executedQty: '0' }) }, 'POST');
+
+export async function runAdoptIntentIntegrationTests() {
+  console.log('[통합 — 커밋된 주문 의도 이어받기 (#531)]');
+
+  // ══════════ ① RED — 이어받지 않으면 주문이 영원히 나가지 않는다 ══════════
+  {
+    const db = adoptDb();
+    const venue = sendableVenue();
+    const r = await scenario(venue, () => exec(db, {}));
+
+    test('★ 예약이 커밋된 의도를 이어받지 않으면 주문이 나가지 않는다 (기존 동작)', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 0, '이어받기를 요청하지 않았는데 주문이 나갔다');
+      eq((r as any).duplicate, true);
+      // **이것이 #531이 가리키는 구멍이다.** 장부에는 의도가 있고 슬롯은
+      // 예약됐는데, 거래소에는 아무 일도 일어나지 않고 ok는 false다.
+      eq((r as any).ok, false);
+      eq(db.table('live_orders')[0].status, 'INTENT');
+    });
+  }
+
+  // ══════════ ② GREEN — 이어받으면 전송이 계속된다 ══════════
+  {
+    const db = adoptDb();
+    const venue = sendableVenue();
+    const r = await scenario(venue, () => exec(db, { adoptIntent: true }));
+
+    test('★ 커밋된 의도를 이어받아 주문을 한 번만 보낸다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 1, `주문이 ${venue.orderSends().length}번 나갔다`);
+      eq((r as any).duplicate, undefined, '이어받았는데 중복으로 끝났다');
+      eq((r as any).status, 'ACKED');
+      // **의도를 또 적지 않는다.** 커밋된 그 줄을 쓴다.
+      eq(db.table('live_orders').length, 1, '의도가 두 줄이 됐다');
+      eq(db.table('live_orders')[0].id, 'claim-1', '예약이 적어 둔 줄이 아닌 다른 줄을 썼다');
+      eq(db.table('live_orders')[0].status, 'ACKED');
+    });
+  }
+
+  // ══════════ ②-a 동일 INTENT 동시 실행: POST 단일화 ══════════
+  {
+    const db = adoptDb();
+    const venue = sendableVenue();
+    const results = await scenario(venue, () => Promise.all([
+      exec(db, { adoptIntent: true }),
+      exec(db, { adoptIntent: true }),
+    ]));
+    test('★ 같은 예약 의도를 두 실행기가 동시에 읽어도 venue POST 최대 1회', () => {
+      assert(!(results instanceof Error), String((results as any)?.message));
+      eq(venue.orderSends().length, 1, '동일 INTENT의 중복 POST가 발생했다');
+      eq((results as any[]).filter((r: any) => r.status === 'UNKNOWN').length, 1,
+        'CAS 패자가 UNKNOWN으로 안전하게 중단하지 않았다');
+      const claims = db.writes.filter((w) => w.kind === 'update'
+        && w.patch.status === 'SENT' && w.where?.status === 'INTENT');
+      eq(claims.length, 1, '동일 INTENT의 SENT 선점이 한 번이어야 한다');
+    });
+  }
+
+  // ══════════ ②-b 예약 adoption의 DB 선점 실패: POST 0회 ══════════
+  {
+    const db = new FakeDb({ failUpdatesOn: 'live_orders' })
+      .seed('live_orders', [committedIntent()]);
+    const venue = sendableVenue();
+    const r = await scenario(venue, () => exec(db, { adoptIntent: true }));
+    test('★ 예약된 INTENT라도 DB 선점 오류 시 전송하지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 0, 'DB 오류 후 예약 주문을 전송했다');
+      eq((r as any).ok, false);
+      eq((r as any).status, 'UNKNOWN');
+      eq(db.table('live_orders')[0].status, 'INTENT');
+    });
+  }
+
+  // ══════════ ③ 이어받기를 거절해야 하는 경우들 ══════════
+  //
+  // 하나라도 통과하면 "다른 주문의 의도로 전송" 또는 "이미 나간 주문 재전송"이다.
+  const refusals: Array<[string, Record<string, any>]> = [
+    ['이미 전송된 줄', { status: 'SENT' }],
+    ['이미 접수된 줄', { status: 'ACKED' }],
+    ['거래소 주문 번호가 남은 줄', { exchange_order_id: '7001' }],
+    ['전송 시각이 남은 줄', { sent_at: '2026-10-29T00:00:00Z' }],
+    ['시도 횟수가 남은 줄', { attempt_count: 1 }],
+    ['수량이 다른 줄', { quantity: 0.02 }],
+    ['종목이 다른 줄', { symbol: 'ETHUSDT' }],
+    ['방향이 다른 줄', { side: 'SELL' }],
+    ['청산 여부가 다른 줄', { reduce_only: true }],
+    ['배율이 다른 줄', { leverage: 10 }],
+    ['진입 주문의 예약 배율 누락', { leverage: null }],
+    ['거래소가 다른 줄', { exchange: 'gate' }],
+    ['환경이 다른 줄', { mode: 'LIVE' }],
+    ['다른 사용자 소유 줄', { user_id: 'u2' }],
+    ['다른 거래소 연결 줄', { connection_id: 'c2' }],
+    ['다른 신호 줄', { signal_id: 'sig-2' }],
+    ['소유자 누락 줄', { user_id: null }],
+    ['연결 누락 줄', { connection_id: null }],
+    ['신호 누락 줄', { signal_id: null }],
+    ['손절 정책이 다른 줄', { stop_policy: null }],
+    ['손절가가 다른 줄', { stop_loss: 95000 }],
+    ['익절가가 다른 줄', { take_profit: 110000 }],
+    ['시장가 의도에 임의 가격이 있는 줄', { price: 99999 }],
+    ['저장된 역행 거리만 다른 줄', { entry_adverse_distance_pct: 2.5 }],
+    ['저장된 청산 거리만 다른 줄', { entry_liquidation_distance_pct_raw: 3.5 }],
+  ];
+  for (const [label, over] of refusals) {
+    const db = adoptDb(over);
+    const venue = sendableVenue();
+    const r = await scenario(venue, () => exec(db, { adoptIntent: true }));
+
+    test(`★ ${label}은 이어받지 않고 주문도 보내지 않는다`, () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 0, `${label}인데 주문이 나갔다`);
+      eq((r as any).duplicate, true, `${label}을 이어받았다`);
+    });
+  }
+
+  // ══════════ ③-a 091 위험 좌표 대조 — 서로 독립적인 NULL 허용 ══════════
+  // SQL 097은 두 좌표를 독립적으로 적는다. 저장된 좌표와 실제 전송 의도가
+  // 다르면 이미 예약한 위험 계약이 아니므로 거래소 POST 전에 중단한다.
+  const riskCases: Array<[
+    string, Record<string, any>, Record<string, any>, number,
+  ]> = [
+    ['두 좌표가 같은 숫자/NUMERIC 문자열', {
+      entry_adverse_distance_pct: '2.5000',
+      entry_liquidation_distance_pct_raw: '3.500',
+    }, { adverseDistancePct: 2.5, liquidationDistancePctRaw: 3.5 }, 1],
+    ['한 좌표만 있고 나머지는 양쪽 NULL', {
+      entry_adverse_distance_pct: '2.5',
+      entry_liquidation_distance_pct_raw: null,
+    }, { adverseDistancePct: 2.5, liquidationDistancePctRaw: null }, 1],
+    ['역행 거리 불일치', {
+      entry_adverse_distance_pct: 2.5,
+      entry_liquidation_distance_pct_raw: 3.5,
+    }, { adverseDistancePct: 2.6, liquidationDistancePctRaw: 3.5 }, 0],
+    ['청산 거리 불일치', {
+      entry_adverse_distance_pct: 2.5,
+      entry_liquidation_distance_pct_raw: 3.5,
+    }, { adverseDistancePct: 2.5, liquidationDistancePctRaw: 3.6 }, 0],
+    ['한쪽만 NULL', {
+      entry_adverse_distance_pct: null,
+      entry_liquidation_distance_pct_raw: 3.5,
+    }, { adverseDistancePct: 2.5, liquidationDistancePctRaw: 3.5 }, 0],
+    ['저장된 비유한 숫자', {
+      entry_adverse_distance_pct: 'Infinity',
+      entry_liquidation_distance_pct_raw: 3.5,
+    }, { adverseDistancePct: 2.5, liquidationDistancePctRaw: 3.5 }, 0],
+  ];
+  for (const [label, stored, riskSnapshot, expectedPosts] of riskCases) {
+    const db = adoptDb(stored);
+    const venue = sendableVenue();
+    const r = await scenario(venue, () => exec(db, {
+      adoptIntent: true, entryRiskSnapshot: riskSnapshot,
+    }));
+    test(`★ 091 위험 좌표 ${label}: venue POST ${expectedPosts}회`, () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, expectedPosts,
+        `${label}: 다른 위험 좌표의 예약을 전송했다`);
+      if (expectedPosts === 0) {
+        eq((r as any).ok, false);
+        eq((r as any).status, 'UNKNOWN');
+        eq((r as any).duplicate, true);
+        eq(db.table('live_orders')[0].status, 'INTENT');
+      }
+    });
+  }
+
+  // ══════════ ③-b 거절된 adoption을 이전 체결 성공으로 승격하지 않는다 ══════════
+  // 이전에는 canAdoptIntent()가 ACKED/FILLED를 거절해도 아래 duplicate
+  // 응답이 prev.status만 보고 ok:true로 바꾸고 다른 계정의 체결 정보를 노출했다.
+  for (const [status, userId] of [['ACKED', 'u2'], ['FILLED', 'u1']] as const) {
+    const db = adoptDb({
+      status, user_id: userId, exchange_order_id: 'private-venue-id',
+      filled_qty: 0.5, avg_price: 50000,
+    });
+    const venue = sendableVenue();
+    const r = await scenario(venue, () => exec(db, { adoptIntent: true }));
+    test(`★ ${status} 예약 이어받기 거절은 성공도 체결정보 공개도 아니다`, () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 0, '이미 전송된 의도를 다시 보냈다');
+      eq((r as any).duplicate, true);
+      eq((r as any).ok, false, 'adoption 거절을 과거 체결 성공으로 승격했다');
+      eq((r as any).status, 'UNKNOWN', '다른 주문 상태를 신뢰 가능한 결과로 노출했다');
+      eq((r as any).exchangeOrderId, undefined, '다른 주문의 거래소 ID를 노출했다');
+      eq((r as any).filledQty, undefined, '다른 주문의 체결 수량을 노출했다');
+      eq((r as any).avgPrice, undefined, '다른 주문의 체결 가격을 노출했다');
+    });
+  }
+
+  // ══════════ ③-c 예약 없는 이어받기는 절대 새 INTENT를 만들지 않는다 ══════════
+  // 이전 HEAD는 adoptIntent:true여도 INSERT를 먼저 시도해, 빈 DB에서
+  // INSERT가 성공하면 그대로 거래소 주문까지 진행했다. 이 테스트는
+  // 097의 예약 없이도 보내던 fail-open을 실제 executeOrder 경로로 잡는다.
+  {
+    const db = new FakeDb();
+    const venue = sendableVenue();
+    const r = await scenario(venue, () => exec(db, { adoptIntent: true }));
+
+    test('★ 예약이 없는데 adoptIntent:true면 DB INSERT 0 · 거래소 전송 0', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(db.table('live_orders').length, 0, '예약 없는 의도를 새로 만들어 버렸다');
+      eq(venue.orderSends().length, 0, '예약 없는 주문을 거래소로 보냈다');
+      eq((r as any).ok, false);
+      eq((r as any).status, 'UNKNOWN');
+    });
+  }
+
+  {
+    const db = new FakeDb({ failSelectsOn: 'live_orders' });
+    const venue = sendableVenue();
+    const r = await scenario(venue, () => exec(db, { adoptIntent: true }));
+
+    test('★ 예약 조회 실패는 새 의도 작성 없이 fail-closed', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(db.table('live_orders').length, 0, '조회 실패 후 의도를 만들어 버렸다');
+      eq(venue.orderSends().length, 0, '조회 실패 후 주문을 보냈다');
+      eq((r as any).ok, false);
+      eq((r as any).status, 'UNKNOWN');
+    });
+  }
+
+  // ══════════ ④ 줄을 못 읽었으면 이어받지 않는다 ══════════
+  {
+    const db = new FakeDb({ failInsertCode: { table: 'live_orders', code: '23505' } });
+    const venue = sendableVenue();
+    const r = await scenario(venue, () => exec(db, { adoptIntent: true }));
+
+    test('★ 커밋된 의도를 못 읽으면 이어받지 않는다 — UNKNOWN을 통과로 적지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 0, '의도를 못 읽었는데 주문이 나갔다');
+      eq((r as any).status, 'UNKNOWN');
+      eq((r as any).duplicate, true);
+    });
+  }
+
+  // ══════════ ⑤ 판단 함수 자체 ══════════
+  {
+    const intent = {
+      client_order_id: 'COID-1', user_id: 'u1', connection_id: 'c1',
+      signal_id: 'sig-1', exchange: 'binance', mode: 'TESTNET',
+      symbol: 'BTCUSDT', side: 'BUY', order_type: 'MARKET',
+      quantity: 0.01, leverage: 100, reduce_only: false,
+      stop_policy: 'NO_FIXED_SL', stop_loss: null, take_profit: null,
+    };
+    test('canAdoptIntent: 같은 의도만 이어받는다', () => {
+      assert(canAdoptIntent(committedIntent(), intent).ok, '같은 의도를 거절했다');
+      // 문자열·숫자 표기 차이로 거절하지 않는다 (DB는 NUMERIC을 문자열로 준다)
+      assert(canAdoptIntent(committedIntent({ quantity: '0.0100' as any }), intent).ok,
+        '같은 수량의 다른 표기를 거절했다');
+      for (const [, over] of refusals) {
+        assert(!canAdoptIntent(committedIntent(over), intent).ok,
+          `${JSON.stringify(over)}를 이어받았다`);
+      }
+      assert(!canAdoptIntent(null, intent).ok, 'null을 이어받았다');
+      assert(!canAdoptIntent(undefined, intent).ok, 'undefined를 이어받았다');
+      // 진입은 예약된 배율이 없으면 전송할 계약을 증명할 수 없다.
+      assert(!canAdoptIntent(committedIntent({ leverage: null }), intent).ok,
+        '진입 예약에 배율이 없는데 이어받았다');
+      assert(!canAdoptIntent(committedIntent(), { ...intent, leverage: null }).ok,
+        '진입 요청에 배율이 없는데 이어받았다');
+      // 청산은 배율이 없을 수 있다. 청산 여부가 양쪽에서 일치해야 한다.
+      assert(canAdoptIntent(committedIntent({ leverage: null, reduce_only: true }),
+        { ...intent, leverage: null, reduce_only: true }).ok,
+        '청산 주문의 양쪽 배율 누락을 거절했다');
+      // LIMIT은 SQL이 저장한 price와 실제 전송 가격까지 동일해야 한다.
+      const limit = { ...intent, order_type: 'LIMIT' };
+      const reservedLimit = committedIntent({ order_type: 'LIMIT', price: '50000.00' });
+      assert(canAdoptIntent(reservedLimit, limit, 50000).ok,
+        '같은 지정가의 NUMERIC 문자열 표현을 거절했다');
+      assert(!canAdoptIntent(reservedLimit, limit, 50001).ok,
+        '다른 지정가를 이어받았다');
+      assert(!canAdoptIntent(reservedLimit, limit).ok,
+        '가격이 없는 LIMIT을 이어받았다');
+      assert(!canAdoptIntent(committedIntent({ price: null }), limit, 50000).ok,
+        '가격이 기록되지 않은 LIMIT을 이어받았다');
+      assert(!canAdoptIntent(committedIntent(), { ...intent, user_id: null }).ok,
+        '요청의 사용자 정체성이 없는데 이어받았다');
+      assert(!canAdoptIntent(committedIntent(), { ...intent, connection_id: null }).ok,
+        '요청의 거래소 연결이 없는데 이어받았다');
+      assert(!canAdoptIntent(committedIntent(), { ...intent, signal_id: null }).ok,
+        '요청의 신호 정체성이 없는데 이어받았다');
+      assert(!canAdoptIntent(committedIntent({ id: null }), intent).ok,
+        'DB 행 ID가 없는데 이어받았다');
+      assert(!canAdoptIntent(committedIntent({ stop_policy: null }), intent).ok,
+        '097이 NO_FIXED_SL 정책을 적지 않은 의도를 이어받았다');
+      // 091은 두 좌표를 독립적으로 NULL 허용한다. 값이 있으면 유한 숫자로 같아야 한다.
+      const riskIntent = { ...intent, entry_adverse_distance_pct: 2.5,
+        entry_liquidation_distance_pct_raw: 3.5 };
+      assert(canAdoptIntent(committedIntent({
+        entry_adverse_distance_pct: '2.5000',
+        entry_liquidation_distance_pct_raw: '3.500',
+      }), riskIntent).ok, '같은 위험 좌표의 NUMERIC 문자열을 거절했다');
+      assert(canAdoptIntent(committedIntent({
+        entry_adverse_distance_pct: null,
+        entry_liquidation_distance_pct_raw: '3.5',
+      }), { ...riskIntent, entry_adverse_distance_pct: null }).ok,
+      '한 좌표만 존재하는 정상 예약을 거절했다');
+      assert(!canAdoptIntent(committedIntent({
+        entry_adverse_distance_pct: 2.6,
+        entry_liquidation_distance_pct_raw: 3.5,
+      }), riskIntent).ok, '다른 역행 거리를 이어받았다');
+      assert(!canAdoptIntent(committedIntent({
+        entry_adverse_distance_pct: 2.5,
+        entry_liquidation_distance_pct_raw: 3.6,
+      }), riskIntent).ok, '다른 청산 거리를 이어받았다');
+      assert(!canAdoptIntent(committedIntent({
+        entry_adverse_distance_pct: null,
+        entry_liquidation_distance_pct_raw: 3.5,
+      }), riskIntent).ok, '저장된 역행 거리 누락을 통과시켰다');
+      for (const invalid of ['NaN', 'Infinity', '-Infinity', 'not-a-number']) {
+        assert(!canAdoptIntent(committedIntent({
+          entry_adverse_distance_pct: invalid,
+        }), { ...intent, entry_adverse_distance_pct: invalid }).ok,
+        `유효하지 않은 위험 좌표 ${invalid}을 이어받았다`);
+      }
+    });
+  }
+}
