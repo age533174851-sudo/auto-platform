@@ -1,0 +1,40 @@
+# Deterministic offline-only paper replay with inspectable per-slot journal.
+# No keys, no network trading calls, no Supabase, no deployment and no live orders.
+name: ten-slot-paper-replay-offline
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/ten-slot-paper-replay.mjs'
+      - 'scripts/ten-slot-paper-replay.test.mjs'
+      - '.github/workflows/ten-slot-paper-replay-offline.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ten-slot-paper-replay
+  cancel-in-progress: true
+
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Confirm reproducible full-cycle FakeDB/FakeVenue replay
+        run: node --test scripts/ten-slot-paper-replay.test.mjs
+      - name: Write 10-slot synthetic trade evidence
+        run: |
+          node scripts/ten-slot-paper-replay.mjs > ten-slot-paper-replay.json
+          cat ten-slot-paper-replay.json
+      - name: Upload synthetic journal (NOT real testnet)
+        uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-ten-slot-paper-replay
+          path: ten-slot-paper-replay.json
+          retention-days: 7
