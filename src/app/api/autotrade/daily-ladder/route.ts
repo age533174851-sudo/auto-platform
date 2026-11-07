@@ -22,6 +22,7 @@ import { ledgerFillQty } from '@/lib/engine/ledgerFillQty';
 import { HOLDING_EVIDENCE_STATUSES } from '@/lib/engine/holdingEvidence';
 import { timingSafeEqual } from 'crypto';
 import { tagStrategy } from '@/lib/strategies/ledger';
+import { scheduleReadSummary } from '@/lib/autotrade/scheduleReadSummary';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -1240,16 +1241,24 @@ export async function GET(req: NextRequest) {
     cronLogError = lg.error;
   } catch (e: any) { cronLogError = String(e?.message || e); }
 
+  // **0건도 결과다.** 켜 놓은 것이 없으면 그렇게 말한다 — 조용히
+  // 아무것도 안 하면 지금까지와 똑같아진다.
+  //
+  // 그런데 **못 읽은 것은 0건이 아니다.** 읽기에 실패하면 `rows`가 빈
+  // 배열로 남고, 그 길이를 그대로 적으면 "사용자가 자동매매를 꺼 두었다"와
+  // "DB를 못 읽는다"가 같은 0으로 나간다. 2026-10-20부터 Supabase가
+  // egress 할당량 초과로 제한됐을 때 이 응답이 매번 `scheduled: 0`이었고,
+  // 예약은 그동안 두 건 다 켜져 있었다. 판정은 한 곳에 둔다.
+  const summary = scheduleReadSummary({ rows, readError });
+
   return NextResponse.json({
-    ok: !readError,
+    ok: summary.ok,
     error: readError,
-    // **0건도 결과다.** 켜 놓은 것이 없으면 그렇게 말한다 — 조용히
-    // 아무것도 안 하면 지금까지와 똑같아진다.
-    scheduled: rows.length,
-    note: readError ? readError
-      : rows.length === 0
-        ? '켜져 있는 자동매매 설정이 없습니다 — autotrade_schedules에 enabled=true 줄이 필요합니다'
-        : `${rows.length}건 실행했습니다`,
+    /** 읽지 못했으면 **null이다 — 0이 아니다** */
+    scheduled: summary.scheduled,
+    /** `scheduled`가 null인 이유를 0과 구분해 읽게 한다 */
+    scheduledUnknown: summary.unknown,
+    note: summary.note,
     results,
     cronLogError,
     liveTradingLocked: !(await import('@/lib/engine/liveTradingGate')).liveTradingGate().allowed,
