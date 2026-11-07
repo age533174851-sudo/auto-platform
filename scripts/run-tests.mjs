@@ -175,6 +175,7 @@ import {
   runPrecisionMatrixTests,
   runAdoptIntentIntegrationTests,
 } from './src/test/integration/orderPathIntegration.test';
+import { runReconcileUnresolvedTests } from './src/test/integration/reconcileUnresolvedIntegration.test';
 import { runSmokeStartRouteTests } from './src/test/integration/smokeStartRouteIntegration.test';
 import { runForcedEntryRouteTests } from './src/test/integration/forcedEntryRouteIntegration.test';
 import { runHoldExtensionIntegrationTests } from './src/test/integration/holdExtensionIntegration.test';
@@ -438,6 +439,7 @@ runExitPolicyTests(); runRunRequestTests(); runBacktestVerdictTests(); runAiResu
   await runNoFixedTpIntegrationTests();
   await runPrecisionIntegrationTests();
   await runPrecisionMatrixTests();
+  await runReconcileUnresolvedTests();
   await runSmokeStartRouteTests();
   await runForcedEntryRouteTests();
   await runHoldExtensionIntegrationTests();

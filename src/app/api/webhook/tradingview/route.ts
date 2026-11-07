@@ -523,7 +523,7 @@ export async function POST(req: NextRequest) {
           blockNewOrders: !!gate.verdict?.blockNewOrders,
           summary: gate.reason || gate.verdict?.summary,
         },
-        unresolvedOrderCount: gate.gather.reachable ? gate.gather.unresolvedOrders.length : null,
+        unresolvedOrderCount: gate.gather.unresolvedOrderCount,
         marginType: risk?.marginType ?? null,
         leverage: (risk?.leverage != null && levNum > 0)
           ? { actual: risk.leverage, intended: levNum } : null,
