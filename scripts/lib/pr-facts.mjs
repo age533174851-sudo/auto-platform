@@ -249,6 +249,57 @@ export async function prDetail({ api, repo, number, log = () => {}, attempts = 4
  * `headContainsBase`도 null이 되고 게이트는 `MERGEABILITY_UNKNOWN`으로
  * 막는다. 확인하지 못한 것은 통과가 아니다.
  */
+/**
+ * **열린 PR 전부.** 100개에서 끊기지 않고, 못 읽은 것을 "없음"으로 적지 않는다.
+ *
+ * 무엇이 문제였나
+ * ───────────────
+ * 2026-11-07에 이 저장소에 열린 PR이 **225개**였는데 두 도구가 **100개만**
+ * 보고 있었다. 둘 다 `?state=open&per_page=100`을 한 번 부르고 끝냈기
+ * 때문이다. GitHub은 한 장에 최대 100개만 주고 나머지는 다음 장에 있다.
+ *
+ * 그래서 두 가지가 조용히 틀렸다:
+ *
+ *   · `scripts/pr-backlog.mjs`는 "읽은 PR 100개"라고 적었다. 나머지 125개가
+ *     빠졌다는 말은 어디에도 없었다 — 보는 사람은 적체가 100개라고 믿는다.
+ *   · `scripts/auto-merge.mjs`의 **30분 안전망**도 첫 장만 훑는다. 첫 장
+ *     밖에 있는 라벨 붙은 PR은 그 안전망으로는 **영원히 합쳐지지 않고**,
+ *     왜 안 합쳐지는지 아무 데도 안 남는다. 신호를 놓쳤을 때를 위한 그물에
+ *     구멍이 있던 것이다.
+ *
+ * 왜 여기 두나
+ * ────────────
+ * 두 도구가 같은 목록을 봐야 한다. 각자 장을 넘기면 한쪽만 고쳐지고
+ * 언젠가 갈린다 (`CLAUDE.md`: 같은 판단이 두 곳에 있으면 언젠가 갈린다).
+ *
+ * 돌려주는 것
+ * ───────────
+ *   { ok, all, complete, failedPage, status, pages }
+ *
+ * **`complete`가 핵심이다.** 다 읽었을 때만 true다. 한 장이라도 못 읽으면,
+ * 응답이 배열이 아니면, 장 수 상한에 닿으면 false이고 — 그때도 읽은 것은
+ * `all`에 그대로 돌려준다. 부르는 쪽은 `complete`가 false면 그 사실을
+ * 사람에게 적어야 한다. 부분을 전체로 적는 것이 이 함수가 막으려는 것이다.
+ */
+export async function listOpenPulls({ api, repo, perPage = 100, maxPages = 30 }) {
+  const all = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const r = await api(`/repos/${repo}/pulls?state=open&per_page=${perPage}&page=${page}`);
+    if (!r?.ok || !Array.isArray(r.body)) {
+      // 못 읽었다. 읽은 것은 돌려주되 **다 읽었다고 하지 않는다.**
+      return { ok: all.length > 0, all, complete: false,
+        failedPage: page, status: r?.status ?? null, pages: page - 1 };
+    }
+    all.push(...r.body);
+    // 꽉 찬 장이면 다음 장이 있을 수 있다. 짧은 장이나 빈 장이 끝이다.
+    if (r.body.length < perPage) {
+      return { ok: true, all, complete: true, failedPage: null, status: r.status, pages: page };
+    }
+  }
+  // 상한에 닿았다 — 더 있을 수 있으므로 다 읽은 것이 아니다.
+  return { ok: true, all, complete: false, failedPage: null, status: 200, pages: maxPages };
+}
+
 export async function baseTip({ api, repo, ref, log = () => {} }) {
   if (!ref) return null;
   const r = await api(`/repos/${repo}/git/ref/heads/${ref}`);
