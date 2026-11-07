@@ -74,14 +74,35 @@ async function venueOf(sb: any, userId: string, connectionId: string) {
   };
 }
 
-/** 이 사용자의 스모크 줄이 들고 있는 주문 번호 */
-async function smokeIds(sb: any, userId: string, symbol: string) {
+/**
+ * 이 사용자의 스모크 줄이 들고 있는 주문 번호.
+ *
+ * **못 읽은 것을 빈 목록으로 두지 않는다.**
+ *
+ * 예전에는 `const { data } = await …`로 **error를 받지 않았다.** 실패한
+ * select는 예외를 던지지 않고 `{ data: null, error }`를 주므로 아래
+ * `catch`에 걸리지 않는다. 그래서 조회가 실패하면 조용히
+ * `rows: [] · ids: [] · error: null`이 됐다 — "읽어 봤더니 없다"와
+ * 구분이 안 되는 모양이다.
+ *
+ * 그 번호 목록은 **소유 증거의 1순위**다(`classifyOrder`가 id 일치를
+ * 먼저 본다). 비어 버리면 거래소가 식별자를 안 준 주문이 전부
+ * `UNKNOWN`으로 떨어져 "건드리지 않습니다"가 되고, 정리 도구가
+ * 조용히 아무것도 못 하게 된다. 화면에는 "DB 기록 0건"으로 보인다.
+ *
+ * 그래서 못 읽으면 **null**이다. `[]`는 "읽었고 없다"일 때만이다.
+ */
+async function smokeIds(sb: any, userId: string, symbol: string): Promise<{
+  rows: any[] | null; ids: string[] | null; error: string | null;
+}> {
   try {
-    const { data } = await (sb as any).from('smoke_tests')
+    const { data, error } = await (sb as any).from('smoke_tests')
       .select('id, symbol, side, state, verdict, sl_order_id, tp_order_id, entry_order_id, client_order_id, created_at, closed_at')
       .eq('user_id', userId).eq('symbol', symbol)
       .order('created_at', { ascending: false }).limit(20);
-    const rows = Array.isArray(data) ? data : [];
+    if (error) throw new Error(error.message || String(error));
+    if (!Array.isArray(data)) throw new Error('스모크 장부 조회 결과가 배열이 아닙니다');
+    const rows = data;
     return {
       rows: rows.map((r: any) => ({
         id: r.id, symbol: r.symbol, side: r.side, state: r.state, verdict: r.verdict,
@@ -93,9 +114,9 @@ async function smokeIds(sb: any, userId: string, symbol: string) {
       error: null as string | null,
     };
   } catch (e: any) {
-    // **못 읽은 것을 빈 목록으로 두지 않는다.** 빈 목록이면 "내 주문이
-    // 하나도 없다"가 되어 남은 것이 전부 남의 것으로 보인다.
-    return { rows: [], ids: [] as string[], error: String(e?.message || e) };
+    // **빈 목록이 아니라 null이다.** 빈 목록이면 "내 주문이 하나도
+    // 없다"가 되어 남은 것이 전부 남의 것으로 보인다.
+    return { rows: null, ids: null, error: String(e?.message || e) };
   }
 }
 
@@ -134,12 +155,18 @@ export async function GET(req: NextRequest) {
     position: { ok: position.ok, found: position.found, qty: position.qty, side: position.side, error: position.error },
     // **null은 '못 읽음'이고 []는 '없음'이다.**
     ordersReadable: orders != null,
-    orders: (orders ?? []).map(o => describe(o, mine.ids)),
+    // 장부 쪽도 같은 축으로 말한다. 이 값이 false면 아래 `ownership`은
+    // **소유 증거 1순위(주문 번호 일치)를 못 쓴 판정**이다.
+    smokeReadable: mine.ids != null,
+    orders: (orders ?? []).map(o => describe(o, mine.ids ?? [])),
     smoke: { rows: mine.rows, ids: mine.ids, error: mine.error },
-    note: orders == null
-      ? '조건부 주문 목록을 읽지 못했습니다 — 0건과 다릅니다'
-      : `조건부 주문 ${orders.length}건. 지우려면 POST에 지울 번호(ids)를 명시하세요 — `
-        + '전체 취소 기능은 없습니다',
+    note: mine.ids == null
+      ? `스모크 장부를 읽지 못했습니다 (${mine.error}) — 어느 주문이 이 테스트 것인지 `
+        + '가릴 수 없습니다. 0건과 다릅니다'
+      : orders == null
+        ? '조건부 주문 목록을 읽지 못했습니다 — 0건과 다릅니다'
+        : `조건부 주문 ${orders.length}건. 지우려면 POST에 지울 번호(ids)를 명시하세요 — `
+          + '전체 취소 기능은 없습니다',
   }, { headers: { 'Cache-Control': 'no-store' } });
 }
 
@@ -184,6 +211,20 @@ export async function POST(req: NextRequest) {
   }
 
   const mine = await smokeIds(sb, userId, symbol);
+  if (mine.ids == null) {
+    // **내 것과 남의 것을 가를 수 없으면 취소하지 않는다.**
+    //
+    // 바로 위 `before == null`과 같은 규칙이다. 그쪽은 "무엇을 지우는지
+    // 모른다"이고 이쪽은 "그게 내 것인지 모른다"다. 둘 중 하나만 막으면
+    // 나머지 절반으로 남의 손절이 사라진다.
+    //
+    // 장부 번호는 소유 증거의 1순위다 — 거래소가 식별자를 안 준 주문은
+    // 번호 일치 말고는 내 것임을 증명할 방법이 없다.
+    return NextResponse.json({ ok: false, error: 'smoke_ledger_unreadable',
+      message: `스모크 장부를 읽지 못했습니다 (${mine.error}) — `
+        + '이 주문이 이 테스트 것인지 확인하지 못한 채로 취소하지 않습니다',
+    }, { status: 503 });
+  }
   const seen = before.map(o => describe(o, mine.ids));
 
   // **남의 전략 주문은 번호를 줘도 안 지운다.**
