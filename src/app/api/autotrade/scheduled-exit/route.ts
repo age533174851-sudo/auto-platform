@@ -21,6 +21,7 @@
 // 유예를 넘긴 것은 **stale로 닫고 주문하지 않는다.** 그 사실이 표에 남아
 // 화면이 "이 예약은 안 나갔습니다"라고 말할 수 있다.
 import { NextRequest, NextResponse } from 'next/server';
+import { positionAmountRead, exitPortionRead } from '@/lib/engine/scheduledExitRunner';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { checkDue, validateSchedule, DEFAULT_GRACE_MS } from '@/lib/engine/scheduleExit';
 
@@ -282,21 +283,48 @@ export async function GET(req: NextRequest) {
         await close('failed', `포지션을 확인하지 못했습니다: ${rr.error || '알 수 없음'}`);
         continue;
       }
-      const amt = Number(rr.risk.positionAmt) || 0;
-      if (amt === 0) {
+      // ── 숫자를 엄격하게 읽는다 ──
+      //
+      // 예전에는 `Number(rr.risk.positionAmt) || 0`이었다. `'NaN'`·`''`·
+      // `'abc'`가 오면 `|| 0`이 그것을 **0**으로 바꾸고, 바로 아래
+      // `no_position` 분기가 예약을 닫았다 — **포지션은 열려 있는데
+      // 예약이 사라져서 그 청산이 영원히 나가지 않는다.** 위의
+      // `== null` 검사는 문자열 `'NaN'`을 통과시킨다.
+      //
+      // 판정은 `positionAmountRead` 한 곳에 있다.
+      const posRead = positionAmountRead(rr.risk.positionAmt);
+      if (!posRead.ok) {
+        // **못 읽은 것을 `no_position`으로 적지 않는다.** 실패로 적으면
+        // 사람이 보고 다시 예약할 수 있다.
+        await close('failed', `${posRead.reason} (받은 값: ${JSON.stringify(rr.risk.positionAmt)})`);
+        continue;
+      }
+      if (posRead.flat) {
         // 이미 닫혀 있다. 실패가 아니다 — 이 예약은 할 일이 없어진 것이다.
         await close('no_position', '실행 시각에 열린 포지션이 없었습니다');
         continue;
       }
+      const amt = posRead.amount as number;
 
-      const pct = row.portion_pct == null ? 100 : Number(row.portion_pct);
+      // 예전에는 `Number(row.portion_pct)`였다. `'NaN'`이면 아래
+      // `pct < 100`이 **false**가 되어 Gate 부분청산 차단을 지나가고,
+      // `closePositionGateFutures`는 **전량 종료**다 — 부분 청산 의도가
+      // 깨진 값 하나로 전량 청산이 됐다.
+      const portion = exitPortionRead(row.portion_pct);
+      if (!portion.ok) {
+        await close('failed', `${portion.reason} (받은 값: ${JSON.stringify(row.portion_pct)})`);
+        continue;
+      }
+      const pct = portion.pct as number;
 
       if (creds.exchange === 'gate') {
         // Gate는 심볼별 전량 종료가 있다. **부분 청산은 아직 없다** —
         // 여기서 계약 수를 직접 계산해 넣으면 배수 오독이 그대로 수량
         // 오류가 되고, 그건 이 저장소에서 이미 한 번 밟은 자리다.
         // 지원 안 하는 것을 지원하는 척하지 않고 그렇다고 적는다.
-        if (pct < 100) {
+        // **`pct < 100`으로 묻지 않는다.** NaN은 모든 비교를 false로
+        // 만들어 이 차단을 지나간다. "전량인가"를 직접 묻는다.
+        if (!portion.full) {
           await close('failed',
             `Gate는 아직 부분 예약 청산(${pct}%)을 지원하지 않습니다 — `
             + '전량(100%)으로 다시 예약하거나 거래소에서 직접 닫으세요');

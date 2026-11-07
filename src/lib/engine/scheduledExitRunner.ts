@@ -164,3 +164,135 @@ export function overdueExitsOf(
   }
   return n;
 }
+
+// ── 숫자를 엄격하게 읽는다 ────────────────────────────
+//
+// **못 읽은 값을 0이나 전량으로 바꾸지 않는다.**
+//
+// 예약 청산 라우트에 두 줄이 있었다:
+//
+//     const amt = Number(rr.risk.positionAmt) || 0;
+//     const pct = row.portion_pct == null ? 100 : Number(row.portion_pct);
+//
+// 첫 줄: `positionAmt`가 `'NaN'` · `'abc'` · `''`로 오면 `Number()`가
+// NaN이 되고 `|| 0`이 그것을 **0**으로 바꾼다. 그러면 바로 아래
+// `amt === 0` 분기가 예약을 `no_position`("실행 시각에 열린 포지션이
+// 없었습니다")으로 **닫는다.** 포지션은 그대로 열려 있고 예약은
+// 사라져서, **그 청산은 영원히 나가지 않는다.** 위의 `== null` 검사는
+// 문자열 `'NaN'`을 통과시킨다.
+//
+// 둘째 줄: `portion_pct`가 `'NaN'`이면 `pct`가 NaN이 되고, Gate 분기의
+// `pct < 100`이 **false**가 되어 부분 청산 차단을 지나간다 —
+// `closePositionGateFutures`는 **전량 종료**다. 부분 청산 의도가
+// 손상된 값 하나로 **전량 청산**이 된다.
+//
+// 그래서 판정을 여기 둔다. 숫자를 못 읽은 것은 **0도 100%도 아니고
+// 실패**다.
+
+export type NumericReadCode =
+  /** 읽었다 */
+  | 'OK'
+  /** 값이 아예 없다 (null · undefined) */
+  | 'MISSING'
+  /** 값이 있는데 숫자로 읽을 수 없다. **0으로도 전량으로도 읽지 않는다** */
+  | 'UNREADABLE'
+  /** 숫자인데 쓸 수 없는 범위다 */
+  | 'OUT_OF_RANGE';
+
+/**
+ * 십진수 문자열만 받는다.
+ *
+ * `Number()`를 그대로 쓰면 `''`→0 · `'  '`→0 · `[]`→0 · `true`→1이 된다.
+ * 거래소 응답이 비어서 온 것을 "0개 보유"로 읽는 길이 그 변환이다.
+ */
+const DECIMAL = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/;
+
+/** 유한한 수로 읽히면 그 값, 아니면 null. **추측하지 않는다** */
+export function strictFinite(raw: unknown): number | null {
+  if (typeof raw === 'number') return Number.isFinite(raw) ? raw : null;
+  if (typeof raw === 'string') {
+    const s = raw.trim();
+    if (!s || !DECIMAL.test(s)) return null;
+    const n = Number(s);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+export interface PositionAmountRead {
+  /** 이 값을 근거로 삼아도 되는가 */
+  ok: boolean;
+  code: NumericReadCode;
+  /** 읽었을 때만 값이 있다. 못 읽었으면 null — **0이 아니다** */
+  amount: number | null;
+  /** 읽었고 0일 때만 true. 못 읽은 것은 flat이 아니다 */
+  flat: boolean;
+  side: 'LONG' | 'SHORT' | null;
+  reason: string;
+}
+
+/**
+ * 거래소가 준 포지션 수량.
+ *
+ * **못 읽은 것과 0은 다르다.** 전자는 실패이고 후자는 "닫을 것이 없다"다.
+ * 그 둘을 같은 값으로 만들면, 조회가 깨진 회차가 예약을 지우고 끝난다.
+ */
+export function positionAmountRead(raw: unknown): PositionAmountRead {
+  const none = { amount: null, flat: false, side: null } as const;
+  if (raw === null || raw === undefined) {
+    return { ...none, ok: false, code: 'MISSING',
+      reason: '거래소가 포지션 수량을 주지 않았습니다 — 0으로 읽지 않습니다' };
+  }
+  const n = strictFinite(raw);
+  if (n == null) {
+    return { ...none, ok: false, code: 'UNREADABLE',
+      reason: '포지션 수량을 숫자로 읽지 못했습니다 — 0으로도 전량으로도 읽지 않습니다' };
+  }
+  if (n === 0) {
+    return { ok: true, code: 'OK', amount: 0, flat: true, side: null,
+      reason: '포지션 수량 0 — 닫을 것이 없습니다' };
+  }
+  return {
+    ok: true, code: 'OK', amount: n, flat: false,
+    side: n > 0 ? 'LONG' : 'SHORT',
+    reason: `포지션 ${n > 0 ? 'LONG' : 'SHORT'} ${Math.abs(n)}`,
+  };
+}
+
+export interface ExitPortionRead {
+  ok: boolean;
+  code: NumericReadCode;
+  /** 읽었을 때만 값이 있다 */
+  pct: number | null;
+  /** 100%인가. **못 읽었으면 false** — 손상된 값이 전량이 되면 안 된다 */
+  full: boolean;
+  reason: string;
+}
+
+/**
+ * 청산 비율(%).
+ *
+ * `null`은 **사용자가 정하지 않은 것**이고, 그 계약은 예전부터 전량이다
+ * (POST도 `null`을 허용한다). 하지만 `''` · `'NaN'` · `Infinity`는
+ * 정하지 않은 것이 아니라 **깨진 것**이고, 깨진 값을 전량으로 읽으면
+ * 부분 청산 의도가 전량 청산이 된다.
+ */
+export function exitPortionRead(raw: unknown): ExitPortionRead {
+  if (raw === null || raw === undefined) {
+    return { ok: true, code: 'OK', pct: 100, full: true,
+      reason: '비율을 정하지 않았습니다 — 전량(100%)' };
+  }
+  const n = strictFinite(raw);
+  if (n == null) {
+    return { ok: false, code: 'UNREADABLE', pct: null, full: false,
+      reason: '청산 비율을 숫자로 읽지 못했습니다 — 전량으로 읽지 않습니다' };
+  }
+  if (n <= 0 || n > 100) {
+    return { ok: false, code: 'OUT_OF_RANGE', pct: null, full: false,
+      reason: `청산 비율이 쓸 수 없는 범위입니다 (${n}%) — 0보다 크고 100 이하여야 합니다` };
+  }
+  return {
+    ok: true, code: 'OK', pct: n, full: n === 100,
+    reason: n === 100 ? '전량(100%)' : `부분 청산 ${n}%`,
+  };
+}
