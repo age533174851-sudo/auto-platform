@@ -271,7 +271,13 @@ async function main() {
   console.log('');
   console.log('Fly Worker 주기 작업 → cron 대체 상태 (vercel.json + GitHub Actions)');
   console.log('');
-  console.log('| 작업 | 역할 | 안전 | Fly 주기 | 대체 주기 | 상태 | 악화 | 깨우는 쪽 |');
+  // **열 이름에 "선언"을 적는다.** 이 검사기는 파일만 읽는다 — cron이
+  // 실제로 그 주기로 도는지는 확인할 수 없다. 그런데 2026-11-07 실측에서
+  // GitHub Actions의 `schedule`은 **선언과 무관하게 하루 4~5회**만 돌았다
+  // (`*/5`로 288회를 선언한 워크플로가 400회/69일 = 5.8회/일). 그래서
+  // 선언 기준 악화 배수는 **실제보다 20~58배 낙관적이다.** 열 이름이
+  // 그냥 "대체 주기"면 보는 사람이 관측값으로 읽는다.
+  console.log('| 작업 | 역할 | 안전 | Fly 주기 | 대체 주기(선언) | 상태 | 악화(선언 기준) | 깨우는 쪽 |');
   console.log('|---|---|---|---|---|---|---|---|');
   for (const r of rows) {
     const who = r.substitute === 'NONE' ? '없음'
@@ -292,6 +298,16 @@ async function main() {
     }
     console.log('');
     console.log('   이 표가 비기 전에는 Worker를 중지하지 않습니다. 이것은 의견이 아니라 값입니다.');
+    console.log('');
+    console.log('   ⚠ 위 악화 배수는 **선언된 cron 기준이며 실제보다 낙관적입니다.**');
+    console.log('      2026-11-07 실측: GitHub Actions `schedule`은 선언과 무관하게 하루 4~5회만');
+    console.log('      돌았습니다 (워크플로 8개, 선언 24~288회/일 → 실측 4.3~5.0회/일).');
+    console.log('      즉 대체 주기는 선언값이 아니라 **약 5시간**입니다:');
+    console.log('        pollSchedules      1분 → 실측 ~294분 (선언 15분)  → 15배가 아니라 ~294배');
+    console.log('        pollExitMonitor    5분 → 실측 ~320분 (선언 1시간) → 12배가 아니라 ~64배');
+    console.log('        pollScheduledExit  1분 → 실측 ~288분 (선언 5분)   →  5배가 아니라 ~288배');
+    console.log('      이 검사기는 파일만 읽으므로 실제 실행률을 확인할 수 없습니다 —');
+    console.log('      선언을 관측으로 적지 않기 위해 이 경고를 남깁니다.');
     if (assertRetirable) {
       err(`Fly 종료 조건이 충족되지 않았습니다 — 안전상 필수 ${blockers.length}개가 대체되지 않았습니다`);
     }
@@ -306,7 +322,11 @@ function finish() {
     console.log(`Worker 대체 선언이 현실과 어긋납니다 (${errs.length}곳).`);
     process.exit(1);
   }
-  console.log('✅ 선언표가 현실과 일치합니다 — 끄면 무엇이 멈추는지 위 표가 답입니다');
+  // **"현실과 일치"라고 적지 않는다.** 이 검사기가 확인한 것은
+  // `tick()`의 선언표와 워크플로 파일이 서로 맞는다는 것뿐이다.
+  // cron이 실제로 그 주기로 도는지는 확인하지 않았다 — 실측은 더 나쁘다.
+  console.log('✅ tick() 선언과 cron 파일이 일치합니다 — 끄면 무엇이 멈추는지 위 표가 답입니다');
+  console.log('   (단, 악화 배수는 선언 기준입니다. 실제 실행률은 이 검사기가 확인하지 않습니다.)');
 }
 
 main().catch((e) => { err(`검사 중 오류 — ${e?.message || e}`); finish(); });
