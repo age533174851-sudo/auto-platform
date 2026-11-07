@@ -51,6 +51,18 @@ export interface EntryWindow {
   endMin: number;
   /** 창이 닫힌 뒤 몇 분까지 늦게라도 판단하는가 */
   graceMin: number;
+  /**
+   * 종료 분을 **포함하지 않는가.**
+   *
+   * 전략마다 종료 경계 계약이 다르다. `my-original-v1`은 09:30을 포함하고,
+   * Exact100X 강제 진입은 09:30을 **배제한다** — `forcedEntryVerdict`가
+   * `minute >= endMin`이면 AFTER_WINDOW로 끝낸다.
+   *
+   * 이 값이 없으면 깨우는 쪽이 판단하는 쪽보다 1분 넓어진다. 09:30에
+   * 깨워 놓고 라우트는 "창 지났습니다"만 돌려준다 — **깨우는 조건을
+   * 판단 조건보다 넓게 두지 않는다.**
+   */
+  endExclusive?: boolean;
 }
 
 export type WindowDueCode =
@@ -113,6 +125,11 @@ export function entryWindowOf(
       // AFTER_WINDOW로 끝낸다 — 깨우는 쪽이 더 늦게까지 깨우면,
       // 라우트는 매번 "창 지났습니다"만 돌려주고 평가만 낭비된다.
       graceMin: 0,
+      // **종료 분(09:30)도 배제한다.** `forcedEntryVerdict`는
+      // `minute >= endMin`을 AFTER_WINDOW로 본다 — 09:30:00부터 거절이다.
+      // 여기서 09:30을 포함하면 그 1분 동안 깨우기만 하고 아무 일도
+      // 일어나지 않는다.
+      endExclusive: true,
     };
   }
 
@@ -143,8 +160,11 @@ export function windowDueVerdict(i: {
     return { due: false, code: 'CLOCK_UNKNOWN', reason: '한국 시각을 읽지 못했습니다' };
   }
 
+  // 종료 경계는 전략이 정한다 — 포함(my-original-v1)과 배제(Exact100X)가
+  // 다르고, 차이는 1분이지만 그 1분이 "깨웠는데 아무 일도 안 함"이다.
   const closeMin = w.endMin + w.graceMin;
-  if (nowMin < w.startMin || nowMin > closeMin) {
+  const beforeClose = w.endExclusive ? nowMin < closeMin : nowMin <= closeMin;
+  if (nowMin < w.startMin || !beforeClose) {
     return { due: false, code: 'OUTSIDE',
       reason: `창(${hhmm(w.startMin)}~${hhmm(w.endMin)} KST) 밖입니다` };
   }

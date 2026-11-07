@@ -34,6 +34,7 @@ import { selectDueSchedules } from './schedulePoll';
 import {
   FORCED_ENTRY_START_KST, FORCED_ENTRY_WINDOW_MIN,
   FORCED_ENTRY_PROFILE_ID, FORCED_ENTRY_PRESET_ID,
+  FORCED_ENTRY_MODE, forcedEntryVerdict,
 } from '../strategies/dailyForcedEntry';
 
 /** FakeClock — 그 한국시각(2026-10-26)의 UTC epoch. KST=UTC+9, 서머타임 없음 */
@@ -108,9 +109,54 @@ export function runForcedEntryWindowWakeTests() {
     eq(v.code, 'WAITING');
   });
 
-  test('★ 09:30(창 끝 경계)까지는 기회를 준다', () => {
+  test('★ 창 안(09:15)에는 기회를 준다', () => {
     eq(at(9, 15).code, 'WINDOW');
-    eq(at(9, 30).code, 'WINDOW');
+  });
+
+  // ── 종료 경계는 두 경로가 같아야 한다 ────────────
+  //
+  // **이 자리를 처음에 틀렸다.** 깨우는 쪽(`windowDueVerdict`)은 09:30을
+  // 포함했고 판단하는 쪽(`forcedEntryVerdict`)은 `minute >= endMin`을
+  // AFTER_WINDOW로 본다. 그래서 09:30:00~09:30:59에는 **깨우기만 하고
+  // 라우트는 "창 지났습니다"만 돌려줬다.**
+  //
+  // 사고가 난 것은 아니다 — 주문이 더 나가지도, 덜 나가지도 않았다.
+  // 그러나 계약이 두 곳에서 다르면 언젠가 한쪽만 고쳐진다. 두 경로를
+  // **같은 시각으로 묶어** 고정한다.
+  const routeAt = (hh: number, mm: number, ss = 0) => forcedEntryVerdict({
+    nowMs: kst(hh, mm, ss), mode: FORCED_ENTRY_MODE,
+    profileId: FORCED_ENTRY_PROFILE_ID, presetId: FORCED_ENTRY_PRESET_ID,
+    ordersTodayInWindow: 0,
+  });
+
+  test('★★★ 09:29:59 — 깨우는 쪽도 판단하는 쪽도 허용한다', () => {
+    eq(at(9, 29, 59).code, 'WINDOW');
+    eq(routeAt(9, 29, 59).code, 'DUE');
+  });
+
+  test('★★★ 09:30:00 — 깨우는 쪽도 판단하는 쪽도 거절한다', () => {
+    assert(at(9, 30, 0).code !== 'WINDOW', `09:30에 깨웠다: ${at(9, 30, 0).code}`);
+    eq(routeAt(9, 30, 0).code, 'AFTER_WINDOW');
+  });
+
+  test('★★ 창 전체에서 두 경로의 허용 여부가 어긋나지 않는다', () => {
+    for (let m = 8 * 60 + 55; m <= 9 * 60 + 35; m++) {
+      const hh = Math.floor(m / 60), mm = m % 60;
+      const wakes = at(hh, mm).code === 'WINDOW';
+      const judges = routeAt(hh, mm).code === 'DUE';
+      assert(wakes === judges,
+        `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')} — 깨움 ${wakes} / 판단 ${judges}`);
+    }
+  });
+
+  test('★★ my-original-v1의 종료 경계(포함)는 바뀌지 않는다', () => {
+    // 이 전략은 09:30을 포함하고 유예 30분이 붙는다. 09:00 창을 고치면서
+    // 이쪽 의미를 건드리면 안 된다.
+    const w = entryWindowOf('my-original-v1');
+    eq(w!.endExclusive, undefined);
+    eq(windowDueVerdict({ nowMs: kst(9, 30), lastRunAtMs: kst(7, 0), window: w }).code, 'WINDOW_OPEN');
+    eq(windowDueVerdict({ nowMs: kst(10, 0), lastRunAtMs: kst(7, 0), window: w }).code, 'WINDOW_OPEN');
+    eq(windowDueVerdict({ nowMs: kst(10, 1), lastRunAtMs: kst(7, 0), window: w }).code, 'OUTSIDE');
   });
 
   test('★★★ 09:31 — 창이 닫힌 뒤에는 뒤늦게 깨우지 않는다 (유예 없음)', () => {
@@ -176,10 +222,16 @@ export function runForcedEntryWindowWakeTests() {
   // ── 순수 창 판정 ─────────────────────────────────
   const W0900 = entryWindowOf('scalp', EXACT100X);
 
-  test('09:00 창 판정 경계 — 09:00 포함 · 09:30 포함 · 09:31 제외', () => {
+  test('09:00 창 판정 경계 — 09:00 포함 · 09:29 포함 · 09:30 제외', () => {
     eq(windowDueVerdict({ nowMs: kst(9, 0), lastRunAtMs: LAST_RUN, window: W0900 }).code, 'WINDOW_OPEN');
-    eq(windowDueVerdict({ nowMs: kst(9, 30), lastRunAtMs: LAST_RUN, window: W0900 }).code, 'WINDOW_OPEN');
+    eq(windowDueVerdict({ nowMs: kst(9, 29), lastRunAtMs: LAST_RUN, window: W0900 }).code, 'WINDOW_OPEN');
+    eq(windowDueVerdict({ nowMs: kst(9, 30), lastRunAtMs: LAST_RUN, window: W0900 }).code, 'OUTSIDE');
     eq(windowDueVerdict({ nowMs: kst(9, 31), lastRunAtMs: LAST_RUN, window: W0900 }).code, 'OUTSIDE');
+  });
+
+  test('09:00 창은 종료 분을 배제한다고 표시돼 있다', () => {
+    eq(W0900!.endExclusive, true);
+    eq(W0900!.graceMin, 0);
   });
 
   test('한국 시각을 못 읽으면 "창 밖"이 아니라 CLOCK_UNKNOWN이다', () => {
