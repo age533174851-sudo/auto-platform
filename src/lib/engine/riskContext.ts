@@ -79,9 +79,20 @@ export async function buildRiskContext(
    * 그어 둔 선이라 함부로 올리면 안 된다.
    */
   let notionalPctFromUser = false;
+  /**
+   * 위 한도를 **사용자 설정에서 실제로 읽었는가.**
+   *
+   * 아래 조회가 `{ data: null, error }`로 실패하면 예외가 아니라서
+   * `catch`에 안 걸리고, `else`의 **"미설정"** 가지로 떨어졌다.
+   * 설정해 둔 사람도 미설정으로 읽히고, 기본값(계좌 위험 5% ·
+   * 일일 -3% · 명목가 300%)으로 재게 된다 — 1%/1%/100%로 좁혀 둔
+   * 사람에게는 선이 3~5배 넓어진 것이다.
+   */
+  let limitsKnown = true;
   if (sb && opts.userId) {
     try {
-      const { data } = await sb.from('risk_limits').select('*').eq('user_id', opts.userId).maybeSingle();
+      const { data, error } = await sb.from('risk_limits').select('*').eq('user_id', opts.userId).maybeSingle();
+      if (error) throw new Error(String((error as any).message || error));
       if (data) {
         limits = {
           maxLeverage: Number(data.max_leverage) || DEFAULTS.maxLeverage,
@@ -96,8 +107,12 @@ export async function buildRiskContext(
       } else {
         warnings.push('사용자 위험 한도 미설정 — 기본값 사용 (최대 5배, 일일 -3%)');
       }
-    } catch {
-      warnings.push('위험 한도 조회 실패 — 기본값 사용');
+    } catch (e: any) {
+      // **기본값으로 대신 재지 않는다.** 숫자는 그대로 두되 '못 읽었다'를
+      // 들고 나가고, planPosition이 그걸 보고 막는다.
+      limitsKnown = false;
+      warnings.push(`위험 한도를 읽지 못했습니다 (${e?.message || e}) — `
+        + '미설정이 아니라 확인 불가입니다');
     }
   } else {
     warnings.push('사용자 미지정 — 기본 한도 사용');
@@ -312,19 +327,30 @@ export async function buildRiskContext(
 
   // ── 4) 현재 열린 위험 (승인된 계획 중 아직 청산 안 된 것) ──
   let currentOpenRisk = 0;
+  /**
+   * 열린 위험을 **실제로 셌는가.**
+   *
+   * 못 읽어도 0이다. 그리고 0이면 `planPosition`의 전체 위험 한도
+   * 비교(`currentOpenRisk + riskAmount > maxAccountRisk`)에서 계좌가
+   * 통째로 비어 보여, 막아야 할 주문이 지나간다.
+   */
+  let openRiskKnown = true;
   if (sb && opts.userId) {
     try {
       const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
-      const { data } = await sb
+      const { data, error } = await sb
         .from('position_plans')
         .select('risk_amount')
         .eq('user_id', opts.userId)
         .eq('approved', true)
         .gte('created_at', since);
-      if (Array.isArray(data)) {
-        currentOpenRisk = data.reduce((a: number, r: any) => a + (Number(r.risk_amount) || 0), 0);
-      }
-    } catch { /* 없으면 0 */ }
+      if (error) throw new Error(String((error as any).message || error));
+      if (!Array.isArray(data)) throw new Error('조회 결과가 배열이 아닙니다');
+      currentOpenRisk = data.reduce((a: number, r: any) => a + (Number(r.risk_amount) || 0), 0);
+    } catch (e: any) {
+      openRiskKnown = false;
+      warnings.push(`열려 있는 위험을 세지 못했습니다 (${e?.message || e}) — 0건과 다릅니다`);
+    }
   }
 
   // ── 연속 손실 (Veto 입력) ──
@@ -431,6 +457,10 @@ export async function buildRiskContext(
       normalMaxLeverage,
       dailyPnl,
       dailyPnlKnown,
+      // **못 읽은 것을 숫자로만 넘기지 않는다.** 숫자는 기본값이라도
+      // 이 둘이 false면 planPosition이 막는다.
+      limitsKnown,
+      openRiskKnown,
       maxLeverage: limits.maxLeverage,
       riskPerTradePct: limits.riskPerTradePct,
       maxAccountRiskPct: limits.maxAccountRiskPct,

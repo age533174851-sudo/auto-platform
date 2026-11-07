@@ -18,7 +18,11 @@ export type RejectCode =
   | 'INSUFFICIENT_MARGIN'
   | 'POSITION_TOO_SMALL'
   | 'EXPANSION_NO_TRADE'
-  | 'ACCOUNT_EQUITY_UNKNOWN';
+  | 'ACCOUNT_EQUITY_UNKNOWN'
+  /** 사용자 위험 한도를 읽지 못했다. **'미설정'이 아니다** */
+  | 'RISK_LIMITS_UNKNOWN'
+  /** 지금 열려 있는 위험을 세지 못했다. **0이 아니다** */
+  | 'OPEN_RISK_UNKNOWN';
 
 export interface RiskConfig {
   accountEquity: number;
@@ -50,6 +54,31 @@ export interface RiskConfig {
    * 자기 dailyPnl을 자기가 알고 넘기므로 검사 대상이 아니다.
    */
   dailyPnlKnown?: boolean;
+  /**
+   * 아래 한도들을 **사용자 설정에서 실제로 읽었는가.**
+   *
+   * `buildRiskContext`는 `risk_limits` 조회가 실패하면 기본값으로 계속
+   * 진행하면서 경고에 "미설정"이라고 적었다. 그런데 실패한 select는
+   * 예외를 던지지 않고 `{ data: null, error }`를 주므로, **설정해 둔
+   * 사람도 '미설정'으로 읽힌다.**
+   *
+   * 기본값이 사용자 값보다 **느슨하면** 그 순간 한도가 풀린다 —
+   * 계좌 위험 5% · 일일 -3% · 명목가 300%는 1%/1%/100%로 좁혀 둔
+   * 사람에게는 3~5배 넓은 값이다. 조회 한 번 실패로 자기가 그어 둔
+   * 선이 넓어지면 안 된다.
+   *
+   * 안 넘기면(undefined) 예전처럼 동작한다 — 백테스트·시뮬레이터는
+   * 자기 한도를 자기가 알고 넘긴다.
+   */
+  limitsKnown?: boolean;
+  /**
+   * `currentOpenRisk`를 **실제로 셌는가.**
+   *
+   * 0이 아니라 '모른다'다. dailyPnlKnown과 정확히 같은 이유다 —
+   * 못 읽어도 0이고, 0이면 "지금 열려 있는 위험이 없다"가 되어
+   * 전체 위험 한도가 통째로 비어 보인다.
+   */
+  openRiskKnown?: boolean;
   /** 사용자·거래소가 허용하는 절대 상한. 실제 적용 상한은 아래 expansion과 함께 결정된다. */
   maxLeverage: number;
   riskPerTradePct?: number;
@@ -172,6 +201,18 @@ export function planPosition(signal: StandardSignal, cfg: RiskConfig, currentOpe
   //
   // 여기서 막으면 시끄럽다. 하지만 조용히 통과하면 손실 한도 없이 도는
   // 것이고, 그 사실을 아무도 모른다. 시끄러운 쪽이 낫다.
+  // **못 읽은 한도를 기본값으로 대신하지 않는다.**
+  //
+  // 아래 모든 비교의 기준값(계좌 위험 % · 일일 손실 % · 명목가 %)이
+  // 사용자 설정에서 온다. 그걸 못 읽었는데 기본값으로 재면, 좁게
+  // 그어 둔 사람에게는 선이 넓어진 것이다.
+  if (cfg.limitsKnown === false) {
+    return reject('RISK_LIMITS_UNKNOWN',
+      '사용자 위험 한도를 읽지 못했습니다 — 기본값으로 대신 재지 않습니다. '
+      + '미설정이라는 뜻이 아니라 확인하지 못했다는 뜻입니다',
+      signal.symbol, side, notes);
+  }
+
   if (cfg.dailyPnlKnown === false) {
     return reject('DAILY_PNL_UNKNOWN',
       '오늘 실현손익을 확인하지 못해 일일 손실 한도를 평가할 수 없습니다 — '
@@ -220,6 +261,19 @@ export function planPosition(signal: StandardSignal, cfg: RiskConfig, currentOpe
 
   // ── 2) 전체 동시 위험 상한 ──
   const maxAccountRisk = cfg.accountEquity * ((cfg.maxAccountRiskPct ?? 5) / 100);
+  // **못 센 노출을 0으로 세지 않는다.**
+  //
+  // 아래 비교는 "지금 열려 있는 위험 + 이번 위험"이 한도를 넘는지 본다.
+  // 조회가 실패하면 currentOpenRisk가 0이 되고, 그러면 계좌가 통째로
+  // 비어 있는 것처럼 보여 **막아야 할 주문이 지나간다.**
+  // dailyPnlKnown과 같은 자리, 같은 이유다.
+  if (cfg.openRiskKnown === false) {
+    return reject('OPEN_RISK_UNKNOWN',
+      '지금 열려 있는 위험을 확인하지 못해 전체 위험 한도를 평가할 수 없습니다 — '
+      + '한도를 모르는 채로는 신규 진입하지 않습니다',
+      signal.symbol, side, notes, { riskAmount });
+  }
+
   if (currentOpenRisk + riskAmount > maxAccountRisk) {
     return reject('TOTAL_RISK_LIMIT',
       `전체 위험 한도 초과 (보유 $${currentOpenRisk.toFixed(0)} + 신규 $${riskAmount.toFixed(0)} > 한도 $${maxAccountRisk.toFixed(0)})`,
