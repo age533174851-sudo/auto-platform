@@ -8,7 +8,7 @@
 import { test, eq, assert } from '../../test/harness';
 import {
   rebaseVerdict, rebaseComment, rebaseDispatchPlan, rebaseDispatchRequest,
-  AUTO_MERGE_LABEL, OPT_OUT_LABEL, REBASE_WORKFLOW,
+  AUTO_MERGE_LABEL, OPT_OUT_LABEL, REBASE_WORKFLOW, rebasePrePushVerdict,
 } from './autoRebase';
 
 const base = {
@@ -121,6 +121,47 @@ export function runAutoRebaseTests() {
     let threw = false;
     try { rebaseDispatchRequest('nope'); } catch { threw = true; }
     eq(threw, true);
+  });
+
+  console.log('[자동 재배치 — force-push 직전 상태 재검증]');
+  const live = { ...base };
+  const prePush = (latest: typeof base | null, latestBaseSha: string | null = 'b'.repeat(40)) =>
+    rebasePrePushVerdict({
+      initial: base, latest, expectedBaseSha: 'b'.repeat(40),
+      latestBaseSha, defaultBranch: 'main',
+    });
+
+  test('변경 없는 PR·main에서만 force-push 허용', () => {
+    eq(prePush(live).allow, true);
+  });
+  test('라벨이 제거되면 기존 REBASE 판정으로 push하지 않는다', () => {
+    eq(prePush({ ...live, labels: [] }).allow, false);
+  });
+  test('재검증 사이 Draft로 바뀌면 push하지 않는다', () => {
+    eq(prePush({ ...live, draft: true }).allow, false);
+  });
+  test('no-auto-rebase가 붙으면 push하지 않는다', () => {
+    eq(prePush({ ...live, labels: [AUTO_MERGE_LABEL, OPT_OUT_LABEL] }).allow, false);
+  });
+  test('PR HEAD가 바뀌면 force-with-lease 전에도 차단', () => {
+    eq(prePush({ ...live, headSha: 'c'.repeat(40) }).allow, false);
+  });
+  test('HEAD 브랜치 이름이 바뀌면 차단', () => {
+    eq(prePush({ ...live, headRef: 'another-branch' }).allow, false);
+  });
+  test('base가 다른 브랜치로 변경되면 차단', () => {
+    eq(prePush({ ...live, baseRef: 'release' }).allow, false);
+  });
+  test('main tip이 바뀌면 오래된 base로 재배치한 결과를 push하지 않는다', () => {
+    eq(prePush(live, 'd'.repeat(40)).allow, false);
+  });
+  test('PR 재조회 실패와 main 조회 실패는 모두 fail-closed', () => {
+    eq(prePush(null).allow, false);
+    eq(prePush(live, null).allow, false);
+  });
+  test('fork로 이동하거나 PR 번호가 다르면 차단', () => {
+    eq(prePush({ ...live, fromFork: true }).allow, false);
+    eq(prePush({ ...live, number: 2 }).allow, false);
   });
 
 }

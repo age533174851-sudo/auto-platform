@@ -196,3 +196,41 @@ export function rebaseDispatchRequest(repo: string, ref: string = REBASE_REF): {
     body: JSON.stringify({ ref: String(ref ?? '').trim() || REBASE_REF }),
   };
 }
+
+
+/**
+ * 실제 force-push 직전, 처음 목록에서 승인된 PR 상태가 그대로인지 확인한다.
+ *
+ * force-with-lease는 head SHA 변경만 막는다. 라벨 제거·Draft 전환·base
+ * 변경·main 이동은 보호하지 못하므로 최신 REST 사실로 다시 판단한다.
+ * 이 재조회와 push 사이의 마지막 경합은 원자적으로 막을 수 없다.
+ */
+export function rebasePrePushVerdict(i: {
+  initial: PrFacts;
+  latest: PrFacts | null;
+  expectedBaseSha: string;
+  latestBaseSha: string | null;
+  defaultBranch: string;
+}): { allow: boolean; reason: string } {
+  const deny = (reason: string) => ({ allow: false, reason });
+  if (!i?.initial || !i.latest) return deny('PR 최신 상태를 확인하지 못했습니다');
+  const sha = (v: unknown) => typeof v === 'string' && /^[0-9a-f]{40}$/i.test(v);
+  if (!sha(i.initial.headSha) || !sha(i.latest.headSha)
+    || !sha(i.expectedBaseSha) || !sha(i.latestBaseSha)) {
+    return deny('HEAD/main SHA 증거가 불완전합니다');
+  }
+  if (i.expectedBaseSha !== i.latestBaseSha) {
+    return deny('main tip이 재배치 도중 변경됐습니다');
+  }
+  if (i.latest.number !== i.initial.number
+    || i.latest.headRef !== i.initial.headRef
+    || i.latest.headSha !== i.initial.headSha
+    || i.latest.baseRef !== i.initial.baseRef) {
+    return deny('PR 번호·HEAD·base가 처음 판정과 달라졌습니다');
+  }
+  const fresh = rebaseVerdict({
+    ...i.latest, behindBy: 1, cleanRebase: true,
+  }, i.defaultBranch);
+  if (fresh.action !== 'REBASE') return deny('최신 PR 상태가 재배치를 허용하지 않습니다: ' + fresh.reason);
+  return { allow: true, reason: 'PR·main 최신 상태가 처음 판정과 일치합니다' };
+}
