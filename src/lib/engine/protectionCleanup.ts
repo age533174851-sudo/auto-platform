@@ -56,6 +56,8 @@ export async function cleanupOwnedProtectionWhenFlat(
     position: { ok: boolean; found: boolean; qty?: number | null };
     myStrategyId: string;
     ownedIds?: string[] | null;
+    /** 그 번호 목록을 **읽었는가.** 생략하면 "읽었다" — `loadOwnedProtectionIds`의 `idsKnown` */
+    ownedIdsKnown?: boolean;
     /** 적어 둔 번호와 일치하는 것만 내 것으로 본다 (전략 id를 모를 때) */
     ownedOnly?: boolean;
     /** 재조회 바퀴 수. 기본 3 */
@@ -74,6 +76,7 @@ export async function cleanupOwnedProtectionWhenFlat(
   const plan = flatCleanupPlan({
     position: i.position, orders, myStrategyId: i.myStrategyId,
     ownedIds: i.ownedIds ?? null, ownedOnly: i.ownedOnly === true,
+    ownedIdsKnown: i.ownedIdsKnown,
   });
 
   if (plan.cancel.length === 0) {
@@ -98,15 +101,20 @@ export async function cleanupOwnedProtectionWhenFlat(
  * `live_orders.sl_order_id` · `tp_order_id`는 **TEXT**라 Gate의 int64
  * 주문 번호도 자릿수 그대로 보존된다(#139).
  *
- * **못 읽으면 빈 배열이 아니라 그냥 없는 것으로 둔다** — 여기서 실패해도
- * 식별자 파싱이라는 2순위 증거가 남아 있고, 이 조회 실패가 정리 자체를
- * 막으면 보호주문이 더 오래 남는다.
+ * **못 읽은 것과 0건을 구별해 돌려준다** (`idsKnown`).
+ *
+ * 예전에는 둘 다 빈 배열이었다. 그러면 1순위 증거를 못 읽은 회차에
+ * **내 주문이 UNKNOWN으로 분류되고**, 그 상태의 판정이 "치울 것 없음"이
+ * 되어 신규 진입이 그 보호주문 위로 나갔다 — 이 모듈이 막으려던 바로
+ * 그 사고다. 조회 실패가 정리를 막지 않게 하려던 의도는 맞지만, 그
+ * 사실을 **부르는 쪽에 알리지 않은 것**이 틀렸다.
  */
 export async function loadOwnedProtectionIds(
   sb: any,
   i: { connectionId?: string | null; userId?: string | null; symbol: string; limit?: number },
-): Promise<{ ids: string[]; strategyIds: string[] }> {
-  const out = { ids: [] as string[], strategyIds: [] as string[] };
+): Promise<{ ids: string[]; strategyIds: string[]; idsKnown: boolean }> {
+  // **기본은 "모른다"다.** 읽기에 성공한 경로에서만 참으로 바꾼다.
+  const out = { ids: [] as string[], strategyIds: [] as string[], idsKnown: false };
   try {
     let q = (sb as any).from('live_orders')
       .select('client_order_id, sl_order_id, tp_order_id, created_at')
@@ -114,9 +122,13 @@ export async function loadOwnedProtectionIds(
     if (i.connectionId) q = q.eq('connection_id', i.connectionId);
     else if (i.userId) q = q.eq('user_id', i.userId);
     else return out;
-    const { data } = await q.order('created_at', { ascending: false }).limit(Math.max(1, i.limit ?? 5));
+    const { data, error } = await q.order('created_at', { ascending: false }).limit(Math.max(1, i.limit ?? 5));
+    // **조회 실패를 "번호 없음"으로 적지 않는다.** Supabase는 실패해도
+    // 던지지 않는다 — `error`를 보지 않으면 그대로 빈 목록이 된다.
+    if (error || !Array.isArray(data)) return out;
+    out.idsKnown = true;
 
-    for (const row of (Array.isArray(data) ? data : [])) {
+    for (const row of data) {
       for (const raw of [row?.sl_order_id, row?.tp_order_id]) {
         // **정밀도를 잃은 번호는 되살리지 않는다.** `String()`으로 만든
         // 번호로 취소를 보내면 거래소는 "그런 주문 없다"고 답한다.
