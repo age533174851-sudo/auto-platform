@@ -2517,6 +2517,79 @@ export async function runAdoptIntentIntegrationTests() {
     });
   }
 
+  // ══════════ ①-a 중복이라고 말하려면 **중복임을 확인해야 한다** ══════════
+  //
+  // 23505는 "그 `client_order_id`로 줄이 하나 있다"까지만 증명한다.
+  // 그 줄이 **어떤 상태인지**는 뒤이은 조회가 알려 주고, 그 조회는 실패할
+  // 수 있다. 그런데 응답은 조회 결과와 무관하게 늘 같은 말을 했다:
+  //
+  //     duplicate: true · "이미 처리된 주문입니다 (중복 요청)"
+  //
+  // 조회가 실패하면 status는 `UNKNOWN`인데 문구는 "이미 처리됐다"다.
+  // **확인하지 못한 것을 처리됨으로 적는 자리다.** 화면은
+  // `settled === false`를 재주문 잠금 신호로 쓰는데(이 파일의
+  // `ExecuteResult.settled` 설명) 이 경로는 그 값을 아예 주지 않아,
+  // 사람이 "이미 처리됐구나" 하고 넘어갈 수 있다.
+  //
+  // 보내지 않는 것은 그대로 둔다 — 바꾸는 것은 **무엇을 말하는가**다.
+  {
+    const db = new FakeDb({
+      failInsertCode: { table: 'live_orders', code: '23505' },
+      failSelectsOn: 'live_orders',
+    });
+    const venue = sendableVenue();
+    const r = await scenario(venue, () => exec(db, {}));
+
+    test('★★ 중복 줄을 읽지 못했으면 "이미 처리됨"으로 적지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      // 보내지 않는 것은 유지한다. 이쪽이 느슨해지면 포지션이 두 배가 된다.
+      eq(venue.orderSends().length, 0, '확인도 못 한 중복에 주문을 보냈다');
+      eq((r as any).ok, false);
+      eq((r as any).duplicate, true, '23505 자체는 줄이 있다는 증거다 — 재주문을 열지 않는다');
+      eq((r as any).status, 'UNKNOWN');
+      // 확정되지 않았으므로 화면이 재주문을 잠글 수 있어야 한다.
+      eq((r as any).settled, false, '확인 못 한 결과에 확정 신호를 주지 않았다');
+      assert(!String((r as any).message).includes('이미 처리된'),
+        `확인 못 한 줄을 "이미 처리됨"으로 적었다: ${(r as any).message}`);
+    });
+  }
+
+  // ══════════ ①-b 예약된 INTENT는 "처리된" 것이 아니다 ══════════
+  //
+  // 097이 커밋한 줄의 상태는 `INTENT`다 — 거래소에는 아무 일도 없었다.
+  // 그 자리에서 "이미 처리된 주문"이라고 적으면, 영원히 나가지 않은 주문이
+  // 처리된 것으로 보인다. 이것이 #531이 가리키는 구멍의 **보고 쪽 절반**이다.
+  {
+    const db = adoptDb();
+    const venue = sendableVenue();
+    const r = await scenario(venue, () => exec(db, {}));
+
+    test('★★ 전송되지 않은 예약 의도를 "이미 처리됨"으로 적지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 0);
+      eq((r as any).status, 'INTENT');
+      eq((r as any).settled, false, '전송조차 안 된 주문을 확정으로 적었다');
+      assert(!String((r as any).message).includes('이미 처리된'),
+        `나가지도 않은 주문을 "이미 처리됨"으로 적었다: ${(r as any).message}`);
+    });
+  }
+
+  // ══════════ ①-c 실제로 체결된 중복은 그대로 확정이다 ══════════
+  {
+    const db = adoptDb({ status: 'FILLED', exchange_order_id: '7001', filled_qty: 0.01 });
+    const venue = sendableVenue();
+    const r = await scenario(venue, () => exec(db, {}));
+
+    test('확인된 체결 중복은 확정으로 적는다 (여기를 약하게 만들지 않는다)', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 0);
+      eq((r as any).ok, true);
+      eq((r as any).status, 'FILLED');
+      eq((r as any).settled, true, '확인된 체결을 확정으로 적지 않았다');
+      eq((r as any).duplicate, true);
+    });
+  }
+
   // ══════════ ② GREEN — 이어받으면 전송이 계속된다 ══════════
   {
     const db = adoptDb();
