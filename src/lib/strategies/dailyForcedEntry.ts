@@ -169,7 +169,12 @@ export function forcedWindowStartMs(nowMs: number): number | null {
   const minute = kstMinuteOfDay(nowMs);
   if (minute == null || !Number.isFinite(nowMs)) return null;
   const startMin = FORCED_ENTRY_START_KST.hh * 60 + FORCED_ENTRY_START_KST.mm;
-  return nowMs - (minute - startMin) * 60_000;
+  // 주문 이력 조회의 하한은 반드시 09:00:00.000이어야 한다.
+  // nowMs의 초·밀리초를 남기면 09:01:45에서 09:00:45를 반환하고,
+  // 09:00:10에 이미 낸 주문이 조회에서 누락돼 중복 진입할 수 있다.
+  // KST는 UTC+9시간이므로 분 경계는 UTC와 같다.
+  const nowMinuteStartMs = Math.floor(nowMs / 60_000) * 60_000;
+  return nowMinuteStartMs - (minute - startMin) * 60_000;
 }
 
 /**
