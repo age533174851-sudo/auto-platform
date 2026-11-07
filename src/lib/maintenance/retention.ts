@@ -124,10 +124,16 @@ export function planCleanup(
 export function checkDeleteSize(
   count: number, total: number,
 ): { ok: boolean; reason: string } {
-  if (!Number.isFinite(count) || count < 0) {
+  if (!Number.isSafeInteger(count) || count < 0) {
     return { ok: false, reason: '지울 개수를 세지 못했습니다 — 세지 못한 채로 지우지 않습니다' };
   }
+  // 삭제 대상이 0건이면 DB에 쓰지 않으므로 전체 개수는 필요 없다.
   if (count === 0) return { ok: true, reason: '지울 것이 없습니다' };
+  // 호출부에서 total 조회 실패/null을 0으로 전달하더라도 절대 삭제하지 않는다.
+  // total=0에 count>0인 응답 역시 모순이므로 fail-closed.
+  if (!Number.isSafeInteger(total) || total <= 0) {
+    return { ok: false, reason: '표 전체 개수를 확인하지 못했습니다 — 전체 삭제 여부를 모르는 채로 지우지 않습니다' };
+  }
   if (count > MAX_DELETE_PER_RUN) {
     return {
       ok: false,
@@ -135,7 +141,7 @@ export function checkDeleteSize(
     };
   }
   // 표 전체를 지우는 상황이면 설정이 잘못됐을 가능성이 높다.
-  if (total > 0 && count >= total) {
+  if (count >= total) {
     return {
       ok: false,
       reason: `전체 ${total}건을 모두 지우려 합니다 — 보관 기간 설정을 확인하세요.`,
