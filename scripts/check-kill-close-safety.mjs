@@ -31,6 +31,7 @@ const STAT = 'src/app/api/risk/kill-switch/status/route.ts';
 const LEASE = 'src/lib/engine/exitMonitorLease.ts';
 const STORE = 'src/lib/engine/exitLeaseStore.ts';
 const MON = 'src/app/api/autotrade/exit-monitor/route.ts';
+const WORKER = 'worker/src/index.ts';
 
 const errors = [];
 const err = (m) => errors.push(m);
@@ -39,6 +40,25 @@ const read = (f) => { try { return readFileSync(f, 'utf8'); } catch { return nul
 const code = (s) => (s ?? '')
   .replace(/\/\*[\s\S]*?\*\//g, '')
   .split('\n').map(l => l.replace(/\/\/.*$/, '')).join('\n');
+
+/**
+ * `case 'NAME': {` 의 **블록 본문만** 중괄호를 세어 떼어 온다.
+ *
+ * 파일 전체에서 문자열을 찾으면 옆 분기의 정당한 호출이 규칙을
+ * 만족시켜 버린다 — 이 저장소의 검사기가 반복해서 빠져나간 구멍이다.
+ */
+const caseBodyOf = (src, name) => {
+  const at = src.indexOf(`case '${name}':`);
+  if (at < 0) return null;
+  const open = src.indexOf('{', at);
+  if (open < 0) return null;
+  let depth = 0;
+  for (let k = open; k < src.length; k += 1) {
+    if (src[k] === '{') depth += 1;
+    else if (src[k] === '}') { depth -= 1; if (depth === 0) return src.slice(open + 1, k); }
+  }
+  return null;
+};
 
 /** `fn(`의 인자 전체를 괄호를 세어 떼어 온다 */
 const callArgsOf = (src, fn) => {
@@ -204,6 +224,56 @@ if (mod && typeof mod.planKillCancelOnly === 'function') {
     if (!/side:\s*\(?p\?\.side/.test(sw)) {
       err(`${SW}이(가) 포지션의 side 칸을 넘기지 않습니다`
         + ' — `amount`는 절댓값이므로 부호만으로는 SHORT를 알 수 없습니다');
+    }
+  }
+}
+
+// ══════════════════════════════════════════════════════════
+// K-5 — 워커의 킬스위치도 같은 규칙을 지킨다
+// ══════════════════════════════════════════════════════════
+//
+// **이 검사기는 `src/`만 보고 있었다.** 그래서 웹 경로가 소유 번호만
+// 지우도록 고쳐지는 동안, 워커의 `KILL_SWITCH_EXECUTE`는 계좌 전체
+// 취소를 그대로 부르고 있었고 아무도 그것을 세지 않았다.
+//
+// 워커는 죽은 코드가 아니다. 모니터가 `kill_switch_state.active`를 보고
+// **스스로 그 잡을 적재한다**("Vercel이 못 만들었어도 자가복구").
+// 기본 모드는 'BC' — 닫지 않고 취소만 한다. 그 조합이 가장 나쁘다:
+// 다른 전략의 보호주문만 지우고 포지션은 열린 채로 남긴다.
+//
+// ★ 파일 전체에서 문자열을 찾지 않는다. `CANCEL_ALL_ORDERS` 잡은
+//   사용자가 "전부 취소"를 고른 것이라 전체 취소가 **맞다.** 그래서
+//   `KILL_SWITCH_EXECUTE` **분기 안**만 본다 — 이 저장소의 검사기가
+//   "어딘가에 그 글자가 있다"로 빠져나간 적이 여러 번이다.
+{
+  const wk = code(read(WORKER));
+  if (!wk) err(`${WORKER}을(를) 읽지 못했습니다`);
+  else {
+    const body = caseBodyOf(wk, 'KILL_SWITCH_EXECUTE');
+    if (body == null) {
+      err(`${WORKER}에서 KILL_SWITCH_EXECUTE 분기를 찾지 못했습니다`
+        + ' — 분기가 사라졌거나 모양이 바뀌었습니다. 확인하지 못한 것을 통과로 보지 않습니다');
+    } else {
+      for (const bad of ['futuresCancelAll', 'cancelAllOpenOrders']) {
+        if (body.includes(bad)) {
+          err(`${WORKER}의 KILL_SWITCH_EXECUTE가 ${bad}을(를) 부릅니다`
+            + ' — 계좌 전체 취소는 같은 연결을 쓰는 다른 전략의 손절까지 지웁니다.'
+            + ' 저장소 첫 절대 규칙("Cancel All 금지")입니다');
+        }
+      }
+      if (!body.includes('planKillCancelOnly(')) {
+        err(`${WORKER}의 KILL_SWITCH_EXECUTE가 planKillCancelOnly를 쓰지 않습니다`
+          + ' — 취소 범위 판정을 워커가 따로 세면 웹과 갈립니다');
+      }
+      if (!body.includes('futuresCancelOrder(')) {
+        err(`${WORKER}의 KILL_SWITCH_EXECUTE가 번호를 지정해 취소하지 않습니다`);
+      }
+      // 판정이 막았는데(BLOCKED_*) 성공으로 적으면, 못 지운 것이 지워진
+      // 것으로 보고된다. 그 한 줄이 이 규칙의 전부다.
+      if (!/BLOCKED_/.test(body)) {
+        err(`${WORKER}의 KILL_SWITCH_EXECUTE가 BLOCKED_ 판정을 성공과 구분하지 않습니다`
+          + ' — 읽지 못해 취소하지 않은 것을 "취소 완료"로 적으면 안 됩니다');
+      }
     }
   }
 }
