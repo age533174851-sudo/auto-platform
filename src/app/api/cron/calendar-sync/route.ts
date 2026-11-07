@@ -21,6 +21,7 @@
 // 그쪽은 사람이 직접 넣거나 외부 결과를 주입하는 통로다. 여기는 예약
 // 수집이다. 둘 다 같은 테이블에 같은 규칙으로 쓴다.
 import { NextRequest, NextResponse } from 'next/server';
+import { cronAuthFromRequest } from '@/lib/cron/cronAuth';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/server';
 import { collectEvents, syncCooldown } from '@/lib/calendar/normalize';
 
@@ -77,11 +78,19 @@ export async function POST(req: NextRequest) {
 }
 
 export async function GET(req: NextRequest) {
-  const secret = process.env.CRON_SECRET || '';
-  if (secret) {
-    const given = req.headers.get('authorization')?.replace(/^Bearer\s+/i, '')
-      || req.nextUrl.searchParams.get('secret') || '';
-    if (given !== secret) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
+  // ── 크론 인증 ──
+  //
+  // **판정은 `cronAuthVerdict` 한 곳에 있다.** 예전에는 다섯 경로가
+  // 각자 적고 있었고, 그래서 `if (secret) { … }`라는 같은 실수를
+  // 다섯 벌이 같이 갖고 있었다 — `CRON_SECRET`이 없으면 인증이
+  // 통째로 사라져 아무나 부를 수 있었다.
+  //
+  // **인증 전에는 DB도 외부 API도 건드리지 않는다.** 이 반환이
+  // 함수의 첫 문장이어야 하는 이유다.
+  const auth = cronAuthFromRequest(req);
+  if (!auth.ok) {
+    return NextResponse.json({ ok: false, error: auth.error, message: auth.message },
+      { status: auth.status, headers: { 'Cache-Control': 'no-store' } });
   }
   return runSync();
 }
