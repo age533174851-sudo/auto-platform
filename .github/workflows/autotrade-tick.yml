@@ -53,6 +53,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      # 판정기(`scripts/autotrade-tick-verdict.mjs`)를 가져온다.
+      # 의존성이 없는 파일이라 `npm ci`는 필요 없다 — 15분마다 도는
+      # 작업에 설치를 붙이면 그것만으로 하루치 분을 다 쓴다.
+      - uses: actions/checkout@v4
+
       - name: 자동매매 예약 확인
         env:
           BASE:   ${{ secrets.EXIT_MONITOR_URL }}
@@ -92,14 +97,21 @@ jobs:
           if [ "$code" = "503" ]; then
             echo "server not ready — 응답의 error 값을 보세요 (admin_secret_missing · supabase_not_configured)"
           fi
-          if [ "$code" != "200" ]; then
-            echo "자동매매 호출 실패 (HTTP ${code})"
-            exit 1
-          fi
 
-          # **200이 '진입했다'는 뜻은 아니다.**
-          # 대부분의 호출은 "아직 간격 안 됨" 또는 "조건 불충족"으로 끝나고
-          # 그건 정상이다. 로그에 응답 전문이 남으므로 무엇을 했는지는
-          # 위 출력에서 확인한다. 여기서 진입 건수로 실패 판정을 하면
-          # 정상적인 관망이 매번 빨간 X로 뜬다.
-          echo "완료 — 위 응답의 results/note가 실제로 무엇을 했는지 적고 있습니다."
+          # ── 판정은 여기서 하지 않는다 ──
+          #
+          # 예전에는 `if [ "$code" != "200" ]`만 봤다. 그런데 이 라우트는
+          # **예약 표를 못 읽어도 200을 돌려준다**:
+          #
+          #     return NextResponse.json({ ok: !readError, error: readError, ... })
+          #
+          # 그래서 DB가 죽어 자동매매가 하루 종일 한 번도 돌지 않아도
+          # 이 회차는 초록이었다. 15분마다 도는 작업이라 아무도 못 본다.
+          #
+          # 판정을 셸에 적으면 시험할 수가 없다. 규칙은
+          # `scripts/autotrade-tick-verdict.mjs` 한 곳에 두고,
+          # `check-autotrade-tick-contract`가 가짜 응답으로 그 동작을
+          # CI에서 확인한다.
+          #
+          # **정상 관망은 성공이다** — 진입 0건도, 켜진 예약 0건도.
+          node scripts/autotrade-tick-verdict.mjs "$code" "$body"
