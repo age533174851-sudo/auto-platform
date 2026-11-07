@@ -519,8 +519,26 @@ export async function futuresProtectiveOrders(
       }
     } else {
       const bf = await import('./binanceFutures');
-      const { orders } = await bf.getFuturesOpenOrders(key, secret, testnet, symbol);
-      if (!Array.isArray(orders)) return fail('미체결 주문을 읽지 못했습니다');
+      // ★ **`success`를 본다.** `getFuturesOpenOrders`는 실패할 때
+      //   `{ success: false, orders: [] }`를 돌려준다 — 빈 **배열**이다.
+      //   그래서 `Array.isArray(orders)`는 실패에도 참이고, 이 관문은
+      //   **한 번도 발동할 수 없었다.** 조회가 깨진 회차가 그대로
+      //   `ok: true · stopCount: 0`으로 나가, 이 함수의 인터페이스가
+      //   약속한 "못 읽으면 null"이 지켜지지 않았다.
+      //
+      //   그 값은 점검 화면에 "열린 포지션이 있는데 거래소에 손절이 하나도
+      //   없습니다"로 적힌다 — 확인한 적 없는 사실을 단정하는 것이고,
+      //   그걸 본 사람이 이미 있는 손절 위에 또 하나를 건다. 포지션이
+      //   닫힌 뒤 남은 하나가 반대 포지션을 연다.
+      //
+      //   같은 파일의 `futuresOpenOrdersAll`은 이미 이 교훈을 적어 두었다.
+      //   형제 함수 둘만 안 고쳐져 있었다.
+      const read = await bf.getFuturesOpenOrders(key, secret, testnet, symbol);
+      if (read?.success !== true) {
+        return fail(read?.message || '미체결 주문을 읽지 못했습니다');
+      }
+      const orders = read.orders;
+      if (!Array.isArray(orders)) return fail('미체결 주문 응답을 읽지 못했습니다');
 
       for (const o of orders as any[]) {
         const t = String(o?.type || '').toUpperCase();
@@ -665,7 +683,30 @@ export async function futuresCancelProtection(
     }
 
     const bf = await import('./binanceFutures');
-    const { orders } = await bf.getFuturesOpenOrders(key, secret, testnet, symbol);
+    // ★ **조회 실패를 "지울 것이 없다"로 읽지 않는다.**
+    //
+    //   `getFuturesOpenOrders`는 실패할 때 `{ success: false, orders: [] }`를
+    //   돌려준다. `(orders || [])`는 그 빈 배열을 그대로 받아 `targets`가
+    //   0건이 되고, 이 함수는 `cancelled: 0 · note: ''`로 **조용히** 끝난다.
+    //
+    //   이 함수를 부르는 자리가 어디인지가 중요하다 — `orderExecutor`가
+    //   **전량 청산을 확인한 직후** 남은 보호주문을 지우려고 부른다.
+    //   그 주석이 이렇게 적고 있다: "포지션이 없어진 뒤에도 남아 있으면
+    //   트리거에 닿는 순간 **반대 방향으로 새 포지션이 열린다.**"
+    //
+    //   즉 조회가 한 번 깨지면, 남아 있는 손절이 그대로 무장된 채
+    //   평탄해진 자리에 남고 아무도 그 사실을 듣지 못한다.
+    //
+    //   아래 catch가 "**지웠다고 말하지 않는다**"고 적어 둔 바로 그
+    //   보호인데, `getFuturesOpenOrders`가 예외를 안에서 삼키므로
+    //   **그 catch는 이 경로에서 발동하지 않는다.**
+    const read = await bf.getFuturesOpenOrders(key, secret, testnet, symbol);
+    if (read?.success !== true || !Array.isArray(read.orders)) {
+      return { cancelled: null,
+        note: ' · ⚠ 남은 보호 주문을 확인하지 못했습니다'
+          + ` (${read?.message || '미체결 조회 실패'}) — 거래소에서 직접 확인하세요` };
+    }
+    const orders = read.orders;
     // **포지션을 닫는 주문만** 지운다. 진입 예약(지정가)은 사용자가 일부러
     // 걸어 둔 것일 수 있어 건드리지 않는다.
     const targets = (orders || []).filter((o: any) => {
