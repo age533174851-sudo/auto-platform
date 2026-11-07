@@ -143,15 +143,16 @@ export function runExitMonitorLeaseTests() {
   test('기록을 못 읽은 것을 "안 돌았다"로 적지 않는다', () => {
     const v = exitMonitorOverdue({ lastSuccessMs: undefined, nowMs: NOW, intervalMs: IV });
     eq(v.code, 'UNKNOWN');
-    eq(v.blockEntry, false);
+    eq(v.blockEntry, true);
+    assert(/신규 진입을 보류/.test(v.reason), v.reason);
   });
 
-  test('**첫 배포 직후(기록 없음)에 매매를 멈추지 않는다**', () => {
-    // 058이 막 적용된 직후가 이 상태다. 이 기능을 배포한 순간
-    // 자동매매가 꺼지면 안 된다.
+  test('**첫 배포 직후(기록 없음)에는 청산 감시 성공 전까지 신규 진입을 보류한다**', () => {
+    // 성공 기록이 없으면 청산 감시가 실제로 작동하는지 검증되지 않았다.
     const v = exitMonitorOverdue({ lastSuccessMs: null, nowMs: NOW, intervalMs: IV });
     eq(v.code, 'NEVER_RAN');
-    eq(v.blockEntry, false);
+    eq(v.blockEntry, true);
+    assert(/신규 진입을 보류/.test(v.reason), v.reason);
   });
 
   // ══ 획득 경합 — 두 실행을 실제로 겹쳐서 돌린다 ══

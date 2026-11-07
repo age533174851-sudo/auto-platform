@@ -171,14 +171,14 @@ export function exitMonitorOverdue(i: {
     ? (i.blockAfterMs as number) : OVERDUE_BLOCK_MS;
 
   if (i?.lastSuccessMs === undefined) {
-    return { code: 'UNKNOWN', overdue: false, sinceSec: null, blockEntry: false,
-      reason: '청산 감시 기록을 읽지 못했습니다 — 안 돌았다는 뜻이 아닙니다' };
+    return { code: 'UNKNOWN', overdue: false, sinceSec: null, blockEntry: true,
+      reason: '청산 감시 기록을 읽지 못했습니다 — 청산 가능 여부를 확인할 때까지 신규 진입을 보류합니다' };
   }
   if (i.lastSuccessMs == null) {
-    // 058이 막 적용된 직후가 이 상태다. **기록이 없다고 매매를 멈추지
-    // 않는다** — 그건 이 기능을 배포한 순간 자동매매를 끄는 것과 같다.
-    return { code: 'NEVER_RAN', overdue: true, sinceSec: null, blockEntry: false,
-      reason: '청산 감시가 아직 한 번도 기록되지 않았습니다 — 첫 회차를 기다립니다' };
+    // 신규 진입은 청산 감시 성공을 확인한 뒤에만 허용한다.
+    // 신규 배포에서는 첫 성공 회차 전까지 진입을 보류한다.
+    return { code: 'NEVER_RAN', overdue: true, sinceSec: null, blockEntry: true,
+      reason: '청산 감시 성공 기록이 없습니다 — 첫 성공 회차를 확인할 때까지 신규 진입을 보류합니다' };
   }
   const since = i.nowMs - i.lastSuccessMs;
   const sinceSec = Math.max(0, Math.round(since / 1000));
