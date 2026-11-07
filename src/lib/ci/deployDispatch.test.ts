@@ -10,7 +10,7 @@ import {
   deployDispatchPlan, deployDispatchRequest, dispatchResultNote,
   migrateDispatchPlan, migrateDispatchRequest, migrateResultNote, MIGRATE_WORKFLOW,
   DEPLOY_WORKFLOW, DEPLOY_REF,
-} from './deployDispatch';
+  approvedMigrationDeployPlan } from './deployDispatch';
 
 export function runDeployDispatchTests() {
   console.log('[배포 호출 — 합쳤다고 배포된 것이 아니다]');
@@ -110,6 +110,58 @@ export function runDeployDispatchTests() {
   test('못 불렀으면 스키마가 뒤처진다고 적는다', () => {
     const note = migrateResultNote({ ok: false, status: 403 });
     assert(note.includes('뒤처진 채로 배포됩니다'), note);
+  });
+
+  // ── 승인 적용 뒤 배포 (#450) ──
+  //
+  // 2026-11-01 ~ 11-06: fly-deploy 가 7회 연속 `마이그레이션이 끝나기를
+  // 기다린다` 단계에서 멈췄고, Worker 는 11-01 빌드(4f6ee8c6)로 main 보다
+  // 89커밋 뒤처진 코드를 돌렸다. 승인해서 적용해도 **배포를 부르는 쪽이
+  // 없었기** 때문이다.
+
+  test('★ 승인 파일이 있고 적용이 성공했으면 배포를 부른다', () => {
+    const p = approvedMigrationDeployPlan({
+      approvedFile: '097_ten_slot_atomic_claim.sql', applyOk: true, hasToken: true });
+    eq(p.dispatch, true, p.reason);
+    eq(p.code, 'DISPATCH');
+    assert(p.reason.includes('097_ten_slot_atomic_claim.sql'), p.reason);
+    assert(p.reason.includes('push를 만들지 않아'), `왜 필요한지가 문구에 남아야 한다: ${p.reason}`);
+  });
+
+  test('★ 승인 입력이 없으면 부르지 않는다 — 평소 적용은 push가 이미 깨운다', () => {
+    for (const f of [null, undefined, '', '   '] as any[]) {
+      const p = approvedMigrationDeployPlan({ approvedFile: f, applyOk: true, hasToken: true });
+      eq(p.dispatch, false, `${JSON.stringify(f)}: ${p.reason}`);
+      eq(p.code, 'NO_APPROVAL');
+    }
+  });
+
+  test('★ 적용이 성공으로 **확인되지 않았으면** 부르지 않는다', () => {
+    // `applyOk`를 안 준 것과 false 를 준 것을 같게 다룬다 —
+    // 모르는 것을 성공으로 읽으면 실패한 적용 위로 워커가 바뀐다.
+    for (const ok of [false, undefined, null] as any[]) {
+      const p = approvedMigrationDeployPlan({
+        approvedFile: '098_ten_slot_apply_event.sql', applyOk: ok, hasToken: true });
+      eq(p.dispatch, false, `${JSON.stringify(ok)}: ${p.reason}`);
+      eq(p.code, 'APPLY_FAILED');
+      assert(p.reason.includes('098_ten_slot_apply_event.sql'), p.reason);
+    }
+  });
+
+  test('★ 토큰이 없으면 **조용히 넘기지 않고** 손으로 할 일을 적는다', () => {
+    const p = approvedMigrationDeployPlan({
+      approvedFile: '097_ten_slot_atomic_claim.sql', applyOk: true, hasToken: false });
+    eq(p.dispatch, false);
+    eq(p.code, 'NO_TOKEN');
+    assert(p.reason.includes('옛 코드로 계속 돕니다'), p.reason);
+    assert(p.reason.includes('fly-deploy'), `무엇을 하라고 적어야 한다: ${p.reason}`);
+  });
+
+  test('승인 적용 배포도 **같은 요청 생성기**를 쓴다 — 주소를 두 곳에 적지 않는다', () => {
+    const req = deployDispatchRequest('owner/repo');
+    eq(req.method, 'POST');
+    assert(req.path.endsWith('/actions/workflows/fly-deploy.yml/dispatches'), req.path);
+    eq(JSON.parse(req.body).ref, 'main', 'PR 브랜치가 운영 워커로 가면 안 된다');
   });
 
 }
