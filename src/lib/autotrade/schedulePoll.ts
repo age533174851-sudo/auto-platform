@@ -72,20 +72,197 @@ export interface PollRow {
   last_run_at?: any;
   interval_min?: any;
   strategy_id?: any;
+  execution_profile_id?: any;
+  execution_preset_id?: any;
   [k: string]: any;
 }
 
 export type PollSkipCode =
-  /** 실전 예약 — 이 루프는 건드리지 않는다 */
+  /** TESTNET 이외의 모든 예약 — 이 루프는 건드리지 않는다 */
   | 'NOT_TESTNET'
   /** 꺼져 있다 · 간격이 안 됐다 · 방금 돌았다 · 연결이 없다 */
   | 'OFF' | 'WAITING' | 'TOO_SOON' | 'NO_CONNECTION';
 
+/**
+ * **마지막으로 실제 평가가 무엇을 판단했는가.**
+ *
+ * 왜 필요한가 (2026-11-02)
+ * ───────────────────────
+ * "테스트는 통과하는데 데모 자동매수가 안 나간다"를 쫓다가, GitHub
+ * cron(`autotrade-tick`)의 Actions 로그 25시간 분량이 **전부 이렇게**
+ * 끝나 있는 것을 봤다:
+ *
+ *     {"symbol":"ETHUSDT","mode":"TESTNET","ok":true,"skipped":true,
+ *      "code":"WAITING","detail":"다음 평가까지 30분 남았습니다"}
+ *
+ * cron은 **한 번도 평가하지 않았다.** 실제 평가자는 24시간 도는 Fly
+ * Worker이고(그래서 `last_run_at`이 늘 최근이다) cron은 예비다 — 거기까지는
+ * 정상이다. 문제는 **그 로그로 "왜 진입하지 않았나"에 답할 수 없다**는 것.
+ * 답은 워커의 판단에 있고, 그걸 보려면 Fly 로그나 운영 DB를 열어야 한다.
+ * `CLAUDE.md`가 금지한 그 문장("fly logs를 열어 확인해 주세요")이 거기서 나온다.
+ *
+ * 그런데 그 판단은 **이미 손에 있다** — 예약 줄에 `last_result`·
+ * `last_decision`으로 적혀 있고 cron은 `select('*')`로 읽는다.
+ * 적지 않았을 뿐이다. 그래서 적는다.
+ */
+export interface LastEvaluationNote {
+  /**
+   * 이 줄을 **평가하겠다고 선점한** 시각 (`last_run_at`).
+   *
+   * **완료 증거가 아니다.** `claimSchedule`이 평가 *전에* 적는 값이다.
+   */
+  at: string | null;
+  /**
+   * 평가가 **끝나고** 판단과 같은 UPDATE에 적힌 시각
+   * (`last_decision.sourceAt`). 없으면 null — 선점 시각으로 메우지 않는다.
+   */
+  completedAt: string | null;
+  /**
+   * `at`의 그 회차가 **판단까지 마쳤다고 확인됐는가.**
+   *
+   * 확인하지 못한 것은 통과가 아니다(`CLAUDE.md`). 아래 `outcome`은
+   * 그대로 두되(정보를 버리지 않는다) 문구가 이전 회차일 수 있음을 적는다.
+   */
+  completed: boolean;
+  outcome: string | null;
+  /** 경계 있는 사유 코드. 없으면 null — `UNKNOWN`으로 메우지 않는다 */
+  reasonCode: string | null;
+  /** 누가 깨웠는가(WORKER · GITHUB_FALLBACK · MANUAL …) */
+  source: string | null;
+  /** 사람이 읽는 한 줄. 길이를 묶는다 */
+  line: string;
+}
+
+/** 로그 한 줄이 화면을 다 먹지 않게 */
+const NOTE_MAX = 160;
+
+/**
+ * **이 문구는 GitHub Actions 공개 로그로 나간다.**
+ *
+ * `last_result`에는 외부 응답·DB 오류 문구가 섞인다. 그 안의 줄바꿈이
+ * 그대로 나가면 뒤 내용이 **줄 시작**에 오고, Actions는 줄 시작의
+ * `::error::`·`::add-mask::` 같은 워크플로 명령을 해석한다. 즉 저장된
+ * 문자열이 CI의 판정 문구를 쓸 수 있다.
+ *
+ * 그래서 제어문자를 **읽는 자리에서 한 번** 없앤다 — 쓰는 쪽을 전부
+ * 믿는 설계보다 실패 지점이 적다.
+ */
+// eslint-disable-next-line no-control-regex
+const CONTROL = /[\u0000-\u001f\u007f]+/g;
+const clip = (v: unknown): string | null => {
+  const t = typeof v === 'string' ? v.replace(CONTROL, ' ').trim() : '';
+  if (!t) return null;
+  return t.length > NOTE_MAX ? `${t.slice(0, NOTE_MAX)}…` : t;
+};
+
+/**
+ * 선점 시각과 완료 시각의 허용 오차.
+ *
+ * `recordEvaluation`은 `last_run_at`을 먼저 만들고 `sourceAt`을 그 뒤에
+ * 만든다(같은 UPDATE). 그래서 정상 경로는 `sourceAt >= last_run_at`이다.
+ * 혹시 순서가 바뀌어도 밀리초 차이로 "확인 불가"가 되지 않게 조금만 둔다.
+ * 선점 직후 죽은 경우의 간격은 **예약 간격(분 단위)**이라 이 값으로
+ * 가려지지 않는다.
+ */
+const CLAIM_RECORD_SLACK_MS = 2_000;
+const msOf = (v: string | null): number | null => {
+  if (v == null) return null;
+  const t = Date.parse(v);
+  return Number.isFinite(t) ? t : null;
+};
+const pick = (o: any, k: string): string | null =>
+  (o && typeof o === 'object' && !Array.isArray(o) ? clip(o[k]) : null);
+
+/**
+ * 예약 줄에서 **마지막 판단**을 꺼낸다.
+ *
+ * 규칙은 하나다: **못 읽은 것을 빈 값으로 적지 않는다.** `last_decision`이
+ * 객체가 아니면 "판단이 없었다"가 아니라 "읽지 못했다"다 — 그 둘을 같은
+ * 값으로 적으면 조용히 틀린 보고가 된다.
+ */
+export function lastEvaluationNote(row: PollRow | null | undefined): LastEvaluationNote {
+  const at = clip((row as any)?.last_run_at);
+  const raw = (row as any)?.last_decision;
+
+  if (at == null && raw == null && (row as any)?.last_result == null) {
+    return { at: null, completedAt: null, completed: false,
+      outcome: null, reasonCode: null, source: null,
+      line: '아직 평가 기록이 없습니다 (한 번도 평가하지 않았습니다)' };
+  }
+
+  // **`last_decision`이 객체가 아니면 아래 `pick`이 null을 준다.**
+  // 처음에는 그 경우를 따로 빼서 "읽지 못했습니다"만 적었는데, 돌연변이로
+  // 확인해 보니 그 분기를 지워도 시험이 전부 통과했다 — 일반 경로가 이미
+  // 같은 말을 하고, 분기는 `last_result`를 **빼먹기까지** 했다.
+  // 중복인 데다 정보를 버리는 분기여서 지웠다.
+  const outcome = pick(raw, 'outcome') ?? pick(raw, 'verdict');
+  const reasonCode = pick(raw, 'reasonCode');
+  const source = pick(raw, 'source');
+  const result = clip((row as any)?.last_result);
+
+  // ── 선점 시각을 평가 완료로 읽지 않는다 ──
+  //
+  // `claimSchedule`이 평가 **전에** `last_run_at`을 지금으로 바꾸므로,
+  // 선점 직후 죽은 회차·기록 UPDATE가 실패한 회차는 `last_run_at`만
+  // 최근이고 판단은 이전 회차의 것이다. 완료 증거는 판단과 **같은
+  // UPDATE에 적힌** `sourceAt` 하나뿐이다.
+  const completedAt = pick(raw, 'sourceAt');
+  const atMs = msOf(at);
+  const doneMs = msOf(completedAt);
+  // 읽지 못한 시각은 비교를 통과시키지 않는다 — 아무 문자열로 초록을
+  // 만들 수 있으면 관문이 아니다.
+  const completed = atMs != null && doneMs != null
+    && doneMs >= atMs - CLAIM_RECORD_SLACK_MS;
+
+  const parts = [
+    completed
+      ? `평가 완료 ${completedAt}`
+      : [
+        at ? `선점 ${at}` : '선점 시각을 읽지 못했습니다',
+        completedAt
+          ? `평가 완료 ${completedAt} — 이 선점 회차의 것이 아닙니다`
+          : '평가 완료 시각이 없습니다',
+        // 판단을 **버리지 않고** 무엇인지만 분명히 적는다.
+        outcome ? '아래 판단은 이전 회차의 것일 수 있습니다' : '',
+      ].filter(Boolean).join(' · '),
+    outcome ? `판단 ${outcome}` : '판단을 읽지 못했습니다',
+    ...(reasonCode ? [`사유 ${reasonCode}`] : []),
+    ...(source ? [`주체 ${source}`] : []),
+    ...(result ? [result] : []),
+  ];
+  return { at, completedAt, completed, outcome, reasonCode, source,
+    line: parts.join(' · ') };
+}
+
+/**
+ * 짧은 로그 한 칸에 들어가는 판단 요약.
+ *
+ * **왜 함수여야 하나.** 워커 로그는 `ETHUSDT:WAITING(…)`처럼 짧게 적는다.
+ * 그 자리에서 `lastEval.outcome`만 꺼내 쓰면 **확인하지 못한 판단이
+ * 확인된 판단과 똑같이 보인다.** 같은 판단을 두 곳에서 적으면 언젠가
+ * 갈린다 — 이 저장소의 상습 고장이다. 그래서 긴 문구(`line`)와 짧은
+ * 문구를 같은 파일의 두 함수가 만든다.
+ */
+export function lastEvaluationBrief(n: LastEvaluationNote | null | undefined): string {
+  if (!n || !n.outcome) return '판단 없음';
+  const code = n.reasonCode ? `${n.outcome}/${n.reasonCode}` : n.outcome;
+  // 확인하지 못한 것은 통과가 아니다 — 짧게 적을 때도 그 사실을 지우지 않는다.
+  return n.completed ? code : `${code}·완료미확인`;
+}
+
 export interface PollSelection {
   /** 지금 평가해야 하는 줄 */
   due: Array<{ row: PollRow; verdict: DueVerdict }>;
-  /** 건너뛴 줄과 그 이유. **조용히 버리지 않는다** */
-  skipped: Array<{ id: string; symbol: string; code: PollSkipCode; reason: string }>;
+  /**
+   * 건너뛴 줄과 그 이유. **조용히 버리지 않는다.**
+   *
+   * `lastEval`이 함께 간다 — "30분 남았습니다"만 적으면 왜 진입하지
+   * 않았는지는 이 로그로 알 수 없다.
+   */
+  skipped: Array<{
+    id: string; symbol: string; code: PollSkipCode; reason: string;
+    lastEval: LastEvaluationNote;
+  }>;
 }
 
 /** `mode`가 실전 계열인가. 저장소 전체와 같은 판정이다 */
@@ -108,17 +285,29 @@ export function selectDueSchedules(rows: PollRow[], nowMs: number): PollSelectio
     const id = String(row?.id ?? '');
     const symbol = String(row?.symbol ?? '');
 
-    // **실전은 이 루프가 보지 않는다.** 먼저 거른다 — 뒤에서 걸러도
-    // 되지만, 앞에 두면 "이 루프는 실전을 만지지 않는다"가 코드에서 바로 읽힌다.
-    if (isLiveMode(row?.mode)) {
+    // **명시적인 TESTNET만** 이 Worker가 평가한다. LIVE만 제외하면
+    // PAPER·MOCK·빈 값·미래 모드도 여기로 들어와 envOfMode에서 TESTNET으로
+    // 재해석될 수 있다. 알 수 없는 모드는 추측하지 않고 차단한다.
+    // 이 분기는 dueCheck·선점·거래소 호출보다 앞에 있어야 한다.
+    if (row?.mode !== 'TESTNET') {
       skipped.push({ id, symbol, code: 'NOT_TESTNET',
-        reason: `실전 예약(${row?.mode})은 이 루프가 평가하지 않습니다` });
+        // 합집합: main의 문구(미지정 모드를 UNKNOWN으로 못박는다)를 쓰고,
+        // #560이 더한 "마지막 판단"을 그대로 들고 간다. 어느 쪽도 잃지 않는다.
+        reason: `TESTNET 외 예약(${String(row?.mode ?? 'UNKNOWN')})은 이 Worker가 평가하지 않습니다`,
+        lastEval: lastEvaluationNote(row) });
       continue;
     }
 
     const v = dueCheck({
       nowMs, enabled: row?.enabled, connectionId: row?.connection_id ?? '',
       lastRunAtMs: row?.last_run_at, intervalMin: row?.interval_min,
+      // **창을 가진 전략은 창으로도 깨운다.** 이 값을 빼먹으면 워커
+      // 경로만 창을 모르게 되고, 주 실행기가 바로 이쪽이다.
+      strategyId: row?.strategy_id,
+      // 09:00 강제 진입 창은 Exact100X 계약에서만 열린다. 이 두 값을
+      // 빼먹으면 워커 경로만 그 창을 모르고, 주 실행기가 이쪽이다.
+      profileId: row?.execution_profile_id,
+      presetId: row?.execution_preset_id,
     });
     if (v.due) { due.push({ row, verdict: v }); continue; }
 
@@ -126,7 +315,7 @@ export function selectDueSchedules(rows: PollRow[], nowMs: number): PollSelectio
       v.code === 'OFF' ? 'OFF'
         : v.code === 'NO_CONNECTION' ? 'NO_CONNECTION'
           : v.code === 'TOO_SOON' ? 'TOO_SOON' : 'WAITING';
-    skipped.push({ id, symbol, code, reason: v.reason });
+    skipped.push({ id, symbol, code, reason: v.reason, lastEval: lastEvaluationNote(row) });
   }
   return { due, skipped };
 }
