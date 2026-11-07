@@ -47,8 +47,14 @@ export interface ExitPlan {
 /** 거래소 수량 단위에 맞춰 내림. stepSize가 없으면 그대로 둔다. */
 function floorToStep(qty: number, step?: number): number {
   if (!step || step <= 0) return qty;
-  const precision = Math.max(0, Math.round(-Math.log10(step)));
-  return Number((Math.floor(qty / step) * step).toFixed(precision));
+  // Math.round(-log10(step)) fails for non-power-of-ten steps such as 0.005:
+  // it rounds 0.005 to 0.01 and can produce a quantity the exchange rejects.
+  const fraction = String(step).toLowerCase();
+  const [mantissa, exponentText] = fraction.split('e');
+  const decimals = (mantissa.split('.')[1] ?? '').length;
+  const precision = Math.max(0, Math.min(15, decimals - Number(exponentText ?? 0)));
+  const units = Math.floor(qty / step + 1e-10);
+  return Number((units * step).toFixed(precision));
 }
 
 export const DEFAULT_PARTIAL_LADDER = [
