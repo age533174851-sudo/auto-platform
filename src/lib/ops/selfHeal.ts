@@ -18,7 +18,7 @@
 //
 // 판정만 여기 있다. 실제 재시작은 자격을 가진 쪽(GitHub Actions)이 한다.
 
-import type { RuntimeHealth } from '../runtime/runtimeHealth';
+import { knownOpenOrderCount, type RuntimeHealth } from '../runtime/runtimeHealth';
 
 export type HealAction =
   | 'RECONCILE_FIRST'
@@ -126,7 +126,7 @@ export function healPlan(i: {
   }
 
   // ── 주문이 떠 있으면 ──
-  if (i.openOrders == null) {
+  if (!knownOpenOrderCount(i.openOrders)) {
     // **모르면 만지지 않는다.** 열린 주문을 못 읽은 채로 워커를 갈아
     // 끼우면 그 사이 체결을 아무도 안 본다.
     return { code: 'HOLD', actions: [], trigger, attempt,

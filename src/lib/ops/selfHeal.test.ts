@@ -50,6 +50,15 @@ export function runSelfHealTests() {
     eq(p.actions.length, 0);
   });
 
+  test('비정상 열린 주문 수로 자동 복구하지 않는다 — NaN·Infinity·음수·소수·정밀도 초과', () => {
+    for (const bad of [NaN, Infinity, -Infinity, -1, 0.5, Number.MAX_SAFE_INTEGER + 1]) {
+      const p = healPlan({ health: health(), openOrders: bad, attempts: [], nowMs: NOW });
+      eq(p.code, 'HOLD', String(bad));
+      eq(p.actions.length, 0, String(bad));
+      assert(/확인하지 못해/.test(p.reason), p.reason);
+    }
+  });
+
   test('**시도 기록을 못 읽으면 다시 시도하지 않는다**', () => {
     // 0번으로 세면 무한 재시작이 된다.
     const p = healPlan({ health: health(), openOrders: 0, attempts: undefined, nowMs: NOW });

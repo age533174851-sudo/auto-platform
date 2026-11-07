@@ -138,6 +138,18 @@ export function runRuntimeHealthTests() {
     assert(p.blocked.some(b => /확인하지 못해/.test(b)), p.blocked.join(' | '));
   });
 
+  test('비정상 열린 주문 수는 0건이 아니다 — NaN·Infinity·음수·소수·정밀도 초과', () => {
+    const h = runtimeHealthOf({
+      worker: { ...okRow, last_seen: new Date(NOW - STALE_MS - 1).toISOString() },
+      mainSha: 'abc1234567', nowMs: NOW,
+    });
+    for (const bad of [NaN, Infinity, -Infinity, -1, 0.5, Number.MAX_SAFE_INTEGER + 1]) {
+      const p = autoFixPlan(h, { openOrders: bad });
+      eq(p.actions.length, 0, String(bad));
+      assert(p.blocked.some(b => /확인하지 못해/.test(b)), p.blocked.join(' | '));
+    }
+  });
+
   test('값을 바꿔야 하는 고장은 자동 목록에 넣지 않는다', () => {
     const h = runtimeHealthOf({
       worker: { ...okRow, supabase_fingerprint: 'zzz999' },

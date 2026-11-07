@@ -234,6 +234,15 @@ export function runtimeHealthOf(i: {
 }
 
 /**
+ * 열린 주문 수는 관측된 **0 이상의 안전한 정수**여야 한다.
+ * NaN·Infinity·음수·소수·정밀도 초과는 '0건'의 증거가 아니다.
+ * 두 자동 복구 경로에서 같은 판정을 사용한다.
+ */
+export function knownOpenOrderCount(value: number | null | undefined): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+/**
  * 자동으로 고쳐 볼 것들.
  *
  * **주문이 떠 있으면 무작정 재시작하지 않는다.** 재시작 자체는 안전하지만,
@@ -255,7 +264,7 @@ export function autoFixPlan(h: RuntimeHealth, i: { openOrders: number | null }):
   }
 
   if (actions.includes('RESTART_WORKER') || actions.includes('REDEPLOY_WORKER')) {
-    if (i?.openOrders == null) {
+    if (!knownOpenOrderCount(i?.openOrders)) {
       // **모르면 재시작하지 않는다.** 열린 주문을 못 읽은 채로 워커를
       // 갈아 끼우면, 그 사이 체결을 아무도 안 본다.
       return { actions: [], blocked: [...blocked, '열린 주문 수를 확인하지 못해 재시작하지 않았습니다'] };
