@@ -56,7 +56,7 @@ if (!target.ok) {
   const red = createScratchDb(target, 'tsred', migrationPaths(root, SCHEMA));
   const green = createScratchDb(target, 'tsgreen',
     migrationPaths(root, [...SCHEMA, '097_ten_slot_atomic_claim.sql',
-      '098_ten_slot_apply_event.sql']));
+      '098_ten_slot_apply_event.sql', '099_ten_slot_role_acl_hardening.sql']));
   process.on('exit', () => {
     try { dropScratchDb(target, red); } catch { /* 정리 실패는 결과를 바꾸지 않는다 */ }
     try { dropScratchDb(target, green); } catch { /* 같음 */ }
@@ -337,6 +337,98 @@ if (!target.ok) {
       { expectError: true });
     assert.match(r.error, /permission denied|권한/i);
     assert.equal(readState(target, green, campaignId).version, 0);
+  });
+
+  // ── 권한을 **전수로** 센다 (#537) ──
+  //
+  // 위 시험은 함수 하나를 골라 부른다. 그것만으로는 097·098의 함수 10개와
+  // 표 4개 중 **어느 하나가 열려 있어도** 통과한다.
+  //
+  // 왜 이 시험이 전에는 초록이었나: 시험 DB에 Supabase의 기본 권한
+  // (pg_default_acl)이 없었다. 그 설정이 없으면 REVOKE ... FROM PUBLIC만
+  // 적은 마이그레이션도 "anon에 권한 없음"으로 보인다 — 운영에서는
+  // 남아 있는데. 그래서 harness의 BOOTSTRAP이 그 기본 권한을 깐다.
+  //
+  // 카탈로그를 돌며 센다. 이름을 손으로 적으면 **다음에 추가되는 함수가
+  // 빠진다** — 그리고 빠진 것은 아무 신호도 내지 않는다.
+  const privRows = (sql) => psql(target, green, sql).filter(Boolean);
+
+  test('★★ ten_slot_* 함수 전수 — anon·authenticated는 EXECUTE가 없다', () => {
+    const open = privRows(`SELECT p.oid::regprocedure::text || ' <- ' || r.rolname
+        FROM pg_proc p
+        JOIN pg_namespace ns ON ns.oid = p.pronamespace
+        CROSS JOIN (VALUES ('anon'), ('authenticated')) AS r(rolname)
+       WHERE ns.nspname = 'public' AND p.proname LIKE 'ten\\_slot\\_%'
+         AND has_function_privilege(r.rolname, p.oid, 'EXECUTE')
+       ORDER BY 1`);
+    assert.deepEqual(open, [], `열려 있는 함수 권한: ${open.join(' · ')}`);
+  });
+
+  test('★★ 함수를 하나도 못 셌으면 통과가 아니다', () => {
+    // 위 시험은 "열린 것이 없다"를 센다. 함수를 하나도 못 찾아도 빈 목록이
+    // 나온다 — 그러면 아무것도 확인하지 않고 초록이 된다.
+    const [n] = privRows(`SELECT count(*)::text FROM pg_proc p
+        JOIN pg_namespace ns ON ns.oid = p.pronamespace
+       WHERE ns.nspname = 'public' AND p.proname LIKE 'ten\\_slot\\_%'`);
+    assert.equal(Number(n), 10, `ten_slot 함수 수가 10이 아니다: ${n}`);
+  });
+
+  test('★★ service_role은 예약·사건 함수를 여전히 부를 수 있다', () => {
+    const shut = privRows(`SELECT p.oid::regprocedure::text
+        FROM pg_proc p
+        JOIN pg_namespace ns ON ns.oid = p.pronamespace
+       WHERE ns.nspname = 'public' AND p.proname LIKE 'ten\\_slot\\_%'
+         AND p.prorettype <> 'pg_catalog.trigger'::regtype
+         AND NOT has_function_privilege('service_role', p.oid, 'EXECUTE')
+       ORDER BY 1`);
+    assert.deepEqual(shut, [], `서버가 못 부르게 된 함수: ${shut.join(' · ')}`);
+  });
+
+  test('★★ ten_slot 표 전수 — anon은 아무 권한도 없다', () => {
+    const open = privRows(`SELECT t.tbl || ' ' || pr.priv
+        FROM (VALUES ('ten_slot_campaigns'), ('ten_slot_slots'),
+                     ('ten_slot_claims'), ('ten_slot_events')) AS t(tbl)
+        CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE'),
+                           ('TRUNCATE'), ('REFERENCES'), ('TRIGGER')) AS pr(priv)
+       WHERE has_table_privilege('anon', 'public.' || t.tbl, pr.priv)
+       ORDER BY 1`);
+    assert.deepEqual(open, [], `anon에 남은 표 권한: ${open.join(' · ')}`);
+  });
+
+  test('★★ authenticated는 캠페인 SELECT만 남는다 — 쓰기는 없다', () => {
+    const open = privRows(`SELECT t.tbl || ' ' || pr.priv
+        FROM (VALUES ('ten_slot_campaigns'), ('ten_slot_slots'),
+                     ('ten_slot_claims'), ('ten_slot_events')) AS t(tbl)
+        CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE'),
+                           ('TRUNCATE'), ('REFERENCES'), ('TRIGGER')) AS pr(priv)
+       WHERE has_table_privilege('authenticated', 'public.' || t.tbl, pr.priv)
+       ORDER BY 1`);
+    // 097이 설계로 남긴 읽기 경로 하나만 남는다. 그 정책
+    // (ten_slot_campaigns_owner)이 죽은 정책이 되지 않게 한다.
+    assert.deepEqual(open, ['ten_slot_campaigns SELECT'],
+      `authenticated에 남은 표 권한: ${open.join(' · ')}`);
+  });
+
+  test('★★ 그 SELECT는 살아 있고 RLS가 남의 줄을 막는다', () => {
+    // `fresh()`가 캠페인을 열어 준다. 줄이 **있는데** 안 보이는 것을
+    // 확인해야 한다 — 빈 표에서 0줄은 RLS의 증거가 아니다.
+    const campaignId = fresh();
+    assert.deepEqual(psql(target, green,
+      `SELECT count(*)::text FROM ten_slot_campaigns WHERE campaign_id = '${campaignId}'`),
+      ['1'], '캠페인이 열리지 않았다 — 이 시험의 전제가 깨졌다');
+    // auth.uid()가 NULL인 harness에서는 소유자 정책이 어떤 줄도 통과시키지
+    // 않는다. **권한 오류가 아니라 0줄**이어야 한다 — 권한 오류면 정책이
+    // 죽은 것이고, 줄이 보이면 RLS가 뚫린 것이다.
+    const r = psql(target, green,
+      `SET ROLE authenticated; SELECT count(*)::text FROM ten_slot_campaigns`);
+    assert.deepEqual(r, ['0'], `authenticated가 본 캠페인 수: ${r.join(',')}`);
+  });
+
+  test('★★ authenticated는 캠페인에 쓸 수 없다', () => {
+    const r = psql(target, green, `SET ROLE authenticated;
+      INSERT INTO ten_slot_campaigns (campaign_id, user_id, environment)
+      VALUES ('x-${fresh()}', '${DEFAULT_OWNER}', 'TESTNET')`, { expectError: true });
+    assert.match(r.error, /permission denied|권한/i);
   });
 
   // ── 같은 판단이 두 곳에 있다. 어긋나면 여기서 드러난다 ──
