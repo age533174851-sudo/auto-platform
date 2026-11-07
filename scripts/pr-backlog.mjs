@@ -41,7 +41,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { gatherFacts } from './lib/pr-facts.mjs';
+import { gatherFacts, listOpenPulls } from './lib/pr-facts.mjs';
 
 const TOKEN = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
 const REPO = process.env.GITHUB_REPOSITORY;
@@ -142,14 +142,18 @@ async function main() {
   const { autoMergeTechnicalGate, AUTO_MERGE_LABEL } =
     await import(`file://${join(outDir, 'autoMergeGate.js')}`);
 
-  const listed = await api(`/repos/${REPO}/pulls?state=open&per_page=100`);
+  // **장을 넘겨 전부 읽는다.** 예전에는 첫 장(100개)만 읽고 그것이
+  // 전부인 양 적었다 — 열린 PR이 225개일 때 125개가 조용히 빠졌다.
+  const listed = await listOpenPulls({ api, repo: REPO });
   if (!listed.ok) {
     console.error(`PR 목록을 읽지 못했습니다: HTTP ${listed.status}`);
     process.exit(1);
   }
-  let briefs = listed.body;
+  const totalOpen = listed.all.length;
+  let briefs = listed.all;
   if (args.pr != null) briefs = briefs.filter(p => p.number === args.pr);
   if (args.limit != null) briefs = briefs.slice(0, args.limit);
+  const truncated = briefs.length < totalOpen;
 
   const rows = [];
   const unread = [];
@@ -196,6 +200,19 @@ async function main() {
 
   console.log(`\n# 열린 PR 적체 보고 — ${REPO}`);
   console.log(`\n읽은 PR ${rows.length}개` + (unread.length ? ` · **읽지 못한 PR ${unread.length}개: ${unread.join(', ')}**` : ''));
+  // **못 본 것을 "없음"으로 적지 않는다.** 목록이 잘렸거나 --limit 으로
+  // 줄였으면 그 사실을 여기 적는다. 안 적으면 보는 사람이 이 보고서를
+  // 적체 전부로 믿는다.
+  if (!listed.complete) {
+    console.log(`\n> ⚠ **PR 목록을 다 읽지 못했습니다** — ${listed.pages}장까지 읽어 ${totalOpen}개를 모았습니다`
+      + (listed.failedPage ? ` (${listed.failedPage}장에서 HTTP ${listed.status})` : ' (장 수 상한에 닿았습니다)')
+      + '. 아래는 **적체 전부가 아닙니다.**');
+  }
+  if (truncated) {
+    console.log(`\n> ⚠ 열린 PR ${totalOpen}개 중 **${briefs.length}개만** 판정했습니다`
+      + (args.pr != null ? ' (`--pr`)' : ' (`--limit`)')
+      + '. 나머지는 보지 않았습니다.');
+  }
   console.log(`초안 ${rows.filter(r => r.draft).length}개 · \`${AUTO_MERGE_LABEL}\` 라벨 ${rows.filter(r => r.labeled).length}개`);
   console.log('\n판정은 `src/lib/ci/autoMergeGate.ts`의 `autoMergeTechnicalGate`가 한 것입니다 —');
   console.log('라벨·초안 스위치만 뺀 **같은 판정기**입니다. 이 보고서는 아무것도 바꾸지 않았습니다.');

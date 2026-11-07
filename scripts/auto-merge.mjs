@@ -23,7 +23,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { gatherFacts } from './lib/pr-facts.mjs';
+import { gatherFacts, listOpenPulls } from './lib/pr-facts.mjs';
 
 const TOKEN = process.env.GITHUB_TOKEN;
 const REPO = process.env.GITHUB_REPOSITORY;   // owner/repo
@@ -164,12 +164,21 @@ async function main() {
 
   const only = process.env.PR_NUMBER ? Number(process.env.PR_NUMBER) : null;
 
-  const listed = await api(`/repos/${REPO}/pulls?state=open&per_page=100`);
+  // **30분 안전망은 열린 PR 전부를 훑어야 한다.** 예전에는 첫 장(100개)만
+  // 훑었다 — 열린 PR이 225개일 때 첫 장 밖의 라벨 붙은 PR은 이 그물로는
+  // 영원히 합쳐지지 않고, 왜 안 합쳐지는지 아무 데도 안 남았다.
+  const listed = await listOpenPulls({ api, repo: REPO });
   if (!listed.ok) {
     console.error('PR 목록을 읽지 못했습니다:', listed.status);
     process.exit(1);
   }
-  const prs = listed.body.filter(p => (only == null || p.number === only));
+  // 다 못 읽었으면 **적어 둔다.** 훑지 못한 PR을 "합칠 것 없음"으로 읽지 않는다.
+  if (!listed.complete) {
+    console.log(`⚠ PR 목록을 다 읽지 못했습니다 — ${listed.pages}장까지 ${listed.all.length}개`
+      + (listed.failedPage ? ` (${listed.failedPage}장에서 HTTP ${listed.status})` : ' (장 수 상한)')
+      + '. 이 회차는 열린 PR 전부를 보지 못했습니다.');
+  }
+  const prs = listed.all.filter(p => (only == null || p.number === only));
 
   let merged = 0;
   for (const brief of prs) {
