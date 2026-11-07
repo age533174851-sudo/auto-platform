@@ -16,9 +16,6 @@
 name: Claude Hourly Dev
 
 on:
-  schedule:
-    # 정시를 피한다 — 전 세계의 `0 * * * *`가 몰려 예약이 밀린다.
-    - cron: '17 * * * *'
   workflow_dispatch:
     inputs:
       focus:
