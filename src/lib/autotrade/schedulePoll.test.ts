@@ -51,6 +51,19 @@ export function runSchedulePollTests() {
     eq(isLiveMode('PAPER'), false);
   });
 
+  test('TESTNET 외 모드는 모두 선점·평가 전에 차단한다 (PAPER·MOCK·미지정·유사 이름)', () => {
+    // 기존 구현은 LIVE만 거부해 PAPER/UNKNOWN을 TESTNET 실행 경로로 보냈다.
+    for (const mode of ['PAPER', 'MOCK', 'DEMO', 'TESTNET_COPY', 'testnet', '', null, undefined]) {
+      const s = selectDueSchedules([row({ mode })], NOW);
+      eq(s.due.length, 0, String(mode));
+      eq(s.skipped.length, 1, String(mode));
+      eq(s.skipped[0].code, 'NOT_TESTNET', String(mode));
+      assert(s.skipped[0].reason.includes('TESTNET'), String(mode));
+    }
+    // 진짜 TESTNET 예약은 이전과 같이 첫 평가를 수행한다.
+    eq(selectDueSchedules([row({ mode: 'TESTNET' })], NOW).due.length, 1);
+  });
+
   test('꺼진 예약은 안 고른다', () => {
     eq(selectDueSchedules([row({ enabled: false })], NOW).skipped[0].code, 'OFF');
     // enabled가 true가 아닌 모든 값은 꺼진 것이다.

@@ -126,7 +126,7 @@ else {
 // ── 3. 규격 적용은 **내림**이어야 한다 ──
 //
 // 반올림이면 신규 진입에서 수량이 커질 수 있다. 그게 이 검사의 이유다.
-const QZ = 'src/lib/exchanges/quantize.ts';
+const QZ = 'src/lib/kernel/quantize.ts';
 if (!existsSync(QZ)) fail(`${QZ}가 없습니다`);
 else {
   const q = stripJs(readFileSync(QZ, 'utf8'));
