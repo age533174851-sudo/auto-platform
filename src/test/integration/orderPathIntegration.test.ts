@@ -535,6 +535,35 @@ export async function runOrderPathIntegrationTests() {
       eq((r as any).status, 'ACKED');
     });
   }
+
+  // ══════════ P1: 청산 후 포지션 수량 파싱 실패 ≠ 전량 종료 ══════════
+  {
+    const db = new FakeDb();
+    const venue = baseVenue()
+      .on(BN_ORDER, { status: 400, json: { code: -2013, msg: 'Order does not exist.' } }, 'GET')
+      .on(BN_ORDER, { json: bnOrder({ status: 'FILLED', executedQty: '0.010', avgPrice: '95000' }) }, 'POST');
+    // 정상적인 v2 응답처럼 HTTP 200을 주되, positionAmt만 깨진 경우.
+    // baseVenue()가 이미 BN_POS 규칙을 갖고 있어 앞에 삽입한다.
+    (venue as any).rules.unshift({
+      label: 'bad-position-amount',
+      match: (c: any) => c.method === 'GET' && c.path === BN_POS,
+      reply: { json: [{ symbol: 'BTCUSDT', positionAmt: 'NaN', entryPrice: '95000',
+        leverage: '100', marginType: 'isolated', liquidationPrice: '94000' }] },
+    });
+    const result = await scenario(venue, () => exec(db, {
+      clientOrderId: 'COID-CLOSE-UNKNOWN', reduceOnly: true,
+    }));
+
+    test('★ 청산 주문 접수 후 positionAmt가 깨지면 remainingQty=null — 0이 아니다', () => {
+      assert(!(result instanceof Error), String((result as any)?.message));
+      eq(venue.orderSends().length, 1, '청산 주문 전송을 막거나 중복으로 보냈다');
+      eq((result as any).remainingQty, null,
+        '깨진 positionAmt를 0으로 읽어 청산 완료를 거짓 확정했다');
+      assert(String((result as any).message).includes('종료를 확인하지 못했습니다'),
+        '확인 불가를 사용자에게 경고하지 않았다');
+    });
+  }
+
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -562,6 +591,38 @@ async function reconcile(db: FakeDb, exchange: 'binance' | 'gate' = 'binance') {
 
 export async function runReconcileIntegrationTests() {
   console.log('[통합 — 대조 경로 (실제 reconcilePendingOrders)]');
+
+  // ══════════ P1: 장부 읽기 실패를 "대조할 주문 없음"으로 숨기지 않는다 ══════════
+  {
+    const db = new FakeDb({ failSelectsOn: 'live_orders' }).seed('live_orders', [pendingRow()]);
+    const venue = baseVenue();
+    const r = await scenario(venue, () => reconcile(db));
+
+    test('★ 미확정 주문 SELECT 실패는 대조 0건 성공이 아니라 오류다 (FakeDb)', () => {
+      // `assert`는 TS 단정 서술(`asserts`)이 아니라서 `r`이 좁혀지지 않는다.
+      if (!(r instanceof Error)) {
+        throw new Error('DB 조회 실패가 checked=0, resolved=0 성공으로 숨겨졌다');
+      }
+      assert(r.message.includes('미확정 주문 장부 조회 실패'), r.message);
+      eq(db.row('live_orders', { id: 'ord-1' })?.status, 'ACKED', '미확정 주문을 바꿨다');
+      eq(db.writes.length, 0, '읽기 실패 뒤 DB에 썼다');
+      eq(venue.calls.length, 0, 'DB 읽기도 실패했는데 거래소에 요청했다');
+    });
+  }
+
+  {
+    const db = new FakeDb(); // 실제로 비어 있는 장부는 정상적인 0건이다.
+    const venue = baseVenue();
+    const r = await scenario(venue, () => reconcile(db));
+
+    test('★ 정상적인 빈 장부는 오류 없이 대조 0건이다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq((r as any).checked, 0);
+      eq((r as any).resolved, 0);
+      eq(venue.calls.length, 0);
+      eq(db.writes.length, 0);
+    });
+  }
 
   // ══════════ ① 부분 체결 후 취소 — 수량 보존 ══════════
   {
