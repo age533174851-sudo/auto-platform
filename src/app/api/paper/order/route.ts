@@ -179,9 +179,16 @@ export async function POST(req: NextRequest) {
   // **챌린지 주문은 `getPaperAccount`를 부르지 않는다.** 그 함수는 기본
   // 계좌를 찾고 **없으면 만든다** — 챌린지 경로에서 부르면 사용자가 고른
   // 적 없는 계좌가 조용히 생긴다.
-  const acct = challengeAccountId ? null : await getPaperAccount(sb, uid);
   let available: number | null = null;
   try {
+    // ★ **기본 계좌를 이 `try` 안에서 읽는다.** 예전에는 바깥이었다 —
+    //   그 자리에서 조회가 실패하면 `getPaperAccount`가 10,000짜리 계좌를
+    //   만들어 돌려주고, 그 잔고가 그대로 예산이 됐다. 안으로 들어오면
+    //   읽기 실패가 `available = null`이 되어 계획 단계가 막는다.
+    //
+    //   ★ 챌린지 경로에서는 **부르지 않는다.** 그 함수는 기본 계좌를
+    //     만들기 때문에, 챌린지 주문이 아무도 고르지 않은 계좌를 만든다.
+    const acct = challengeAccountId ? null : await getPaperAccount(sb, uid);
     // **SQL과 같은 범위를 본다.** `082`의 `paper_open_position`은
     // `user_id AND paper_account_id`로 예산을 센다. 여기가 사용자 전체를
     // 세면 미리보기와 최종 판정이 다른 예산을 본다.
@@ -201,8 +208,12 @@ export async function POST(req: NextRequest) {
     } else {
       const scope = await resolvePaperScope(sb, uid);
       if (paperScopeFailed(scope)) throw new Error(scope.reason);
+      const b = Number(acct?.balance);
+      // 챌린지 쪽과 **같은 규칙**이다. `|| 0`으로 받으면 못 읽은 잔고가
+      // "잔고 없음"이 되어 사유가 뒤바뀐다.
+      if (!Number.isFinite(b)) throw new Error('모의 계좌 잔고를 읽지 못했습니다');
       accountId = scope.accountId;
-      balance = Number(acct.balance) || 0;
+      balance = b;
     }
     // **조회 실패는 "열린 포지션 0건"이 아니다.**
     // 예전에는 `error`를 버리고 `data`만 썼다. SELECT가 실패하면 `open`이

@@ -1,6 +1,7 @@
 // src/lib/engine/paperAvailable.test.ts
 import { test, eq, assert } from '../../test/harness';
 import { usedMarginOf, availableBalance, availableView } from './paperAvailable';
+import { getPaperAccount } from './paperStore';
 
 export function runPaperAvailableTests() {
   test('열린 포지션의 증거금을 잔고에서 뺀다', () => {
@@ -72,5 +73,75 @@ export function runPaperAvailableTests() {
 
   test('증거금 0인 줄은 정상이다', () => {
     eq(usedMarginOf([{ margin: 0 }]).unreadable, 0);
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // ★ 잔고 쪽에 남아 있던 같은 구멍 — 계좌를 **못 읽은** 회차
+  // ══════════════════════════════════════════════════════════
+  //
+  //   위 시험들은 **증거금**(목록) 쪽을 막는다. 가용 잔고는 두 숫자로
+  //   만들어진다: `balance - usedMargin`. 그 앞의 `balance`가
+  //   `getPaperAccount`에서 오고, 그쪽은 이랬다:
+  //
+  //     const { data } = await sb.from('paper_accounts')…maybeSingle();
+  //     if (data) return data;
+  //     // 없으면 10,000 USDT짜리 기본 계좌를 만든다
+  //
+  //   `error`를 버리므로 **조회 실패가 "계좌 없음"이 된다.** 그러면 잔고
+  //   300인 사용자의 예산이 조용히 **10,000**이 되고, 그 상태로 진입이
+  //   통과한다. 막는 쪽이 아니라 **여는 쪽으로 틀린** 기본값이다.
+
+  const acctDb = (reply: { data: any; error: any }, writes: string[] = []): any => ({
+    from: () => {
+      const c: any = {
+        select: () => c, eq: () => c,
+        maybeSingle: async () => reply,
+        insert: async (row: any) => { writes.push(JSON.stringify(row)); return { error: null }; },
+      };
+      return c;
+    },
+  });
+
+  test('★ 모의 계좌 조회가 실패하면 10,000짜리 계좌를 만들지 않는다', async () => {
+    const writes: string[] = [];
+    let threw = '';
+    try {
+      await getPaperAccount(acctDb({ data: null, error: { message: '조회 실패' } }, writes), 'u-1');
+    } catch (e: any) { threw = String(e?.message || e); }
+    assert(threw !== '', '★ 못 읽은 회차가 계좌를 들고 돌아왔다');
+    assert(threw.includes('없다는 뜻이 아닙니다'), `사유가 사실을 말해야 한다: ${threw}`);
+    eq(writes.length, 0, '★ 못 읽은 회차에 계좌가 새로 생겼다');
+  });
+
+  test('★ 조회가 던져도 계좌를 만들지 않는다', async () => {
+    const writes: string[] = [];
+    const thrower: any = { from: () => { throw new Error('연결 끊김'); } };
+    let threw = '';
+    try { await getPaperAccount(thrower, 'u-1'); } catch (e: any) { threw = String(e?.message || e); }
+    assert(threw !== '', '★ 예외가 계좌 생성으로 덮였다');
+    eq(writes.length, 0);
+  });
+
+  test('줄이 **정말 없으면** 기본 계좌를 만든다 (기존 동작)', async () => {
+    const writes: string[] = [];
+    const acct = await getPaperAccount(acctDb({ data: null, error: null }, writes), 'u-1');
+    eq(acct.balance, 10000);
+    eq(acct.is_default, true);
+    eq(writes.length, 1, '없으면 만든다 — 이 동작은 그대로다');
+  });
+
+  test('줄이 있으면 그 줄을 그대로 쓴다 — 쓰기 0건', async () => {
+    const writes: string[] = [];
+    const acct = await getPaperAccount(
+      acctDb({ data: { id: 'a1', balance: 317.5, is_default: true }, error: null }, writes), 'u-1');
+    eq(acct.balance, 317.5);
+    eq(writes.length, 0);
+  });
+
+  test('★ 못 읽은 잔고는 가용 계산에 들어가지 않는다', () => {
+    // 호출부가 `null`을 넘기면 계획 단계가 막는다. 10,000이 흘러 들어오면
+    // 그 자리에서는 **정상적인 숫자로 보인다** — 그래서 앞에서 막아야 한다.
+    eq(availableBalance(null as any, usedMarginOf([])), null);
+    eq(availableView(null as any, []).available, null);
   });
 }
