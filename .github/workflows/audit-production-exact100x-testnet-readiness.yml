@@ -271,6 +271,69 @@ jobs:
            ORDER BY sc.mode;
 
           \echo ''
+          \echo '=== 3g. 활성 예약 ↔ 거래소 연결 대조 (어느 거래소에 붙어 있는가) ==='
+          -- **왜 여기 있는가**
+          --
+          -- "활성 BTCUSDT·ETHUSDT 예약이 Binance에 붙어 있는가 Gate에
+          -- 붙어 있는가"는 가동 가부를 가르는 사실인데, 지금까지 어느
+          -- 워크플로도 그것을 묻지 않았다. 그래서 그 답이 매번 일회성
+          -- 조회로만 존재했고, 다음 사람은 **다시 사람에게 물어야** 했다.
+          --
+          -- 3e는 예약의 계약(프로필·프리셋·버전)만 세고, 1은 연결만
+          -- 센다. **둘을 잇는 질문이 비어 있었다.**
+          --
+          -- 연결이 없거나(`connection_id IS NULL`) 가리키는 연결 row가
+          -- 사라졌으면 `UNKNOWN`으로 적는다. **못 읽은 것을 통과로
+          -- 적지 않는다** — LEFT JOIN을 쓰는 이유가 그것이다.
+          --
+          -- 값은 세지 않는다: 키·시크릿·자유 문자열은 선택하지 않고,
+          -- 종목·전략·모드·거래소·테스트넷 여부만 묶어서 센다.
+          SELECT to_jsonb(sc) ->> 'symbol'                     AS symbol,
+                 to_jsonb(sc) ->> 'strategy_id'                AS strategy_id,
+                 sc.mode,
+                 coalesce(ec.exchange_id, 'UNKNOWN')           AS exchange_id,
+                 CASE
+                   WHEN ec.id IS NULL THEN 'UNKNOWN'
+                   WHEN ec.is_testnet THEN 'TESTNET'
+                   ELSE 'LIVE'
+                 END                                           AS connection_env,
+                 count(*)                                      AS rows,
+                 count(*) FILTER (WHERE sc.enabled)            AS enabled_rows,
+                 count(*) FILTER (WHERE ec.id IS NULL)         AS connection_unresolved,
+                 count(*) FILTER (WHERE ec.is_active)          AS connection_active,
+                 count(*) FILTER (WHERE ec.has_withdrawal)     AS has_withdrawal,
+                 count(*) FILTER (
+                   WHERE (to_jsonb(sc) ->> 'execution_profile_id') = 'MAX_LEV_100X'
+                     AND (to_jsonb(sc) ->> 'execution_preset_id')  = 'EXACT_100X'
+                 )                                             AS exact100x_contract,
+                 count(*) FILTER (
+                   WHERE (to_jsonb(sc) ->> 'margin_allocation_pct') IS NOT NULL
+                 )                                             AS margin_alloc_set
+            FROM public.autotrade_schedules sc
+            LEFT JOIN public.exchange_connections ec
+              ON ec.id = (to_jsonb(sc) ->> 'connection_id')::uuid
+           WHERE sc.enabled
+           GROUP BY 1, 2, 3, 4, 5
+           ORDER BY symbol, strategy_id, exchange_id;
+
+          \echo ''
+          \echo '=== 3h. 활성 예약이 붙은 거래소 — 한 줄 요약 ==='
+          -- 거래소가 **섞여 있는지**를 한 눈에 본다. 2 이상이면 종목마다
+          -- 다른 거래소로 나가고 있다는 뜻이고, `unresolved`가 0이 아니면
+          -- 그만큼은 **모른다**(0으로 적지 않는다).
+          SELECT count(*)                                              AS enabled_schedules,
+                 count(DISTINCT ec.exchange_id)                        AS distinct_exchanges,
+                 count(*) FILTER (WHERE ec.id IS NULL)                 AS unresolved_connection,
+                 count(*) FILTER (WHERE ec.exchange_id = 'binance')    AS on_binance,
+                 count(*) FILTER (WHERE ec.exchange_id = 'gate')       AS on_gate,
+                 count(*) FILTER (WHERE ec.id IS NOT NULL
+                                    AND NOT ec.is_testnet)             AS on_live_connection
+            FROM public.autotrade_schedules sc
+            LEFT JOIN public.exchange_connections ec
+              ON ec.id = (to_jsonb(sc) ->> 'connection_id')::uuid
+           WHERE sc.enabled;
+
+          \echo ''
           \echo '=== 4. 판정 — 어느 단계에서 막혀 있는가 ==='
           WITH tn AS (
             SELECT * FROM public.exchange_connections
@@ -368,6 +431,19 @@ jobs:
           | `testnet_exact100x_orders = 0` | 연결은 있으나 Exact100X 진입이 **한 번도 없었습니다** |
           | `exact100x_filled = 0` 인데 주문은 있음 | 주문은 나갔지만 **체결된 적이 없습니다** (3b·3d의 status를 보세요) |
           | `testnet_*_samples = 0` 인데 **체결이 있음** | 관측 기록 경로가 돌지 않았습니다 |
+
+          ### 활성 예약이 **어느 거래소**에 붙어 있는가
+
+          `=== 3g. 활성 예약 ↔ 거래소 연결 대조 ===` 와 `=== 3h. 한 줄 요약 ===`
+          을 보세요. 종목별로 어느 거래소·어느 환경의 연결로 주문이 나가는지가
+          거기 적힙니다.
+
+          | 보이는 값 | 뜻 |
+          |---|---|
+          | `on_binance > 0` 인데 Gate로 돌릴 생각이었다 | 예약의 `connection_id`가 **의도와 다릅니다** — 바꾸려면 운영 DB 변경 승인이 필요합니다 |
+          | `distinct_exchanges >= 2` | 종목마다 다른 거래소로 나갑니다 — 한쪽만 검증하고 둘 다 됐다고 적지 마세요 |
+          | `unresolved_connection > 0` | 그 예약의 연결을 **못 찾았습니다**. 0으로 읽지 마세요 |
+          | `on_live_connection > 0` | 활성 예약이 **실전 연결**을 가리킵니다 — TESTNET 검증 전에는 있어선 안 됩니다 |
 
           `=== 2b. 칸이 실제로 있는가 ===`를 먼저 보세요. `present = f`인 칸의
           NULL은 "값이 없다"가 아니라 **"칸이 없다"**입니다. 둘을 같은 0으로
