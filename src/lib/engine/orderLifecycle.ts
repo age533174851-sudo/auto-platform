@@ -47,7 +47,24 @@ export const TERMINAL: OrderState[] = ['CLOSED', 'REJECTED', 'FAILED', 'CANCELED
 const ALLOWED: Record<OrderState, OrderState[]> = {
   DRAFT:     ['PENDING', 'APPROVED', 'CANCELED'],
   PENDING:   ['APPROVED', 'CANCELED', 'REJECTED'],
-  APPROVED:  ['SENT', 'CANCELED', 'FAILED'],
+  // **APPROVED → REJECTED가 여기 있는 이유.**
+  //
+  // 승인된 뒤에도 **보내기 전에** 우리 쪽 관문이 막는 경우가 있다 —
+  // Gate 진입의 손절 관문·수량 격자·격리 확인·계약 이름 변환이 그렇다
+  // (`orderExecutor.ts`의 Gate 갈래). 그때 실행기는 호출자에게 REJECTED를
+  // 돌려주고 장부에도 REJECTED를 적으려 한다.
+  //
+  // 그 전이가 막혀 있으면 **상태만 조용히 버려지고 장부는 INTENT로
+  // 남는다.** INTENT는 `UNRESOLVED_ENTRY_STATUSES`에 들어 있어서 그 줄은
+  // **미확정 진입 자리를 영구히 차지한다.** 거래소에 보낸 적이 없으니
+  // 조회로 확정될 수도 없다 — 끝난 일이 영원히 "진행 중"으로 남는 것이다.
+  //
+  // PENDING → REJECTED가 이미 허용돼 있다(서버 위험 규칙의 거부). 승인
+  // 뒤의 거부도 같은 종류다: **거래소가 아니라 우리가** 막았고, 주문은
+  // 나가지 않았으며, 더 변할 일이 없다.
+  //
+  // 전송 뒤에는 이 길로 오지 않는다 — 그때 상태는 이미 SENT다.
+  APPROVED:  ['SENT', 'CANCELED', 'FAILED', 'REJECTED'],
   SENT:      ['ACKED', 'PARTIAL', 'FILLED', 'REJECTED', 'FAILED', 'UNKNOWN'],
   ACKED:     ['PARTIAL', 'FILLED', 'CANCELED', 'REJECTED', 'UNKNOWN'],
   PARTIAL:   ['PARTIAL', 'FILLED', 'CANCELED', 'UNKNOWN'],
