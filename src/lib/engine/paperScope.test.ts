@@ -180,6 +180,36 @@ export function runPaperScopeTests() {
     assert(scopedTo(posQ, DEFAULT_ACCT), 'REVERSE가 계좌로 좁히지 않았다 — 남의 포지션을 닫는다');
   });
 
+  // ── REVERSE가 **못 읽은 것**을 "반대 포지션 없음"으로 읽지 않는다 ──
+  //
+  //   `closeOpposingPositions`는 `error`를 버리고 `data`만 봤다. 조회가
+  //   실패하면 `data`가 null이 되어 **0건을 돌려주고**, 부르는 쪽(신호
+  //   웹훅)은 그 0을 "닫을 것이 없었다"로 읽어 **새 포지션을 그대로
+  //   연다.** 그러면 모의 장부에 같은 종목의 LONG과 SHORT가 함께 남고,
+  //   REVERSE라는 말이 지켜지지 않는다 — 그 장부로 낸 연습 성과도 거짓이
+  //   된다.
+
+  test('★ 반대 포지션 조회가 실패하면 0건으로 적지 않는다', async () => {
+    const { closeOpposingPositions } = await import('./paperStore');
+    const { sb } = fakeSb({ paper_accounts: ACCOUNTS, paper_positions: POSITIONS },
+      { errorOn: 'paper_positions' });
+    let threw = '';
+    let got: any = 'NOT_SET';
+    try {
+      got = await closeOpposingPositions(sb, USER, DEFAULT_ACCT, 'BTCUSDT', 'LONG', 100);
+    } catch (e: any) { threw = String(e?.message || e); }
+    assert(threw !== '', `★ 못 읽은 회차가 ${JSON.stringify(got)}를 돌려줬다 — 0은 "없다"로 읽힌다`);
+    assert(threw.includes('없다는 뜻이 아닙니다'), `사유가 사실을 말해야 한다: ${threw}`);
+  });
+
+  test('반대 포지션이 **정말 없으면** 0이고 던지지 않는다', async () => {
+    const { closeOpposingPositions } = await import('./paperStore');
+    // 같은 종목의 반대 방향(SHORT)이 없는 장부
+    const { sb } = fakeSb({ paper_accounts: ACCOUNTS, paper_positions: [] });
+    const n = await closeOpposingPositions(sb, USER, DEFAULT_ACCT, 'BTCUSDT', 'LONG', 100);
+    eq(n, 0, '없는 것은 없는 것이다 — 여기서 막으면 첫 진입이 영원히 안 열린다');
+  });
+
   test('계좌를 안 주면 REVERSE는 아무것도 닫지 않는다', async () => {
     const { closeOpposingPositions } = await import('./paperStore');
     const { sb, calls } = fakeSb({ paper_accounts: ACCOUNTS, paper_positions: POSITIONS });
