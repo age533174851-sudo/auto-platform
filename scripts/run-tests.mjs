@@ -251,6 +251,7 @@ import { runOrderSizingTests } from './src/lib/engine/orderSizing.test';
 import { runOwnerBootstrapTests } from './src/lib/auth/ownerBootstrap.test';
 import { runConvictionTests } from './src/lib/risk/conviction.test';
 import { runSleeveLedgerTests } from './src/lib/strategies/sleeveLedger.test';
+import { runSmokeStatusRouteTests } from './src/test/integration/smokeStatusRouteIntegration.test';
 import { runOrderIntentTests } from './src/lib/engine/orderIntent.test';
 import { runProtectionRepairTests } from './src/lib/engine/protectionRepair.test';
 import { runPriceBasisTests } from './src/lib/markets/priceBasis.test';
@@ -435,6 +436,7 @@ runExitPolicyTests(); runRunRequestTests(); runBacktestVerdictTests(); runAiResu
   await runGateTpslRouteTests();
   await runGateExecIntegrationTests();
   await runGateDupIntegrationTests();
+  await runSmokeStatusRouteTests();
   await runNoFixedTpIntegrationTests();
   await runPrecisionIntegrationTests();
   await runPrecisionMatrixTests();

@@ -203,9 +203,17 @@ export async function GET(req: NextRequest) {
     runs = data || [];
     const ids = runs.map((r: any) => r.id);
     if (ids.length) {
-      const { data: t } = await (sb as any).from('smoke_tests')
+      // ★ **회차 목록을 못 읽은 것을 "회차 0건"으로 그리지 않는다.**
+      //
+      //   바로 위의 `smoke_runs` 조회는 이미 `error`를 보고 끊는다. 여기는
+      //   보지 않아서, 3회차까지 돈 묶음의 회차를 못 읽으면 화면이
+      //   `advanceVerdict`에 빈 목록을 넘겨 **"1회차를 시작할 수 있습니다"**를
+      //   그렸다. 한 함수 안에서 규칙이 갈려 있었다 — 같은 규칙을 쓴다.
+      const { data: t, error: tErr } = await (sb as any).from('smoke_tests')
         .select('*').in('run_id', ids).order('attempt_no', { ascending: true });
-      tests = t || [];
+      if (tErr) throw new Error(tErr.message);
+      if (!Array.isArray(t)) throw new Error('회차 목록 응답이 목록이 아닙니다 — 0건과 다릅니다');
+      tests = t;
     }
   } catch (e: any) {
     if (isMissing(e?.message)) tableMissing = true;
