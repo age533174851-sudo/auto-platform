@@ -11,6 +11,7 @@ import {
   positionModeVerdict, isolationVerdict, withdrawalEvidence,
   overallDiagnoseVerdict, statusToOk,
 } from './testnetDiagnoseVerdict';
+import { summarizeTestnetOpenOrders, summarizeTestnetOpenPositions } from './testnetVenueEvidence';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -214,6 +215,59 @@ export function runTestnetDiagnoseVerdictTests() {
       resolve(process.cwd(), 'src/lib/engine/testnetDiagnoseVerdict.ts'), 'utf8');
     eq(/^import /m.test(src), false, 'import이 생기면 탐침 컴파일 사슬이 꺼진다');
     eq(src.includes('process.env'), false, '주변 상태를 직접 집지 않는다');
+  });
+
+  // ── ⑥ 실제 거래소 조회와 낡은 DB 미결 장부를 혼동하지 않는가 ──
+  test('★ Binance 미체결 조회 실패는 0건이 아니라 UNKNOWN', () => {
+    const v = summarizeTestnetOpenOrders({ success: false, orders: [] });
+    eq(v.code, 'UNKNOWN');
+    eq(v.openOrderCount, null);
+    eq(v.openCloseIntentCount, null);
+    eq(summarizeTestnetOpenOrders(null).code, 'UNKNOWN');
+    eq(summarizeTestnetOpenOrders({ success: true, orders: null }).code, 'UNKNOWN');
+  });
+
+  test('★ Binance 미체결 주문 성공·빈 배열은 검증된 0건', () => {
+    const v = summarizeTestnetOpenOrders({ success: true, orders: [] });
+    eq(v.code, 'VERIFIED');
+    eq(v.openOrderCount, 0);
+    eq(v.openCloseIntentCount, 0);
+    eq(v.bySymbol.length, 0);
+    eq(v.source, 'BINANCE_TESTNET_OPEN_ORDERS');
+  });
+
+  test('★ reduceOnly/closePosition 둘 중 하나라도 참이면 청산 의도 후보', () => {
+    const snapshot = summarizeTestnetOpenOrders({ success: true, orders: [
+      { symbol: 'BTCUSDT', reduceOnly: true, closePosition: false, orderId: 'secret-one' },
+      { symbol: 'BTCUSDT', reduceOnly: false, closePosition: true, orderId: 'secret-two' },
+      { symbol: 'BTCUSDT', reduceOnly: false, closePosition: false, orderId: 'secret-three' },
+      { symbol: 'ETHUSDT', reduceOnly: true, closePosition: true, orderId: 'secret-four' },
+    ] });
+    eq(snapshot.code, 'VERIFIED');
+    eq(snapshot.openOrderCount, 4);
+    eq(snapshot.openCloseIntentCount, 3);
+    eq(snapshot.bySymbol.length, 2);
+    eq(snapshot.bySymbol[0].symbol, 'BTCUSDT');
+    eq(snapshot.bySymbol[0].closeIntents, 2);
+    eq(snapshot.bySymbol[1].symbol, 'ETHUSDT');
+    eq(snapshot.bySymbol[1].closeIntents, 1);
+    assert(!JSON.stringify(snapshot).includes('secret-one'),
+      '주문 ID는 진단 응답에 출력하지 않는다');
+  });
+
+  test('★ Binance 알 수 없는 주문/포지션 응답은 추측하지 않는다', () => {
+    eq(summarizeTestnetOpenOrders({ success: true,
+      orders: [{ symbol: 'BTCUSDT', reduceOnly: null, closePosition: false }] }).code,
+    'UNKNOWN');
+    eq(summarizeTestnetOpenPositions({ success: false, positions: [] }).openPositionCount, null);
+    eq(summarizeTestnetOpenPositions({ success: true, positions: [] }).openPositionCount, 0);
+    const p = summarizeTestnetOpenPositions({ success: true, positions: [
+      { symbol: 'BTCUSDT', amount: 0.01 }, { symbol: 'BTCUSDT', amount: 0.02 },
+      { symbol: 'ETHUSDT', amount: 0.03 },
+    ] });
+    eq(p.openPositionCount, 3);
+    eq(p.symbols.join(','), 'BTCUSDT,ETHUSDT');
+    eq(p.source, 'BINANCE_TESTNET_POSITION_RISK');
   });
 
   test('★ 판정 정본은 기대 배율을 스스로 적지 않는다', () => {

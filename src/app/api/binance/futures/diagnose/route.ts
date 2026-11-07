@@ -12,7 +12,8 @@ import {
   overallDiagnoseVerdict, statusToOk, type DiagnoseStatus,
 } from '@/lib/engine/testnetDiagnoseVerdict';
 import { overrideOf } from '@/lib/strategies/profilePreset';
-import { testFuturesConnection, getFuturesBalance, getFuturesPositions, getFuturesTicker, getSymbolFilters } from '@/lib/exchanges/binanceFutures';
+import { summarizeTestnetOpenOrders, summarizeTestnetOpenPositions } from '@/lib/engine/testnetVenueEvidence';
+import { testFuturesConnection, getFuturesBalance, getFuturesPositions, getFuturesOpenOrders, getFuturesTicker, getSymbolFilters } from '@/lib/exchanges/binanceFutures';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -106,11 +107,38 @@ export async function POST(req: NextRequest) {
     const r = await getFuturesBalance(apiKey, secret, testnet);
     return { ok: r.success, detail: r.message };
   });
-  // 3. 포지션 조회
+  // 3. 포지션 조회 — 성공적으로 조회된 계좌의 실제 노출만 증거다.
+  // 장부에 후보 0건이어도 이 값으로 "거래소에 포지션 0"이라 단정하지 않는다.
+  let positionEvidence = summarizeTestnetOpenPositions(null);
   await run('포지션 조회', async () => {
     const r = await getFuturesPositions(apiKey, secret, testnet);
+    positionEvidence = summarizeTestnetOpenPositions(r);
     return { ok: r.success, detail: r.message };
   });
+
+  // ★ 기존 live_orders의 ACKED/UNKNOWN 43건은 과거 DB 장부의 상태이지
+  //   Binance의 현재 openOrders 건수가 아니다. 직접 READ해서 구별한다.
+  // 조회 실패 => UNKNOWN(null), 정상 빈 배열 => VERIFIED(0).
+  // 주문 ID·키·시크릿·응답 원문은 UI로 보내지 않는다.
+  let openOrderEvidence = summarizeTestnetOpenOrders(null);
+  const orderReadAt = Date.now();
+  try {
+    const snapshot = await getFuturesOpenOrders(apiKey, secret, true);
+    openOrderEvidence = summarizeTestnetOpenOrders(snapshot);
+  } catch {
+    openOrderEvidence = summarizeTestnetOpenOrders(null);
+  }
+  checks.push({
+    name: '실제 TESTNET 미체결 주문 수 (전체 계좌)',
+    ok: openOrderEvidence.code === 'VERIFIED',
+    status: openOrderEvidence.code === 'VERIFIED' ? 'PASS' : 'UNKNOWN',
+    code: 'VENUE_OPEN_ORDERS:' + openOrderEvidence.code,
+    detail: openOrderEvidence.code === 'VERIFIED'
+      ? `Binance 현재 미체결 ${openOrderEvidence.openOrderCount}건 · reduceOnly/closePosition ${openOrderEvidence.openCloseIntentCount}건 (전략 소유권 미확인)`
+      : '거래소 미체결 주문을 읽지 못했습니다 — 0건으로 간주하지 않습니다',
+    ms: Date.now() - orderReadAt,
+  });
+
   // 4. 현재가 조회
   await run('현재가 조회 (BTCUSDT)', async () => {
     const p = await getFuturesTicker('BTCUSDT', testnet);
@@ -295,6 +323,9 @@ export async function POST(req: NextRequest) {
     // TESTNET 호스트만 공개한다. API 키 일부라도 응답에 싣지 않는다.
     host: deep.host,
     stopSupport,
+    // 읽기 전용 증거. Binance 현재 상태이며 DB의 과거 미결 건수와 다르다.
+    openOrderEvidence,
+    positionEvidence,
     cause,
     at: Date.now(),
   }, { headers: { 'Cache-Control': 'no-store' } });
