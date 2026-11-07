@@ -128,6 +128,18 @@ export function dedupe(list: NormalizedArticle[]): DedupeResult {
   return { unique, removed };
 }
 
+/**
+ * 하나 이상의 공급자가 정상적인 기사 배열을 반환했는가.
+ * 빈 배열([])은 정상 0건이지만 null/undefined는 응답 실패다.
+ * 모든 설정된 공급자가 실패했는데도 collectFrom()의 빈 결과를
+ * 수집 성공으로 기록하면 크론/CI가 거짓 GREEN이 된다.
+ */
+export function hasSuccessfulProviderResponse(
+  batches: Array<{ provider: string; items: RawArticle[] | null | undefined }>,
+): boolean {
+  return batches.some(b => Array.isArray(b.items));
+}
+
 /** 여러 공급자 응답을 한 번에 */
 export function collectFrom(
   batches: { provider: string; items: RawArticle[] | null | undefined }[],

@@ -12,8 +12,9 @@
 // 사용자가 열 때마다 외부 API를 때리면 요금 한도가 사람 수만큼 곱해진다.
 // 예약으로 모아 두고 화면은 저장된 것을 읽는다.
 import { NextRequest, NextResponse } from 'next/server';
+import { cronAuthFromRequest } from '@/lib/cron/cronAuth';
 import { getSupabaseAdmin } from '@/lib/supabase/server';
-import { collectFrom, onlyNew } from '@/lib/news/collect';
+import { collectFrom, onlyNew, hasSuccessfulProviderResponse } from '@/lib/news/collect';
 import { saveArticles, knownHashes } from '@/lib/news/store';
 
 export const dynamic = 'force-dynamic';
@@ -27,14 +28,19 @@ async function fetchJson(url: string): Promise<any | null> {
 }
 
 export async function GET(req: NextRequest) {
-  // 크론 인증. 없으면 아무나 호출해 외부 API 한도를 태울 수 있다.
-  const secret = process.env.CRON_SECRET || '';
-  if (secret) {
-    const given = req.headers.get('authorization')?.replace(/^Bearer\s+/i, '')
-      || req.nextUrl.searchParams.get('secret') || '';
-    if (given !== secret) {
-      return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
-    }
+  // ── 크론 인증 ──
+  //
+  // **판정은 `cronAuthVerdict` 한 곳에 있다.** 예전에는 다섯 경로가
+  // 각자 적고 있었고, 그래서 `if (secret) { … }`라는 같은 실수를
+  // 다섯 벌이 같이 갖고 있었다 — `CRON_SECRET`이 없으면 인증이
+  // 통째로 사라져 아무나 부를 수 있었다.
+  //
+  // **인증 전에는 DB도 외부 API도 건드리지 않는다.** 이 반환이
+  // 함수의 첫 문장이어야 하는 이유다.
+  const auth = cronAuthFromRequest(req);
+  if (!auth.ok) {
+    return NextResponse.json({ ok: false, error: auth.error, message: auth.message },
+      { status: auth.status, headers: { 'Cache-Control': 'no-store' } });
   }
 
   const batches: { provider: string; items: any[] | null }[] = [];
@@ -76,6 +82,17 @@ export async function GET(req: NextRequest) {
       message: '뉴스 공급자 키가 하나도 없습니다. FINNHUB_API_KEY / FMP_API_KEY / NEWS_API_KEY 중 하나를 넣으세요.',
       sources: sourceStatus,
     }, { status: 503 });
+  }
+
+  // 공급자 키가 있는 것과 실제 수집에 성공한 것은 다르다.
+  // 모든 API가 429/5xx/타임아웃/비정상 JSON이면 collected=0이지만
+  // 이를 정상 0건으로 저장하면 HTTP 200 · ok:true 거짓 성공이 된다.
+  // 빈 배열은 정상 응답이므로 실패로 분류하지 않는다.
+  if (!hasSuccessfulProviderResponse(batches)) {
+    return NextResponse.json({
+      ok: false, error: 'news_providers_unavailable',
+      sources: sourceStatus, collected: 0, saved: 0,
+    }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
   }
 
   const sb = getSupabaseAdmin();
