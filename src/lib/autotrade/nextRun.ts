@@ -20,7 +20,7 @@
 // ─────────────────
 // 실행기가 정확히 언제 올지는 **모른다.** GitHub Actions는 부하에 따라
 // 몇 분 늦는다. 그래서 "다음 실행 12:34"라고 단정하지 않고 "12:34부터
-// 가능 · 실행기가 15분마다 보므로 몇 분 늦을 수 있음"이라고 적는다.
+// 확인 가능 · 실행기는 15분 주기지만 실제 실행 시각은 보장되지 않음"이라고 적는다.
 // 모르는 것을 아는 것처럼 적으면 1분 늦은 것을 고장으로 읽는다.
 
 /** 서버 실행기(autotrade-tick)가 예약을 확인하는 주기(분) */
@@ -65,7 +65,7 @@ export interface NextRunPlan {
   state: NextRunState;
   /** 다음 확인 **가능** 시각(ms). 모르면 null */
   nextCheckMs: number | null;
-  /** 실행기 지연까지 더한 현실적인 상한(ms). 모르면 null */
+  /** 실제 점검 시각의 보장 상한. 예약 cron에는 보장 상한이 없으므로 null */
   latestCheckMs: number | null;
   intervalMin: number;
   runnerIntervalMin: number;
@@ -123,9 +123,9 @@ export function nextRunPlan(i: NextRunInput, enabled = true): NextRunPlan {
     return {
       state: 'NEVER_RAN',
       nextCheckMs: null,
-      latestCheckMs: (num(i.enabledAtMs) ?? i.nowMs) + runner * 60_000,
+      latestCheckMs: null,
       intervalMin: interval, runnerIntervalMin: runner,
-      summary: `아직 점검된 적 없습니다 — 실행기가 ${runner}분 안에 확인합니다`,
+      summary: `아직 점검된 적 없습니다 — 실행기 확인 주기 ${runner}분, 실제 시각은 보장되지 않습니다`,
     };
   }
 
@@ -133,17 +133,17 @@ export function nextRunPlan(i: NextRunInput, enabled = true): NextRunPlan {
   if (nextMs <= i.nowMs) {
     return {
       state: 'DUE', nextCheckMs: nextMs,
-      // 이미 지났으므로 다음 실행기 방문까지가 상한이다.
-      latestCheckMs: i.nowMs + runner * 60_000,
+      // cron 지연에는 보장된 상한이 없다. 주기를 실제 완료의 상한으로 쓰지 않는다.
+      latestCheckMs: null,
       intervalMin: interval, runnerIntervalMin: runner,
-      summary: `간격이 지났습니다 — 실행기가 오는 대로(최대 ${runner}분) 확인합니다`,
+      summary: `간격이 지났습니다 — 실행기 확인 주기 ${runner}분, 실제 시각은 보장되지 않습니다`,
     };
   }
 
   const leftMin = Math.ceil((nextMs - i.nowMs) / 60_000);
   return {
     state: 'WAITING', nextCheckMs: nextMs,
-    latestCheckMs: nextMs + runner * 60_000,
+    latestCheckMs: null,
     intervalMin: interval, runnerIntervalMin: runner,
     summary: `다음 진입 확인까지 ${leftMin}분 남았습니다`,
   };
@@ -237,7 +237,7 @@ export function nextRunLines(i: NextRunInput, plan: NextRunPlan): NextRunLine[] 
   if (plan.state === 'FIRST_CHECK_RUNNING') {
     out.push({ label: '다음 확인 가능', value: '지금 첫 점검 중', unknown: true });
   } else if (plan.state === 'NEVER_RAN') {
-    out.push({ label: '다음 확인 가능', value: `실행기가 오는 대로 (최대 ${plan.runnerIntervalMin}분)`, unknown: true });
+    out.push({ label: '다음 확인 가능', value: `실행기가 오는 대로 (확인 주기 ${plan.runnerIntervalMin}분 · 지연 가능)`, unknown: true });
   } else if (plan.state === 'DUE') {
     out.push({ label: '다음 확인 가능', value: '지금 가능 — 실행기 대기 중' });
   } else if (plan.state === 'OFF') {
@@ -248,7 +248,7 @@ export function nextRunLines(i: NextRunInput, plan: NextRunPlan): NextRunLine[] 
 
   out.push({
     label: '실행기 확인 주기',
-    value: `${plan.runnerIntervalMin}분마다 · 부하에 따라 몇 분 늦을 수 있습니다`,
+    value: `${plan.runnerIntervalMin}분마다 확인 예정 · 지연될 수 있으며 상한은 보장되지 않습니다`,
   });
   return out;
 }

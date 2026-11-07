@@ -26,13 +26,15 @@ export function runAutotradeTimingTests() {
     eq(p.state, 'WAITING');
     eq(p.nextCheckMs, NOW - 20 * MIN + 60 * MIN);
     assert(p.summary.includes('40분'), p.summary);
+    eq(p.latestCheckMs, null, '대기 중이어도 다음 실행 완료 시각은 보장되지 않는다');
   });
 
   test('간격이 지났으면 실행기가 오는 대로다', () => {
     const p = nextRunPlan({ nowMs: NOW, lastRunAtMs: NOW - 90 * MIN, intervalMin: 60 });
     eq(p.state, 'DUE');
     // **단정하지 않는다.** GitHub Actions는 부하에 따라 늦는다.
-    eq(p.latestCheckMs, NOW + RUNNER_INTERVAL_MIN * MIN);
+    eq(p.latestCheckMs, null, 'cron 지연에는 보장된 상한이 없다');
+    assert(!p.summary.includes('최대'), p.summary);
     assert(p.summary.includes('15분'), p.summary);
   });
 
@@ -48,11 +50,16 @@ export function runAutotradeTimingTests() {
     eq(line?.value, '지금 첫 점검 중');
   });
 
-  test('켰는데 아직 안 돌았으면 실행기 주기를 상한으로 적는다', () => {
+  test('켰는데 아직 안 돌았으면 실행기 주기를 완료 상한으로 주장하지 않는다', () => {
     const p = nextRunPlan({ nowMs: NOW, enabledAtMs: NOW - 2 * MIN, lastRunAtMs: null });
     eq(p.state, 'NEVER_RAN');
     eq(p.nextCheckMs, null, '모르는 시각을 지어내면 안 된다');
-    eq(p.latestCheckMs, NOW - 2 * MIN + RUNNER_INTERVAL_MIN * MIN);
+    eq(p.latestCheckMs, null);
+    assert(p.summary.includes('보장되지'), p.summary);
+    const line = nextRunLines({ nowMs: NOW, enabledAtMs: NOW - 2 * MIN, lastRunAtMs: null }, p)
+      .find(l => l.label === '다음 확인 가능');
+    assert(line?.value.includes('지연 가능') === true, String(line?.value));
+    assert(line?.value.includes('최대') === false, String(line?.value));
   });
 
   test('꺼져 있으면 다음 시각이 없다', () => {
@@ -128,7 +135,7 @@ export function runAutotradeTimingTests() {
     );
     const l = lines.find(x => x.label === '실행기 확인 주기');
     assert(l != null && l.value.includes('15분'), String(l?.value));
-    assert(l != null && l.value.includes('늦을 수'), String(l?.value));
+    assert(l != null && l.value.includes('보장되지'), String(l?.value));
   });
 
   console.log('[실행 결과 — HTTP 200은 주문이 나갔다는 뜻이 아니다]');
