@@ -184,7 +184,9 @@ const ALLOW = new Map([
     + 'enqueueJob도 from(\'jobs\')도 쓰지 않아서 **막을 적재 자체가 없다** — '
     + '즉 지금 새고 있는 것은 아니다. 고칠 것은 둘 중 하나다: 웹훅이 다시 '
     + '적재하게 되면 이 가드를 붙이거나, 적재 경로가 없어진 사실을 그 주석에 '
-    + '반영하는 것. **지금 그 주석을 읽는 사람은 있지 않은 가드를 믿는다**'],
+    + '반영하는 것. **2026-11-08에 그 주석을 고쳤고**, 약속은 주석이 아니라 '
+    + 'scripts/check-order-guards.mjs로 옮겼다 — 제품 코드에 적재가 다시 '
+    + '생기면 그 검사기가 실행자 확인을 요구한다. 이 모듈은 그때 쓰인다'],
   ['src/lib/autotrade/decision.ts',
     '진짜 미배선이다 — 참조가 **모든 모양에서 0건**이다(인용 경로 · 확장자 '
     + '붙은 경로 · join 조립 전부 확인). export 6개. 머리말은 '
@@ -228,7 +230,19 @@ function walk(dir) {
     const st = statSync(p);
     if (st.isDirectory()) { walk(p); continue; }
     if (!/\.(ts|tsx|mjs|js)$/.test(name)) continue;
-    sources.push({ path: p, text: readFileSync(p, 'utf8') });
+    // ── **주석은 소비자가 아니다** ─────────────────────────────
+    //
+    // 이 검사기가 2026-11-08에 제 변경을 잡았다. 제가 다른 검사기의
+    // 주석에 `src/lib/jobs/queueGuard.ts`라고 적었더니 그 줄이 소비자로
+    // 세어져서, **진짜로 끊긴 모듈이 "이미 배선됨"으로 뒤집혔다.**
+    //
+    // 이 파일의 머리말이 이미 같은 함정을 적어 두었다 — "주석에 이름이
+    // 적혀 있다는 이유로 통과가 난다. 이 저장소에서 이미 두 번 일어난
+    // 일이다." 그런데 소비자 판정 자체는 원문을 보고 있었다.
+    //
+    // 주석으로 배선을 증명할 수는 없다. 지우고 본다. (전수 측정:
+    // 이 변경으로 새로 끊기는 모듈 0건.)
+    sources.push({ path: p, text: stripComments(readFileSync(p, 'utf8')) });
   }
 }
 for (const d of SEARCH_DIRS) walk(d);
