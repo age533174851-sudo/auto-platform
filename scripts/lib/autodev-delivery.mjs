@@ -74,6 +74,21 @@ export const FORBIDDEN_SHAPES = [
   ['git push origin HEAD:main', 'refspec 으로 main 에 밀 수 있습니다'],
   ['git push -u origin claude/dev-x:main', 'refspec 으로 main 에 밀 수 있습니다'],
   ['git push -u origin claude/dev-x --force', '뒤에 붙은 --force 로 역사를 다시 쓸 수 있습니다'],
+  // ── 선행 `--force` 도 센다 ──
+  //
+  // 2026-11-08에 구멍이 하나 드러났다. 위 두 줄은 **뒤에 붙은** `--force`만
+  // 모양으로 갖고 있었다. 그래서 허용 항목에 `Bash(git push --force:*)`를
+  // 넣으면 접두어가 `git push --force`라서 위 어느 모양과도 맞지 않고,
+  // 검사기가 **통과시켰다.** 그런데 그 항목은 `git push --force origin main`
+  // 과 `git push --force origin claude/dev-x`를 전부 허용한다 — 즉 이
+  // 울타리가 막으려는 두 가지(main 강제 push, 역사 재작성)를 그대로 연다.
+  //
+  // 짧은 플래그 `-f`와 `--force-with-lease`도 같은 구멍이라 함께 적는다.
+  ['git push --force origin main', '선행 --force 로 main 을 강제로 덮을 수 있습니다'],
+  ['git push --force origin claude/dev-x', '선행 --force 로 역사를 다시 쓸 수 있습니다'],
+  ['git push --force-with-lease origin main', '선행 force 로 main 을 덮을 수 있습니다'],
+  ['git push -f origin main', '짧은 -f 로 main 을 강제로 덮을 수 있습니다'],
+  ['git push -f origin claude/dev-x', '짧은 -f 로 역사를 다시 쓸 수 있습니다'],
   ['git push -u origin claude/dev-x --force-with-lease', '뒤에 붙은 force 로 역사를 다시 쓸 수 있습니다'],
   ['git push origin +claude/dev-x:main', '+refspec 으로 강제로 main 에 밀 수 있습니다'],
   ['gh pr merge 1 --merge', 'PR 을 스스로 병합할 수 있습니다'],
