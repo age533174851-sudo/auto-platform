@@ -36,16 +36,29 @@
 import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs';
 import { join, basename } from 'node:path';
 
-/** 판정 모듈이 사는 곳 */
-const WATCH_DIRS = [
-  'src/lib/engine', 'src/lib/risk', 'src/lib/strategies', 'src/lib/markets',
-  'src/lib/exchanges', 'src/lib/auth', 'src/lib/terminal', 'src/lib/ui', 'src/lib/nav',
-  // 수익률·성과 귀속. **이 칸이 없던 동안 여기는 검사 밖이었다** —
-  // 새 판정 디렉터리를 만들면 이 목록에도 같이 넣어야 한다.
-  'src/lib/portfolio',
-  // 백테스트 판정과 AI 출처 판정. 여기도 검사 밖이었다.
-  'src/lib/backtest', 'src/lib/ai', 'src/lib/runtime',
-];
+/**
+ * 판정 모듈이 사는 곳 — **목록을 손으로 적지 않는다.**
+ *
+ * 예전에는 디렉터리를 하나씩 적어 둔 배열이었다. 그래서 `src/lib`의
+ * 55개 중 **13개만** 보고 있었고, 밖에 있던 것 중에는 이런 것들이 있었다:
+ *
+ *   src/lib/autotrade  33개  ← 예약 평가·진입 창·강제 진입 판정
+ *   src/lib/trading    32개
+ *   src/lib/ops        14개
+ *   src/lib/safety      5개  ← 이름이 safety인데 검사 밖이었다
+ *
+ * 즉 "만들어 놓고 배선을 안 함"을 잡는 검사가 **그 고장이 가장 비싼
+ * 자리들을 보지 않고 있었다.** 그리고 목록을 손으로 적는 방식 자체가
+ * 이 저장소에서 반복된 고장이다(#571 "손으로 적은 모듈 목록 드리프트").
+ *
+ * 그래서 항목을 더 채우지 않고 **목록을 없앴다.** 새 디렉터리를 만들면
+ * 아무것도 안 해도 감시에 들어온다 — 사람이 기억해야 하는 단계가
+ * 사라지는 것이 항목을 늘리는 것보다 낫다.
+ */
+const WATCH_DIRS = readdirSync('src/lib', { withFileTypes: true })
+  .filter((e) => e.isDirectory())
+  .map((e) => join('src/lib', e.name))
+  .sort();
 
 /**
  * 어디서든 부를 수 있는 곳 — 여기 전부를 소비자로 본다.
@@ -59,6 +72,86 @@ const WATCH_DIRS = [
  * 그 순간 이 검사는 진짜로 끊긴 모듈을 덮기 시작한다.
  */
 const SEARCH_DIRS = ['src', 'scripts', 'worker/src'];
+
+/**
+ * **시험 파일인가** — 이 저장소의 시험 파일 이름은 한 모양이 아니다.
+ *
+ *   src/lib/risk/killSwitchTruth.test.ts     ← `.test.ts`
+ *   src/components/Foo.test.tsx              ← `.test.tsx`
+ *   scripts/ten-slot-pg.test.mjs             ← `.test.mjs`   (6개)
+ *   scripts/test-kill-retry.mjs              ← `test-` 접두어 (6개)
+ *
+ * 아래 소비자 판정은 `.test.ts`·`.test.tsx`만 뺐다. 그래서 뒤의 두 모양은
+ * **여전히 소비자로 세어진다.** 그리고 이 검사기가 확장자 붙은 경로까지
+ * 보게 된 뒤부터는(`'src/lib/risk/killRetry.ts'` 같은 문자열) 그 구멍이
+ * 실제로 열렸다 — `scripts/test-*.mjs`가 TS를 tsc 인자로 넘기려고 적어 둔
+ * 경로 문자열이 **배선으로 세어진다.**
+ *
+ * 전수 측정(다섯 PR을 한 트리에 모은 상태): 두 모양을 함께 빼면 새로
+ * orphan이 되는 모듈은 **1개뿐이고 그게 의도한 모듈이다** —
+ * `src/lib/risk/killRetry.ts`(제품 소비자 0곳, ALLOW에 사유가 적혀 있다).
+ * 다른 544개는 판정이 바뀌지 않는다. 즉 이 변경은 검사기를 **느슨하게
+ * 만드는 것이 아니라** 놓치던 것을 잡게 한다.
+ */
+function isTestSource(path) {
+  if (/\.test\.(ts|tsx|mjs|js)$/.test(path)) return true;
+  if (/^scripts\/test-[^/]+\.mjs$/.test(path)) return true;
+  return false;
+}
+
+// 이 판정이 틀리면 검사 전체가 조용히 뒤집힌다 — 끊긴 모듈이 "배선됨"이
+// 된다. 그래서 **CI가 평소에 돌리는 경로에서** 바로 확인한다. 별도
+// `--self-test` 모드로 두면 CI가 안 돌리고, 이 저장소의 규칙대로
+// **CI가 안 돌리는 검사기는 없는 검사기다.**
+for (const [p, want] of [
+  ['src/lib/risk/killSwitchTruth.test.ts', true],
+  ['src/components/terminal/PaperWallet.test.tsx', true],
+  ['scripts/ten-slot-pg.test.mjs', true],
+  ['scripts/test-kill-retry.mjs', true],
+  ['scripts/test-pr-facts.mjs', true],
+  // ── 시험이 **아닌데** 이름에 test가 들어간 것들 (전부 실재한다) ──
+  ['scripts/check-test-registry.mjs', false],
+  ['scripts/check-testnet-diagnose.mjs', false],
+  ['scripts/run-tests.mjs', false],
+  ['scripts/testnet-diagnose-mutations.mjs', false],
+  ['src/lib/engine/testnetDiagnoseVerdict.ts', false],
+  ['src/lib/risk/killRetry.ts', false],
+]) {
+  if (isTestSource(p) !== want) {
+    console.error(
+      `\n❌ 검사기 자기 점검 실패: isTestSource('${p}') 가 ${want} 여야 하는데 ${!want} 입니다.`,
+    );
+    console.error('   시험 파일을 소비자로 세면 끊긴 모듈이 "배선됨"으로 통과합니다.');
+    process.exit(1);
+  }
+}
+
+// **판단이 두 곳에 있으면 언젠가 갈린다.** 위 점검은 `isTestSource()`가
+// 맞는지만 본다 — 소비자 루프가 그 함수를 **안 쓰고** 제 손으로 정규식을
+// 다시 적으면, 점검은 통과하면서 실제 판정은 옛 규칙으로 돌아간다.
+// (실제로 변이로 확인했다: 루프만 `.test.ts` 규칙으로 되돌려도 이 저장소의
+// 현재 상태로는 결과가 똑같아서 **아무도 모른다.**)
+//
+// 그래서 이 파일 안에 `.test.` 정규식이 **한 개뿐**임을 자기 소스로 고정한다.
+{
+  const own = stripComments(readFileSync('scripts/check-wiring.mjs', 'utf8'));
+  const dup = (own.match(/\\\.test\\\./g) || []).length;
+  if (dup !== 1) {
+    console.error(
+      `\n❌ 검사기 자기 점검 실패: \`\\.test\\.\` 정규식이 ${dup}곳에 있습니다 (1곳이어야 합니다).`,
+    );
+    console.error('   시험 파일 판정은 isTestSource() 한 곳에만 둡니다 — 두 곳이면 갈립니다.');
+    process.exit(1);
+  }
+  // **문자열을 통째로 적으면 이 줄 자신이 그 문자열이다.** 처음에 그렇게
+  // 적었고, 그래서 루프에서 호출을 지워도 이 점검이 통과했다 — 점검이
+  // 자기 자신을 근거로 통과하는 것이 이 저장소에서 반복된 고장이다
+  // (`check-wiring.mjs`를 소비자에서 빼는 이유와 같다). 쪼개서 적는다.
+  if (!own.includes('isTestSource' + '(s.path)')) {
+    console.error('\n❌ 검사기 자기 점검 실패: 소비자 루프가 isTestSource() 를 쓰지 않습니다.');
+    process.exit(1);
+  }
+}
 
 /**
  * 아직 안 붙였지만 그럴 만한 이유가 있는 것.
@@ -120,6 +213,74 @@ const ALLOW = new Map([
     + '대신 기능이 멎는 것이라, 어느 쪽을 원하는지는 사용자가 정할 일이다. '
     + '덧붙여 getUsedCredits는 조회 실패 시 0을 돌려준다(= 항상 통과). '
     + '붙일 때 그것부터 고쳐야 한다 — 못 읽은 것은 안 쓴 것이 아니다'],
+
+  // ── 기준을 조인 순간 드러난 셋 ────────────────────────────────
+  //
+  // 예전 기준은 **자기 테스트만** 소비자에서 뺐다. 그래서 *다른 모듈의*
+  // 시험이 import하면 "배선됨"이 됐고, 아래 셋이 그 구멍으로 지나갔다.
+  // 셋 다 제품 코드 소비자가 **0곳**이다 — 지금 적는 것은 숨기는 것이
+  // 아니라 **빚을 장부에 올리는 것**이다. 비어 있는 것이 목표다.
+  ['src/lib/strategies/profileMonteCarlo.ts',
+    '프로필 숫자를 몬테카를로 입력으로 번역한다. 제품 소비자 0곳 — '
+    + 'import하는 것은 costAnalysis.test.ts와 roundLedger.test.ts뿐이다. '
+    + '이 파일의 머리말이 스스로 적고 있다: "엔진은 있는데 화면에 안 붙어 '
+    + '있었다 … 엔진이 있다는 것과 그 엔진이 도는 것은 다른 이야기다 — '
+    + '이 저장소에서 가장 자주 나는 고장이 이것이다." **그 문장을 쓴 파일이 '
+    + '그 상태다.** 붙일 자리는 전략 프로필 화면이고, 붙이면 그 화면이 '
+    + '한 경로의 끝 잔고 대신 분포를 적게 된다 — 즉 화면에 나가는 숫자가 '
+    + '바뀌는 변경이라 사람 확인이 필요하다'],
+  ['src/lib/strategies/roundRunner.ts',
+    '회차 종료를 한 곳으로 모은 함수(장부 한 줄 · 계좌 되돌리기 · 회차 '
+    + '번호 올리기). 제품 소비자 0곳 — roundLedger.test.ts만 import한다. '
+    + '머리말은 "화면은 이 함수만 부른다"고 적었는데 **부르는 화면이 없다.** '
+    + '즉 회차 종료가 여전히 화면 안에 흩어져 있을 가능성이 있고, 그것은 '
+    + '이 파일이 막으려던 바로 그 고장이다. 붙이려면 회차 종료 경로가 '
+    + '지금 어디에 몇 개 있는지부터 세어야 한다'],
+  ['src/lib/strategies/simFormat.ts',
+    '모의 성적표 표시 서식(기간·금액). 제품 소비자 0곳 — '
+    + 'profileSim.test.ts만 import한다. 이 파일은 화면에 실제로 나갔던 두 줄'
+    + '("표본 기간: 시작과 끝이 같은 시각", "누적손익 +238,790,…e+36")을 '
+    + '고치려고 썼다. 붙지 않은 동안 그 화면은 고쳐지지 않았을 수 있다 — '
+    + '어느 화면이 그 두 줄을 그리는지 확인하고 거기에 붙여야 한다'],
+
+  // ── 목록을 없애고 `src/lib` 전부를 보게 한 뒤 남은 넷 ──────────
+  //
+  // 처음에는 16건이 잡혔다. 그중 **12건은 이 검사기 자신의 오탐**이었다 —
+  // 확장자 붙은 경로(`'src/lib/ci/autoMergeGate.ts'`)를 못 봤기 때문이다.
+  // 정규식을 고치자 12건이 사라졌다. 남은 넷은 하나씩 확인했다.
+  ['src/lib/ops/opsQueue.ts',
+    '**배선돼 있다 — 정규식으로 볼 수 없는 모양이다.** '
+    + "scripts/ops-runner.mjs:80이 join(ROOT,'src','lib','ops','opsQueue.ts')로 "
+    + '경로를 조립해 복사·컴파일하고 opsQueue.js를 동적 import한다. '
+    + '인용된 경로 문자열이 아니라 **조각으로 조립**하므로 어떤 정규식도 '
+    + '보지 못한다. 이것을 정규식으로 쫓으면 오탐이 다시 늘어난다 — '
+    + '그래서 쫓지 않고 여기 적는다. **이 항목은 빚이 아니라 한계다**'],
+  ['src/lib/jobs/queueGuard.ts',
+    '진짜 미배선이다. 그리고 그보다 중요한 것: '
+    + 'src/app/api/binance/futures/order/route.ts:525의 주석이 '
+    + '"큐는 남겨 둔다 — 웹훅(signal·tradingview)이 아직 쓴다. 다만 그쪽도 '
+    + '실행자가 없으면 적재하지 않는다(queueGuard)"라고 적고 있는데, '
+    + '**웹훅 라우트 셋 다 이 모듈을 부르지 않는다.** 다만 그 셋은 '
+    + 'enqueueJob도 from(\'jobs\')도 쓰지 않아서 **막을 적재 자체가 없다** — '
+    + '즉 지금 새고 있는 것은 아니다. 고칠 것은 둘 중 하나다: 웹훅이 다시 '
+    + '적재하게 되면 이 가드를 붙이거나, 적재 경로가 없어진 사실을 그 주석에 '
+    + '반영하는 것. **2026-11-08에 그 주석을 고쳤고**, 약속은 주석이 아니라 '
+    + 'scripts/check-order-guards.mjs로 옮겼다 — 제품 코드에 적재가 다시 '
+    + '생기면 그 검사기가 실행자 확인을 요구한다. 이 모듈은 그때 쓰인다'],
+  ['src/lib/autotrade/decision.ts',
+    '진짜 미배선이다 — 참조가 **모든 모양에서 0건**이다(인용 경로 · 확장자 '
+    + '붙은 경로 · join 조립 전부 확인). export 6개. 머리말은 '
+    + '"설명가능한(XAI) 판단 엔진 … 아무것도 안 하는 이유(대기 사유)까지 '
+    + '투명하게 설명한다"고 적었다. 그 설명이 화면에 나가지 않고 있다. '
+    + '붙일지 지울지는 결정이 필요하다 — 자동매매 판정 경로에 두 번째 '
+    + '엔진을 붙이는 일이라 사람 확인 없이 할 수 없다'],
+  ['src/lib/fx/rate.ts',
+    '진짜 미배선이다 — 참조 0건, export 2개(getUsdKrw 계열). '
+    + '**실패 시 fallback 1375를 쓰는 환율 모듈**이다. 이 저장소에는 '
+    + '환율로 1,000배가 틀어진 기록이 있다(walletMoney.ts: 공용 cvt()가 '
+    + '입력을 KRW로 가정). 그래서 이것을 붙이는 일은 "환율이 없으면 원화로 '
+    + '바꾸지 않는다"는 기존 규칙과 충돌하지 않는지 먼저 봐야 한다 — '
+    + '고정 fallback은 **환율을 모르는데 아는 척하는 값**이다'],
 ]);
 
 const files = [];
@@ -149,7 +310,19 @@ function walk(dir) {
     const st = statSync(p);
     if (st.isDirectory()) { walk(p); continue; }
     if (!/\.(ts|tsx|mjs|js)$/.test(name)) continue;
-    sources.push({ path: p, text: readFileSync(p, 'utf8') });
+    // ── **주석은 소비자가 아니다** ─────────────────────────────
+    //
+    // 이 검사기가 2026-11-08에 제 변경을 잡았다. 제가 다른 검사기의
+    // 주석에 `src/lib/jobs/queueGuard.ts`라고 적었더니 그 줄이 소비자로
+    // 세어져서, **진짜로 끊긴 모듈이 "이미 배선됨"으로 뒤집혔다.**
+    //
+    // 이 파일의 머리말이 이미 같은 함정을 적어 두었다 — "주석에 이름이
+    // 적혀 있다는 이유로 통과가 난다. 이 저장소에서 이미 두 번 일어난
+    // 일이다." 그런데 소비자 판정 자체는 원문을 보고 있었다.
+    //
+    // 주석으로 배선을 증명할 수는 없다. 지우고 본다. (전수 측정:
+    // 이 변경으로 새로 끊기는 모듈 0건.)
+    sources.push({ path: p, text: stripComments(readFileSync(p, 'utf8')) });
   }
 }
 for (const d of SEARCH_DIRS) walk(d);
@@ -165,12 +338,48 @@ for (const file of files) {
   //
   // 따옴표 안에서 이 파일 이름으로 끝나는 경로를 찾는다:
   //   from './foo'  ·  from '@/lib/engine/foo'  ·  import('./foo')
-  const re = new RegExp(`['"\`][^'"\`]*/${stem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}['"\`]`);
+  //
+  // **확장자가 붙은 모양도 본다.** 이 저장소의 스크립트들은 판정을
+  // 복제하지 않으려고 TS 파일을 **tsc 인자로 넘겨 컴파일한 뒤** 산출물을
+  // 동적 import한다:
+  //
+  //   scripts/auto-merge.mjs:47   tsc, 'src/lib/ci/autoMergeGate.ts', …
+  //   scripts/auto-merge.mjs:156  await import(`…/autoMergeGate.js`)
+  //
+  // 확장자 없는 모양만 보면 그 셋(`autoMergeGate` · `autoRebase` ·
+  // `deployDispatch`)이 **멀쩡히 배선됐는데 끊긴 것으로** 잡힌다. 그러면
+  // 사람은 ALLOW에 적어 넣고, 그 순간 이 검사는 믿을 수 없는 것이 된다.
+  // 못 잡는 것과 **없는 것을 잡는 것**은 둘 다 검사기를 무용하게 만든다.
+  const esc = stem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`['"\`][^'"\`]*/${esc}(\\.(ts|tsx|js|mjs))?['"\`]`);
 
   let consumers = 0;
   for (const s of sources) {
     if (s.path === file) continue;                     // 자기 자신
-    if (s.path === file.replace(/\.ts$/, '.test.ts')) continue;   // 자기 테스트
+    // ── **시험 파일은 소비자가 아니다** ─────────────────────────
+    //
+    // 예전에는 **자기 테스트만** 뺐다. 그러면 *다른 모듈의* 시험이
+    // import하는 것으로 "배선됨"이 된다. 그 구멍으로 셋이 지나갔다:
+    //
+    //   profileMonteCarlo.ts ← costAnalysis.test.ts · roundLedger.test.ts
+    //   roundRunner.ts       ← roundLedger.test.ts
+    //   simFormat.ts         ← profileSim.test.ts
+    //
+    // 셋 다 제품 코드에서 부르는 곳이 **0곳**인데 이 검사는 "배선 안 된
+    // 것 0개"라고 적었다. 그리고 하필 그 셋이 **이 고장을 고치려고 쓴
+    // 파일들**이다 — `profileMonteCarlo.ts`의 머리말이 직접 적고 있다:
+    //
+    //   "엔진은 있는데 화면에 안 붙어 있었다 … 엔진이 있다는 것과 그
+    //    엔진이 도는 것은 다른 이야기다 — 이 저장소에서 가장 자주
+    //    나는 고장이 이것이다"
+    //
+    // 시험이 소비자로 세어지면 이 검사는 **자기 목적을 잃는다.** 시험은
+    // 판정이 맞는지 보는 것이고, 그 판정이 **쓰이는지**는 보지 않는다.
+    //
+    // **이름 모양이 두 가지다.** `.test.ts`만 보면 `scripts/ten-slot-*.test.mjs`
+    // 여섯 개와 `scripts/test-*.mjs` 여섯 개가 여전히 소비자로 세어진다.
+    // 판정은 `isTestSource()` 한 곳에 있고 자기 점검이 붙어 있다 (위).
+    if (isTestSource(s.path)) continue;
     // **이 스크립트 자신은 소비자가 아니다.**
     //
     // WATCH_DIRS에 'src/lib/runtime'을 넣자마자 `src/lib/ai/runtime.ts`가
