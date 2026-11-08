@@ -191,6 +191,102 @@ const HUMAN_ENV_FACTS = [
   }
 }
 
+
+// ── 워커가 살아 있는지를 **한 곳에서만 정한다** ───────────────────
+//
+// 같은 질문("heartbeat가 이만큼 오래됐으면 죽은 것인가")에 답하는 상수가
+// 세 곳에 있었고, 이미 갈라져 있었다:
+//
+//   src/lib/autotrade/evaluationLoop.ts  WORKER_STALE_MS    = 180_000
+//   src/lib/runtime/runtimeHealth.ts     STALE_MS           = 3 * 60_000
+//   src/lib/runtime/persistentRuntime.ts HEARTBEAT_STALE_MS =  30_000   ← 갈림
+//
+// 셋째는 주석까지 틀렸다 — "10초 간격으로 도는 실행기라면"이라고 적혀
+// 있지만 워커의 실제 주기는 `WORKER_POLL_SEC || '3'`이고 1~15초로
+// 조여진다(`worker/src/index.ts:86`). 10초라는 설정은 존재하지 않는다.
+//
+// 그리고 이 저장소는 **이미 그 값의 하한을 시험으로 적어 두었다**:
+//
+//   src/lib/autotrade/schedulePoll.test.ts:470
+//     assert(WORKER_STALE_MS >= 120_000, '유예가 너무 짧으면 재배포마다 빨강이 된다')
+//
+// 30_000은 그 하한을 깬다. 그런데 **시험이 그것을 볼 수 없다** — 다른
+// 상수이기 때문이다. 즉 판단이 두 곳에 있으면 한쪽의 시험이 다른 쪽을
+// 지켜 주지 않는다. `CLAUDE.md`가 적은 "경로가 둘인데 한쪽만 고침"이다.
+//
+// 그래서 숫자는 `src/lib/runtime/runtimeHealth.ts` 한 곳이 소유하고,
+// 나머지는 그것을 가져다 쓴다. 여기서는 **새 사본이 생기는 것**을 막는다.
+const HEARTBEAT_OWNER = 'src/lib/runtime/runtimeHealth.ts';
+{
+  // 워커 heartbeat 신선도 상수로 읽히는 선언만 본다. 다른 종류의 staleness
+  // (환율·장부·시세)는 각자 다른 질문이므로 건드리지 않는다.
+  const DECL = /export\s+const\s+([A-Z0-9_]*(?:HEARTBEAT|WORKER)[A-Z0-9_]*STALE[A-Z0-9_]*)\s*=\s*([^;]+);/;
+  const owners = [];
+  for (const f of srcFiles) {
+    const path = f.replaceAll('\\', '/');
+    const lines = readFileSync(f, 'utf8').split('\n');
+    lines.forEach((line, i) => {
+      const t = line.trim();
+      if (t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')) return;
+      const m = DECL.exec(line);
+      if (!m) return;
+      const rhs = m[2].trim();
+      // 소유자에서 가져온 것(식별자 참조)은 사본이 아니다. 숫자를 직접
+      // 적은 것만 사본이다 — `3 * 60_000`도 숫자다.
+      const isLiteral = /^[\d_\s*+/().]+$/.test(rhs);
+      if (!isLiteral) return;
+      owners.push({ path, line: i + 1, name: m[1], rhs });
+    });
+  }
+  const strays = owners.filter((o) => o.path !== HEARTBEAT_OWNER);
+  if (strays.length > 0) {
+    console.error('❌ 워커 생존 판정 기준이 여러 곳에 숫자로 적혀 있습니다:');
+    for (const o of strays) {
+      console.error(`   · ${o.path}:${o.line}  ${o.name} = ${o.rhs}`);
+    }
+    console.error(`\n   이 숫자는 ${HEARTBEAT_OWNER} 하나가 소유합니다.`);
+    console.error('   사본을 만들면 한쪽의 시험이 다른 쪽을 지켜 주지 않습니다 —');
+    console.error('   schedulePoll.test.ts가 >= 120_000을 요구하는데도');
+    console.error('   HEARTBEAT_STALE_MS = 30_000이 통과하고 있었던 이유입니다.');
+    process.exit(1);
+  }
+  if (owners.length === 0) {
+    console.error(`❌ 워커 생존 판정 기준이 ${HEARTBEAT_OWNER}에 없습니다.`);
+    console.error('   소유자가 사라지면 다음 사람이 각자 다시 적습니다.');
+    process.exit(1);
+  }
+
+  // ── 근거를 **읽어서** 맞춘다 ──────────────────────────────
+  //
+  // 소유자의 주석은 "워커는 최악의 설정에서도 15초마다 heartbeat를
+  // 쓴다"를 근거로 180초를 고른다. 그 15초는 워커 코드의 clamp 상한이다.
+  // **주석과 코드가 갈리는 것이 이 저장소에서 반복된 고장**이므로
+  // (방금 고친 "10초 간격으로 도는 실행기라면"이 바로 그것이다)
+  // 숫자를 손으로 적지 않고 워커에서 읽어 비교한다.
+  const WORKER_MAIN = 'worker/src/index.ts';
+  if (existsSync(WORKER_MAIN)) {
+    const wsrc = readFileSync(WORKER_MAIN, 'utf8');
+    const m = /Math\.max\(\s*(\d+)\s*,\s*Math\.min\(\s*(\d+)\s*,\s*parseInt\(\s*process\.env\.WORKER_POLL_SEC/.exec(wsrc);
+    if (!m) {
+      console.error(`❌ ${WORKER_MAIN}에서 heartbeat 주기(WORKER_POLL_SEC clamp)를 읽지 못했습니다.`);
+      console.error('   못 읽은 것을 통과로 적지 않습니다 — 모양이 바뀌었으면 이 규칙을 같이 고치세요.');
+      process.exit(1);
+    }
+    const clampMaxSec = Number(m[2]);
+    const ownerMs = Number(String(owners[0].rhs).replace(/[_\s]/g, '').split('*')
+      .reduce((a, b) => a * Number(b), 1));
+    const needMs = clampMaxSec * 1000 * 4;
+    if (!Number.isFinite(ownerMs) || ownerMs < needMs) {
+      console.error('❌ 워커 생존 기준이 heartbeat 주기에 비해 너무 짧습니다:');
+      console.error(`   · ${HEARTBEAT_OWNER}  ${owners[0].name} = ${ownerMs}ms`);
+      console.error(`   · ${WORKER_MAIN}:  heartbeat 주기 상한 ${clampMaxSec}초`);
+      console.error(`   한 번 늦은 것을 죽음으로 읽지 않으려면 최소 ${needMs}ms 입니다.`);
+      process.exit(1);
+    }
+    console.log(`✅ 워커 생존 기준 ${ownerMs / 1000}초 · heartbeat 주기 상한 ${clampMaxSec}초 (${ownerMs / (clampMaxSec * 1000)}배) · 사본 0곳`);
+  }
+}
+
 const staleErrors = [];
 for (const f of uiFiles) {
   const lines = readFileSync(f, 'utf8').split('\n');

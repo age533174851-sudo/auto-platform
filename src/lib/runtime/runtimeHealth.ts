@@ -71,8 +71,43 @@ export interface WorkerRow {
   startup_detail?: string | null;
 }
 
-/** 이 시간을 넘으면 살아 있다고 말하지 않는다 */
-export const STALE_MS = 3 * 60_000;
+/**
+ * **워커가 살아 있는지를 정하는 단 하나의 숫자.**
+ *
+ * 이 질문에 답하는 상수가 세 곳에 따로 있었고 이미 갈라져 있었다:
+ * `evaluationLoop.WORKER_STALE_MS`(180초) · 이 파일(180초) ·
+ * `persistentRuntime.HEARTBEAT_STALE_MS`(**30초**). 그래서 같은 워커가
+ * 보는 화면에 따라 "실행 중"이거나 "응답 없음"이 됐다.
+ *
+ * 숫자의 근거 — 실측값에서 나온다:
+ *
+ *   worker/src/index.ts:86
+ *     const POLL_SEC = Math.max(1, Math.min(15, parseInt(process.env.WORKER_POLL_SEC || '3', 10)))
+ *
+ * 즉 heartbeat는 기본 **3초**마다, 최악의 설정에서도 **15초**마다 쓰인다
+ * (`index.ts:1200`이 매 tick 안에서 쓴다). 180초는 그 상한의 12배다.
+ *
+ * 왜 넉넉한가 — **재배포 때문이다.** 짧게 잡으면 배포마다 모든 화면이
+ * 빨강이 되고, 사람은 빨강을 무시하기 시작한다. 그 하한은 이 저장소가
+ * 이미 시험으로 적어 두었다:
+ *
+ *   src/lib/autotrade/schedulePoll.test.ts:470
+ *     assert(WORKER_STALE_MS >= 120_000, '유예가 너무 짧으면 재배포마다 빨강이 된다')
+ *     assert(WORKER_STALE_MS <= 600_000, '유예가 너무 길면 죽은 워커를 못 본다')
+ *
+ * `HEARTBEAT_STALE_MS = 30_000`은 그 하한을 깨고 있었다. **그런데 시험이
+ * 그것을 볼 수 없었다** — 다른 상수였기 때문이다. 한쪽에 붙인 시험은
+ * 다른 쪽을 지켜 주지 않는다.
+ *
+ * 새 사본이 생기는 것은 `scripts/check-runtime.mjs`가 막는다.
+ */
+export const WORKER_STALE_MS = 3 * 60_000;
+
+/**
+ * 예전 이름. 이 파일 안과 `runtimeHealth.test.ts`가 쓴다.
+ * **값을 따로 적지 않는다** — 같은 숫자다.
+ */
+export const STALE_MS = WORKER_STALE_MS;
 
 function ms(v: any): number | null {
   const t = Date.parse(String(v ?? ''));
