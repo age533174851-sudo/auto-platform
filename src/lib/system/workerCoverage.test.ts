@@ -9,6 +9,7 @@
 import { test, eq, assert } from '../../test/harness';
 import {
   cronEveryMs, coverageRow, coverage, flyRetirementBlockers, flyRetirable,
+  killSwitchExecutionPath,
   type WorkerTask, type VercelCron,
 } from './workerCoverage';
 
@@ -224,5 +225,64 @@ export function runWorkerCoverageTests() {
     eq(coverage([], []).length, 0);
     eq(flyRetirable([]), true);
     eq(coverage(null as unknown as WorkerTask[], null as unknown as VercelCron[]).length, 0);
+  });
+
+  // ── 정정: "Fly가 없으면 킬스위치가 아예 실행되지 않는다"는 과장이었다 ──
+  //
+  // 이 시험이 막는 것은 **두 방향의 거짓**이다.
+  //   · 없는 위험을 있다고 적는 것 (멈추지 않는데 멈춘다고 보고)
+  //   · 모르는 것을 안전하다고 적는 것 (확인 못 했는데 안 멈춘다고 보고)
+  // 둘 다 같은 규칙 위반이다 — 확인한 것만 적는다.
+  console.log('[킬스위치 실행 경로 — Fly를 끄면 실행 자체가 멈추는가]');
+
+  test('라우트가 직접 실행하고 큐에 외부 생산자가 없으면 큐는 자가복구 그물이다', () => {
+    const v = killSwitchExecutionPath({
+      enqueueCallers: 0, externalQueueProducers: 0, routesExecuteInline: true,
+    });
+    eq(v.path, 'INLINE');
+    eq(v.queueIsSelfHealOnly, true);
+    eq(v.stopsAllExecution, false, '★ 멈추지 않는데 멈춘다고 적었다');
+    assert(v.reason.includes('자가복구'), v.reason);
+  });
+
+  test('큐에 외부 생산자가 생기면 같은 문장을 더 쓰지 않는다', () => {
+    const v = killSwitchExecutionPath({
+      enqueueCallers: 2, externalQueueProducers: 1, routesExecuteInline: true,
+    });
+    eq(v.path, 'BOTH');
+    eq(v.queueIsSelfHealOnly, false);
+    eq(v.stopsAllExecution, false);
+    assert(v.reason.includes('3곳'), v.reason);
+  });
+
+  test('직접 실행이 없고 큐로만 실행되면 끄면 정말 멈춘다', () => {
+    const v = killSwitchExecutionPath({
+      enqueueCallers: 1, externalQueueProducers: 0, routesExecuteInline: false,
+    });
+    eq(v.path, 'QUEUE');
+    eq(v.stopsAllExecution, true);
+  });
+
+  test('실행하는 곳을 하나도 못 찾으면 안전으로 적지 않는다', () => {
+    const v = killSwitchExecutionPath({
+      enqueueCallers: 0, externalQueueProducers: 0, routesExecuteInline: false,
+    });
+    eq(v.path, 'UNKNOWN');
+    eq(v.stopsAllExecution, null, '★ 실행자가 안 보이는데 안 멈춘다고 적었다');
+  });
+
+  test('하나라도 세지 못했으면 UNKNOWN이고 stopsAllExecution은 null이다', () => {
+    for (const f of [
+      { enqueueCallers: null, externalQueueProducers: 0, routesExecuteInline: true },
+      { enqueueCallers: 0, externalQueueProducers: null, routesExecuteInline: true },
+      { enqueueCallers: 0, externalQueueProducers: 0, routesExecuteInline: null },
+    ]) {
+      const v = killSwitchExecutionPath(f as never);
+      eq(v.path, 'UNKNOWN');
+      eq(v.stopsAllExecution, null, '★ 모르는 것을 0/false로 읽었다');
+      eq(v.queueIsSelfHealOnly, false);
+    }
+    eq(killSwitchExecutionPath(null).path, 'UNKNOWN');
+    eq(killSwitchExecutionPath(undefined).stopsAllExecution, null);
   });
 }

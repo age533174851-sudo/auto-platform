@@ -35,6 +35,83 @@ import { join } from 'node:path';
 const WORKER = 'worker/src/index.ts';
 const JUDGE = 'src/lib/system/workerCoverage.ts';
 
+// 킬스위치 발동 라우트 — 여기가 직접 실행하면 큐는 주 경로가 아니다
+const KILL_ROUTES = [
+  'src/app/api/risk/kill-switch/trigger/route.ts',
+  'src/app/api/risk/kill-switch/status/route.ts',
+];
+/** `enqueueJob`의 정의가 있는 파일. 이 안의 insert는 **호출자 수로** 센다 */
+const ENQUEUE_HELPER = 'src/lib/jobs.ts';
+
+/** 주석을 지운다 — 주석에 적힌 이름을 호출로 세면 숫자가 거짓이 된다 */
+function stripComments(src) {
+  return String(src).replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+}
+
+function productTsFiles(root) {
+  const out = [];
+  if (!existsSync(root)) return out;
+  (function walk(d) {
+    for (const name of readdirSync(d, { withFileTypes: true })) {
+      const q = join(d, name.name);
+      if (name.isDirectory()) { if (name.name !== 'node_modules') walk(q); continue; }
+      if (!/\.tsx?$/.test(name.name)) continue;
+      if (/\.test\.tsx?$/.test(name.name) || /\.d\.ts$/.test(name.name)) continue;
+      out.push(q);
+    }
+  })(root);
+  return out;
+}
+
+/**
+ * 킬스위치 실행 경로를 **코드에서 센다.**
+ *
+ * 세지 못한 값은 `null`로 둔다 — 판정이 그때 UNKNOWN을 준다. 0으로
+ * 채우면 "안 멈춘다"는 거짓이 조용히 생긴다.
+ */
+function killSwitchFacts() {
+  let enqueueCallers = null;
+  let externalQueueProducers = null;
+  let routesExecuteInline = null;
+
+  try {
+    const files = [...productTsFiles('src'), ...productTsFiles('worker/src')];
+    if (files.length === 0) throw new Error('제품 소스를 찾지 못했습니다');
+
+    let calls = 0, ext = 0;
+    for (const f of files) {
+      const body = stripComments(readFileSync(f, 'utf8'));
+      // 호출만 센다 — 정의(`export async function enqueueJob(`)는 뺀다.
+      for (const m of body.matchAll(/enqueueJob\s*\(/g)) {
+        const before = body.slice(Math.max(0, m.index - 40), m.index);
+        if (/function\s+$/.test(before)) continue;
+        calls++;
+      }
+      // jobs에 행을 넣는 곳. Worker 안은 자가복구이므로 '외부'가 아니다.
+      // `enqueueJob`의 몸통도 빼고 **그 호출자 수로** 센다(위에서 셌다).
+      if (/^worker[\\/]/.test(f)) continue;
+      if (f === ENQUEUE_HELPER || /[\\/]jobs\.ts$/.test(f)) continue;
+      for (const _m of body.matchAll(/from\(\s*['"]jobs['"]\s*\)\s*\.\s*insert/g)) ext++;
+    }
+    enqueueCallers = calls;
+    externalQueueProducers = ext;
+
+    // 라우트가 그 자리에서 실행하는가: executeKillActions를 부르고,
+    // 그 라우트가 job을 적재하지 않는다.
+    let inline = true;
+    for (const r of KILL_ROUTES) {
+      if (!existsSync(r)) { inline = null; break; }
+      const body = stripComments(readFileSync(r, 'utf8'));
+      if (!/executeKillActions/.test(body)) inline = false;
+      if (/from\(\s*['"]jobs['"]\s*\)\s*\.\s*insert/.test(body)) inline = false;
+    }
+    routesExecuteInline = inline;
+  } catch {
+    // 못 셌으면 null로 남긴다 — 0으로 채우지 않는다
+  }
+  return { enqueueCallers, externalQueueProducers, routesExecuteInline };
+}
+
 const errs = [];
 const err = (m) => { errs.push(m); console.log(`❌ ${m}`); console.log(`::error::${m}`); };
 const ok = (m) => console.log(`✅ ${m}`);
@@ -45,11 +122,18 @@ const ok = (m) => console.log(`✅ ${m}`);
 // 주기·엔드포인트는 코드에서 뽑으므로 여기 적지 않는다(두 곳이 갈린다).
 //
 // `safetyCritical`: 포지션을 닫거나 손실을 막는 일, 또는 그것을 **가능하게
-// 하는** 일. job 큐와 킬스위치 보장이 여기 들어간다 — 큐를 처리하는
-// 쪽이 없으면 킬스위치 job이 영원히 대기한다.
+// 하는** 일. job 큐와 킬스위치 자가복구가 여기 들어간다 — 큐를 처리하는
+// 쪽이 없으면 **적재된 자가복구 job이 영원히 대기한다.**
+//
+// ⚠ **정정.** 이것을 "큐가 없으면 킬스위치가 아예 실행되지 않는다"로
+// 적었던 것은 과장이었다. 발동 라우트가 그 자리에서 직접 실행한다. 큐는
+// 그 주 경로가 실패했을 때의 그물이다. 등급은 그대로 true다 — 그물이
+// 없어지는 것도 손실이고, **막는 검사기를 약하게 고치지 않는다.**
+// 바뀌는 것은 보고 문장이다. 그 문장도 산문으로 두지 않고
+// `killSwitchExecutionPath()`가 코드를 세어 답한다(아래).
 const DECLARED = {
-  processPendingJobs: { role: 'job 큐 처리 (킬스위치·Ghost Sync job이 여기서 실행된다)', safetyCritical: true },
-  monitorConnections: { role: '연결 감시 · 킬스위치 job 보장', safetyCritical: true },
+  processPendingJobs: { role: 'job 큐 처리 — 킬스위치 **자가복구 그물**(주 실행 경로는 발동 라우트)', safetyCritical: true },
+  monitorConnections: { role: '연결 감시 · 킬스위치 자가복구 job 보장(주 경로가 실패했을 때)', safetyCritical: true },
   pollSchedules: { role: '예약 평가 — 진입 판단을 깨운다', safetyCritical: false },
   pollExitMonitor: { role: '계단식 청산 · 손절 이동 감시', safetyCritical: true },
   pollScheduledExit: { role: '예약 청산 실행', safetyCritical: true },
@@ -244,7 +328,7 @@ async function main() {
   if (!errs.length) ok(`선언표와 tick()이 일치합니다 (주기 작업 ${found.length}개)`);
 
   const outDir = loadJudge();
-  const { coverage, flyRetirementBlockers } =
+  const { coverage, flyRetirementBlockers, killSwitchExecutionPath } =
     await import(`file://${join(outDir, 'workerCoverage.js')}`);
 
   // ── 깨우는 쪽을 **전부** 모은다 ──
@@ -308,6 +392,36 @@ async function main() {
     console.log('        pollScheduledExit  1분 → 실측 ~288분 (선언 5분)   →  5배가 아니라 ~288배');
     console.log('      이 검사기는 파일만 읽으므로 실제 실행률을 확인할 수 없습니다 —');
     console.log('      선언을 관측으로 적지 않기 위해 이 경고를 남깁니다.');
+
+    // ── 정정 — 반대 방향의 거짓도 적지 않는다 ──
+    //
+    // 위 목록에 `processPendingJobs`가 ★로 올라가면, 읽는 사람에게
+    // 남는 문장은 "Fly를 끄면 킬스위치가 아예 실행되지 않는다"가 된다.
+    // 그렇게 보고한 적이 있고, 그것은 **과장이었다.** 모르는 것을 0으로
+    // 적지 않는 것과 똑같이, **없는 위험을 있다고 적지도 않는다.**
+    //
+    // 산문으로 적어 두지 않는다. 누가 큐에 외부 생산자를 붙이면 아래
+    // 판정이 스스로 답을 바꾼다.
+    const ksFacts = killSwitchFacts();
+    const ks = killSwitchExecutionPath(ksFacts);
+    const queueBlocked = blockers.some((b) => b.fn === 'processPendingJobs' || b.fn === 'monitorConnections');
+    if (queueBlocked) {
+      console.log('');
+      console.log('   ── 정정: 위 ★는 "킬스위치가 아예 실행되지 않는다"는 뜻이 아닙니다 ──');
+      console.log(`      킬스위치 실행 경로(코드에서 셈): ${ks.path}`);
+      console.log(`        · 발동 라우트 직접 실행: ${ksFacts.routesExecuteInline === null ? 'UNKNOWN' : ksFacts.routesExecuteInline ? '예' : '아니오'}`);
+      console.log(`        · jobs 큐 외부 생산자: ${ksFacts.externalQueueProducers === null ? 'UNKNOWN' : ksFacts.externalQueueProducers + '곳'}`);
+      console.log(`        · enqueueJob 제품 호출: ${ksFacts.enqueueCallers === null ? 'UNKNOWN' : ksFacts.enqueueCallers + '건'}`);
+      console.log(`      → Fly를 끄면 실행 자체가 멈추는가: ${ks.stopsAllExecution === null ? 'UNKNOWN (확인 못 했습니다)' : ks.stopsAllExecution ? '예' : '아니오'}`);
+      console.log(`      ${ks.reason}`);
+      console.log('      ★는 그대로 둡니다 — 그물이 없어지는 것도 손실이고, 막는 검사기를');
+      console.log('      약하게 고치지 않습니다. 바뀐 것은 보고 문장입니다.');
+      console.log('      ⚠ 이것은 **소스의 모양**에 대한 판정입니다. 실제 발동이 거래소에서');
+      console.log('        성공한다는 증거가 아닙니다 — 그 증거는 거래소 응답으로만 생깁니다.');
+      if (ks.stopsAllExecution === null) {
+        err('킬스위치 실행 경로를 코드에서 확인하지 못했습니다 — 안전하다고 적지 않습니다');
+      }
+    }
     if (assertRetirable) {
       err(`Fly 종료 조건이 충족되지 않았습니다 — 안전상 필수 ${blockers.length}개가 대체되지 않았습니다`);
     }
