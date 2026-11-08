@@ -45,6 +45,49 @@ const WATCH_DIRS = [
   'src/lib/portfolio',
   // 백테스트 판정과 AI 출처 판정. 여기도 검사 밖이었다.
   'src/lib/backtest', 'src/lib/ai', 'src/lib/runtime',
+
+  // ── 손으로 적은 목록이 뒤처져 있었다 ──────────────────────────
+  //
+  // 위 목록은 사람이 하나씩 더해 온 것이고, 그래서 **`src/lib` 55개
+  // 디렉터리 중 13개만** 보고 있었다. 밖에 있던 것 중에는 이런 것들이
+  // 있었다:
+  //
+  //   src/lib/autotrade  33개  ← 예약 평가·진입 창·강제 진입 판정
+  //   src/lib/trading    32개
+  //   src/lib/ops        14개
+  //   src/lib/system     10개
+  //   src/lib/ledger      9개
+  //   src/lib/signals     8개
+  //   src/lib/safety      5개  ← 이름이 safety인데 검사 밖이었다
+  //
+  // 즉 "만들어 놓고 배선을 안 함"을 잡는 검사가 **그 고장이 가장 비싼
+  // 자리들을 보지 않고 있었다.** 목록을 손으로 적는 방식 자체가 이
+  // 저장소에서 반복된 고장이다(#571 "손으로 적은 모듈 목록 드리프트").
+  //
+  // 한꺼번에 넣지 않는다
+  // ────────────────────
+  // 넣기 전에 디렉터리별로 **몇 건이 RED가 되는지 전수로 셌다.** 42개
+  // 중 **35개는 RED 0건**이라 지금 바로 넣을 수 있고, 아래 6개는 합쳐
+  // 16건이 RED가 된다:
+  //
+  //   src/lib/ops   8건 · src/lib/ci  3건 · src/lib/system 2건
+  //   src/lib/autotrade 1건(decision.ts) · src/lib/jobs 1건(queueGuard.ts)
+  //   src/lib/fx    1건(rate.ts)
+  //
+  // 그 16건은 **면제로 덮지 않는다.** 하나하나 "붙일 것인가 지울 것인가"를
+  // 정해야 하는 결정이고, 그걸 ALLOW에 몰아넣으면 이 검사는 다시 없는
+  // 것과 같아진다. 그래서 이번에는 **RED 0건인 35개만** 넣고, 6개는
+  // 측정값과 함께 보고한다. 특히 `queueGuard.ts`(적재 시각 가드)와
+  // `decision.ts`(자동매매 판정)는 이름만으로도 확인이 필요하다.
+  'src/lib/trading', 'src/lib/news', 'src/lib/accounts', 'src/lib/ledger',
+  'src/lib/signals', 'src/lib/smoke', 'src/lib/commands', 'src/lib/supabase',
+  'src/lib/safety', 'src/lib/calendar', 'src/lib/notify', 'src/lib/providers',
+  'src/lib/theme', 'src/lib/api', 'src/lib/derivatives', 'src/lib/execution',
+  'src/lib/hooks', 'src/lib/season', 'src/lib/autobot', 'src/lib/confirm',
+  'src/lib/dca', 'src/lib/env', 'src/lib/fees', 'src/lib/funding',
+  'src/lib/http', 'src/lib/kernel', 'src/lib/log', 'src/lib/maintenance',
+  'src/lib/market', 'src/lib/paper', 'src/lib/pnl', 'src/lib/posters',
+  'src/lib/products', 'src/lib/security', 'src/lib/slippage',
 ];
 
 /**
