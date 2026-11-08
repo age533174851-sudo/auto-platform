@@ -29,6 +29,112 @@ export const RUNNER_INTERVAL_MIN = 15;
 /** interval_min이 없을 때(마이그레이션 035 전) — 하루로 본다. 0으로 읽으면 간격이 사라진다 */
 export const DEFAULT_INTERVAL_MIN = 1440;
 
+/**
+ * 실행기가 "늦었다"고 볼 배수.
+ *
+ * **여기에 둔 이유:** `evaluationLoop.ts`가 이 파일을 import하므로 반대
+ * 방향은 순환이 된다. 그래서 상수를 이 파일에 두고 그쪽이 다시 내보낸다 —
+ * 두 벌로 적으면 화면과 판정이 갈린다.
+ */
+export const RUNNER_LATE_FACTOR = 3;
+
+// ── 주기를 약속하지 않는다 (#592 2번) ──────────────────────────────
+//
+// 화면 세 자리가 "서버가 **15분마다** 확인합니다"라고 적고 있었다.
+// 그 15분은 위 `RUNNER_INTERVAL_MIN`, 즉 **워크플로에 선언된 값**이다.
+//
+// 2026-11-07 실측: GitHub Actions `schedule`은 선언과 무관하게 하루
+// 4~5회만 돌았다(워크플로 8개, 선언 24~288회/일 → 실측 4.3~5.0회/일).
+// `autotrade-tick`은 실측 4.9회/일 ≒ **294분 간격**이다. 즉 화면이
+// 약속한 주기가 실제보다 약 20배 낙관적이었다.
+//
+// `TrailPanel`은 "청산 감시가 5분마다"라고 적었다. 그 5분은 Fly Worker의
+// `pollExitMonitor` 주기이고, GitHub 대체의 실측은 ~320분이다 — **64배**.
+// 손절·트레일링 문구라 이쪽이 더 무겁다: 사용자는 약속을 읽고 손절이 그
+// 간격으로 확인된다고 믿는다.
+//
+// 이 저장소는 같은 자리에서 이미 한 번 틀렸다. `AutotradeControl.tsx:1275`의
+// 주석이 적고 있다 — 예전에는 "크론은 매일 23:00 UTC"라는 고정 문구였고,
+// 그것을 걷어낸 자리를 **또 다른 고정 주기 문구로 채웠다.**
+//
+// 고치는 방향은 "약속을 지우고 관측을 적는 것"이다. 다만
+// `AutotradeControl`에는 관측값(`runnerLastSeenMs`)이 **아예 없다** —
+// 없는 관측을 꾸며 낼 수는 없으므로, 관측이 주어지면 그것을 앞세우고
+// 없으면 **선언값임을 밝히고 보장하지 않는다**고 적는다.
+//
+// 그리고 이 문구는 **한 곳**에만 둔다. 세 자리에 따로 적으면 언젠가
+// 한쪽만 고쳐진다 — `CLAUDE.md`가 "자주 나는 고장 ②"로 적어 둔 그것이다.
+
+export type CadenceCode =
+  /** 마지막 확인 시각을 **관측했다** */
+  | 'OBSERVED'
+  /** 관측했는데 선언 주기를 크게 넘겼다 */
+  | 'STALE'
+  /** 관측이 없다 — 선언값만 적는다 */
+  | 'DECLARED_ONLY'
+  /** **모른다.** 0분도 아니고 정상도 아니다 */
+  | 'UNKNOWN';
+
+export interface CadenceNote {
+  code: CadenceCode;
+  /** 마지막 확인으로부터 지난 분. 관측이 없으면 null — 0이 아니다 */
+  agoMin: number | null;
+  /** 화면에 그대로 적을 문장. **절대 "N분마다"라고 쓰지 않는다** */
+  text: string;
+}
+
+/**
+ * 확인 주기를 화면에 어떻게 적을 것인가.
+ *
+ * 계약: 돌려주는 `text`에는 **`분마다`가 들어가지 않는다.** 그 형태가
+ * 곧 약속이고, 이 저장소에서 실제로 20~64배 틀렸던 문장의 모양이다.
+ * `nextRun.test.ts`가 모든 분기에서 그것을 못 박는다.
+ */
+export function cadenceNote(i: {
+  /** 선언된 주기(분). 모르면 null */
+  declaredMin: number | null | undefined;
+  /** 마지막으로 **실제로** 확인된 시각(ms). 없으면 null */
+  lastSeenMs?: number | null;
+  nowMs?: number | null;
+  lateFactor?: number;
+  /** 무엇의 주기인가 — '서버 실행기' · '청산 감시' */
+  subject?: string;
+}): CadenceNote {
+  const who = String(i?.subject || '').trim() || '서버 실행기';
+  const declared = num(i?.declaredMin);
+  const hasDeclared = declared != null && declared > 0;
+  const last = num(i?.lastSeenMs);
+  const now = num(i?.nowMs);
+  const factor = num(i?.lateFactor) ?? RUNNER_LATE_FACTOR;
+
+  // ── 관측이 있으면 그것을 앞세운다 ──
+  if (last != null && now != null) {
+    const elapsed = now - last;
+    if (elapsed < 0) {
+      // 시계가 어긋났다. 그대로 믿고 "방금 확인했다"고 적지 않는다.
+      return { code: 'UNKNOWN', agoMin: null,
+        text: `${who}의 마지막 확인 시각이 현재보다 미래입니다 — 시계가 어긋나 알 수 없습니다` };
+    }
+    const agoMin = Math.round(elapsed / 60_000);
+    if (hasDeclared && elapsed > (declared as number) * factor * 60_000) {
+      return { code: 'STALE', agoMin,
+        text: `${who} 마지막 확인 ${agoMin}분 전 — 선언 주기 ${declared}분을 크게 넘겼습니다 (지연 또는 중단)` };
+    }
+    return { code: 'OBSERVED', agoMin,
+      text: hasDeclared
+        ? `${who} 마지막 확인 ${agoMin}분 전 (선언 주기 ${declared}분 · 실제 확인 시각은 보장되지 않습니다)`
+        : `${who} 마지막 확인 ${agoMin}분 전 (확인 주기는 알 수 없습니다)` };
+  }
+
+  // ── 관측이 없다 ──
+  if (!hasDeclared) {
+    return { code: 'UNKNOWN', agoMin: null,
+      text: `${who}의 확인 주기를 알 수 없습니다 — 돌고 있다는 뜻도, 멈췄다는 뜻도 아닙니다` };
+  }
+  return { code: 'DECLARED_ONLY', agoMin: null,
+    text: `${who} 선언 주기 ${declared}분 — 실제 확인 시각은 보장되지 않습니다` };
+}
+
 export interface NextRunInput {
   nowMs: number;
   /** 예약을 켠 시각 */

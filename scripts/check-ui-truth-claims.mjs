@@ -40,8 +40,13 @@ const ACADEMY  = 'src/components/pages/AcademyPage.tsx';
 const STOPLIB  = 'src/lib/autotrade/globalStop.ts';
 const FEEDLIB  = 'src/lib/news/feed.ts';
 const CARDLIB  = 'src/lib/ui/strategyCard.ts';
+// ⑦ 주기를 약속하는 문장이 있던 자리들 (#592 2번)
+const AUTOCTL  = 'src/components/AutotradeControl.tsx';
+const TRAIL    = 'src/components/terminal/TrailPanel.tsx';
+const WATCHAPI = 'src/app/api/watch/route.ts';
 
-const FILES = [AUTO, HOME, RAIL, ACADEMY, STOPLIB, FEEDLIB, CARDLIB];
+const FILES = [AUTO, HOME, RAIL, ACADEMY, STOPLIB, FEEDLIB, CARDLIB,
+  AUTOCTL, TRAIL, WATCHAPI];
 
 /** 주석을 지운 본문. 파일이 없으면 여기서 멈춘다 — 못 읽은 것은 통과가 아니다. */
 const code = {};
@@ -392,6 +397,42 @@ need(ACADEMY, /골든\s*크로스[\s\S]{0,300}?아래에서\s*위로/,
   '골든크로스를 교차 사건("아래에서 위로")으로 설명하지 않습니다');
 need(ACADEMY, /상태가\s*아니라\s*사건/,
   '골든크로스가 상태가 아니라 사건이라는 구분이 사라졌습니다');
+
+/* ── ⑦ 주기를 약속하지 않는다 ────────────────────────────────
+   이 저장소에서 **같은 자리에서 두 번** 난 고장이다.
+
+   처음에는 "크론은 매일 23:00 UTC"라는 고정 문구였다(`vercel.json` 크론
+   시절). 그것을 걷어낸 자리를 **또 다른 고정 주기 문구**로 채웠다 —
+   "서버가 15분마다 확인합니다". 이번엔 GitHub Actions의 선언값인데,
+   그것도 현실이 아니다.
+
+   2026-11-07 실측: `schedule`은 선언과 무관하게 하루 4~5회만 돌았다
+   (워크플로 8개, 선언 24~288회/일 → 실측 4.3~5.0회/일).
+     · `autotrade-tick`  선언 15분  → 실측 ~294분   (약 20배)
+     · `exit-monitor`    선언 5분   → 실측 ~320분   (약 64배)
+
+   손절·트레일링 문구라 그 차이가 그대로 위험이 된다 — 사용자는 약속을
+   읽고 손절이 그 간격으로 따라온다고 믿는다.
+
+   그래서 **"N분마다" 형태 자체를 막는다.** 주석은 지운 뒤에 보므로,
+   왜 막는지 설명하는 주석은 걸리지 않는다. 문구는 `cadenceNote` 한
+   곳에서만 만든다 — 세 자리에 따로 적으면 언젠가 한쪽만 고쳐진다. */
+const PROMISE = /\d+\s*분\s*마다/;
+for (const f of [AUTOCTL, TRAIL, WATCHAPI]) {
+  deny(f, PROMISE, '확인 주기를 "N분마다"로 약속합니다 — 선언값이고 실제 시각은 보장되지 않습니다'
+    + ' (cadenceNote를 쓰세요)');
+}
+// 템플릿으로 우회하는 형태도 막는다: `${X}분마다`
+for (const f of [AUTOCTL, TRAIL, WATCHAPI]) {
+  deny(f, /[}\)]\s*분\s*마다|\$\{[^}]*\}\s*분\s*마다/,
+    '변수로 만든 "분마다" 약속이 남아 있습니다 — cadenceNote를 쓰세요');
+}
+// 그리고 **실제로 그 판정을 부르는지** 본다. 문구만 지우고 안 부르면
+// 다음 사람이 다시 하드코딩한다.
+for (const f of [AUTOCTL, TRAIL, WATCHAPI]) {
+  need(f, /\bcadenceNote\s*\(/,
+    'cadenceNote를 부르지 않습니다 — 주기 문구를 이 파일에서 따로 만들면 언젠가 갈립니다');
+}
 
 if (bad) {
   console.error('\n화면이 확인하지 않은 것을 확인한 것처럼 적고 있습니다.\n'
