@@ -159,6 +159,43 @@ export function autoMergeGate(pr: PrFacts): GateVerdict {
       reason: '초안(draft) PR입니다' };
   }
 
+  // 스위치가 둘 다 켜져 있다. 나머지 판정은 **기술 판정부 한 곳**에 있다.
+  return autoMergeTechnicalGate(pr);
+}
+
+/**
+ * **스위치를 뺀 나머지 판정.** 라벨도 초안도 보지 않는다.
+ *
+ * 왜 따로 부를 수 있어야 하나
+ * ───────────────────────────
+ * `autoMergeGate`는 라벨이 없으면 거기서 돌아선다. 그게 맞다 — 라벨이
+ * 유일한 스위치고, 그 앞에서 멈추는 것이 안전하다.
+ *
+ * 그런데 **그래서 열린 PR 전부의 판정이 `NO_LABEL` 하나로 수렴한다.**
+ * 2026-11-05 기준 열린 PR 100개가 전부 초안이고 라벨이 0개라서, 게이트에
+ * 물어보면 100개가 똑같이 `NO_LABEL`이라고만 답한다. 그중 무엇이 충돌
+ * 났고 무엇이 검사가 빨갛고 무엇이 지금 올려도 되는지는 **사람이 100개를
+ * 하나씩 열어 봐야** 알 수 있었다. `CLAUDE.md`가 없애라고 한 바로 그
+ * 수동 절차다.
+ *
+ * 이 함수는 그 질문에 답하기 위한 것이다: "스위치를 켠다면, 그래도 막는
+ * 것이 남아 있는가."
+ *
+ * 왜 로직을 복제하지 않았나
+ * ─────────────────────────
+ * 보고용으로 같은 판정을 한 번 더 쓰면 두 곳이 갈리고, 갈리면 보고서가
+ * "올려도 된다"고 한 PR을 게이트가 막는다 (`CLAUDE.md`: 같은 판단이 두
+ * 곳에 있으면 언젠가 갈린다). 그래서 `autoMergeGate`가 이 함수를 부른다 —
+ * 정본은 여기 하나다. 테스트가 두 함수의 판정이 **값으로 같다**는 것을
+ * 못 박는다.
+ *
+ * **이 함수는 아무것도 합치지 않는다.** 합치는 쪽(`scripts/auto-merge.mjs`)은
+ * `autoMergeGate`만 부른다 — 그래야 라벨 없는 PR이 합쳐질 길이 없다.
+ * `scripts/check-auto-merge-switches.mjs`가 그것을 검사한다.
+ */
+export function autoMergeTechnicalGate(pr: PrFacts): GateVerdict {
+  const d: string[] = [];
+
   // 2. 대상 브랜치. main이 아니면 **stacked PR**이다.
   //    앞 PR이 먼저 들어가야 하고, 그 뒤에는 base가 바뀌므로 검사도 다시 돌아야 한다.
   if (pr.baseRef !== INTENDED_BASE) {

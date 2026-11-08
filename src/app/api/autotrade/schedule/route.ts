@@ -34,7 +34,7 @@ import { scheduleConnState, rebindVerdict } from '@/lib/engine/schedulePlan';
 import {
   resolveStrategy, runnableStrategies, strategyIdOfRow, LEGACY_STRATEGY_ID,
 } from '@/lib/strategies/registry';
-import { runtimeStateOf, RUNTIME_LABEL } from '@/lib/autotrade/evaluationLoop';
+import { runtimeStateOf, RUNTIME_LABEL, dueDiagnostics } from '@/lib/autotrade/evaluationLoop';
 import { parseTogglePatch, enabledUpdate, notFoundMessage } from '@/lib/autotrade/scheduleToggle';
 import { workerPlan } from '@/lib/runtime/workerPlan';
 import { executionGateVerdict, enableFilterSpec } from '@/lib/execution/dormantGate';
@@ -226,6 +226,19 @@ export async function GET(req: NextRequest) {
       // 켜짐/꺼짐만으로는 부족하다. 켜져 있는데 실행기가 안 오면 그건
       // 감시 중이 아니다. 마지막 평가 결과와 다음 평가 시각까지 함께
       // 준다 — 화면이 '다음 실행 아침 8시' 같은 없는 사실을 적지 않도록.
+      // ── 지금 왜 안 도는가 ──
+      //
+      // `runtime`(runtimeStateOf)은 `dueCheck`를 부르지 않는다. 그래서
+      // 화면에 `WATCHING`이 떠 있는데 실행기의 틱은 매번 `WAITING`으로
+      // 돌아설 수 있다 — 2026-11-02~05 `autotrade-tick` 12회차가 전부
+      // 그랬고, 그 사실은 워크플로 로그에만 있었다.
+      //
+      // 그래서 **틱을 막는 그 판정**을 같은 정본에서 가져와 함께 싣는다.
+      // 읽기만 하고, 아는 필드만 돌려준다(시크릿은 들어가지 않는다).
+      dueDiag: dueDiagnostics({
+        nowMs, enabled: r.enabled, connectionId: r.connection_id,
+        lastRunAtMs: r.last_run_at, intervalMin: r.interval_min,
+      }),
       runtime: runtimeStateOf({
         nowMs, enabled: r.enabled,
         lastRunAtMs: r.last_run_at,
