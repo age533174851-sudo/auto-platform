@@ -434,6 +434,28 @@ for (const f of [AUTOCTL, TRAIL, WATCHAPI]) {
     'cadenceNote를 부르지 않습니다 — 주기 문구를 이 파일에서 따로 만들면 언젠가 갈립니다');
 }
 
+/* ── ⑧ 계산해서 내려보낸 **관측값**을 화면이 버리지 않는다 ──────
+   ⑦에서 "N분마다" 약속을 지웠다. 그런데 거기서 멈추면 화면은
+   "선언 주기 15분 — 보장되지 않습니다"만 말하고, **실제로 언제
+   확인됐는지는 말하지 않는다.** 그건 약속보다 낫지만 아직 관측이 아니다.
+
+   그리고 그 관측값은 이미 와 있다:
+
+     evaluationLoop.ts `runtimeStateOf`  → runnerLastSeenMs · runnerStale 계산
+     api/autotrade/schedule/route.ts:242 → 예약별 `runtime`에 실어 보냄
+     AutotradeControl.tsx                → `s.runtime`을 이미 읽는다
+     그런데 runnerLastSeenMs를 **그리는 곳은 0건이었다**
+
+   계산해서 브라우저까지 보낸 값을 화면이 버린 것이다 — `CLAUDE.md`가
+   "자주 나는 고장 ①"로 적어 둔 **만들어 놓고 배선을 안 함**이다.
+   이 규칙은 그 값이 화면에 도달하는지를 본다. */
+need(AUTOCTL, /\brunnerLastSeenMs\b/,
+  '실행기의 마지막 확인 시각(runnerLastSeenMs)을 화면이 쓰지 않습니다 — '
+  + 'runtimeStateOf가 계산해 schedule 라우트가 내려보낸 관측값입니다 (버리지 마세요)');
+need(AUTOCTL, /cadenceNote\s*\(\s*\{[^}]*lastSeenMs/,
+  '관측값을 cadenceNote에 넣지 않습니다 — 넣지 않으면 선언값만 적히고 '
+  + '"마지막 확인 N분 전"이 나오지 않습니다');
+
 if (bad) {
   console.error('\n화면이 확인하지 않은 것을 확인한 것처럼 적고 있습니다.\n'
     + '표시를 낮추거나, 서버에서 확인하는 경로를 붙이세요.\n');

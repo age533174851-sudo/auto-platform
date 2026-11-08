@@ -1183,6 +1183,35 @@ export default function AutotradeControl({ onSnapshot, onReload }: {
                     overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                   }} title={s.runtime.reason}>{s.runtime.reason}</div>
                 )}
+                {/* ── 2-b행: 실행기를 **마지막으로 실제 본 때** ──
+                    `runnerLastSeenMs`는 `runtimeStateOf`가 계산해
+                    `/api/autotrade/schedule`이 이 행에 실어 보낸 **관측값**
+                    이다. 그런데 화면이 그리는 곳이 **0건이었다** — 계산해서
+                    브라우저까지 보낸 값을 버린 것이고, `CLAUDE.md`의
+                    "자주 나는 고장 ①(만들어 놓고 배선을 안 함)"이다.
+
+                    위 2행은 '무엇을 판단했는가'이고, 이 줄은 '그 판단이
+                    **언제** 것인가'다. 둘은 다른 질문이다 — WATCHING이
+                    떠 있어도 마지막 확인이 294분 전이면 감시 중이 아니다.
+
+                    문구는 `cadenceNote` 한 곳에서만 만든다(⑦과 같은 판정).
+                    관측이 없으면 그 함수가 선언값만 적는다 — 여기서
+                    0분이나 '방금'으로 꾸미지 않는다. */}
+                {s.runtime && (() => {
+                  const c = cadenceNote({
+                    declaredMin: RUNNER_INTERVAL_MIN,
+                    lastSeenMs: s.runtime.runnerLastSeenMs ?? null,
+                    nowMs: Date.now(),
+                    subject: '서버 실행기',
+                  });
+                  return (
+                    <div style={{
+                      color: c.code === 'STALE' ? T.ylw : c.code === 'OBSERVED' ? T.sub : T.muted,
+                      fontSize: 10, marginTop: 2, lineHeight: 1.4,
+                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                    }} title={c.text}>{c.text}</div>
+                  );
+                })()}
                 {/* ── 3행: 나머지는 한 줄로 ── */}
                 <div style={{ color: T.muted, fontSize: 10, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {/* 서버가 판정한 상태를 그대로 쓴다. 화면이 다시 판단하면
