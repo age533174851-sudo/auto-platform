@@ -34,6 +34,7 @@ import type { EvaluationOutcome } from '../strategies/runStrategy';
 import type { DecisionVerdict } from '../ui/autoOverview';
 import { intervalMinOf, RUNNER_INTERVAL_MIN } from './nextRun';
 import { entryWindowOf, windowDueVerdict } from './entryWindowDue';
+import { WORKER_STALE_MS } from '../runtime/runtimeHealth';
 
 /** null·빈 문자열·boolean은 숫자가 아니다. **0으로 눕히지 않는다** */
 const num = (v: any): number | null => {
@@ -340,10 +341,13 @@ export const RUNNER_LATE_FACTOR = 3;
 /**
  * 주 실행기(Fly Worker)를 끊겼다고 볼 때까지.
  *
- * 워커는 몇 초마다 heartbeat를 쓴다. 3분이면 재배포로 잠깐 끊긴 것과
- * 정말 죽은 것을 가른다.
+ * **값은 여기서 정하지 않는다.** 같은 질문에 답하는 숫자가 세 곳에
+ * 따로 적혀 있었고 한 곳은 30초로 갈라져 있었다. 근거와 숫자는
+ * `src/lib/runtime/runtimeHealth.ts`가 소유하고, 여기서는 그것을
+ * 가져다 쓰면서 **이미 이 이름으로 import하는 쪽**(`workerPlan.ts` ·
+ * `schedulePoll.test.ts`)이 그대로 돌게 다시 내보낸다.
  */
-export const WORKER_STALE_MS = 180_000;
+export { WORKER_STALE_MS } from '../runtime/runtimeHealth';
 
 /**
  * 이 예약이 지금 어떤 상태인가.

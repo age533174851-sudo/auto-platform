@@ -9,7 +9,11 @@
 // 이 시험은 그 사흘을 한 줄로 만든다.
 
 import { test, eq, assert } from '../../test/harness';
-import { runtimeHealthOf, autoFixPlan, STALE_MS } from './runtimeHealth';
+import { runtimeHealthOf, autoFixPlan, STALE_MS, WORKER_STALE_MS } from './runtimeHealth';
+// **다른 모듈에서 가져온다.** 셋이 같은 숫자인지는 한 파일 안에서는
+// 확인할 수 없다 — 갈라진 자리가 바로 다른 파일이었다.
+import { HEARTBEAT_STALE_MS } from './persistentRuntime';
+import { WORKER_STALE_MS as LOOP_WORKER_STALE_MS } from '../autotrade/evaluationLoop';
 
 const NOW = 1_800_000_000_000;
 const fresh = new Date(NOW - 10_000).toISOString();
@@ -136,6 +140,30 @@ export function runRuntimeHealthTests() {
     const p = autoFixPlan(h, { openOrders: null });
     eq(p.actions.length, 0);
     assert(p.blocked.some(b => /확인하지 못해/.test(b)), p.blocked.join(' | '));
+  });
+
+  // ── 워커 생존 기준은 하나다 ────────────────────────────────
+  //
+  // 이 시험이 없으면 다음에 누가 한 곳만 고친다. 실제로 그렇게 됐다:
+  // 세 상수가 180초 · 180초 · **30초**였고, `schedulePoll.test.ts`가
+  // `>= 120_000`을 요구하는데도 30초가 통과했다 — 다른 상수여서 그
+  // 시험이 보지 못했다. 셋이 같은 값임을 여기서 묶어 두면, 한쪽에 붙인
+  // 어떤 시험도 나머지를 함께 지킨다.
+  test('워커 생존 기준은 세 모듈에서 같은 숫자다', () => {
+    eq(STALE_MS, WORKER_STALE_MS);
+    eq(HEARTBEAT_STALE_MS, WORKER_STALE_MS);
+    eq(LOOP_WORKER_STALE_MS, WORKER_STALE_MS);
+  });
+
+  test('워커 생존 기준은 재배포를 견디고 죽음을 놓치지 않는 범위다', () => {
+    // schedulePoll.test.ts:470이 WORKER_STALE_MS에 걸어 둔 것과 같은 범위다.
+    // 같은 숫자가 됐으므로 이제 세 모듈 전부가 이 범위 안에 있다.
+    assert(WORKER_STALE_MS >= 120_000, `${WORKER_STALE_MS}: 유예가 짧으면 재배포마다 빨강이 된다`);
+    assert(WORKER_STALE_MS <= 600_000, `${WORKER_STALE_MS}: 유예가 길면 죽은 워커를 못 본다`);
+    // 워커는 최악의 설정에서도 15초마다 heartbeat를 쓴다
+    // (worker/src/index.ts:86의 clamp 상한). 그 네 번은 넘겨야
+    // 한 번 늦은 것을 죽음으로 읽지 않는다.
+    assert(WORKER_STALE_MS >= 15_000 * 4, `${WORKER_STALE_MS}: 15초 주기의 네 번보다 짧다`);
   });
 
   test('값을 바꿔야 하는 고장은 자동 목록에 넣지 않는다', () => {
