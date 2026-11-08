@@ -74,6 +74,86 @@ const WATCH_DIRS = readdirSync('src/lib', { withFileTypes: true })
 const SEARCH_DIRS = ['src', 'scripts', 'worker/src'];
 
 /**
+ * **시험 파일인가** — 이 저장소의 시험 파일 이름은 한 모양이 아니다.
+ *
+ *   src/lib/risk/killSwitchTruth.test.ts     ← `.test.ts`
+ *   src/components/Foo.test.tsx              ← `.test.tsx`
+ *   scripts/ten-slot-pg.test.mjs             ← `.test.mjs`   (6개)
+ *   scripts/test-kill-retry.mjs              ← `test-` 접두어 (6개)
+ *
+ * 아래 소비자 판정은 `.test.ts`·`.test.tsx`만 뺐다. 그래서 뒤의 두 모양은
+ * **여전히 소비자로 세어진다.** 그리고 이 검사기가 확장자 붙은 경로까지
+ * 보게 된 뒤부터는(`'src/lib/risk/killRetry.ts'` 같은 문자열) 그 구멍이
+ * 실제로 열렸다 — `scripts/test-*.mjs`가 TS를 tsc 인자로 넘기려고 적어 둔
+ * 경로 문자열이 **배선으로 세어진다.**
+ *
+ * 전수 측정(다섯 PR을 한 트리에 모은 상태): 두 모양을 함께 빼면 새로
+ * orphan이 되는 모듈은 **1개뿐이고 그게 의도한 모듈이다** —
+ * `src/lib/risk/killRetry.ts`(제품 소비자 0곳, ALLOW에 사유가 적혀 있다).
+ * 다른 544개는 판정이 바뀌지 않는다. 즉 이 변경은 검사기를 **느슨하게
+ * 만드는 것이 아니라** 놓치던 것을 잡게 한다.
+ */
+function isTestSource(path) {
+  if (/\.test\.(ts|tsx|mjs|js)$/.test(path)) return true;
+  if (/^scripts\/test-[^/]+\.mjs$/.test(path)) return true;
+  return false;
+}
+
+// 이 판정이 틀리면 검사 전체가 조용히 뒤집힌다 — 끊긴 모듈이 "배선됨"이
+// 된다. 그래서 **CI가 평소에 돌리는 경로에서** 바로 확인한다. 별도
+// `--self-test` 모드로 두면 CI가 안 돌리고, 이 저장소의 규칙대로
+// **CI가 안 돌리는 검사기는 없는 검사기다.**
+for (const [p, want] of [
+  ['src/lib/risk/killSwitchTruth.test.ts', true],
+  ['src/components/terminal/PaperWallet.test.tsx', true],
+  ['scripts/ten-slot-pg.test.mjs', true],
+  ['scripts/test-kill-retry.mjs', true],
+  ['scripts/test-pr-facts.mjs', true],
+  // ── 시험이 **아닌데** 이름에 test가 들어간 것들 (전부 실재한다) ──
+  ['scripts/check-test-registry.mjs', false],
+  ['scripts/check-testnet-diagnose.mjs', false],
+  ['scripts/run-tests.mjs', false],
+  ['scripts/testnet-diagnose-mutations.mjs', false],
+  ['src/lib/engine/testnetDiagnoseVerdict.ts', false],
+  ['src/lib/risk/killRetry.ts', false],
+]) {
+  if (isTestSource(p) !== want) {
+    console.error(
+      `\n❌ 검사기 자기 점검 실패: isTestSource('${p}') 가 ${want} 여야 하는데 ${!want} 입니다.`,
+    );
+    console.error('   시험 파일을 소비자로 세면 끊긴 모듈이 "배선됨"으로 통과합니다.');
+    process.exit(1);
+  }
+}
+
+// **판단이 두 곳에 있으면 언젠가 갈린다.** 위 점검은 `isTestSource()`가
+// 맞는지만 본다 — 소비자 루프가 그 함수를 **안 쓰고** 제 손으로 정규식을
+// 다시 적으면, 점검은 통과하면서 실제 판정은 옛 규칙으로 돌아간다.
+// (실제로 변이로 확인했다: 루프만 `.test.ts` 규칙으로 되돌려도 이 저장소의
+// 현재 상태로는 결과가 똑같아서 **아무도 모른다.**)
+//
+// 그래서 이 파일 안에 `.test.` 정규식이 **한 개뿐**임을 자기 소스로 고정한다.
+{
+  const own = stripComments(readFileSync('scripts/check-wiring.mjs', 'utf8'));
+  const dup = (own.match(/\\\.test\\\./g) || []).length;
+  if (dup !== 1) {
+    console.error(
+      `\n❌ 검사기 자기 점검 실패: \`\\.test\\.\` 정규식이 ${dup}곳에 있습니다 (1곳이어야 합니다).`,
+    );
+    console.error('   시험 파일 판정은 isTestSource() 한 곳에만 둡니다 — 두 곳이면 갈립니다.');
+    process.exit(1);
+  }
+  // **문자열을 통째로 적으면 이 줄 자신이 그 문자열이다.** 처음에 그렇게
+  // 적었고, 그래서 루프에서 호출을 지워도 이 점검이 통과했다 — 점검이
+  // 자기 자신을 근거로 통과하는 것이 이 저장소에서 반복된 고장이다
+  // (`check-wiring.mjs`를 소비자에서 빼는 이유와 같다). 쪼개서 적는다.
+  if (!own.includes('isTestSource' + '(s.path)')) {
+    console.error('\n❌ 검사기 자기 점검 실패: 소비자 루프가 isTestSource() 를 쓰지 않습니다.');
+    process.exit(1);
+  }
+}
+
+/**
  * 아직 안 붙였지만 그럴 만한 이유가 있는 것.
  *
  * **비워 두는 것이 목표다.** 여기 적는 순간 그건 "언젠가 붙일 것"이라는
@@ -295,7 +375,11 @@ for (const file of files) {
     //
     // 시험이 소비자로 세어지면 이 검사는 **자기 목적을 잃는다.** 시험은
     // 판정이 맞는지 보는 것이고, 그 판정이 **쓰이는지**는 보지 않는다.
-    if (/\.test\.(ts|tsx)$/.test(s.path)) continue;
+    //
+    // **이름 모양이 두 가지다.** `.test.ts`만 보면 `scripts/ten-slot-*.test.mjs`
+    // 여섯 개와 `scripts/test-*.mjs` 여섯 개가 여전히 소비자로 세어진다.
+    // 판정은 `isTestSource()` 한 곳에 있고 자기 점검이 붙어 있다 (위).
+    if (isTestSource(s.path)) continue;
     // **이 스크립트 자신은 소비자가 아니다.**
     //
     // WATCH_DIRS에 'src/lib/runtime'을 넣자마자 `src/lib/ai/runtime.ts`가
