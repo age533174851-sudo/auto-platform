@@ -16,6 +16,10 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { C, FS, NUM, ghostBtn, fmtPrice } from './theme';
 import { useTerminal } from './TerminalContext';
+import { cadenceNote } from '@/lib/autotrade/nextRun';
+
+/** Fly Worker `pollExitMonitor`의 **선언** 주기(분). 실제 실행률은 이 화면이 알지 못한다 */
+const EXIT_MONITOR_DECLARED_MIN = 5;
 
 const ACTION_LABEL: Record<string, string> = {
   NONE: '그대로', MOVE_STOP: '손절 옮김', CLOSE: '청산',
@@ -155,7 +159,14 @@ export function TrailPanel() {
       <div style={{ color: C.faint, fontSize: FS.micro, lineHeight: 1.6 }}>
         이 화면은 아무것도 실행하지 않습니다 — 판정만 보여줍니다.
         {data.liveStopKnown === false && ' 거래소에 지금 걸린 손절가는 조회하지 않았습니다(화면을 여는 것만으로 요청이 나가지 않게). 위 손절가는 진입 시점 값 기준입니다.'}
-        {' '}실제 이동은 청산 감시가 5분마다 확인해서 합니다.
+        {/* ── 여기가 가장 무거운 약속이었다 (#592 2번) ──
+            "5분마다"는 Fly Worker `pollExitMonitor`의 **선언 주기**다.
+            GitHub 대체(`exit-monitor.yml`)의 2026-11-07 실측은 ~320분
+            이므로 **64배** 낙관적이었다. 손절 이동 문구라, 사용자는 이
+            숫자를 읽고 손절이 그 간격으로 따라온다고 믿는다.
+            이 화면에는 마지막 확인 시각의 관측값이 없으므로 꾸며 내지
+            않고, 선언값임을 밝히고 보장하지 않는다고만 적는다. */}
+        {' '}실제 이동은 청산 감시가 합니다 — {cadenceNote({ declaredMin: EXIT_MONITOR_DECLARED_MIN, subject: '청산 감시' }).text}.
       </div>
 
       <button onClick={load} disabled={busy}

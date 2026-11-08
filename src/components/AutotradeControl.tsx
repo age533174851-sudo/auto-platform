@@ -24,7 +24,7 @@ import { autotradeHealth, agoText } from '@/lib/engine/autotradeHealth';
 import { stopPctForLeverage, liquidationDistancePct, maxLeverageBeforeLiquidation, riskMarginVerdict } from '@/lib/engine/leverageMath';
 import { errorTextOf } from '@/lib/http/errorText';
 import { savedButBlockedText, type OutcomeVerdict, firstEvaluationVerdict } from '@/lib/autotrade/runOutcome';
-import { nextRunPlan, nextRunLines, RUNNER_INTERVAL_MIN } from '@/lib/autotrade/nextRun';
+import { nextRunPlan, nextRunLines, cadenceNote, RUNNER_INTERVAL_MIN } from '@/lib/autotrade/nextRun';
 // 켜고 끄기는 정체를 다시 조립하지 않는다 — 판정은 한 곳에만 둔다.
 import {
   toggleRequest, rebindRequest, applyToggleResult, toggleFailureNote,
@@ -1183,6 +1183,35 @@ export default function AutotradeControl({ onSnapshot, onReload }: {
                     overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                   }} title={s.runtime.reason}>{s.runtime.reason}</div>
                 )}
+                {/* ── 2-b행: 실행기를 **마지막으로 실제 본 때** ──
+                    `runnerLastSeenMs`는 `runtimeStateOf`가 계산해
+                    `/api/autotrade/schedule`이 이 행에 실어 보낸 **관측값**
+                    이다. 그런데 화면이 그리는 곳이 **0건이었다** — 계산해서
+                    브라우저까지 보낸 값을 버린 것이고, `CLAUDE.md`의
+                    "자주 나는 고장 ①(만들어 놓고 배선을 안 함)"이다.
+
+                    위 2행은 '무엇을 판단했는가'이고, 이 줄은 '그 판단이
+                    **언제** 것인가'다. 둘은 다른 질문이다 — WATCHING이
+                    떠 있어도 마지막 확인이 294분 전이면 감시 중이 아니다.
+
+                    문구는 `cadenceNote` 한 곳에서만 만든다(⑦과 같은 판정).
+                    관측이 없으면 그 함수가 선언값만 적는다 — 여기서
+                    0분이나 '방금'으로 꾸미지 않는다. */}
+                {s.runtime && (() => {
+                  const c = cadenceNote({
+                    declaredMin: RUNNER_INTERVAL_MIN,
+                    lastSeenMs: s.runtime.runnerLastSeenMs ?? null,
+                    nowMs: Date.now(),
+                    subject: '서버 실행기',
+                  });
+                  return (
+                    <div style={{
+                      color: c.code === 'STALE' ? T.ylw : c.code === 'OBSERVED' ? T.sub : T.muted,
+                      fontSize: 10, marginTop: 2, lineHeight: 1.4,
+                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                    }} title={c.text}>{c.text}</div>
+                  );
+                })()}
                 {/* ── 3행: 나머지는 한 줄로 ── */}
                 <div style={{ color: T.muted, fontSize: 10, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {/* 서버가 판정한 상태를 그대로 쓴다. 화면이 다시 판단하면
@@ -1612,12 +1641,19 @@ export default function AutotradeControl({ onSnapshot, onReload }: {
               걸려 있어 **성공한 진입은 하루 최대 1회**다. 앞 문구는
               "실제 진입 간격 60분"이라고 적었는데, 그건 60분마다 포지션이
               생긴다는 뜻으로 읽힌다. 실제로는 하루 한 번이다. */}
+          {/* ── 주기를 약속하지 않는다 (#592 2번) ──
+              예전에는 "서버가 15분마다 확인합니다"라고 적었다. 그 15분은
+              워크플로에 **선언된** 값이고, 2026-11-07 실측은 약 294분이었다
+              (약 20배). 문구는 한 곳(`cadenceNote`)에서만 만든다 — 이
+              자리에 직접 적으면 다음에 또 한쪽만 고쳐진다. */}
           {ticking
-            ? <>서버가 <b>{RUNNER_INTERVAL_MIN}분마다</b>, 이 예약은 <b>{intervalMin || '?'}분</b>마다 조건을 봅니다.
+            ? <>{cadenceNote({ declaredMin: RUNNER_INTERVAL_MIN, subject: '서버 실행기' }).text}
+                {' '}이 예약은 <b>{intervalMin || '?'}분</b> 간격 조건으로 평가되고,
                 진입은 <b>하루 최대 1회</b>입니다(계단식 전략의 하루 1회 제약).
                 이 화면은 더 자주 볼 뿐이라 <b>닫아도 자동매매는 계속 돕니다.</b></>
-            : <>서버가 <b>{RUNNER_INTERVAL_MIN}분마다</b> 확인하고, 이 예약은 <b>{intervalMin || '?'}분</b>마다 조건을 봅니다 —
-                조건이 맞으면 그때 들어가고, <b>진입은 하루 최대 1회</b>입니다.
+            : <>{cadenceNote({ declaredMin: RUNNER_INTERVAL_MIN, subject: '서버 실행기' }).text}
+                {' '}이 예약은 <b>{intervalMin || '?'}분</b> 간격 조건으로 평가되고,
+                조건이 맞으면 그때 들어가며 <b>진입은 하루 최대 1회</b>입니다.
                 <b> 폰을 닫아도, 배포를 해도 계속 돕니다</b> — 예약은 서버에 저장돼 있습니다.
                 아래 스위치는 이 화면이 열려 있는 동안만 더 자주 보는 용도입니다.</>}
         </div>
@@ -2189,8 +2225,8 @@ export default function AutotradeControl({ onSnapshot, onReload }: {
             {/* **"매일 23:00 UTC"는 사실이 아니었다.** 그 문구는 vercel.json
                 크론(하루 1회) 시절 것이다. 지금 실행기는 GitHub Actions이고
                 15분마다 예약을 확인한다 — 위 예약 줄이 실제 시각을 적는다. */}
-            아직 없습니다. 서버 실행기가 <b style={{ color: T.txt }}>{RUNNER_INTERVAL_MIN}분마다</b> 예약을
-            확인하고, 실제 진입 가능 시각은 예약마다 다릅니다 — 위 예약 줄에 적혀 있습니다.
+            아직 없습니다. {cadenceNote({ declaredMin: RUNNER_INTERVAL_MIN, subject: '서버 실행기' }).text}
+            {' '}실제 진입 가능 시각은 예약마다 다릅니다 — 위 예약 줄에 적혀 있습니다.
           </div>
         )}
         {runs.map((r, i) => (

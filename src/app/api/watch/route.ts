@@ -9,6 +9,7 @@ import {
   listActiveWatches, createWatch, closeWatch, CHECK_INTERVAL_MIN,
 } from '@/lib/strategies/watchStore';
 import { startTrailing, validateWatchSpec } from '@/lib/strategies/spotOrderPlan';
+import { cadenceNote } from '@/lib/autotrade/nextRun';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -40,9 +41,19 @@ export async function GET(req: NextRequest) {
       // 이 값이 곧 보호 수준이다. 화면이 그대로 보여줘야 한다.
       checkIntervalMin: CHECK_INTERVAL_MIN,
       guardedBy: 'APP',
-      note: `서버가 ${CHECK_INTERVAL_MIN}분마다 확인합니다. ` +
-            `그 사이에 가격이 손절선을 지나가면 지나간 값에 체결됩니다. ` +
-            `서버나 감시 작업이 멈추면 이 보호는 동작하지 않습니다.`,
+      // ── 주기를 약속하지 않는다 (#592 2번) ──
+      //
+      // 예전에는 "서버가 N분마다 확인합니다"였다. `CHECK_INTERVAL_MIN`은
+      // 깨우는 쪽(GitHub Actions `watch-tick`)에 **선언된** 값이고,
+      // 2026-11-07 실측에서 `schedule`은 선언과 무관하게 하루 4~5회만
+      // 돌았다. 손절 보호 문구라 그 차이가 그대로 위험이 된다.
+      //
+      // 문구는 `cadenceNote` 한 곳에서만 만든다. 화면(`WatchPanel`)은
+      // 이미 `checkIntervalMin`을 받아 정직하게 그리므로, 이 `note`만
+      // 약속을 쓰지 않으면 된다.
+      note: `${cadenceNote({ declaredMin: CHECK_INTERVAL_MIN, subject: '이 보호' }).text}. `
+          + `확인 사이에 가격이 손절선을 지나가면 지나간 값에 체결됩니다. `
+          + `서버나 감시 작업이 멈추면 이 보호는 동작하지 않습니다.`,
     }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (e: any) {
     return NextResponse.json({ ok: false, error: e?.message || '조회 실패' }, { status: 500 });

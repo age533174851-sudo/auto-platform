@@ -32,7 +32,7 @@
 
 import type { EvaluationOutcome } from '../strategies/runStrategy';
 import type { DecisionVerdict } from '../ui/autoOverview';
-import { intervalMinOf, RUNNER_INTERVAL_MIN } from './nextRun';
+import { intervalMinOf, RUNNER_INTERVAL_MIN, RUNNER_LATE_FACTOR } from './nextRun';
 import { entryWindowOf, windowDueVerdict } from './entryWindowDue';
 
 /** null·빈 문자열·boolean은 숫자가 아니다. **0으로 눕히지 않는다** */
@@ -335,7 +335,10 @@ export interface RuntimeStatus {
  * 실행기는 부하에 따라 몇 분 늦는다. 한 주기 놓쳤다고 '멈췄다'고 적으면
  * 경고가 상시로 켜져 있고, 그러면 진짜 멈췄을 때 아무도 안 본다.
  */
-export const RUNNER_LATE_FACTOR = 3;
+// **상수는 `nextRun.ts`에 있다.** 화면 문구(`cadenceNote`)와 이 판정이
+// 같은 배수를 써야 하는데, 두 벌로 적으면 언젠가 갈린다. 기존
+// import 경로를 깨지 않도록 여기서 다시 내보낸다.
+export { RUNNER_LATE_FACTOR };
 
 /**
  * 주 실행기(Fly Worker)를 끊겼다고 볼 때까지.

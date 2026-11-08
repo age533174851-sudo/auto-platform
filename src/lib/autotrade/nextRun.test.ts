@@ -11,6 +11,7 @@
 import { test, assert, eq } from '../../test/harness';
 import {
   nextRunPlan, nextRunLines, intervalMinOf, kstClock, fmtKst, fmtUtc,
+  cadenceNote,
   RUNNER_INTERVAL_MIN, DEFAULT_INTERVAL_MIN,
 } from './nextRun';
 import { classifyRun, blockCodeOf, savedButBlockedText, CONCURRENT_CODES } from './runOutcome';
@@ -26,13 +27,15 @@ export function runAutotradeTimingTests() {
     eq(p.state, 'WAITING');
     eq(p.nextCheckMs, NOW - 20 * MIN + 60 * MIN);
     assert(p.summary.includes('40분'), p.summary);
+    eq(p.latestCheckMs, null, '대기 중이어도 다음 실행 완료 시각은 보장되지 않는다');
   });
 
   test('간격이 지났으면 실행기가 오는 대로다', () => {
     const p = nextRunPlan({ nowMs: NOW, lastRunAtMs: NOW - 90 * MIN, intervalMin: 60 });
     eq(p.state, 'DUE');
     // **단정하지 않는다.** GitHub Actions는 부하에 따라 늦는다.
-    eq(p.latestCheckMs, NOW + RUNNER_INTERVAL_MIN * MIN);
+    eq(p.latestCheckMs, null, 'cron 지연에는 보장된 상한이 없다');
+    assert(!p.summary.includes('최대'), p.summary);
     assert(p.summary.includes('15분'), p.summary);
   });
 
@@ -48,11 +51,16 @@ export function runAutotradeTimingTests() {
     eq(line?.value, '지금 첫 점검 중');
   });
 
-  test('켰는데 아직 안 돌았으면 실행기 주기를 상한으로 적는다', () => {
+  test('켰는데 아직 안 돌았으면 실행기 주기를 완료 상한으로 주장하지 않는다', () => {
     const p = nextRunPlan({ nowMs: NOW, enabledAtMs: NOW - 2 * MIN, lastRunAtMs: null });
     eq(p.state, 'NEVER_RAN');
     eq(p.nextCheckMs, null, '모르는 시각을 지어내면 안 된다');
-    eq(p.latestCheckMs, NOW - 2 * MIN + RUNNER_INTERVAL_MIN * MIN);
+    eq(p.latestCheckMs, null);
+    assert(p.summary.includes('보장되지'), p.summary);
+    const line = nextRunLines({ nowMs: NOW, enabledAtMs: NOW - 2 * MIN, lastRunAtMs: null }, p)
+      .find(l => l.label === '다음 확인 가능');
+    assert(line?.value.includes('지연 가능') === true, String(line?.value));
+    assert(line?.value.includes('최대') === false, String(line?.value));
   });
 
   test('꺼져 있으면 다음 시각이 없다', () => {
@@ -128,7 +136,7 @@ export function runAutotradeTimingTests() {
     );
     const l = lines.find(x => x.label === '실행기 확인 주기');
     assert(l != null && l.value.includes('15분'), String(l?.value));
-    assert(l != null && l.value.includes('늦을 수'), String(l?.value));
+    assert(l != null && l.value.includes('보장되지'), String(l?.value));
   });
 
   console.log('[실행 결과 — HTTP 200은 주문이 나갔다는 뜻이 아니다]');
@@ -240,5 +248,103 @@ export function runAutotradeTimingTests() {
     } });
     eq(skipped.outcome, 'WAITING');
     assert(skipped.detail.includes('40분'), skipped.detail);
+  });
+
+  // ── 주기를 약속하지 않는다 (#592 2번) ───────────────────────────
+  //
+  // 화면 세 자리가 "서버가 **15분마다** 확인합니다"라고 적고 있었다.
+  // 그 15분은 `RUNNER_INTERVAL_MIN`, 즉 **워크플로에 선언된 값**이다.
+  // 2026-11-07 실측에서 GitHub Actions `schedule`은 선언과 무관하게
+  // 하루 4~5회만 돌았다(`autotrade-tick` 실측 4.9회/일 ≒ 294분 간격).
+  // 즉 화면이 약속한 주기가 실제보다 **약 20배** 낙관적이었다.
+  // `TrailPanel`은 "청산 감시가 5분마다"라고 적었는데 그건 Fly Worker의
+  // 주기이고, 실측 대체 주기는 ~320분이다 — **64배**.
+  //
+  // 손절·트레일링 문구라 이쪽이 더 무겁다: 사용자는 약속을 읽고
+  // 손절이 그 간격으로 확인된다고 믿는다.
+  //
+  // 고치는 방향은 "관측을 적는 것"이지만, `AutotradeControl`에는 관측값
+  // (`runnerLastSeenMs`)이 **아예 없다.** 없는 관측을 꾸며 낼 수는 없으므로
+  // 이 단계에서 하는 일은 **약속을 지우는 것**이다: 선언값임을 적고,
+  // 관측이 주어지면 그것을 앞세운다. 그리고 그 문구를 **한 곳**에 둔다 —
+  // 세 자리에 따로 적어 두면 언젠가 한쪽만 고쳐진다.
+  console.log('[실행기 주기 문구 — 주기를 약속하지 않는다]');
+
+  test('관측이 없으면 선언값이라고 적고 보장하지 않는다', () => {
+    const n = cadenceNote({ declaredMin: 15, subject: '서버 실행기' });
+    eq(n.code, 'DECLARED_ONLY', n.text);
+    eq(n.agoMin, null);
+    assert(n.text.includes('선언'), n.text);
+    assert(n.text.includes('보장'), n.text);
+  });
+
+  test('★ 어떤 입력에서도 "N분마다"라고 약속하지 않는다', () => {
+    const cases = [
+      { declaredMin: 15, subject: '서버 실행기' },
+      { declaredMin: 5, subject: '청산 감시' },
+      { declaredMin: 15, lastSeenMs: 1_000_000, nowMs: 1_600_000, subject: '서버 실행기' },
+      { declaredMin: 15, lastSeenMs: 1_000_000, nowMs: 99_000_000, subject: '서버 실행기' },
+      { declaredMin: null, subject: '서버 실행기' },
+      { declaredMin: 0, subject: '서버 실행기' },
+      { declaredMin: 15, lastSeenMs: 2_000_000, nowMs: 1_000_000, subject: '서버 실행기' },
+    ];
+    for (const c of cases) {
+      const t = cadenceNote(c as never).text;
+      assert(!t.includes('분마다'), `★ 주기를 약속했다 — ${t}`);
+    }
+  });
+
+  test('관측이 있으면 마지막 확인이 언제였는지를 앞세운다', () => {
+    const n = cadenceNote({
+      declaredMin: 15, lastSeenMs: 1_000_000, nowMs: 1_000_000 + 7 * 60_000,
+      subject: '서버 실행기',
+    });
+    eq(n.code, 'OBSERVED', n.text);
+    eq(n.agoMin, 7);
+    assert(n.text.includes('7분 전'), n.text);
+    assert(n.text.includes('15'), `선언값도 같이 적는다 — ${n.text}`);
+  });
+
+  test('선언 주기를 크게 넘기면 STALE로 적는다 — 정상으로 적지 않는다', () => {
+    const n = cadenceNote({
+      declaredMin: 15, lastSeenMs: 0, nowMs: 294 * 60_000, subject: '서버 실행기',
+    });
+    eq(n.code, 'STALE', n.text);
+    eq(n.agoMin, 294);
+    assert(n.text.includes('넘겼'), n.text);
+  });
+
+  test('경계 — 선언 × 3배까지는 STALE이 아니다', () => {
+    const ok = cadenceNote({ declaredMin: 15, lastSeenMs: 0, nowMs: 45 * 60_000 });
+    eq(ok.code, 'OBSERVED', ok.text);
+    const over = cadenceNote({ declaredMin: 15, lastSeenMs: 0, nowMs: 46 * 60_000 });
+    eq(over.code, 'STALE', over.text);
+  });
+
+  test('주기를 모르면 "모른다"고 적는다 — 0분이나 정상으로 적지 않는다', () => {
+    for (const d of [null, 0, -5, NaN]) {
+      const n = cadenceNote({ declaredMin: d as never, subject: '서버 실행기' });
+      eq(n.code, 'UNKNOWN', `declaredMin=${String(d)} — ${n.text}`);
+      assert(/돌고 있다는 뜻도|알 수 없/.test(n.text), n.text);
+      assert(!n.text.includes('0분'), `★ 모르는 것을 0분으로 적었다 — ${n.text}`);
+    }
+  });
+
+  test('마지막 확인이 미래면(시계 어긋남) 그대로 믿지 않는다', () => {
+    const n = cadenceNote({ declaredMin: 15, lastSeenMs: 2_000_000, nowMs: 1_000_000 });
+    eq(n.code, 'UNKNOWN', n.text);
+    eq(n.agoMin, null);
+  });
+
+  test('주기를 몰라도 관측이 있으면 관측은 적는다', () => {
+    const n = cadenceNote({ declaredMin: null, lastSeenMs: 0, nowMs: 12 * 60_000 });
+    eq(n.agoMin, 12, n.text);
+    assert(n.text.includes('12분 전'), n.text);
+    assert(!n.text.includes('분마다'), n.text);
+  });
+
+  test('빈 입력에서 터지지 않는다', () => {
+    eq(cadenceNote(null as never).code, 'UNKNOWN');
+    eq(cadenceNote(undefined as never).agoMin, null);
   });
 }
