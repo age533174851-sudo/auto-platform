@@ -76,9 +76,129 @@ export interface PaperEquity {
   totalFees: number | null;
   tradeCount: number | null;
   winCount: number | null;
-  /** 시작 대비 수익률(%). 종잣돈이 없으면 null */
+  /**
+   * **거래로 번 돈** = 실현 + 미실현. 충전·출금에 면역이다.
+   * 둘 중 하나라도 못 구했으면 null — 0이 아니다.
+   */
+  netPnl: number | null;
+  /**
+   * 시작 대비 수익률(%). 종잣돈이 없거나 **외부 입출금이 있으면 null**
+   * (그때는 계산할 수 없다 — `returnPctReason`이 왜인지 적는다)
+   */
   returnPct: number | null;
+  /** 수익률을 적지 못한 이유. 적었으면 빈 문자열 */
+  returnPctReason: string;
   note: string;
+}
+
+// ── 충전액을 수익으로 세지 않는다 (#592) ──────────────────────────
+//
+// 화면에 실제로 나간 숫자: 시작 10,000 · 총자산 61,258.32 · 거래 손익 0
+// → **+512.58% 수익.** 사용자는 51,258.32를 충전했을 뿐 거래를 한 번도
+// 하지 않았다. 이슈가 1번으로 지적한 "총자산 상승 = 수익 아님"이 코드에
+// 그대로 있었다.
+//
+// 틀린 자리가 **셋**이었고 셋 다 같은 식을 따로 적고 있었다:
+//
+//   src/app/api/paper/account/route.ts     (현금으로 나눔 — 이중 오류)
+//   src/lib/portfolio/paperAccount.ts      (총자산으로 나눔)
+//   src/app/api/paper/positions/route.ts   (게다가 종잣돈 0을 **0%** 로 적음)
+//
+// 그래서 식을 세 번 고치는 대신 **판정을 여기 한 곳에 두고** 세 자리가
+// 이것을 부른다. 같은 판단이 세 곳에 있으면 언젠가 갈린다.
+//
+// 입출금을 어떻게 아는가
+// ──────────────────────
+// 기본 모의 장부에는 현금흐름 원장이 없다 — `paper_challenge_cashflows`
+// (083)는 `challenge_id` FK로 **챌린지에만** 묶여 있다. 그래서 ΣF를 표에서
+// 읽을 수는 없다. 다만 **남는 돈으로 복원할 수 있다**:
+//
+//   외부 순입출금 = 총자산 − 시작자본 − (실현손익 + 미실현손익)
+//
+// 이 장부는 펀딩을 모델링하지 않고(그래서 잔고에도 영향이 없다),
+// 수수료는 이미 `realized_pnl` 안에 들어 있다(`paperExecution.ts:88`에서
+// `gross_pnl − entry_fee − exit_fee`). 따라서 잔차는 외부 입출금뿐이다.
+// **다시 수수료를 빼면 이중 차감이 된다.**
+//
+// 잔차가 있으면 수익률은 **'계산 불가'가 정답이다.** 0%나 추정치로
+// 위장하지 않는다. 금액(순손익)은 거래에서 파생되므로 그대로 정확하다.
+
+/** 이보다 작은 잔차는 반올림으로 본다 (USDT) */
+export const PAPER_FLOW_EPSILON = 0.01;
+
+export type PaperReturnCode =
+  /** 외부 입출금이 없다 — 수익률을 적을 수 있다 */
+  | 'OK'
+  /** 외부 입출금이 있다 — **수익률 계산 불가** */
+  | 'EXTERNAL_FLOW'
+  /** 종잣돈이 없거나 0이다 — 나눌 것이 없다 */
+  | 'NO_SEED'
+  /** **못 읽은 것이 있다.** 0이 아니다 */
+  | 'UNKNOWN';
+
+export interface PaperReturnVerdict {
+  code: PaperReturnCode;
+  /** 거래로 번 돈 = 실현 + 미실현. 못 구했으면 null */
+  netPnl: number | null;
+  /** 시작 대비 수익률(%). 적을 수 없으면 null */
+  returnPct: number | null;
+  /** 복원한 외부 순입출금. 못 구했으면 null */
+  externalFlow: number | null;
+  reason: string;
+}
+
+/**
+ * 모의 장부의 수익률을 적어도 되는가.
+ *
+ * **분자는 총자산 차이가 아니라 거래 손익이다.** 입출금이 없을 때 둘은
+ * 같지만, 있을 때 총자산 차이는 충전액을 포함한다 — 그것이 512.58%의
+ * 정체였다.
+ */
+export function paperReturnVerdict(i: {
+  // DB 원본값(문자열·null)도 받는다 — 아래 `num()`이 한 곳에서 강제변환한다.
+  // 부르는 쪽마다 Number()를 쓰면 `Number(null) === 0`으로 **못 읽은 것이
+  // 0이 된다.** 그 변환을 라우트에 맡기지 않는다.
+  initialBalance: number | string | null | undefined;
+  totalEquity: number | string | null | undefined;
+  realizedPnl: number | string | null | undefined;
+  unrealizedPnl: number | string | null | undefined;
+  epsilon?: number;
+}): PaperReturnVerdict {
+  const initial = num(i?.initialBalance);
+  const equity = num(i?.totalEquity);
+  const realized = num(i?.realizedPnl);
+  const unreal = num(i?.unrealizedPnl);
+  const eps = num(i?.epsilon) ?? PAPER_FLOW_EPSILON;
+
+  // **못 읽은 것을 0으로 더하지 않는다.** 미실현을 모르면 순손익도 모른다.
+  if (realized == null || unreal == null) {
+    return { code: 'UNKNOWN', netPnl: null, returnPct: null, externalFlow: null,
+      reason: realized == null
+        ? '실현손익을 읽지 못했습니다 — 거래로 번 돈을 계산하지 않았습니다'
+        : '미실현손익을 구하지 못했습니다 — 거래로 번 돈을 계산하지 않았습니다' };
+  }
+  const netPnl = realized + unreal;
+
+  if (equity == null) {
+    return { code: 'UNKNOWN', netPnl, returnPct: null, externalFlow: null,
+      reason: '총자산을 구하지 못해 입출금 여부를 확인할 수 없습니다' };
+  }
+  if (initial == null || initial <= 0) {
+    return { code: 'NO_SEED', netPnl, returnPct: null, externalFlow: null,
+      reason: '시작 자본이 없어 수익률을 계산하지 않았습니다' };
+  }
+
+  const externalFlow = equity - initial - netPnl;
+  if (Math.abs(externalFlow) > eps) {
+    const dir = externalFlow > 0 ? '충전' : '출금';
+    return { code: 'EXTERNAL_FLOW', netPnl, returnPct: null, externalFlow,
+      reason: `수익률 계산 불가 — 외부 입출금 ${externalFlow > 0 ? '+' : ''}`
+        + `${externalFlow.toFixed(2)} USDT(${dir})가 있고 이 장부에는 입출금 기록이 없습니다. `
+        + `거래로 번 돈은 ${netPnl >= 0 ? '+' : ''}${netPnl.toFixed(2)} USDT입니다` };
+  }
+
+  return { code: 'OK', netPnl, returnPct: (netPnl / initial) * 100, externalFlow,
+    reason: '' };
 }
 
 export type PaperAccountCode =
@@ -207,7 +327,9 @@ export function paperEquityOf(i: {
   const empty = {
     cash: null, usedMargin: null, unrealizedPnl: null, totalEquity: null,
     knownCash: null, initialBalance: null, realizedPnl: null, totalFees: null,
-    tradeCount: null, winCount: null, returnPct: null,
+    tradeCount: null, winCount: null,
+    // **시작 전·확인 못 함에서는 수익률도 순손익도 없다.** 0이 아니다.
+    netPnl: null, returnPct: null, returnPctReason: '',
   };
   // **계좌 없음과 확인 못 함은 다른 문장이다.**
   if (st.code === 'UNREADABLE') {
@@ -218,7 +340,9 @@ export function paperEquityOf(i: {
         cash: null, usedMargin: null, unrealizedPnl: null, totalEquity: null,
         knownCash: null, initialBalance: num(a.initial_balance),
         realizedPnl: num(a.total_pnl), totalFees: num(a.total_fees),
-        tradeCount: num(a.trade_count), winCount: num(a.win_count), returnPct: null,
+        tradeCount: num(a.trade_count), winCount: num(a.win_count),
+        netPnl: null, returnPct: null,
+        returnPctReason: '잔고를 읽지 못해 수익률을 계산하지 않았습니다',
         note: '모의 계좌의 잔고를 읽지 못했습니다 — 0으로 적지 않습니다',
       };
     }
@@ -253,20 +377,29 @@ export function paperEquityOf(i: {
   const unrealizedPnl = unknownCount > 0 ? null : unreal;
   const totalEquity = unrealizedPnl == null ? null : cash + unrealizedPnl;
 
+  const realizedPnl = num(a!.total_pnl);
+  // **수익률은 여기서 계산하지 않는다.** 판정 한 곳(`paperReturnVerdict`)을
+  // 부른다 — 예전에는 이 줄이 총자산 차이를 종잣돈으로 나눠서 **충전액을
+  // 수익으로 셌다**(#592).
+  const ret = paperReturnVerdict({
+    initialBalance: initial, totalEquity, realizedPnl, unrealizedPnl,
+  });
+
   return {
     state: 'ACTIVE', code: 'READY',
     cash, usedMargin,
     unrealizedPnl, totalEquity, knownCash: cash,
     initialBalance: initial,
-    realizedPnl: num(a!.total_pnl),
+    realizedPnl,
     totalFees: num(a!.total_fees),
     tradeCount: num(a!.trade_count),
     winCount: num(a!.win_count),
-    returnPct: initial != null && initial > 0 && totalEquity != null
-      ? ((totalEquity - initial) / initial) * 100 : null,
+    netPnl: ret.netPnl,
+    returnPct: ret.returnPct,
+    returnPctReason: ret.reason,
     note: unknownCount > 0
       ? `포지션 ${unknownCount}건의 현재가를 못 읽어 총자산을 계산하지 않았습니다`
-      : '',
+      : ret.reason,
   };
 }
 
