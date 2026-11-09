@@ -34,7 +34,7 @@
 // "아직 안 붙인 것" 목록이 된다.
 
 import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs';
-import { join, basename } from 'node:path';
+import { join, basename, dirname } from 'node:path';
 
 /**
  * 판정 모듈이 사는 곳 — **목록을 손으로 적지 않는다.**
@@ -281,6 +281,35 @@ const ALLOW = new Map([
     + '입력을 KRW로 가정). 그래서 이것을 붙이는 일은 "환율이 없으면 원화로 '
     + '바꾸지 않는다"는 기존 규칙과 충돌하지 않는지 먼저 봐야 한다 — '
     + '고정 fallback은 **환율을 모르는데 아는 척하는 값**이다'],
+
+  // ── 그림자 배럴: 쌍둥이에 가려 아무도 닿지 못하는 모듈 ──
+  ['src/lib/fees/index.ts',
+    '**형제 파일에 가려져 아무도 닿지 못한다.** `src/lib/fees.ts`와 '
+    + '`src/lib/fees/index.ts`가 함께 있고, 파일이 디렉터리보다 먼저 '
+    + '해석된다. `tsc --traceResolution`으로 확인했다 — '
+    + '`src/lib/backtest/index.ts:10`의 `from \'../fees\'`는 '
+    + '`src/lib/fees.ts`로 간다. `fees/index`를 명시한 경로는 저장소에 '
+    + '0곳이다. 즉 이 158줄은 **죽은 코드이면서 살아 있는 것처럼 보인다.** '
+    + '지우지 않는 이유: 두 파일이 같은 질문에 다른 답을 하고, 어느 쪽이 '
+    + '정본인지는 **수수료 숫자를 고르는 결정**이다. '
+    + '`fees.ts`는 거래소별 단일 요율이고 Binance를 maker 0.001 / '
+    + 'taker 0.001로 적는다(현물 VIP0). `fees/index.ts`는 **현물과 선물을 '
+    + '나누고** VIP 구간을 담아 Binance 선물 VIP0을 maker 0.0002 / '
+    + 'taker 0.0005로 적는다. 이 플랫폼은 선물을 거래한다. '
+    + '그리고 **부르는 쪽은 죽은 모듈에 맞춰 쓰여 있다** — '
+    + '`backtest/index.ts:81`과 `safety/index.ts:271`이 '
+    + '`getDefaultConfig(exchange, \'futures\')`로 인자를 둘 넘기는데, '
+    + '실제로 닿는 `fees.ts`의 그 함수는 인자가 하나다. tsc가 **이미 '
+    + '그것을 적고 있다** — 기준선 73건 안에 '
+    + '`backtest/index.ts(81,49) TS2554: Expected 0-1 arguments, but got 2`와 '
+    + '`safety/index.ts(271,68)` 같은 오류로 들어 있다. 기준선을 **개수로만** '
+    + '보면 이 두 줄이 보이지 않는다. '
+    + '실제 체결 수수료는 다른 곳에서 온다(`paperExecution.ts`의 '
+    + '`paperFeeRate` · `paper/engine.ts`의 `FEE_RATE`) — 즉 **실주문 손익이 '
+    + '틀어지는 문제는 아니다.** 영향은 백테스트 수수료와 '
+    + '`validatePreOrder`의 왕복 수수료 추정이고, 둘 다 수수료를 '
+    + '**과대**하게 잡는 방향(보수적)이다. 어느 표를 정본으로 할지는 '
+    + '사이징·백테스트 숫자를 바꾸는 결정이라 사람 승인 사항이다'],
 ]);
 
 const files = [];
@@ -327,6 +356,41 @@ function walk(dir) {
 }
 for (const d of SEARCH_DIRS) walk(d);
 
+// ── **새 그림자 배럴을 만들지 않는다** ─────────────────────────
+//
+// `X.ts`와 `X/index.ts`가 함께 있으면 `'…/X'`는 **파일**로 간다. 그래서
+// 배럴은 명시 경로가 없는 한 아무도 닿지 못하고, 두 파일이 같은 이름의
+// export를 갖고 있으면 **어느 쪽을 고쳤는지 모르는 상태**가 된다.
+// 이 저장소에 실제로 하나 있고(`fees`), 그 하나가 지금 죽어 있다.
+//
+// 아는 짝만 통과시킨다. 새로 생기면 막는다 — 고친 뒤에 발견하는 것보다
+// 만들 때 막는 것이 싸다.
+const KNOWN_SHADOWS = new Set(['src/lib/fees/index.ts']);
+{
+  const found = [];
+  for (const f of files) {
+    if (basename(f) !== 'index.ts') continue;
+    const d = dirname(f);
+    const sibling = join(dirname(d), `${basename(d)}.ts`);
+    if (existsSync(sibling)) found.push({ barrel: f.replaceAll('\\', '/'), sibling: sibling.replaceAll('\\', '/') });
+  }
+  const fresh = found.filter((x) => !KNOWN_SHADOWS.has(x.barrel));
+  if (fresh.length > 0) {
+    console.error('\n❌ 같은 이름의 파일과 디렉터리가 함께 있습니다 (그림자 배럴):');
+    for (const x of fresh) console.error(`   · ${x.sibling}  ↔  ${x.barrel}`);
+    console.error('\n   `\'…/이름\'` import는 **파일로 갑니다** — 배럴은 아무도 못 부릅니다.');
+    console.error('   둘 중 하나로 합치거나, 배럴 쪽 이름을 바꾸세요.');
+    process.exit(1);
+  }
+  const goneStale = [...KNOWN_SHADOWS].filter((b) => !found.some((x) => x.barrel === b));
+  if (goneStale.length > 0) {
+    console.error('\n❌ KNOWN_SHADOWS에 적혀 있는데 더는 그림자가 아닌 것:');
+    for (const b of goneStale) console.error(`   · ${b}`);
+    console.error('   해결됐으면 목록에서 지우세요. 낡은 면제는 다음 짝을 덮습니다.');
+    process.exit(1);
+  }
+}
+
 const orphans = [];
 const stale = [];
 
@@ -350,8 +414,50 @@ for (const file of files) {
   // `deployDispatch`)이 **멀쩡히 배선됐는데 끊긴 것으로** 잡힌다. 그러면
   // 사람은 ALLOW에 적어 넣고, 그 순간 이 검사는 믿을 수 없는 것이 된다.
   // 못 잡는 것과 **없는 것을 잡는 것**은 둘 다 검사기를 무용하게 만든다.
-  const esc = stem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const re = new RegExp(`['"\`][^'"\`]*/${esc}(\\.(ts|tsx|js|mjs))?['"\`]`);
+  //
+  // ── **`index.ts`는 스템으로 찾을 수 없다** ────────────────────
+  //
+  // 여기까지는 파일 이름(스템)으로 경로를 찾았다. `index.ts`에서는 그
+  // 스템이 `index`라서, 저장소 안의 **아무 `/index` 경로**나 소비자로
+  // 세어진다. 실측했다 — `src/lib/*/index.ts` 배럴 12개가 전부 **같은
+  // 22개**를 소비자로 받고 있었다:
+  //
+  //   scripts/check-100x-contract.mjs …  'worker/src/index.ts'        (7개)
+  //   scripts/probe/auto-targets.mjs …   '…/playwright/index.mjs'     (13개)
+  //
+  // 22개 중 **단 하나도** 그 배럴에 관한 증거가 아니다. 즉 이 검사는
+  // "배선 안 된 것 0개"라고 적으면서 **12개를 아예 안 보고 있었다.**
+  //
+  // 그래서 배럴은 **디렉터리 이름**으로 찾는다. Node/TS가 디렉터리
+  // import를 그 안의 `index`로 푸는 것과 같은 규칙이다.
+  //
+  // ── 그림자 배럴 ───────────────────────────────────────────────
+  //
+  // 단, 같은 이름의 **형제 파일**이 있으면 디렉터리 import는 그 파일로
+  // 간다. 파일이 디렉터리보다 먼저다. 이 저장소에 실제로 하나 있다:
+  //
+  //   src/lib/fees.ts  ↔  src/lib/fees/index.ts
+  //
+  // `tsc --traceResolution`으로 확인했다 —
+  // `'../fees'`는 `src/lib/fees.ts`로 해석된다. 그러니 그 경우 배럴은
+  // **명시적인 `/fees/index` 경로로만** 닿을 수 있다.
+  const stemEsc = stem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const isBarrel = stem === 'index';
+  const dirName = basename(dirname(file));
+  const dirEsc = dirName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const shadowedBy = isBarrel ? join(dirname(dirname(file)), `${dirName}.ts`) : null;
+  const shadowed = shadowedBy != null && existsSync(shadowedBy);
+  const re = !isBarrel
+    ? new RegExp(`['"\`][^'"\`]*/${stemEsc}(\\.(ts|tsx|js|mjs))?['"\`]`)
+    : shadowed
+      // 형제 파일에 가려졌다 — 디렉터리 경로는 그 파일로 간다
+      ? new RegExp(`['"\`][^'"\`]*/${dirEsc}/index(\\.(ts|tsx|js|mjs))?['"\`]`)
+      : new RegExp(`['"\`][^'"\`]*/${dirEsc}(/index(\\.(ts|tsx|js|mjs))?)?['"\`]`);
+  // 같은 디렉터리 안에서 `'./index'`로 부르는 것도 배선이다
+  // (`src/lib/safety/auditStore.ts:61`이 그렇게 한다). 경로에 디렉터리
+  // 이름이 없으므로 위 정규식으로는 보이지 않는다.
+  const sameDirRe = /['"`]\.\/index(\.(ts|tsx|js|mjs))?['"`]/;
+  const ownDir = dirname(file);
 
   let consumers = 0;
   for (const s of sources) {
@@ -387,7 +493,8 @@ for (const file of files) {
     // 보였기 때문이다. 검사기가 자기 설정을 근거로 통과시키면, 진짜로
     // 끊긴 모듈이 조용히 살아난다.
     if (s.path === 'scripts/check-wiring.mjs') continue;
-    if (re.test(s.text)) consumers++;
+    if (re.test(s.text)) { consumers++; continue; }
+    if (isBarrel && dirname(s.path) === ownDir && sameDirRe.test(s.text)) consumers++;
   }
 
   const allowed = ALLOW.has(file);
