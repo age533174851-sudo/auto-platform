@@ -521,8 +521,17 @@ export async function POST(req: NextRequest) {
   // ISOLATED 강제·손절 부착·UNKNOWN 처리가 전부 따라온다. 워커 경로에는
   // 그게 절반만 있었다.
   //
-  // 큐는 남겨 둔다 — 웹훅(signal·tradingview)이 아직 쓴다. 다만 그쪽도
-  // 실행자가 없으면 적재하지 않는다(queueGuard).
+  // 큐는 남겨 둔다. 다만 **지금 적재하는 제품 코드는 없다** — 2026-11-08
+  // 전수 확인: 웹훅 셋(signal·tradingview·secret) 모두 `jobs`에 적재하지
+  // 않고 `queueGuard`도 부르지 않는다. `enqueueJob`의 제품 호출도 0건이고,
+  // 제품 코드의 유일한 적재는 워커 자신의 킬스위치 자가복구다.
+  //
+  // 예전 문구는 "웹훅이 아직 쓴다. 다만 그쪽도 실행자가 없으면 적재하지
+  // 않는다(queueGuard)"였다. **그 문장은 거짓이 아니라 낡았다** — 적재
+  // 경로가 사라졌는데 문장이 남았고, 읽는 사람은 **있지 않은 가드를
+  // 믿는다.** 그래서 약속을 주석에 두지 않고 검사기로 옮겼다:
+  // `scripts/check-order-guards.mjs`가 **제품 코드에 적재가 다시 생기면
+  // 실행자 확인을 요구한다.** 주석은 또 낡지만 그 규칙은 낡지 않는다.
   const { buildManualPlan } = await import('@/lib/engine/manualPlan');
   const { executeOrder } = await import('@/lib/engine/orderExecutor');
   const { decryptSecret } = await import('@/lib/exchanges/crypto');
