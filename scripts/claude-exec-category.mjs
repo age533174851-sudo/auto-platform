@@ -32,6 +32,56 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
+/**
+ * **출력해도 되는 도구 이름 — 화이트리스트다.**
+ *
+ * 진단은 지금 `권한 거부 수: 5`까지만 적는다. 실측이다 — 최근 매시 회차
+ * 6건이 3·5·9·10·10·16건을 거부당했고, **무엇이 막혔는지는 어디에도 없다.**
+ * 그러면 "허용 목록을 고쳐야 하나"에 답할 수 없다.
+ *
+ * 그런데 이름을 그대로 내보내면 이 파일의 규칙이 깨진다 — 머리말이 적은
+ * 그대로 "원문을 가공해서 내보내지 않는다 … 화이트리스트는 새로운 칸이
+ * 생겨도 안 샌다." MCP 도구 이름은 서버가 정하므로 **임의 문자열**이고,
+ * 거기에 무엇이 섞여 들어올지 이 파일이 보장할 수 없다.
+ *
+ * 그래서 **아는 이름만 적고, 목록 밖은 개수로만 적는다.** 이름을 지우는
+ * 것이 아니라 애초에 담지 않는 쪽이다.
+ */
+const PRINTABLE_TOOLS = new Set([
+  'Bash', 'BashOutput', 'KillShell',
+  'Read', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit',
+  'Glob', 'Grep', 'WebFetch', 'WebSearch',
+  'Task', 'TodoWrite', 'ExitPlanMode',
+]);
+
+/**
+ * 거부 항목을 **이름 칸만** 보고 센다.
+ *
+ * 인자(`tool_input`)는 쳐다보지 않는다 — 거기에 명령줄·URL·토큰이 들어온다.
+ * 이름을 못 읽은 항목은 **버리지 않고 따로 센다.** 못 읽은 것을 0으로 적는
+ * 것이 이 저장소가 금지하는 바로 그 일이다.
+ */
+export function deniedToolTally(denials) {
+  if (!Array.isArray(denials) || denials.length === 0) {
+    return { named: [], unlisted: 0, unnamed: 0 };
+  }
+  const counts = new Map();
+  let unlisted = 0;
+  let unnamed = 0;
+  for (const d of denials) {
+    const raw = d && typeof d === 'object'
+      ? (d.tool_name ?? d.toolName ?? d.name)
+      : null;
+    if (typeof raw !== 'string' || raw === '') { unnamed += 1; continue; }
+    if (!PRINTABLE_TOOLS.has(raw)) { unlisted += 1; continue; }
+    counts.set(raw, (counts.get(raw) ?? 0) + 1);
+  }
+  const named = [...counts.entries()]
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+  return { named, unlisted, unnamed };
+}
+
 /** 오류 문구 → 범주. 구체적인 것부터 본다 */
 const PATTERNS = [
   ['credit_or_billing', /credit balance|\b402\b|payment required|billing/i],
@@ -169,6 +219,7 @@ export function categorize(input) {
     /** 'present' | 'absent' | 'unknown' */
     usageRecord,
     permissionDenials: Array.isArray(r.permission_denials) ? r.permission_denials.length : null,
+    deniedTools: deniedToolTally(r.permission_denials),
     category: 'unknown',
   };
 
@@ -198,6 +249,15 @@ export function categorize(input) {
   return out;
 }
 
+/** 막힌 도구 한 줄. **이름은 화이트리스트에 있는 것만 나온다** */
+export function deniedToolLine(t) {
+  const parts = [];
+  for (const { name, count } of (t?.named ?? [])) parts.push(`${name} ${count}건`);
+  if (t?.unlisted) parts.push(`목록 밖 ${t.unlisted}건(이름 비공개)`);
+  if (t?.unnamed) parts.push(`이름 확인 못 함 ${t.unnamed}건`);
+  return parts.length ? parts.join(' · ') : '확인 못 함';
+}
+
 /** 사람이 읽을 요약. **이 함수는 분류 결과의 칸만 쓴다** */
 export function render(c) {
   const v = (x) => (x == null ? '확인 못 함' : String(x));
@@ -213,6 +273,8 @@ export function render(c) {
     `- 모델 사용 기록: ${{ present: '있음', absent: '없음', unknown: '확인 못 함' }[c.usageRecord] ?? '확인 못 함'}`,
     `- 사용 기록의 모델 종류 수: ${v(c.usageModelKinds)} (호출 횟수가 아닙니다)`,
     `- 권한 거부 수: ${v(c.permissionDenials)}`,
+    // 거부가 있을 때만 적는다. 0건에 빈 줄을 만들면 "막힌 것이 있다"로 읽힌다.
+    ...(c.permissionDenials ? [`- 막힌 도구: ${deniedToolLine(c.deniedTools)}`] : []),
     '',
     `- 다음에 움직일 쪽: ${{ human: '**사람**', system: '시스템(다음 회차)', none: '없음' }[nextAction(c.category).owner] ?? '**사람**'} — ${nextAction(c.category).line}`,
     '',

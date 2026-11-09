@@ -13,7 +13,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { categorize, render, nextAction, CATEGORIES } from './claude-exec-category.mjs';
+import { categorize, render, nextAction, CATEGORIES, deniedToolTally, deniedToolLine } from './claude-exec-category.mjs';
 
 /** 실제 실패 회차가 보고한 모양 */
 const OBSERVED = {
@@ -306,4 +306,77 @@ test('★★ 처방 한 줄에도 오류 원문이 섞이지 않는다', () => {
     assert.ok(!/[A-Za-z]{2,}-[A-Za-z0-9]{8,}/.test(line), `${c}의 처방에 토큰 모양이 있다`);
     assert.ok(!line.includes('http'), `${c}의 처방에 URL이 있다`);
   }
+});
+
+// ── 거부가 몇 건인지만 알면 아무것도 할 수 없다 (#533) ──────────
+//
+// 매시 갈래의 진단은 `권한 거부 수: 5`까지만 적는다. 실측이다 — 최근 6회차가
+// 3·5·9·10·10·16건이었고, **무엇이 막혔는지는 어디에도 없다.** 그러면
+// "허용 목록을 고쳐야 하는가"에 답할 수 없다.
+//
+// 이름은 **화이트리스트로만** 적는다. 이 파일의 머리말이 정한 규칙이다 —
+// "마스킹은 패턴을 하나 놓치면 새지만, 화이트리스트는 새로운 칸이 생겨도
+// 안 샌다." 그래서 아는 도구 이름만 적고, 목록 밖은 **개수로만** 적는다.
+test('거부된 도구 이름을 적는다 — 아는 이름만', () => {
+  const c = categorize({
+    type: 'result', subtype: 'success', is_error: false,
+    num_turns: 9, duration_ms: 1000, total_cost_usd: 0.5,
+    modelUsage: { 'claude-x': {} },
+    permission_denials: [
+      { tool_name: 'Bash' }, { tool_name: 'Bash' }, { tool_name: 'WebFetch' },
+    ],
+  });
+  assert.equal(c.permissionDenials, 3);
+  const out = render(c);
+  assert.match(out, /Bash/, '막힌 도구 이름이 요약에 없다');
+  assert.match(out, /WebFetch/, '둘째 도구 이름이 요약에 없다');
+  assert.match(out, /Bash.*2|2.*Bash/s, '같은 도구의 횟수를 적지 않았다');
+});
+
+test('목록 밖 이름은 **적지 않고 개수로만** 적는다', () => {
+  const c = categorize({
+    type: 'result', subtype: 'success', is_error: false,
+    num_turns: 2, duration_ms: 10, total_cost_usd: 0.1,
+    modelUsage: { 'claude-x': {} },
+    permission_denials: [
+      { tool_name: 'mcp__secretserver__sk-live-DO-NOT-PRINT' },
+      { tool_name: 'Bash' },
+    ],
+  });
+  const out = render(c);
+  assert.ok(!out.includes('sk-live-DO-NOT-PRINT'), '목록 밖 이름이 그대로 샜다');
+  assert.ok(!out.includes('secretserver'), '목록 밖 이름이 그대로 샜다');
+  assert.match(out, /Bash/);
+  assert.match(out, /목록 밖/, '목록 밖 건수를 적지 않았다');
+});
+
+test('거부가 0건이면 이름 줄을 만들지 않는다', () => {
+  const c = categorize({
+    type: 'result', subtype: 'success', is_error: false,
+    num_turns: 1, duration_ms: 10, total_cost_usd: 0.1,
+    modelUsage: { 'claude-x': {} }, permission_denials: [],
+  });
+  assert.ok(!render(c).includes('막힌 도구'), '거부 0건인데 이름 줄이 있다');
+});
+
+// 변이 시험에서 이 구멍을 찾았다: 이름을 못 읽은 항목을 조용히 버려도
+// 위의 시험들이 전부 통과했다. 그러면 `권한 거부 수: 3`인데 막힌 도구
+// 줄에는 `Bash 1건`만 적히고, **나머지 둘이 사라진다.**
+// 못 읽은 것을 0으로 적는 것이 이 저장소가 금지하는 바로 그 일이다.
+test('이름을 못 읽은 거부도 버리지 않고 센다', () => {
+  const t = deniedToolTally([{ tool_name: 'Bash' }, { nope: 1 }, {}, null, 'x']);
+  assert.equal(t.unnamed, 4, '이름 없는 항목을 버렸다');
+  assert.deepEqual(t.named, [{ name: 'Bash', count: 1 }]);
+  const line = deniedToolLine(t);
+  assert.match(line, /이름 확인 못 함 4건/, '못 읽은 건수를 적지 않았다');
+});
+
+test('막힌 도구 줄의 합이 거부 수와 맞는다', () => {
+  const denials = [
+    { tool_name: 'Bash' }, { tool_name: 'Bash' }, { tool_name: 'Read' },
+    { tool_name: 'mcp__x__y' }, { nope: 1 },
+  ];
+  const t = deniedToolTally(denials);
+  const summed = t.named.reduce((a, b) => a + b.count, 0) + t.unlisted + t.unnamed;
+  assert.equal(summed, denials.length, `합 ${summed} ≠ 거부 ${denials.length} — 어딘가로 사라졌다`);
 });
