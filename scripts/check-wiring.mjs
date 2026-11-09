@@ -838,6 +838,163 @@ if (causeGaps.length > 0) {
   bad = true;
 }
 
+// ── **배선된 파일 속의 죽은 판정** ────────────────────────────
+//
+// 위의 두 규칙에는 각각 구멍이 있고, 그 구멍이 겹치는 자리가 있다.
+//
+//   orphan 규칙   **파일 단위**로 본다. export 하나라도 제품에서 쓰이면
+//                 그 파일은 "배선됨"이고, 같은 파일의 죽은 판정은 안 보인다
+//   쌍둥이 규칙   **이름이 겹치는** 것만 본다. 이름이 유일하면 안 보인다
+//
+// 그래서 **이름이 유일하고, 파일은 배선돼 있고, 그 함수만 아무도 안 부르는**
+// 판정은 지금까지 어떤 검사도 보지 못했다. 실제로 그런 것이 있다:
+//
+//   src/lib/risk/index.ts   updateTrailingStop · checkBreakeven ·
+//                           checkPartialTP · checkWeeklyLimits
+//                           → 살아 있는 대체는 engine/trailPlan.ts ·
+//                             risk/lossStreak.ts 쪽이다
+//   src/lib/engine/leverageMath.ts  liquidationWarning ·
+//                           stopFiresBeforeLiquidation
+//
+// `risk/index.ts`의 유일한 산 소비자는 `backtest/index.ts`가
+// `calcPositionSize` 하나를 가져가는 것이다. 그 하나 때문에 파일이
+// "배선됨"이 되고, 트레일링 스톱·본전·부분청산·주간한도 판정 넷이
+// 그 뒤에 숨는다. **거기서 손절 로직을 고치면 아무 일도 일어나지 않는다.**
+//
+// 왜 전체가 아니라 돈 경로만 보는가
+// ─────────────────────────────────
+// 저장소 전체로 재면 수백 건이고, 그 대부분은 라벨·상수·표시 헬퍼다.
+// 그걸 다 막으면 **사람은 목록에 적어 넣기만 하고 이 검사는 믿을 수 없는
+// 것이 된다**(이 파일이 이미 두 번 배운 교훈이다). 그래서
+//
+//   · **돈 경로 디렉터리**만 보고
+//   · **`export function`만** 본다 — 판정은 함수다. 라벨·상수가 안 쓰이는
+//     것은 어질러진 것이고, 판정이 안 쓰이는 것은 **고장**이다
+// **이번 단계는 `src/lib/risk`만 막는다.** 다섯 디렉터리 전부로 재면
+// 91건이고(engine 42 · markets 21 · risk 14 · exchanges 13 · safety 1),
+// 그걸 한 번에 목록으로 만들면 사유가 고무도장이 된다 — 이 파일이 이미
+// 적어 둔 실패다("사람은 ALLOW에 적어 넣기만 하고 이 검사는 믿을 수
+// 없는 것이 된다"). 그래서 **세어서 적어 두고**, 디렉터리를 하나씩
+// 늘리면서 각 항목을 확인한 사유와 함께 올린다. 아래 14건은 **전수
+// 하나씩 직접 확인했다**(표본이 아니다).
+const MONEY_DIRS = ['src/lib/risk'];
+const DEAD_FN_ALLOW = new Map([
+  // ── src/lib/risk/index.ts ─────────────────────────────────
+  //
+  // 이 파일의 유일한 산 소비자는 `backtest/index.ts`가 `calcPositionSize`
+  // 하나를 가져가는 것이다. 그 하나 때문에 파일이 "배선됨"이 되고 아래
+  // 다섯이 그 뒤에 숨는다. 다섯 다 **살아 있는 대체가 따로 있다** —
+  // 즉 이 파일은 초기 구현이 밀려난 자리로 보인다.
+  ['updateTrailingStop@src/lib/risk/index.ts',
+    '트레일링 스톱. 산 쪽은 engine/trailPlan.ts · exitPlan.ts · exitLifecycle.ts'],
+  ['checkBreakeven@src/lib/risk/index.ts',
+    '본전 이동. 산 쪽은 engine/trailPlan.ts · exitPlan.ts · exitLifecycle.ts'],
+  ['checkPartialTP@src/lib/risk/index.ts',
+    '부분 청산. 산 쪽은 engine/exitPlan.ts · asymmetricExit.ts · orderExecutor.ts'],
+  ['calcNextDCA@src/lib/risk/index.ts',
+    '다음 DCA 지점. 산 쪽은 src/lib/dca/aiDca.ts'],
+  ['checkWeeklyLimits@src/lib/risk/index.ts',
+    '주간 손실 한도. 산 쪽은 risk/lossStreak.ts · limitScope.ts · collectLimits.ts · lossStreakCheck.ts'],
+
+  // ── src/lib/risk/conviction.ts ────────────────────────────
+  //
+  // **이 파일이 `CLAUDE.md`가 적은 첫 예다**: "conviction.ts 판정 넷을
+  // 만들고 테스트까지 붙였는데 저장소 전체에서 부르는 곳이 0곳이었다."
+  // 지금 상태를 세어 보면 export 7개 중 **`overtradingGate` 하나만**
+  // 외부 참조가 있고(5곳), 나머지 여섯은 0곳이다. 그 하나 때문에
+  // 파일이 "배선됨"이 되어 **orphan 검사가 아래 셋을 못 본다.**
+  ['gradeOf@src/lib/risk/conviction.ts',
+    '확신 등급 판정. 살아 있는 대체를 찾지 못했다 — 배선 아니면 삭제 결정이 필요하다'],
+  ['riskBudgetFor@src/lib/risk/conviction.ts',
+    '등급별 리스크 예산. 위와 같다 — 이것이 안 불리면 등급이 사이징에 반영되지 않는다'],
+  ['patienceScore@src/lib/risk/conviction.ts',
+    '인내 점수. 위와 같다'],
+
+  // ── src/lib/risk/killSwitch.ts ────────────────────────────
+  //
+  // 이 파일은 잘 배선돼 있다 — `loadKillSwitch` · `saveKillSwitch` ·
+  // `logKillEvent` · `executeKillActions` · `evaluate` · `reconcile`를
+  // 킬스위치 라우트 셋이 쓴다. 아래 셋이 그 뒤에 숨는다.
+  ['computeUsdtEquity@src/lib/risk/killSwitch.ts',
+    'USDT 환산 자산. 제품 참조 0곳 — 킬스위치 판정이 쓰는 자산값은 다른 경로에서 온다'],
+  ['acquireLock@src/lib/risk/killSwitch.ts',
+    '**쌍둥이다.** 워커는 자기 것(worker/src/supabase.ts:22)을 쓴다 — '
+    + 'worker/src/index.ts:18이 `./supabase`에서 가져온다. 이 복사본은 아무도 안 부른다'],
+  ['releaseLock@src/lib/risk/killSwitch.ts',
+    '위와 같은 짝. 워커의 4개 참조는 전부 worker/src/supabase.ts 쪽이다'],
+
+  // ── 나머지 ────────────────────────────────────────────────
+  ['confirmLines@src/lib/risk/emergencyLevel.ts',
+    '비상 단계 확인 문구. 제품 참조 0곳. 비슷한 이름의 `confirmLinesFor`가 '
+    + 'engine/mismatchRecovery.ts에도 있고 그것도 죽어 있다(이 PR 범위 밖)'],
+  ['signalKey@src/lib/risk/idempotency.ts',
+    '**멱등키 생성기인데 아무도 안 부른다.** 중복 주문을 막는 판정이 '
+    + '안 불리는 것이므로 이름만 보면 가장 위험하다. 다만 실제 중복 방지는 '
+    + '`clientOrderId` 경로가 한다(engine/venuePositionOps.ts · stateReconcile.ts · '
+    + 'risk/killSwitch.ts · killCloseRun.ts) — 그래서 "중복 주문이 막히지 않는다"는 '
+    + '아니다. 이 파일이 무엇을 위한 것인지 확인한 뒤 배선 아니면 삭제'],
+  ['retriggerPlan@src/lib/risk/killSwitchTruth.ts',
+    '재발동 계획 판정. 제품 참조 0곳 — 유일한 언급은 같은 파일 214행의 '
+    + '**주석**이다(검사기는 주석을 지우고 센다). #589의 killRetryVerdict와 '
+    + '겹치는 영역이라 함께 결정해야 한다'],
+]);
+{
+  const deadFns = [];
+  for (const dir of MONEY_DIRS) {
+    if (!existsSync(dir)) continue;
+    for (const name of readdirSync(dir)) {
+      if (!name.endsWith('.ts') || name.endsWith('.test.ts') || name.endsWith('.d.ts')) continue;
+      const file = join(dir, name).replaceAll('\\', '/');
+      const own = stripComments(readFileSync(file, 'utf8'));
+      const fns = [];
+      let mm;
+      const fnRe = /export\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/g;
+      while ((mm = fnRe.exec(own))) fns.push(mm[1]);
+      if (fns.length === 0) continue;
+
+      const m = consumerMatcherFor(file);
+      const consumers = sources.filter((s) => isConsumerOf(s, file, m));
+      if (consumers.length === 0) continue;      // 파일째 끊김 — orphan 규칙 소관
+
+      for (const fn of fns) {
+        const esc2 = fn.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const useRe = new RegExp(`\\b${esc2}\\b`);
+        if (consumers.some((s) => useRe.test(s.text))) continue;   // 제품이 부른다
+        // 같은 파일 안에서 쓰이면 내부 헬퍼다 — 죽은 것이 아니다.
+        // 선언 줄 자신은 세지 않는다.
+        const declRe = new RegExp(`export\\s+(?:async\\s+)?function\\s+${esc2}\\b`);
+        const withoutDecl = own.replace(declRe, ' '.repeat(10));
+        if (useRe.test(withoutDecl)) continue;
+        deadFns.push({ file, fn });
+      }
+    }
+  }
+  const fresh = deadFns.filter((d) => !DEAD_FN_ALLOW.has(`${d.fn}@${d.file}`));
+  if (fresh.length > 0) {
+    console.error('\n❌ 돈 경로에 **아무도 부르지 않는 판정 함수**가 있습니다:');
+    for (const d of fresh) console.error(`   · ${d.fn}  —  ${d.file}`);
+    console.error('\n   파일은 배선돼 있어서 위의 orphan 검사가 못 봅니다.');
+    console.error('   이름이 유일해서 쌍둥이 검사도 못 봅니다.');
+    console.error('   거기서 손절·눈금·손익 로직을 고치면 **아무 일도 일어나지 않습니다.**');
+    console.error('\n   셋 중 하나를 하세요:');
+    console.error('     1. 실제로 부르는 곳에 배선한다');
+    console.error('     2. 살아 있는 대체가 있으면 지운다');
+    console.error('     3. 정본 결정이 필요하면 DEAD_FN_ALLOW에 사유와 함께 적는다');
+    bad = true;
+  }
+  const goneDead = [...DEAD_FN_ALLOW.keys()].filter(
+    (k) => !deadFns.some((d) => `${d.fn}@${d.file}` === k));
+  if (goneDead.length > 0) {
+    console.error('\n❌ DEAD_FN_ALLOW에 적혀 있는데 더는 죽지 않은 것:');
+    for (const k of goneDead) console.error(`   · ${k}`);
+    console.error('   해결됐으면 목록에서 지우세요. 낡은 면제는 다음 것을 덮습니다.');
+    bad = true;
+  }
+  if (fresh.length === 0 && goneDead.length === 0) {
+    console.log(`✅ 돈 경로에 죽은 판정 함수 0건 (면제 ${DEAD_FN_ALLOW.size}건) · 디렉터리 ${MONEY_DIRS.length}개`);
+  }
+}
+
 if (bad) process.exit(1);
 
 console.log(`✅ 판정 모듈 ${files.length}개 · 배선 안 된 것 0개`
