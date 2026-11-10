@@ -16,6 +16,11 @@
 //
 // 모르는 거래소는 UNSUPPORTED_EXCHANGE로 막는다. binance로 떨어뜨리지 않는다.
 import { sb, acquireLock, releaseLock, heartbeat, noteStartupResult, noteScheduler } from './supabase';
+import {
+  bootCheckRequested, missingRequiredEnv, invalidNumericEnv, missingProtectionEnv,
+  BOOT_CHECK_MARKER, BOOT_CHECK_PASS, BOOT_CHECK_UNPROTECTED, PROTECTION_PATHS,
+  BOOT_EXIT_READY, BOOT_EXIT_CANNOT_BOOT, BOOT_EXIT_UNPROTECTED,
+} from '../../src/lib/runtime/workerBootCheck';
 import { decryptSecret } from './crypto';
 import { redisAvailable, lockNxEx, unlock } from './redis';
 import { alert } from './telegram';
@@ -1270,16 +1275,32 @@ async function startupChecks() {
   // 마지막 줄이 문제다. 죽은 워커는 알아채지만, "돌고 있는데 아무것도 안
   // 하는" 워커는 아무도 모른다. Fly는 restart=always라 종료하면 재시작하고,
   // 크래시 루프는 로그에 그대로 남는다 — 그게 훨씬 잘 보인다.
-  const missing: string[] = [];
-  if (!process.env.SUPABASE_URL) missing.push('SUPABASE_URL');
-  if (!process.env.SUPABASE_SERVICE_ROLE_KEY) missing.push('SUPABASE_SERVICE_ROLE_KEY');
-  if (!process.env.EXCHANGE_ENCRYPTION_KEY && !process.env.ENCRYPTION_KEY) missing.push('EXCHANGE_ENCRYPTION_KEY (또는 ENCRYPTION_KEY)');
+  // 목록은 `src/lib/runtime/workerBootCheck.ts` 한 곳이 소유한다 — 부팅
+  // 점검과 이 자리가 각자 목록을 들면 언젠가 갈리고, 그때 갈리는 쪽은
+  // "없어도 뜨는" 쪽이다.
+  const missing: string[] = missingRequiredEnv(process.env as any);
   if (missing.length) {
     console.error('❌ 필수 환경변수 누락:', missing.join(', '));
     console.error('   이 값들이 없으면 잡을 읽을 수도, 거래소 키를 복호화할 수도 없습니다.');
     console.error('   돌기만 하고 아무것도 못 하는 상태를 만들지 않기 위해 종료합니다.');
     console.error('   Fly: flyctl secrets set <NAME>=<VALUE> (값은 Secrets로만 넣습니다)');
     process.exit(1);
+  }
+
+  // ── 숫자 환경변수: 여기서는 **막지 않고 크게 말한다** ──
+  //
+  // 왜 막지 않는가: 운영에 지금 어떤 값이 들어 있는지 이 자리에서는 볼 수
+  // 없다. 거부로 바꾸면 멀쩡히 돌던 워커가 **다음 배포에서 안 뜬다** —
+  // 값을 못 본 채로 내릴 결정이 아니다.
+  //
+  // 대신 `WORKER_BOOT_CHECK=1`은 같은 것을 보고 **거부한다.** 그쪽은 아직
+  // 트래픽이 없으니 거부가 공짜다. 즉 사람은 옮기기 **전에** 점검으로 알게
+  // 되고, 운영은 조용해지지 않는다.
+  //
+  // 값을 눈으로 확인한 사람이 이 블록을 `process.exit(1)`로 바꾸면 된다.
+  for (const bad of invalidNumericEnv(process.env as any)) {
+    console.error(`⚠ ${bad.name} — ${bad.reason}`);
+    console.error('   기본값으로 되돌리지 않습니다 — 적은 값이 그대로 쓰이거나 무시됩니다.');
   }
 
   // 암호화 키 지문(6자리)만 찍는다. **값은 절대 찍지 않는다.**
@@ -1313,6 +1334,59 @@ async function startupChecks() {
 }
 
 async function main() {
+  // ── 부팅 점검 모드 ──
+  //
+  // **`startupChecks()`보다 먼저 끝낸다.** 그 함수는 Supabase에 연결해
+  // `noteStartupResult`로 **DB에 쓴다** — 부팅만 보려는 자리에서 그걸
+  // 하면 "연결하지 않고 확인한다"가 깨진다.
+  //
+  // 그래서 여기서는 환경변수만 보고 끝낸다: DB 연결 0 · 쓰기 0 ·
+  // 거래소 호출 0 · `tick()` 0.
+  if (bootCheckRequested(process.env as any)) {
+    console.log(`${BOOT_CHECK_MARKER} — tick 에 들어가지 않고 끝냅니다`);
+    console.log(`  id=${WORKER_ID}  build=${String(process.env.GIT_SHA || '').slice(0, 7) || '(모름)'}`);
+    const missing = missingRequiredEnv(process.env as any);
+    if (missing.length) {
+      console.error('❌ 필수 환경변수 누락:', missing.join(', '));
+      console.error('   이 값들이 없으면 잡을 읽을 수도, 거래소 키를 복호화할 수도 없습니다.');
+      process.exit(BOOT_EXIT_CANNOT_BOOT);
+    }
+    // **작은 오타 하나도 여기서 걸러진다.** 이 자리는 아직 트래픽이 없어서
+    // 거부가 공짜다 — 운영 부팅에서는 경고만 한다(아래 startupChecks).
+    const badNumeric = invalidNumericEnv(process.env as any);
+    if (badNumeric.length) {
+      console.error('❌ 숫자로 읽는 환경변수가 숫자가 아닙니다:');
+      for (const b of badNumeric) console.error(`   ${b.name} — ${b.reason}`);
+      console.error('   WORKER_POLL_SEC 이 숫자가 아니면 락 잡기가 예외를 던지고,');
+      console.error('   tick 은 그걸 "나는 main 이다"로 받습니다 — **모든 워커가 main 이 됩니다.** tick 간격도 사라집니다.');
+      process.exit(BOOT_EXIT_CANNOT_BOOT);
+    }
+    // 암호화 키 **지문만** 찍는다. 값은 절대 찍지 않는다 — 다른 호스팅으로
+    // 옮길 때 Vercel의 지문과 눈으로 대조하는 용도다.
+    try {
+      const { createHash } = await import('crypto');
+      const raw = String(process.env.EXCHANGE_ENCRYPTION_KEY || process.env.ENCRYPTION_KEY || '');
+      console.log(`  🔑 암호화 키 지문: ${createHash('sha256').update(raw).digest('hex').slice(0, 6)}`);
+    } catch { /* 지문을 못 만들어도 점검 결과는 바뀌지 않는다 */ }
+    // ── 뜨는 것과 지키는 것을 가른다 ──
+    //
+    // 여기까지 왔으면 **뜨기는** 한다. 그런데 APP_URL·ADMIN_SECRET 이 없으면
+    // 청산 감시·예약 청산·모의 청산·챌린지 정리가 **한 번도 돌지 않는다.**
+    // 그 상태를 ✅ 로 적으면 사람이 "준비됐다"로 읽고 배포한다.
+    const unprotected = missingProtectionEnv(process.env as any);
+    if (unprotected.length) {
+      console.error(BOOT_CHECK_UNPROTECTED);
+      for (const p of PROTECTION_PATHS) console.error(`     · ${p}`);
+      console.error(`   빈 칸: ${unprotected.join(', ')}`);
+      console.error('   잡 처리와 heartbeat 는 돕니다 — 그래서 밖에서는 건강한 워커로 보입니다.');
+      console.error(`   (종료코드 ${BOOT_EXIT_UNPROTECTED} = 뜨지만 안 지킨다. 1 은 뜨지 못함, 0 은 지킬 준비까지 됨)`);
+      process.exit(BOOT_EXIT_UNPROTECTED);
+    }
+    console.log(BOOT_CHECK_PASS);
+    console.log('  🛡 보호 경로 자격 있음 — 청산 감시·예약 청산을 부를 수 있습니다.');
+    process.exit(BOOT_EXIT_READY);
+  }
+
   await startupChecks();
   let stopping = false;
   for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig as any, async () => {
