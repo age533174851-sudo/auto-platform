@@ -17,8 +17,9 @@
 // 모르는 거래소는 UNSUPPORTED_EXCHANGE로 막는다. binance로 떨어뜨리지 않는다.
 import { sb, acquireLock, releaseLock, heartbeat, noteStartupResult, noteScheduler } from './supabase';
 import {
-  bootCheckRequested, missingRequiredEnv, invalidNumericEnv,
-  BOOT_CHECK_MARKER, BOOT_CHECK_PASS,
+  bootCheckRequested, missingRequiredEnv, invalidNumericEnv, missingProtectionEnv,
+  BOOT_CHECK_MARKER, BOOT_CHECK_PASS, BOOT_CHECK_UNPROTECTED, PROTECTION_PATHS,
+  BOOT_EXIT_READY, BOOT_EXIT_CANNOT_BOOT, BOOT_EXIT_UNPROTECTED,
 } from '../../src/lib/runtime/workerBootCheck';
 import { decryptSecret } from './crypto';
 import { redisAvailable, lockNxEx, unlock } from './redis';
@@ -1348,7 +1349,7 @@ async function main() {
     if (missing.length) {
       console.error('❌ 필수 환경변수 누락:', missing.join(', '));
       console.error('   이 값들이 없으면 잡을 읽을 수도, 거래소 키를 복호화할 수도 없습니다.');
-      process.exit(1);
+      process.exit(BOOT_EXIT_CANNOT_BOOT);
     }
     // **작은 오타 하나도 여기서 걸러진다.** 이 자리는 아직 트래픽이 없어서
     // 거부가 공짜다 — 운영 부팅에서는 경고만 한다(아래 startupChecks).
@@ -1358,7 +1359,7 @@ async function main() {
       for (const b of badNumeric) console.error(`   ${b.name} — ${b.reason}`);
       console.error('   WORKER_POLL_SEC 이 숫자가 아니면 락 잡기가 예외를 던지고,');
       console.error('   tick 은 그걸 "나는 main 이다"로 받습니다 — **모든 워커가 main 이 됩니다.** tick 간격도 사라집니다.');
-      process.exit(1);
+      process.exit(BOOT_EXIT_CANNOT_BOOT);
     }
     // 암호화 키 **지문만** 찍는다. 값은 절대 찍지 않는다 — 다른 호스팅으로
     // 옮길 때 Vercel의 지문과 눈으로 대조하는 용도다.
@@ -1367,8 +1368,23 @@ async function main() {
       const raw = String(process.env.EXCHANGE_ENCRYPTION_KEY || process.env.ENCRYPTION_KEY || '');
       console.log(`  🔑 암호화 키 지문: ${createHash('sha256').update(raw).digest('hex').slice(0, 6)}`);
     } catch { /* 지문을 못 만들어도 점검 결과는 바뀌지 않는다 */ }
+    // ── 뜨는 것과 지키는 것을 가른다 ──
+    //
+    // 여기까지 왔으면 **뜨기는** 한다. 그런데 APP_URL·ADMIN_SECRET 이 없으면
+    // 청산 감시·예약 청산·모의 청산·챌린지 정리가 **한 번도 돌지 않는다.**
+    // 그 상태를 ✅ 로 적으면 사람이 "준비됐다"로 읽고 배포한다.
+    const unprotected = missingProtectionEnv(process.env as any);
+    if (unprotected.length) {
+      console.error(BOOT_CHECK_UNPROTECTED);
+      for (const p of PROTECTION_PATHS) console.error(`     · ${p}`);
+      console.error(`   빈 칸: ${unprotected.join(', ')}`);
+      console.error('   잡 처리와 heartbeat 는 돕니다 — 그래서 밖에서는 건강한 워커로 보입니다.');
+      console.error(`   (종료코드 ${BOOT_EXIT_UNPROTECTED} = 뜨지만 안 지킨다. 1 은 뜨지 못함, 0 은 지킬 준비까지 됨)`);
+      process.exit(BOOT_EXIT_UNPROTECTED);
+    }
     console.log(BOOT_CHECK_PASS);
-    process.exit(0);
+    console.log('  🛡 보호 경로 자격 있음 — 청산 감시·예약 청산을 부를 수 있습니다.');
+    process.exit(BOOT_EXIT_READY);
   }
 
   await startupChecks();

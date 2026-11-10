@@ -196,3 +196,57 @@ export function invalidNumericEnv(
   }
   return bad;
 }
+
+// ── 뜨는 것과 지키는 것은 다르다 ──────────────────────────────
+//
+// `APP_URL`(또는 `NEXT_PUBLIC_APP_URL`)과 `ADMIN_SECRET` 이 없으면 워커는
+// **멀쩡히 뜨고 잡도 처리하는데** 아래 네 가지가 한 번도 돌지 않는다.
+// `worker/src/index.ts` 에서 넷 다 같은 자격을 본다:
+//
+//   820행  pollExitMonitor     트레일링 · 본전이동 · 시간청산
+//   910행  pollPaperExit       모의 청산
+//   970행  pollChallengeSweep  챌린지 정리
+//  1038행  pollScheduledExit   예약 청산
+//
+//     hasCredential: !!(APP_URL && APP_ADMIN_SECRET)
+//
+// 그리고 그 사실은 `NO_CREDENTIAL` 로 **한 번만** 로그에 찍힌다. 즉 포지션을
+// 지키는 쪽이 전부 죽은 채로 heartbeat 는 정상이고 잡도 돈다 — 밖에서 보면
+// 건강한 워커다.
+//
+// `worker/.env.example` 에도 두 칸이 없었다. 호스팅을 옮기는 사람이 그 파일을
+// 보고 채우면 **이 상태가 기본값**이 된다. 그래서 둘 다 고친다: 예시 파일에
+// 넣고, 부팅 점검이 이 상태를 **통과로 적지 않게** 한다.
+//
+// 막지는 않는다 — 이 값 없이 잡만 돌리는 운영도 성립한다. 대신 **종료코드를
+// 가른다.** 0 = 지킬 준비까지 됨 · 1 = 뜨지 못함 · 2 = 뜨지만 안 지킨다.
+
+/** 이 값이 없으면 보호 경로가 돌지 않는다 (뜨는 것은 막지 않는다) */
+export const PROTECTION_ENV: readonly RequiredEnvRule[] = [
+  { label: 'APP_URL (또는 NEXT_PUBLIC_APP_URL)', anyOf: ['APP_URL', 'NEXT_PUBLIC_APP_URL'] },
+  { label: 'ADMIN_SECRET', anyOf: ['ADMIN_SECRET'] },
+];
+
+/** 보호 경로가 돌지 못하게 하는 빈 칸의 **이름**. 빈 배열이면 자격이 있다 */
+export function missingProtectionEnv(env: Record<string, unknown> | undefined | null): string[] {
+  const e = env ?? {};
+  return PROTECTION_ENV
+    .filter(rule => !rule.anyOf.some(k => present(e[k])))
+    .map(rule => rule.label);
+}
+
+/** 자격이 없을 때 **돌지 않는** 것들. 이름을 적어야 사람이 무게를 안다 */
+export const PROTECTION_PATHS: readonly string[] = [
+  '청산 감시 (트레일링 · 본전이동 · 시간청산)',
+  '예약 청산',
+  '모의 청산',
+  '챌린지 정리',
+];
+
+/** 부팅 점검의 종료코드. 0/1 만 쓰면 "뜨지만 안 지킨다"가 통과로 읽힌다 */
+export const BOOT_EXIT_READY = 0;
+export const BOOT_EXIT_CANNOT_BOOT = 1;
+export const BOOT_EXIT_UNPROTECTED = 2;
+
+export const BOOT_CHECK_UNPROTECTED =
+  '❗ 뜨기는 하지만 **포지션을 지키지 않습니다** — 아래가 한 번도 돌지 않습니다.';

@@ -17,7 +17,7 @@
 import { test, eq, assert } from '../../test/harness';
 import {
   bootCheckRequested, missingRequiredEnv, invalidNumericEnv, readNumeric,
-  REQUIRED_ENV, NUMERIC_ENV,
+  missingProtectionEnv, REQUIRED_ENV, NUMERIC_ENV, PROTECTION_ENV, PROTECTION_PATHS,
 } from './workerBootCheck';
 
 const FULL = {
@@ -182,5 +182,38 @@ export function runWorkerBootCheckTests() {
     ]) assert(names.includes(n), `${n}이 목록에 없다 — 그 칸의 오타는 아무도 모른다`);
     // 실제 코드와의 대조는 scripts/worker-boot-check.test.mjs가 파일을 읽어서 한다.
     eq(names.length, new Set(names).size, '목록에 같은 이름이 두 번 있다');
+  });
+
+  // ── 뜨는 것과 지키는 것 ──
+
+  test('★★ APP_URL·ADMIN_SECRET 이 없으면 통과로 적지 않는다', () => {
+    // 이게 ✅ 로 적히면 사람이 "준비됐다"로 읽고 배포한다. 그 상태에서
+    // 청산 감시·예약 청산·모의 청산·챌린지 정리가 한 번도 안 돈다.
+    eq(missingProtectionEnv(FULL).length, 2, '필수 3개만 있는 상태를 자격 있음으로 읽었다');
+    eq(missingProtectionEnv({ ...FULL, APP_URL: 'https://x.invalid' }).length, 1);
+    eq(missingProtectionEnv({ ...FULL, ADMIN_SECRET: 's' }).length, 1);
+    eq(missingProtectionEnv({ ...FULL, APP_URL: 'https://x.invalid', ADMIN_SECRET: 's' }).length, 0,
+      '둘 다 줬는데 자격 없음으로 읽었다 — 울기만 하는 검사기가 된다');
+  });
+
+  test('★★ NEXT_PUBLIC_APP_URL 도 APP_URL 로 인정한다 — 코드가 둘 다 읽는다', () => {
+    // worker/src/index.ts:45 가 APP_URL || NEXT_PUBLIC_APP_URL 이다.
+    // 한쪽만 인정하면 멀쩡히 도는 환경을 "안 지킨다"고 적는다.
+    eq(missingProtectionEnv({ ...FULL, NEXT_PUBLIC_APP_URL: 'https://x.invalid', ADMIN_SECRET: 's' }).length, 0,
+      'NEXT_PUBLIC_APP_URL 을 인정하지 않았다');
+  });
+
+  test('★ 빈 문자열은 자격이 아니다 — 호스팅 UI에서 칸만 만든 경우', () => {
+    eq(missingProtectionEnv({ ...FULL, APP_URL: '', ADMIN_SECRET: 's' }).length, 1);
+    eq(missingProtectionEnv({ ...FULL, APP_URL: 'https://x.invalid', ADMIN_SECRET: '  ' }).length, 1);
+  });
+
+  test('★ 이름만 돌려준다 — 값은 돌려주지 않는다', () => {
+    const secret = 'super-secret-admin-value-0123456789';
+    const out = JSON.stringify(missingProtectionEnv({ ...FULL, ADMIN_SECRET: '' , APP_URL: secret }));
+    assert(!out.includes(secret), '값이 섞여 나왔다');
+    eq(PROTECTION_ENV.length, 2);
+    assert(PROTECTION_PATHS.length >= 4,
+      '안 도는 경로를 네 개 미만으로 적었다 — 사람이 무게를 못 잰다');
   });
 }

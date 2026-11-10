@@ -36,6 +36,18 @@ const BASE_ENV = {
   GIT_SHA: 'deadbeef1234567',
 };
 
+/**
+ * 보호 자격까지 갖춘 환경.
+ *
+ * `BASE_ENV` 에는 APP_URL·ADMIN_SECRET 이 **없다** — 그 상태는 "뜨지만 안
+ * 지킨다"(종료코드 2)다. 종료코드 0 을 기대하는 시험은 이쪽을 써야 한다.
+ */
+const PROTECTED_ENV = {
+  ...BASE_ENV,
+  APP_URL: 'https://example.invalid',
+  ADMIN_SECRET: 'fake-admin',
+};
+
 function runWorker(env, timeoutMs) {
   const r = spawnSync(process.execPath, [ARTIFACT], {
     env, encoding: 'utf8', timeout: timeoutMs, killSignal: 'SIGKILL',
@@ -126,7 +138,9 @@ test('워커 산출물이 있다 (없으면 빌드한다 — 건너뛰지 않는
 });
 
 test('★★ 부팅 점검 모드는 tick 에 들어가지 않는다 (jobs·heartbeat 0)', () => {
-  const { status, out } = runWorker({ ...BASE_ENV, WORKER_BOOT_CHECK: '1' }, 60_000);
+  // 보호 자격까지 갖춘 환경으로 돌린다 — 이 시험의 관심은 '아무 일도 안 한다'이고,
+  // 자격이 없는 상태의 종료코드 2 는 아래 전용 시험이 본다.
+  const { status, out } = runWorker({ ...PROTECTED_ENV, WORKER_BOOT_CHECK: '1' }, 60_000);
   assert.equal(status, 0, `종료코드가 0이 아니다 (${status})\n${out}`);
   assert.match(out, /부팅 점검 모드/, '부팅 점검 모드 표시가 없다');
   assert.match(out, /부팅 가능/, '통과 문구가 없다');
@@ -136,7 +150,7 @@ test('★★ 부팅 점검 모드는 tick 에 들어가지 않는다 (jobs·hear
   assert.doesNotMatch(out, /\[heartbeat\]/, 'heartbeat 를 썼다 — DB 쓰기가 일어났다');
   assert.doesNotMatch(out, /\[smoke\]/, '스모크 경로에 들어갔다');
   // 값이 로그에 새지 않는다
-  assert.doesNotMatch(out, /fake-not-a-real-key|fake-key-for-test/, '시크릿 값이 로그에 찍혔다');
+  assert.doesNotMatch(out, /fake-not-a-real-key|fake-key-for-test|fake-admin/, '시크릿 값이 로그에 찍혔다');
 });
 
 test('★★ 음성 대조: 스위치가 없으면 같은 환경에서 tick 에 들어간다', async () => {
@@ -206,7 +220,7 @@ test('★★ 숫자 환경변수에 오타가 있으면 통과시키지 않는�
 
 test('★ 음성 대조: 정상 숫자는 통과시킨다 — 울기만 하는 검사기가 아니다', () => {
   const { status, out } = runWorker(
-    { ...BASE_ENV, WORKER_BOOT_CHECK: '1', WORKER_POLL_SEC: '3',
+    { ...PROTECTED_ENV, WORKER_BOOT_CHECK: '1', WORKER_POLL_SEC: '3',
       LEDGER_SYNC_INTERVAL_MS: '900000' }, 60_000);
   assert.equal(status, 0, `정상 숫자인데 거부했다 (exit ${status})\n${out}`);
   assert.match(out, /부팅 점검 통과/, '통과 문구가 없다');
@@ -263,5 +277,39 @@ test('★★ NUMERIC_ENV 표가 worker/src/*.ts 전부의 실제 코드와 어�
   for (const name of listed.keys()) {
     assert.ok(found.has(name),
       `${name} 이 표에 있는데 코드는 숫자로 읽지 않는다 — 낡은 항목이다`);
+  }
+});
+
+// ── 뜨는 것과 지키는 것 ──
+//
+// BASE_ENV 에는 APP_URL·ADMIN_SECRET 이 없다. 즉 위 시험들이 보는 상태는
+// 전부 "뜨지만 안 지킨다"(종료코드 2)다. 그래서 아래 두 건이 짝이다.
+
+test('★★ 보호 자격이 없으면 통과로 적지 않는다 (종료코드 2)', () => {
+  const { status, out } = runWorker({ ...BASE_ENV, WORKER_BOOT_CHECK: '1' }, 60_000);
+  assert.equal(status, 2,
+    `APP_URL·ADMIN_SECRET 없이 종료코드가 ${status} 다 — 0 이면 사람이 "준비됐다"로 읽는다\n${out}`);
+  assert.match(out, /포지션을 지키지 않습니다/, '무엇이 문제인지 적지 않았다');
+  assert.match(out, /청산 감시/, '안 도는 경로를 이름으로 적지 않았다');
+  assert.doesNotMatch(out, /부팅 점검 통과/, '거부하면서 통과 문구도 찍었다');
+  assert.doesNotMatch(out, /tick #/, 'tick 에 들어갔다');
+  assert.doesNotMatch(out, /fake-admin/, '시크릿 값이 로그에 찍혔다');
+});
+
+test('★★ 양성 대조: 두 칸을 주면 통과한다 (종료코드 0)', () => {
+  const { status, out } = runWorker({ ...PROTECTED_ENV, WORKER_BOOT_CHECK: '1' }, 60_000);
+  assert.equal(status, 0, `자격이 있는데 종료코드가 ${status} 다\n${out}`);
+  assert.match(out, /부팅 점검 통과/, '통과 문구가 없다');
+  assert.match(out, /보호 경로 자격 있음/, '자격 있음을 적지 않았다');
+  assert.doesNotMatch(out, /fake-admin/, '시크릿 값이 로그에 찍혔다');
+});
+
+test('★ worker/.env.example 이 보호 자격 두 칸을 적어 둔다', () => {
+  // 사람이 이 파일을 보고 Railway 에 채운다. 여기 없으면 "안 지키는" 상태가
+  // 기본값이 된다 — 그걸 막는 것이 이 시험이다.
+  const ex = readFileSync('worker/.env.example', 'utf8');
+  for (const k of ['APP_URL', 'ADMIN_SECRET']) {
+    assert.match(ex, new RegExp(`^${k}=`, 'm'),
+      `${k} 가 .env.example 에 없다 — 옮기는 사람이 빈 칸인 줄 모른다`);
   }
 });
