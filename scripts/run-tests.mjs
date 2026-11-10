@@ -16,6 +16,9 @@ execFileSync(process.execPath, ['--test', 'scripts/ten-slot-reconcile-evidence-o
 // 실제 PostgreSQL 원자성 검증. `TEN_SLOT_PG_URL`이 없으면 **건너뛴다고 말한다** —
 // 돌지 않은 것을 통과로 적지 않는다. 설정 방법은 그 파일 머리말에 있다.
 execFileSync(process.execPath, ['--test', 'scripts/ten-slot-pg.test.mjs'], { cwd: root, stdio: 'inherit' });
+// `scripts/check-undefined.mjs`의 판정. 그 검사기는 `ci.yml`의 명시 목록에
+// 없어서 저장소의 어느 워크플로도 부르지 않는다 — 판정만이라도 여기서 돈다.
+execFileSync(process.execPath, ['--test', 'scripts/check-undefined.test.mjs'], { cwd: root, stdio: 'inherit' });
 const dir = mkdtempSync(join(tmpdir(), 'traigo-test-'));
 cpSync(join(root, 'src'), join(dir, 'src'), { recursive: true });
 
