@@ -16,7 +16,8 @@
 //     칸에서 나오는 오타다
 import { test, eq, assert } from '../../test/harness';
 import {
-  bootCheckRequested, missingRequiredEnv, invalidNumericEnv, REQUIRED_ENV, NUMERIC_ENV,
+  bootCheckRequested, missingRequiredEnv, invalidNumericEnv, readNumeric,
+  REQUIRED_ENV, NUMERIC_ENV,
 } from './workerBootCheck';
 
 const FULL = {
@@ -103,6 +104,47 @@ export function runWorkerBootCheckTests() {
     // 나머지는 Number로 읽는다: '7s' → NaN (안 돌아간다)
     eq(invalidNumericEnv({ LEDGER_SYNC_INTERVAL_MS: '7s' }).length, 1,
       "Number로 읽는 칸인데 '7s'를 통과시켰다 — now-last<NaN이 뒤집혀 매 tick 돈다");
+  });
+
+  test('★★ readNumeric: 세 방식이 같은 문자열을 다르게 읽는다 (표가 방식을 드는 이유)', () => {
+    // 이 표가 틀리면 검사기가 실제 동작과 다른 판정을 낸다.
+    const cases: [string, number | 'NaN', number | 'NaN', number | 'NaN'][] = [
+      //  입력      parseInt   Number    parseFloat
+      ['7',          7,         7,        7],
+      ['7s',         7,         'NaN',    7],
+      ['1.9',        1,         1.9,      1.9],
+      ['abc',        'NaN',     'NaN',    'NaN'],
+      ['0x10',       0,         16,       0],
+      ['1e3',        1,         1000,     1000],
+    ];
+    for (const [text, pi, nu, pf] of cases) {
+      for (const [parse, want] of [['parseInt', pi], ['Number', nu], ['parseFloat', pf]] as const) {
+        const got = readNumeric(text, parse as any);
+        if (want === 'NaN') {
+          assert(Number.isNaN(got), `readNumeric('${text}', '${parse}') = ${got} — NaN 이어야 한다`);
+        } else {
+          eq(got, want, `readNumeric('${text}', '${parse}')`);
+        }
+      }
+    }
+  });
+
+  test('★★ 표에 적힌 방식이 셋 중 하나다', () => {
+    // 표가 방식을 들고 있는 이유. 같은 '7s' 가 방식에 따라 돌거나 안 돈다.
+    //   parseInt('7s')=7 · Number('7s')=NaN · parseFloat('7s')=7
+    // 지금 parseFloat 로 읽는 칸은 없지만, 생기면 표가 그걸 적을 수 있어야
+    // 한다 — 없으면 `scripts/worker-boot-check.test.mjs` 의 대조가 막는다.
+    const rules = NUMERIC_ENV.map(r => r.parse);
+    assert(rules.every(p => p === 'parseInt' || p === 'Number' || p === 'parseFloat'),
+      '표에 모르는 읽는 방식이 들어 있다');
+    // 소수를 쓰는 칸은 Number 로도 통과한다 — 방식이 달라도 숫자면 통과
+    eq(invalidNumericEnv({ LEDGER_SYNC_INTERVAL_MS: '900000.5' }).length, 0,
+      '소수를 숫자가 아니라고 읽었다');
+    // parseInt 칸은 소수를 깎아서 읽는다(1.9 → 1). 1 이상이면 통과다.
+    eq(invalidNumericEnv({ WORKER_POLL_SEC: '1.9' }).length, 0);
+    // 그러나 0.9 는 parseInt 로 0 이 되어 min 미만이다 — 간격 0 은 전속 회전이다
+    eq(invalidNumericEnv({ WORKER_POLL_SEC: '0.9' }).length, 1,
+      'parseInt 로 0 이 되는 값을 통과시켰다');
   });
 
   test('★ 없는 것은 문제가 아니다 — 전부 기본값이 있다', () => {

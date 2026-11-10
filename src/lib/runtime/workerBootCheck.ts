@@ -113,11 +113,27 @@ export const BOOT_CHECK_PASS =
 // `WORKER_POLL_SEC`은 `parseInt`로 읽고(`'7s'` → 7) 나머지는 `Number`로
 // 읽는다(`'7s'` → NaN). 검사기가 한 가지 방식으로만 재면 **실제 동작과
 // 다른 판정**을 내린다. 그래서 규칙이 읽는 방식을 같이 들고 있고,
-// `workerBootCheck.test.ts`가 이 표와 `worker/src/index.ts`의 실제 코드가
-// 어긋나지 않는지 **파일을 읽어서** 확인한다.
+// `scripts/worker-boot-check.test.mjs`가 이 표와 **`worker/src/*.ts` 전부**의
+// 실제 코드가 어긋나지 않는지 파일을 읽어서 확인한다.
+//
+// 왜 한 파일이 아니라 전부인가 — 탐침으로 재어 봤다. `index.ts`만 훑던
+// 동안에는 `redis.ts`에 `Number(process.env.X)`를 더해도 대조 시험이
+// **9/9로 통과했다.** 같은 판단이 두 경로에 있으면 언젠가 갈린다.
+//
+// 이 표는 **워커의** 칸만 덮는다. 웹(`src/`)의 env는 다른 표면이고 이
+// 부팅 점검이 보지 않는다 — 우연이 아니라 범위다.
 
-/** 숫자 환경변수를 워커가 실제로 어떻게 읽는지 */
-export type NumericParse = 'parseInt' | 'Number';
+/**
+ * 숫자 환경변수를 워커가 실제로 어떻게 읽는지.
+ *
+ * 세 방식이 **같은 문자열을 다르게 읽는다.** 그래서 규칙이 방식을 들고
+ * 있어야 검사기가 실제 동작과 같은 판정을 낸다:
+ *
+ *   '7s'   → parseInt 7 · Number NaN · parseFloat 7
+ *   '1.5'  → parseInt 1 · Number 1.5 · parseFloat 1.5
+ *   'abc'  → 셋 다 NaN
+ */
+export type NumericParse = 'parseInt' | 'Number' | 'parseFloat';
 
 export interface NumericEnvRule {
   readonly name: string;
@@ -147,6 +163,19 @@ export const NUMERIC_ENV: readonly NumericEnvRule[] = [
  * 값은 돌려주지 않는다. 글자 수만 적는다 — 시크릿을 숫자 칸에 잘못
  * 붙여 넣었을 때도 로그에 값이 남아서는 안 된다.
  */
+/**
+ * 문자열을 **워커가 읽는 방식 그대로** 숫자로 읽는다.
+ *
+ * 따로 내보내는 이유: 지금 `parseFloat` 를 쓰는 칸이 하나도 없어서, 표를
+ * 통해서만 부르면 그 가지는 **아무 시험도 지나가지 않는 죽은 코드**가 된다.
+ * 여기서 직접 셋 다 센다.
+ */
+export function readNumeric(text: string, parse: NumericParse): number {
+  if (parse === 'parseInt') return parseInt(text, 10);
+  if (parse === 'parseFloat') return parseFloat(text);
+  return Number(text);
+}
+
 export function invalidNumericEnv(
   env: Record<string, unknown> | undefined | null,
 ): { name: string; reason: string }[] {
@@ -156,7 +185,7 @@ export function invalidNumericEnv(
     const raw = e[rule.name];
     if (!present(raw)) continue;            // 없는 것은 기본값으로 간다
     const text = String(raw).trim();
-    const n = rule.parse === 'parseInt' ? parseInt(text, 10) : Number(text);
+    const n = readNumeric(text, rule.parse);
     if (!Number.isFinite(n)) {
       bad.push({ name: rule.name, reason: `숫자로 읽히지 않습니다 (${text.length}자)` });
       continue;

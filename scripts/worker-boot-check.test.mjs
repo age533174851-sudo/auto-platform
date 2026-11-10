@@ -22,7 +22,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { createServer } from 'node:http';
 
 const ARTIFACT = 'worker/dist/worker/src/index.js';
@@ -212,34 +212,53 @@ test('★ 음성 대조: 정상 숫자는 통과시킨다 — 울기만 하는 �
   assert.match(out, /부팅 점검 통과/, '통과 문구가 없다');
 });
 
-test('★★ NUMERIC_ENV 표가 worker/src/index.ts 의 실제 코드와 어긋나지 않는다', () => {
+test('★★ NUMERIC_ENV 표가 worker/src/*.ts 전부의 실제 코드와 어긋나지 않는다', () => {
   // 이 시험이 막는 것: 나중에 숫자 env 가 하나 늘었는데 표에 안 들어가서
   // **그 칸의 오타만 조용히 통과하는 상태.** 표가 코드를 따라가는지는
   // 사람이 기억할 일이 아니다.
-  const src = readFileSync('worker/src/index.ts', 'utf8');
+  //
+  // **한 파일만 훑으면 이 시험이 거짓으로 통과한다.** 탐침으로 재어 봤다:
+  //   · `redis.ts` 에 `Number(process.env.X)` 를 더함      → 9/9 통과(놓침)
+  //   · `index.ts` 에 `parseFloat(process.env.Y)` 를 더함  → 9/9 통과(놓침)
+  // 그래서 범위는 `worker/src/*.ts` 전부이고 방식은 세 가지 전부다.
+  const dir = 'worker/src';
+  const files = readdirSync(dir).filter((f) => f.endsWith('.ts')).sort();
+  assert.ok(files.length >= 4,
+    `${dir} 에서 .ts 를 ${files.length}개만 찾았다 — 훑는 범위가 좁아졌다`);
+  assert.ok(files.includes('index.ts'), 'index.ts 를 훑지 않는다');
+
   const mod = readFileSync('src/lib/runtime/workerBootCheck.ts', 'utf8');
 
-  // 코드에서 숫자로 읽는 env 를 실제로 긁는다: parseInt(process.env.X 또는 Number(process.env.X
-  const found = new Map();           // 이름 → 'parseInt' | 'Number'
-  for (const m of src.matchAll(/\b(parseInt|Number)\(\s*process\.env\.([A-Z0-9_]+)/g)) {
-    found.set(m[2], m[1]);
+  // 코드에서 숫자로 읽는 env 를 실제로 긁는다. 읽는 방식까지 같이 센다 —
+  // '7s' 를 parseInt 는 7 로, Number 는 NaN 으로 읽기 때문에 방식이 다르면
+  // 판정도 달라야 한다.
+  const found = new Map();           // 이름 → 'parseInt' | 'Number' | 'parseFloat'
+  const where = new Map();           // 이름 → 어느 파일에서 읽는지(실패 문구용)
+  for (const f of files) {
+    const src = readFileSync(`${dir}/${f}`, 'utf8');
+    for (const m of src.matchAll(/\b(parseInt|Number|parseFloat)\(\s*process\.env\.([A-Z0-9_]+)/g)) {
+      found.set(m[2], m[1]);
+      where.set(m[2], f);
+    }
   }
   assert.ok(found.size >= 7,
-    `worker/src/index.ts 에서 숫자 env 를 ${found.size}개만 찾았다 — 정규식이 코드를 못 따라가고 있다`);
+    `${dir}/*.ts 에서 숫자 env 를 ${found.size}개만 찾았다 — 정규식이 코드를 못 따라가고 있다`);
 
   // 표에 적힌 것 긁기
   const listed = new Map();
   const block = mod.match(/NUMERIC_ENV[^=]*=\s*\[([\s\S]*?)\n\];/);
   assert.ok(block, 'NUMERIC_ENV 표를 모듈에서 찾지 못했다');
-  for (const m of block[1].matchAll(/name:\s*'([A-Z0-9_]+)'\s*,\s*parse:\s*'(parseInt|Number)'/g)) {
+  for (const m of block[1].matchAll(/name:\s*'([A-Z0-9_]+)'\s*,\s*parse:\s*'(parseInt|Number|parseFloat)'/g)) {
     listed.set(m[1], m[2]);
   }
 
   for (const [name, parse] of found) {
     assert.ok(listed.has(name),
-      `${name} 을 코드는 숫자로 읽는데 NUMERIC_ENV 표에 없다 — 그 칸의 오타는 아무도 모른다`);
+      `${name} 을 ${dir}/${where.get(name)} 가 숫자로 읽는데 NUMERIC_ENV 표에 없다`
+      + ' — 그 칸의 오타는 아무도 모른다');
     assert.equal(listed.get(name), parse,
-      `${name}: 코드는 ${parse} 로 읽는데 표는 ${listed.get(name)} 로 적혀 있다 — 판정이 실제와 달라진다`);
+      `${name}: ${dir}/${where.get(name)} 는 ${parse} 로 읽는데 표는 ${listed.get(name)} 로`
+      + ' 적혀 있다 — 판정이 실제와 달라진다');
   }
   for (const name of listed.keys()) {
     assert.ok(found.has(name),
