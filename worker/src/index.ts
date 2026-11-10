@@ -28,7 +28,7 @@ import {
 } from '../../src/lib/exchanges/futuresExec';
 import { futuresCancelAll, futuresCloseAll } from '../../src/lib/exchanges/futuresAdapter';
 import { evaluateIfDue } from '../../src/lib/autotrade/evaluationRunner';
-import { selectDueSchedules, shouldPollNow, POLL_INTERVAL_MS, lastEvaluationBrief } from '../../src/lib/autotrade/schedulePoll';
+import { selectDueSchedules, shouldPollNow, POLL_INTERVAL_MS, lastEvaluationBrief, offSkipCount } from '../../src/lib/autotrade/schedulePoll';
 import { exitMonitorPlan, exitMonitorOutcome, EXIT_MONITOR_INTERVAL_MS } from '../../src/lib/engine/exitMonitorSchedule';
 import { wakeCadenceHeaders } from '../../src/lib/engine/exitMonitorWake';
 
@@ -569,6 +569,16 @@ async function pollSchedules(): Promise<void> {
     lastPollIso: new Date(nowMs).toISOString(),
     lastDueCount: sel.due.length,
     lastSkippedCount: sel.skipped.length,
+    // **"지금 때가 아니라 0"과 "꺼져 있어서 0"을 가른다.**
+    //
+    // 2026-11-10 운영에서 워커는 tick 39645회·pollCount 1956으로 멀쩡히
+    // 돌고 있었는데 `autotrade_schedules` 7건이 전부 `enabled=false`였다.
+    // 그때 판정은 "주 경로가 돌고 있습니다"였다 — 틀린 말은 아니지만
+    // **앞으로도 영원히 아무것도 쏘지 않는다**는 사실이 어디에도 없었다.
+    //
+    // 개수만 적는다. 종목·id는 담지 않는다 — 이 보고는 로그인 없이 열리는
+    // 경로로 나가고, `lastDueCount`와 같은 등급의 값이다.
+    lastOffCount: offSkipCount(sel),
     pollCount,
   });
   if (sel.due.length === 0) {
