@@ -35,7 +35,10 @@ import {
   resolveStrategy, runnableStrategies, strategyIdOfRow, LEGACY_STRATEGY_ID,
 } from '@/lib/strategies/registry';
 import { runtimeStateOf, RUNTIME_LABEL, dueDiagnostics } from '@/lib/autotrade/evaluationLoop';
-import { parseTogglePatch, enabledUpdate, notFoundMessage } from '@/lib/autotrade/scheduleToggle';
+import {
+  parseTogglePatch, enabledUpdate, notFoundMessage, toggleAuditRecord,
+} from '@/lib/autotrade/scheduleToggle';
+import { recordAuditAsync } from '@/lib/safety/auditStore';
 import { workerPlan } from '@/lib/runtime/workerPlan';
 import { executionGateVerdict, enableFilterSpec } from '@/lib/execution/dormantGate';
 
@@ -958,6 +961,36 @@ export async function PATCH(req: NextRequest) {
       ok: false, error: 'not_found', message: notFoundMessage(p.id),
     }, { status: 404, headers: { 'Cache-Control': 'no-store' } });
   }
+
+  // ── 끈 사실을 남긴다 ──
+  //
+  // 2026-11-10 운영에서 예약 7건이 전부 꺼져 있었는데 **누가 언제 껐는지
+  // 어떤 질의로도 답이 안 나왔다.** `enabledUpdate`는 `{ enabled }` 한
+  // 칸만 쓰고 시각도 주체도 남기지 않는다. 그래서 사람이 추측해야 했다.
+  //
+  // `audit_events`(040)는 남길 대상으로 "자동매매 ON/OFF"를 직접 적어 뒀고
+  // `'AUTOTRADE_TOGGLE'` 어휘까지 있었다. **배선만 없었다.**
+  //
+  // 왜 `recordAudit`(불 지르고 잊기)이 아니라 `recordAuditAsync`인가:
+  // 서버리스는 응답을 돌려주면 그 요청의 실행을 곧 정리한다. 잊어버린
+  // insert는 **완료 전에 잘릴 수 있고**, 그러면 기록은 있다고 믿는데 표는
+  // 비어 있다. 이 자리는 사람이 스위치를 누른 것이라 왕복 한 번이 늦어도
+  // 상관없다 — **주문 경로가 아니다.**
+  //
+  // 그리고 **끄는 것을 어렵게 만들지 않는다.** 기록이 실패해도 토글은
+  // 성공으로 돌아간다(그 함수는 던지지 않지만, 여기서 한 겹 더 막는다).
+  try {
+    const audit = toggleAuditRecord({
+      scheduleId: r.row.id, enabled: p.enabled === true,
+      symbol: r.row.symbol, mode: r.row.mode,
+    });
+    if (audit) {
+      await recordAuditAsync(sb, {
+        userId: uid, action: audit.action, resource: audit.resource,
+        result: audit.result, detail: audit.detail,
+      });
+    }
+  } catch { /* 기록 실패가 끄기를 실패시키지 않는다 */ }
 
   return NextResponse.json({
     ok: true, schedule: r.row,
