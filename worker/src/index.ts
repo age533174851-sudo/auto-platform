@@ -16,6 +16,9 @@
 //
 // 모르는 거래소는 UNSUPPORTED_EXCHANGE로 막는다. binance로 떨어뜨리지 않는다.
 import { sb, acquireLock, releaseLock, heartbeat, noteStartupResult, noteScheduler } from './supabase';
+import {
+  bootCheckRequested, missingRequiredEnv, BOOT_CHECK_MARKER, BOOT_CHECK_PASS,
+} from '../../src/lib/runtime/workerBootCheck';
 import { decryptSecret } from './crypto';
 import { redisAvailable, lockNxEx, unlock } from './redis';
 import { alert } from './telegram';
@@ -1270,10 +1273,10 @@ async function startupChecks() {
   // 마지막 줄이 문제다. 죽은 워커는 알아채지만, "돌고 있는데 아무것도 안
   // 하는" 워커는 아무도 모른다. Fly는 restart=always라 종료하면 재시작하고,
   // 크래시 루프는 로그에 그대로 남는다 — 그게 훨씬 잘 보인다.
-  const missing: string[] = [];
-  if (!process.env.SUPABASE_URL) missing.push('SUPABASE_URL');
-  if (!process.env.SUPABASE_SERVICE_ROLE_KEY) missing.push('SUPABASE_SERVICE_ROLE_KEY');
-  if (!process.env.EXCHANGE_ENCRYPTION_KEY && !process.env.ENCRYPTION_KEY) missing.push('EXCHANGE_ENCRYPTION_KEY (또는 ENCRYPTION_KEY)');
+  // 목록은 `src/lib/runtime/workerBootCheck.ts` 한 곳이 소유한다 — 부팅
+  // 점검과 이 자리가 각자 목록을 들면 언젠가 갈리고, 그때 갈리는 쪽은
+  // "없어도 뜨는" 쪽이다.
+  const missing: string[] = missingRequiredEnv(process.env as any);
   if (missing.length) {
     console.error('❌ 필수 환경변수 누락:', missing.join(', '));
     console.error('   이 값들이 없으면 잡을 읽을 수도, 거래소 키를 복호화할 수도 없습니다.');
@@ -1313,6 +1316,34 @@ async function startupChecks() {
 }
 
 async function main() {
+  // ── 부팅 점검 모드 ──
+  //
+  // **`startupChecks()`보다 먼저 끝낸다.** 그 함수는 Supabase에 연결해
+  // `noteStartupResult`로 **DB에 쓴다** — 부팅만 보려는 자리에서 그걸
+  // 하면 "연결하지 않고 확인한다"가 깨진다.
+  //
+  // 그래서 여기서는 환경변수만 보고 끝낸다: DB 연결 0 · 쓰기 0 ·
+  // 거래소 호출 0 · `tick()` 0.
+  if (bootCheckRequested(process.env as any)) {
+    console.log(`${BOOT_CHECK_MARKER} — tick 에 들어가지 않고 끝냅니다`);
+    console.log(`  id=${WORKER_ID}  build=${String(process.env.GIT_SHA || '').slice(0, 7) || '(모름)'}`);
+    const missing = missingRequiredEnv(process.env as any);
+    if (missing.length) {
+      console.error('❌ 필수 환경변수 누락:', missing.join(', '));
+      console.error('   이 값들이 없으면 잡을 읽을 수도, 거래소 키를 복호화할 수도 없습니다.');
+      process.exit(1);
+    }
+    // 암호화 키 **지문만** 찍는다. 값은 절대 찍지 않는다 — 다른 호스팅으로
+    // 옮길 때 Vercel의 지문과 눈으로 대조하는 용도다.
+    try {
+      const { createHash } = await import('crypto');
+      const raw = String(process.env.EXCHANGE_ENCRYPTION_KEY || process.env.ENCRYPTION_KEY || '');
+      console.log(`  🔑 암호화 키 지문: ${createHash('sha256').update(raw).digest('hex').slice(0, 6)}`);
+    } catch { /* 지문을 못 만들어도 점검 결과는 바뀌지 않는다 */ }
+    console.log(BOOT_CHECK_PASS);
+    process.exit(0);
+  }
+
   await startupChecks();
   let stopping = false;
   for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig as any, async () => {
