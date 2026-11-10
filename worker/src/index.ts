@@ -17,7 +17,8 @@
 // 모르는 거래소는 UNSUPPORTED_EXCHANGE로 막는다. binance로 떨어뜨리지 않는다.
 import { sb, acquireLock, releaseLock, heartbeat, noteStartupResult, noteScheduler } from './supabase';
 import {
-  bootCheckRequested, missingRequiredEnv, BOOT_CHECK_MARKER, BOOT_CHECK_PASS,
+  bootCheckRequested, missingRequiredEnv, invalidNumericEnv,
+  BOOT_CHECK_MARKER, BOOT_CHECK_PASS,
 } from '../../src/lib/runtime/workerBootCheck';
 import { decryptSecret } from './crypto';
 import { redisAvailable, lockNxEx, unlock } from './redis';
@@ -1285,6 +1286,22 @@ async function startupChecks() {
     process.exit(1);
   }
 
+  // ── 숫자 환경변수: 여기서는 **막지 않고 크게 말한다** ──
+  //
+  // 왜 막지 않는가: 운영에 지금 어떤 값이 들어 있는지 이 자리에서는 볼 수
+  // 없다. 거부로 바꾸면 멀쩡히 돌던 워커가 **다음 배포에서 안 뜬다** —
+  // 값을 못 본 채로 내릴 결정이 아니다.
+  //
+  // 대신 `WORKER_BOOT_CHECK=1`은 같은 것을 보고 **거부한다.** 그쪽은 아직
+  // 트래픽이 없으니 거부가 공짜다. 즉 사람은 옮기기 **전에** 점검으로 알게
+  // 되고, 운영은 조용해지지 않는다.
+  //
+  // 값을 눈으로 확인한 사람이 이 블록을 `process.exit(1)`로 바꾸면 된다.
+  for (const bad of invalidNumericEnv(process.env as any)) {
+    console.error(`⚠ ${bad.name} — ${bad.reason}`);
+    console.error('   기본값으로 되돌리지 않습니다 — 적은 값이 그대로 쓰이거나 무시됩니다.');
+  }
+
   // 암호화 키 지문(6자리)만 찍는다. **값은 절대 찍지 않는다.**
   // Vercel과 같은 키인지 눈으로 대조하는 용도다 — 다르면 저장된 API secret을
   // 복호화할 수 없고, 그 증상은 '키가 틀렸다'로 보인다.
@@ -1331,6 +1348,16 @@ async function main() {
     if (missing.length) {
       console.error('❌ 필수 환경변수 누락:', missing.join(', '));
       console.error('   이 값들이 없으면 잡을 읽을 수도, 거래소 키를 복호화할 수도 없습니다.');
+      process.exit(1);
+    }
+    // **작은 오타 하나도 여기서 걸러진다.** 이 자리는 아직 트래픽이 없어서
+    // 거부가 공짜다 — 운영 부팅에서는 경고만 한다(아래 startupChecks).
+    const badNumeric = invalidNumericEnv(process.env as any);
+    if (badNumeric.length) {
+      console.error('❌ 숫자로 읽는 환경변수가 숫자가 아닙니다:');
+      for (const b of badNumeric) console.error(`   ${b.name} — ${b.reason}`);
+      console.error('   WORKER_POLL_SEC 이 숫자가 아니면 락 잡기가 예외를 던지고,');
+      console.error('   tick 은 그걸 "나는 main 이다"로 받습니다 — **모든 워커가 main 이 됩니다.** tick 간격도 사라집니다.');
       process.exit(1);
     }
     // 암호화 키 **지문만** 찍는다. 값은 절대 찍지 않는다 — 다른 호스팅으로

@@ -77,3 +77,93 @@ export const BOOT_CHECK_MARKER = '[worker] 부팅 점검 모드';
 export const BOOT_CHECK_PASS =
   '✅ 부팅 점검 통과 — 필수 환경변수가 있습니다. '
   + '이것은 "부팅 가능"이며 **"매매 가능"을 뜻하지 않습니다** (DB 연결 0 · 주문 0 · tick 0).';
+// ── 숫자로 읽는 환경변수 ──────────────────────────────────────
+//
+// **오타 하나가 조용히 동작을 바꾼다.** 호스팅을 옮길 때 이 7개를 손으로
+// 다시 타이핑하므로, 이건 "일어날 수도 있는 일"이 아니라 Railway 이전의
+// 기본 위험이다. 그리고 지금 이걸 보는 검사기가 **하나도 없다.**
+//
+// 실제로 재어 본 것 (빌드된 `worker/dist/worker/src/supabase.js`를 그대로 호출):
+//
+//   WORKER_POLL_SEC=abc
+//     → POLL_SEC = Math.max(1, Math.min(15, parseInt('abc', 10))) = **NaN**
+//     → acquireLock(..., NaN): `new Date(now + NaN).toISOString()`이
+//       **그 함수의 try 바깥(선언부)에서** RangeError를 던진다
+//       (ttlSec=12 → 반환 false · ttlSec=NaN → 예외가 밖으로 나옴, 둘 다 측정)
+//     → tick()의 `catch { isMain = true }`가 그걸 받는다
+//     → **모든 워커가 자기를 main이라고 믿는다** — 중복 main 진입
+//     → 덤으로 `sleep(Math.max(500, NaN))` = `sleep(NaN)` ≈ 0ms → 전속 회전
+//
+//   LEDGER_SYNC_INTERVAL_MS=abc · EQUITY_SNAPSHOT_INTERVAL_MS=abc
+//     → `now - last < NaN`이 **항상 false** → "너무 이르다"가 뒤집혀
+//       15분마다가 아니라 **매 tick** 돈다
+//
+//   EXIT_MONITOR / PAPER_EXIT / CHALLENGE_SWEEP / SCHEDULED_EXIT_INTERVAL_MS
+//     → `exitMonitorPlan`의 `Number.isFinite` 가드가 기본값으로 되돌린다.
+//       동작은 안전하지만 **사람은 자기 설정이 무시된 줄 모른다.**
+//
+// 왜 기본값으로 덮지 않는가
+// ─────────────────────────
+// 조용히 되돌리면 오타는 영원히 남고, 그 환경은 "내가 적은 간격으로
+// 돈다"고 잘못 믿는다. 체크리스트를 자동으로 눌러 주는 것보다 **그 칸을
+// 없애는 쪽**이 낫다.
+//
+// 왜 읽는 방식을 규칙에 적는가
+// ────────────────────────────
+// `WORKER_POLL_SEC`은 `parseInt`로 읽고(`'7s'` → 7) 나머지는 `Number`로
+// 읽는다(`'7s'` → NaN). 검사기가 한 가지 방식으로만 재면 **실제 동작과
+// 다른 판정**을 내린다. 그래서 규칙이 읽는 방식을 같이 들고 있고,
+// `workerBootCheck.test.ts`가 이 표와 `worker/src/index.ts`의 실제 코드가
+// 어긋나지 않는지 **파일을 읽어서** 확인한다.
+
+/** 숫자 환경변수를 워커가 실제로 어떻게 읽는지 */
+export type NumericParse = 'parseInt' | 'Number';
+
+export interface NumericEnvRule {
+  readonly name: string;
+  /** 워커 코드가 쓰는 방식 그대로 */
+  readonly parse: NumericParse;
+  /** 이 값보다 작으면 거부한다 */
+  readonly min: number;
+}
+
+/** 워커가 숫자로 읽는 환경변수 전부. 하나라도 빠지면 그 칸이 다시 조용해진다 */
+export const NUMERIC_ENV: readonly NumericEnvRule[] = [
+  { name: 'WORKER_POLL_SEC', parse: 'parseInt', min: 1 },
+  { name: 'EXIT_MONITOR_INTERVAL_MS', parse: 'Number', min: 1 },
+  { name: 'PAPER_EXIT_INTERVAL_MS', parse: 'Number', min: 1 },
+  { name: 'CHALLENGE_SWEEP_INTERVAL_MS', parse: 'Number', min: 1 },
+  { name: 'SCHEDULED_EXIT_INTERVAL_MS', parse: 'Number', min: 1 },
+  { name: 'LEDGER_SYNC_INTERVAL_MS', parse: 'Number', min: 1 },
+  { name: 'EQUITY_SNAPSHOT_INTERVAL_MS', parse: 'Number', min: 1 },
+];
+
+/**
+ * **있는데 숫자가 아닌** 환경변수의 이름과 이유를 돌려준다.
+ *
+ * 없는 것은 문제가 아니다 — 전부 기본값이 있다. 문제는 **있는데 숫자가
+ * 아닌 것**이고, 그건 지금 아무 데서도 걸리지 않는다.
+ *
+ * 값은 돌려주지 않는다. 글자 수만 적는다 — 시크릿을 숫자 칸에 잘못
+ * 붙여 넣었을 때도 로그에 값이 남아서는 안 된다.
+ */
+export function invalidNumericEnv(
+  env: Record<string, unknown> | undefined | null,
+): { name: string; reason: string }[] {
+  const e = env ?? {};
+  const bad: { name: string; reason: string }[] = [];
+  for (const rule of NUMERIC_ENV) {
+    const raw = e[rule.name];
+    if (!present(raw)) continue;            // 없는 것은 기본값으로 간다
+    const text = String(raw).trim();
+    const n = rule.parse === 'parseInt' ? parseInt(text, 10) : Number(text);
+    if (!Number.isFinite(n)) {
+      bad.push({ name: rule.name, reason: `숫자로 읽히지 않습니다 (${text.length}자)` });
+      continue;
+    }
+    if (n < rule.min) {
+      bad.push({ name: rule.name, reason: `${rule.min} 미만입니다 (${n})` });
+    }
+  }
+  return bad;
+}

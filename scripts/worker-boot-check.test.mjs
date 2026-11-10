@@ -22,7 +22,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 
 const ARTIFACT = 'worker/dist/worker/src/index.js';
 
@@ -100,4 +100,64 @@ test('★ railway.json 의 start 경로가 산출물과 맞는다', () => {
   const rel = String(pkg?.scripts?.start ?? '').replace(/^node\s+/, '');
   assert.equal(`worker/${rel}`, ARTIFACT,
     `npm start 가 찾는 경로(worker/${rel})와 실제 산출물(${ARTIFACT})이 다르다`);
+});
+
+test('★★ 숫자 환경변수에 오타가 있으면 통과시키지 않는다', () => {
+  // 왜 이게 치명적인가 (빌드된 supabase.js 를 직접 불러 재어 봤다):
+  //   WORKER_POLL_SEC=abc → POLL_SEC = Math.max(1, Math.min(15, NaN)) = NaN
+  //   → acquireLock(..., NaN) 안의 `new Date(now + NaN).toISOString()` 이
+  //     **그 함수의 try 바깥**에서 RangeError 를 던진다
+  //   → tick() 의 `catch { isMain = true }` 가 받는다
+  //   → **모든 워커가 자기를 main 이라고 믿는다** (중복 main 진입)
+  // Fly → Railway 겹치는 구간에서 이게 두 배로 돈다.
+  const { status, out } = runWorker(
+    { ...BASE_ENV, WORKER_BOOT_CHECK: '1', WORKER_POLL_SEC: 'abc' }, 60_000);
+  assert.equal(status, 1, `숫자 아닌 WORKER_POLL_SEC 를 통과시켰다 (exit ${status})\n${out}`);
+  assert.match(out, /WORKER_POLL_SEC/, '어느 변수가 문제인지 적지 않았다');
+  assert.doesNotMatch(out, /tick #/, 'tick 에 들어갔다');
+  // 통과 문구가 같이 찍히면 사람은 통과로 읽는다
+  assert.doesNotMatch(out, /부팅 점검 통과/, '거부하면서 통과 문구도 찍었다');
+});
+
+test('★ 음성 대조: 정상 숫자는 통과시킨다 — 울기만 하는 검사기가 아니다', () => {
+  const { status, out } = runWorker(
+    { ...BASE_ENV, WORKER_BOOT_CHECK: '1', WORKER_POLL_SEC: '3',
+      LEDGER_SYNC_INTERVAL_MS: '900000' }, 60_000);
+  assert.equal(status, 0, `정상 숫자인데 거부했다 (exit ${status})\n${out}`);
+  assert.match(out, /부팅 점검 통과/, '통과 문구가 없다');
+});
+
+test('★★ NUMERIC_ENV 표가 worker/src/index.ts 의 실제 코드와 어긋나지 않는다', () => {
+  // 이 시험이 막는 것: 나중에 숫자 env 가 하나 늘었는데 표에 안 들어가서
+  // **그 칸의 오타만 조용히 통과하는 상태.** 표가 코드를 따라가는지는
+  // 사람이 기억할 일이 아니다.
+  const src = readFileSync('worker/src/index.ts', 'utf8');
+  const mod = readFileSync('src/lib/runtime/workerBootCheck.ts', 'utf8');
+
+  // 코드에서 숫자로 읽는 env 를 실제로 긁는다: parseInt(process.env.X 또는 Number(process.env.X
+  const found = new Map();           // 이름 → 'parseInt' | 'Number'
+  for (const m of src.matchAll(/\b(parseInt|Number)\(\s*process\.env\.([A-Z0-9_]+)/g)) {
+    found.set(m[2], m[1]);
+  }
+  assert.ok(found.size >= 7,
+    `worker/src/index.ts 에서 숫자 env 를 ${found.size}개만 찾았다 — 정규식이 코드를 못 따라가고 있다`);
+
+  // 표에 적힌 것 긁기
+  const listed = new Map();
+  const block = mod.match(/NUMERIC_ENV[^=]*=\s*\[([\s\S]*?)\n\];/);
+  assert.ok(block, 'NUMERIC_ENV 표를 모듈에서 찾지 못했다');
+  for (const m of block[1].matchAll(/name:\s*'([A-Z0-9_]+)'\s*,\s*parse:\s*'(parseInt|Number)'/g)) {
+    listed.set(m[1], m[2]);
+  }
+
+  for (const [name, parse] of found) {
+    assert.ok(listed.has(name),
+      `${name} 을 코드는 숫자로 읽는데 NUMERIC_ENV 표에 없다 — 그 칸의 오타는 아무도 모른다`);
+    assert.equal(listed.get(name), parse,
+      `${name}: 코드는 ${parse} 로 읽는데 표는 ${listed.get(name)} 로 적혀 있다 — 판정이 실제와 달라진다`);
+  }
+  for (const name of listed.keys()) {
+    assert.ok(found.has(name),
+      `${name} 이 표에 있는데 코드는 숫자로 읽지 않는다 — 낡은 항목이다`);
+  }
 });
