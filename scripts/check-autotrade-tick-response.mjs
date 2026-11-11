@@ -19,6 +19,17 @@ export function tickResponseVerdict(body) {
   if (body.results.length !== body.scheduled || !body.results.every(object)) {
     return fail('SCHEDULE_RESULT_INCOMPLETE');
   }
+  // A schedule evaluation can report ok:true even when its DB state write failed.
+  // The cron audit write is separate from the schedule evaluation loop.
+  if (body.results.some((r) => r.saveError != null && r.saveError !== '')) {
+    return fail('SCHEDULE_STATE_SAVE_FAILED');
+  }
+  if (body.cronLogError != null && body.cronLogError !== '') {
+    return fail('CRON_AUDIT_SAVE_FAILED');
+  }
+  if (body.results.some((r) => typeof r.ok !== 'boolean')) {
+    return fail('EVALUATION_STATUS_UNKNOWN');
+  }
   const failures = body.results.filter((r) => r.ok === false).length;
   const reportedEntries = body.results.filter((r) => r.executed === true).length;
   const checked = body.results.length;
