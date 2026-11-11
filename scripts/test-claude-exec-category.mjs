@@ -13,7 +13,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { categorize, render, nextAction, CATEGORIES, deniedToolTally, deniedToolLine } from './claude-exec-category.mjs';
+import { categorize, render, nextAction, CATEGORIES, deniedToolTally, deniedToolLine, PRINTABLE_TOOLS } from './claude-exec-category.mjs';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 /** 실제 실패 회차가 보고한 모양 */
 const OBSERVED = {
@@ -347,7 +349,11 @@ test('목록 밖 이름은 **적지 않고 개수로만** 적는다', () => {
   assert.ok(!out.includes('sk-live-DO-NOT-PRINT'), '목록 밖 이름이 그대로 샜다');
   assert.ok(!out.includes('secretserver'), '목록 밖 이름이 그대로 샜다');
   assert.match(out, /Bash/);
-  assert.match(out, /목록 밖/, '목록 밖 건수를 적지 않았다');
+  // **이 이름은 MCP 모양이라 `MCP 도구` 칸으로 센다**(`목록 밖`이 아니다).
+  // 어느 칸인지는 바뀌어도 지켜야 하는 성질은 둘이다 — 위의 두 assert 처럼
+  // 이름이 새지 않는 것, 그리고 **건수가 어디로도 사라지지 않는 것**.
+  assert.match(out, /MCP 도구 1건/, 'MCP 거부 건수를 적지 않았다');
+  assert.ok(!out.includes('목록 밖'), 'MCP 모양인데 목록 밖으로 셌다');
 });
 
 test('거부가 0건이면 이름 줄을 만들지 않는다', () => {
@@ -377,6 +383,93 @@ test('막힌 도구 줄의 합이 거부 수와 맞는다', () => {
     { tool_name: 'mcp__x__y' }, { nope: 1 },
   ];
   const t = deniedToolTally(denials);
-  const summed = t.named.reduce((a, b) => a + b.count, 0) + t.unlisted + t.unnamed;
+  // 칸이 하나 늘었다(`mcp`). 합에 더하지 않으면 이 시험이 **새 칸으로 간
+  // 건수를 사라진 것으로 못 본다** — 그게 이 시험의 유일한 일이다.
+  const summed = t.named.reduce((a, b) => a + b.count, 0) + t.mcp + t.unlisted + t.unnamed;
   assert.equal(summed, denials.length, `합 ${summed} ≠ 거부 ${denials.length} — 어딘가로 사라졌다`);
+});
+
+// ── "목록 밖"이 두 가지를 한 이름으로 섞고 있었다 ──
+//
+//   `mcp__github__merge_pull_request`가 막힌 것과, 처음 보는 내장 도구가
+//   막힌 것이 **같은 `목록 밖 N건`**으로 떨어졌다. 그런데 사람이 할 일이
+//   다르다 — 앞은 MCP 설정, 뒤는 도구 허용 목록이다.
+//
+//   이름은 여전히 내보내지 않는다. MCP 도구 이름은 서버가 정하는 임의
+//   문자열이므로 **모양만 보고 개수로만** 센다.
+
+test('MCP 도구 거부를 "목록 밖"과 구별해 센다', () => {
+  const t = deniedToolTally([
+    { tool_name: 'mcp__github__merge_pull_request' },
+    { tool_name: 'mcp__x__y' },
+    { tool_name: 'SomeFutureTool' },
+    { tool_name: 'Bash' },
+  ]);
+  assert.equal(t.mcp, 2, 'MCP 거부를 따로 세지 않았다');
+  assert.equal(t.unlisted, 1, '목록 밖은 MCP 가 아닌 것만이어야 한다');
+  assert.deepEqual(t.named, [{ name: 'Bash', count: 1 }]);
+  const line = deniedToolLine(t);
+  assert.match(line, /MCP 도구 2건/, 'MCP 건수가 줄에 없다');
+  // **이름은 절대 나오지 않는다.**
+  assert.ok(!line.includes('mcp__'), `MCP 이름이 새어 나갔다: ${line}`);
+  assert.ok(!line.includes('github'), `서버 이름이 새어 나갔다: ${line}`);
+});
+
+test('mcp 를 품은 이름이라고 다 MCP 가 아니다 — 접두사 모양만 본다', () => {
+  const t = deniedToolTally([
+    { tool_name: 'mcpSomething' }, { tool_name: 'mcp__' }, { tool_name: 'x__mcp__y' },
+  ]);
+  assert.equal(t.mcp, 0, '모양이 아닌 것을 MCP 로 셌다');
+  assert.equal(t.unlisted, 3);
+});
+
+test('아무 이름도 못 적었으면 목록이 낡았을 수 있다고 적는다', () => {
+  // 이름이 전부 목록 밖으로 떨어지면 그 줄은 바꾸기 전의 "개수만"과 똑같이
+  // 쓸모가 없어진다. **그걸 알려 주는 장치가 없으면 아무도 모른다.**
+  const stale = deniedToolLine(deniedToolTally([{ tool_name: 'SomeFutureTool' }]));
+  assert.match(stale, /목록이 낡았을 수 있습니다/, '낡음 신호가 없다');
+  // 하나라도 이름이 적혔으면 그 문장을 붙이지 않는다 — 거짓 경보를 만들지 않는다.
+  const ok = deniedToolLine(deniedToolTally([{ tool_name: 'Bash' }, { tool_name: 'SomeFutureTool' }]));
+  assert.ok(!ok.includes('목록이 낡았을 수 있습니다'), ok);
+  // MCP 는 목록이 낡은 것이 아니다 — 모양을 알아본 것이다.
+  const mcpOnly = deniedToolLine(deniedToolTally([{ tool_name: 'mcp__a__b' }]));
+  assert.ok(!mcpOnly.includes('목록이 낡았을 수 있습니다'), mcpOnly);
+});
+
+test('합이 여전히 맞는다 — 새 칸이 생겨도 어디로도 사라지지 않는다', () => {
+  const denials = [
+    { tool_name: 'Bash' }, { tool_name: 'Read' }, { tool_name: 'mcp__a__b' },
+    { tool_name: 'SomeFutureTool' }, { nope: 1 }, null,
+  ];
+  const t = deniedToolTally(denials);
+  const summed = t.named.reduce((a, b) => a + b.count, 0) + t.mcp + t.unlisted + t.unnamed;
+  assert.equal(summed, denials.length, `합 ${summed} ≠ 거부 ${denials.length} — 어딘가로 사라졌다`);
+});
+
+test('갈래가 쓰는 도구 이름이 전부 출력 목록에 있다 — 표가 코드에서 멀어지는 것을 잡는다', () => {
+  // 허용·차단 목록에 새 도구가 생기면 그 이름의 거부는 `목록 밖`으로
+  // 떨어진다. 그러면 이름 줄이 다시 쓸모없어지는데, **아무도 모른다.**
+  // 그래서 워크플로를 읽어 대조한다(읽기만 한다 — 고치지 않는다).
+  const files = readdirSync('.github/workflows')
+    .filter(f => /^claude-.*\.ya?ml$/.test(f));
+  assert.ok(files.length >= 2, `갈래 워크플로를 ${files.length}개만 찾았다 — 글롭이 빗나갔다`);
+
+  const found = new Set();
+  for (const f of files) {
+    const src = readFileSync(join('.github/workflows', f), 'utf8');
+    const lists = src.match(/--(?:dis)?allowedTools\s+"[^"]*"/g) || [];
+    assert.ok(lists.length > 0, `${f}에서 도구 목록을 못 찾았다 — 정규식이 낡았다`);
+    for (const l of lists) {
+      const inner = l.slice(l.indexOf('"') + 1, -1);
+      for (const entry of inner.split(',')) {
+        const base = entry.trim().split('(')[0].trim();
+        if (base) found.add(base);
+      }
+    }
+  }
+  assert.ok(found.size > 0, '도구 이름을 하나도 못 읽었다 — 이 시험이 아무것도 안 보고 있다');
+  for (const name of found) {
+    assert.ok(PRINTABLE_TOOLS.has(name),
+      `갈래가 ${name} 를 쓰는데 출력 목록에 없다 — 그 거부는 "목록 밖"으로 떨어진다`);
+  }
 });

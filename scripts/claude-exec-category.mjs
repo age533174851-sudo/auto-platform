@@ -47,7 +47,7 @@ import { join } from 'node:path';
  * 그래서 **아는 이름만 적고, 목록 밖은 개수로만 적는다.** 이름을 지우는
  * 것이 아니라 애초에 담지 않는 쪽이다.
  */
-const PRINTABLE_TOOLS = new Set([
+export const PRINTABLE_TOOLS = new Set([
   'Bash', 'BashOutput', 'KillShell',
   'Read', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit',
   'Glob', 'Grep', 'WebFetch', 'WebSearch',
@@ -61,11 +61,28 @@ const PRINTABLE_TOOLS = new Set([
  * 이름을 못 읽은 항목은 **버리지 않고 따로 센다.** 못 읽은 것을 0으로 적는
  * 것이 이 저장소가 금지하는 바로 그 일이다.
  */
+/**
+ * MCP 도구 이름의 **모양.** `mcp__<서버>__<도구>`.
+ *
+ * 왜 따로 세는가: `mcp__github__merge_pull_request`가 막힌 것과 처음 보는
+ * 내장 도구가 막힌 것이 같은 `목록 밖 N건`으로 떨어지고 있었다. 그런데
+ * **사람이 할 일이 다르다** — 앞은 MCP 설정, 뒤는 도구 허용 목록이다.
+ *
+ * 이름은 그대로 두 번째로도 내보내지 않는다. 서버가 정하는 임의 문자열이라
+ * 무엇이 섞여 들어올지 이 파일이 보장할 수 없다. **모양만 보고 개수로만**
+ * 센다. 서버 이름도 적지 않는다 — 그것도 설정에서 오는 문자열이다.
+ *
+ * 서버 이름에 `_`가 들어갈 수 있어(`mcp__Claude_Docs__batch`) 세그먼트를
+ * 글자 종류로 묶지 않고 **마지막 `__` 구분자**로 가른다.
+ */
+const MCP_TOOL_SHAPE = /^mcp__.+?__.+/;
+
 export function deniedToolTally(denials) {
   if (!Array.isArray(denials) || denials.length === 0) {
-    return { named: [], unlisted: 0, unnamed: 0 };
+    return { named: [], mcp: 0, unlisted: 0, unnamed: 0 };
   }
   const counts = new Map();
+  let mcp = 0;
   let unlisted = 0;
   let unnamed = 0;
   for (const d of denials) {
@@ -73,13 +90,16 @@ export function deniedToolTally(denials) {
       ? (d.tool_name ?? d.toolName ?? d.name)
       : null;
     if (typeof raw !== 'string' || raw === '') { unnamed += 1; continue; }
-    if (!PRINTABLE_TOOLS.has(raw)) { unlisted += 1; continue; }
+    if (!PRINTABLE_TOOLS.has(raw)) {
+      if (MCP_TOOL_SHAPE.test(raw)) mcp += 1; else unlisted += 1;
+      continue;
+    }
     counts.set(raw, (counts.get(raw) ?? 0) + 1);
   }
   const named = [...counts.entries()]
     .map(([name, count]) => ({ name, count }))
     .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
-  return { named, unlisted, unnamed };
+  return { named, mcp, unlisted, unnamed };
 }
 
 /** 오류 문구 → 범주. 구체적인 것부터 본다 */
@@ -253,7 +273,14 @@ export function categorize(input) {
 export function deniedToolLine(t) {
   const parts = [];
   for (const { name, count } of (t?.named ?? [])) parts.push(`${name} ${count}건`);
-  if (t?.unlisted) parts.push(`목록 밖 ${t.unlisted}건(이름 비공개)`);
+  if (t?.mcp) parts.push(`MCP 도구 ${t.mcp}건(이름 비공개)`);
+  if (t?.unlisted) {
+    // 이름이 **하나도** 안 적혔으면 이 줄은 바꾸기 전의 "개수만"과 똑같이
+    // 쓸모가 없다. 그 사실을 줄 안에서 말한다 — 모르는 것을 모른 채로
+    // 두지 않는다. 하나라도 적혔으면 붙이지 않는다(거짓 경보를 만들지 않는다).
+    const stale = (t?.named?.length ?? 0) === 0;
+    parts.push(`목록 밖 ${t.unlisted}건(이름 비공개${stale ? ' — 이름 목록이 낡았을 수 있습니다' : ''})`);
+  }
   if (t?.unnamed) parts.push(`이름 확인 못 함 ${t.unnamed}건`);
   return parts.length ? parts.join(' · ') : '확인 못 함';
 }
