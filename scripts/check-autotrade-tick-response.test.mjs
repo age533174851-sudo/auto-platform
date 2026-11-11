@@ -64,3 +64,21 @@ test('workflow checks out repository before invoking the parser and never echoes
   assert.ok(checkout >= 0 && verifier > checkout, 'checkout must precede the parser');
   assert.doesNotMatch(workflow, /^\s*cat "\$body"/m);
 });
+
+test('RED: schedule save error cannot be reported as a successful tick', () => {
+  const v = tickResponseVerdict(ok([{ ok: true, executed: false, saveError: 'write failed' }]));
+  assert.equal(v.pass, false);
+  assert.equal(v.code, 'SCHEDULE_STATE_SAVE_FAILED');
+});
+
+test('RED: cron log failure must be visible rather than silently green', () => {
+  const v = tickResponseVerdict({ ...ok([{ ok: true, executed: false }]), cronLogError: 'write failed' });
+  assert.equal(v.pass, false);
+  assert.equal(v.code, 'CRON_AUDIT_SAVE_FAILED');
+});
+
+test('RED: missing per-schedule ok must not pass as a successful evaluation', () => {
+  const v = tickResponseVerdict(ok([{ executed: true, outcome: 'ENTERED' }]));
+  assert.equal(v.pass, false);
+  assert.equal(v.code, 'EVALUATION_STATUS_UNKNOWN');
+});
