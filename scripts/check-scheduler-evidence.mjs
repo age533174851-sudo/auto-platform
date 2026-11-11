@@ -183,6 +183,25 @@ if (workerRaw) {
   if (!/lastPollIso\s*:/.test(w)) fail(`${WORKER}이 마지막 폴링 시각을 적지 않습니다 — 그게 "실제로 봤다"의 증거입니다`);
   if (!/lastErrorCode\s*:/.test(w)) fail(`${WORKER}이 폴링 오류를 적지 않습니다 — 조용히 멈추면 초록으로 보입니다`);
   if (/lastError\s*:/.test(w)) fail(`${WORKER}이 예외 문구를 보고에 담습니다 — 코드(lastErrorCode)만 적으세요`);
+
+  // ── 건너뛴 회차 로그가 "확인하지 못한 판단"을 확인된 판단처럼 적지 않는가 ──
+  //
+  // `claimSchedule`은 평가 **전에** `last_run_at`을 바꾼다. 선점 직후 죽은
+  // 회차는 `last_run_at`만 최근이고 `last_decision`은 이전 회차의 것이다.
+  // `lastEvaluationNote`가 그것을 `completed === false`로 가려내는데,
+  // 로그 쪽에서 `lastEval.outcome`만 꺼내 쓰면 **그 사실이 지워진다** —
+  // 같은 판단이 두 곳에 있으면 언젠가 갈린다는 이 저장소의 상습 고장이다.
+  //
+  // 실제로 이 자리를 돌연변이로 되돌려 봤을 때 시험 7260개가 전부
+  // 통과했다(검출 0건). 그래서 규칙으로 못 박는다.
+  if (/lastEval\s*\??\.\s*(outcome|reasonCode)\b/.test(w)) {
+    fail(`${WORKER}이 lastEval에서 판단을 직접 꺼내 적습니다`
+      + ` — lastEvaluationBrief()로 적으세요 (완료 미확인이 지워집니다)`);
+  }
+  if (/sel\.skipped/.test(w) && !/lastEvaluationBrief\s*\(/.test(w)) {
+    fail(`${WORKER}이 건너뛴 회차를 적으면서 lastEvaluationBrief를 쓰지 않습니다`
+      + ` — "왜 안 나갔나"의 답이 확인된 것인지 알 수 없게 됩니다`);
+  }
   // 코드 자리에 템플릿 문자열이 들어가면 예외 문구가 그대로 실린다.
   for (const m of w.matchAll(/lastErrorCode\s*:\s*([^,\n}]+)/g)) {
     const v = m[1].trim();

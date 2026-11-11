@@ -23,6 +23,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { gatherFacts } from './lib/pr-facts.mjs';
 
 const TOKEN = process.env.GITHUB_TOKEN;
 const REPO = process.env.GITHUB_REPOSITORY;   // owner/repo
@@ -135,68 +136,6 @@ async function graphql(query, variables) {
   return { ok: r.ok && !j?.errors, body: j };
 }
 
-/**
- * 리뷰 상태. **못 읽으면 null이다** — 0으로 두면 미해결 리뷰를 무시하고 합친다.
- */
-async function reviewFacts(number) {
-  const q = `query($o:String!,$n:String!,$p:Int!){
-    repository(owner:$o,name:$n){ pullRequest(number:$p){
-      reviewThreads(first:100){ nodes { isResolved isOutdated } }
-      reviews(first:100, states:CHANGES_REQUESTED){ totalCount }
-    }}}`;
-  const r = await graphql(q, { o: OWNER, n: NAME, p: number });
-  if (!r.ok) return { unresolvedThreads: null, changesRequested: null };
-  const pr = r.body?.data?.repository?.pullRequest;
-  const nodes = pr?.reviewThreads?.nodes;
-  if (!Array.isArray(nodes) || pr?.reviews?.totalCount == null) {
-    return { unresolvedThreads: null, changesRequested: null };
-  }
-  return {
-    // outdated된 스레드는 이미 그 코드가 사라진 것이라 세지 않는다.
-    unresolvedThreads: nodes.filter(t => !t.isResolved && !t.isOutdated).length,
-    changesRequested: pr.reviews.totalCount,
-  };
-}
-
-/**
- * head가 base tip을 조상으로 갖는가. **못 읽으면 null**
- *
- * 2026-08-17에 이 확인이 **네 번 연속 실패**했다. #139는 검사가 전부
- * 초록이고 로컬에서 `a919bd5 → 67bb099`가 ahead임이 확인되는데도
- * `MERGEABILITY_UNKNOWN`으로 계속 막혔다. 그 사이 로그에 남은 것은
- * "확인하지 못했습니다" 한 줄뿐이라 **왜 실패했는지 알 방법이 없었다.**
- *
- * 그래서 둘을 더한다:
- *   · 한 번 실패했다고 포기하지 않는다 — 짧게 재시도한다
- *   · 실패하면 **HTTP 상태와 응답 요약을 로그에 남긴다**
- *
- * **판정 규칙은 그대로다.** 모르면 여전히 null이고, null이면 합치지
- * 않는다. 확인하지 못한 것을 통과로 바꾸는 것이 아니라, 확인을 실제로
- * 할 수 있게 만들고 못 했을 때 이유가 보이게 하는 것이다.
- */
-async function headContainsBase(baseSha, headSha) {
-  const path = `/repos/${REPO}/compare/${baseSha}...${headSha}`;
-  let last = null;
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    const r = await api(path);
-    last = r;
-    if (r.ok) {
-      const s = r.body?.status;
-      // 'ahead' | 'identical' 이면 head가 base를 포함한다.
-      // 'behind' | 'diverged' 이면 아니다.
-      if (s === 'ahead' || s === 'identical') return true;
-      if (s === 'behind' || s === 'diverged') return false;
-      console.log(`compare 응답에 status가 없습니다 (${JSON.stringify(s)}) — ${path}`);
-      return null;
-    }
-    if (attempt < 3) await new Promise(res => setTimeout(res, attempt * 1000));
-  }
-  // **왜 못 읽었는지 남긴다.** 이 한 줄이 없어서 네 번을 헤맸다.
-  console.log(`compare 실패 HTTP ${last?.status} — ${path}`
-    + (last?.body?.message ? ` :: ${String(last.body.message).slice(0, 200)}` : ''));
-  return null;
-}
-
 /** 이 판정 코멘트는 하나만 유지한다 — 매번 새로 달면 PR이 잡음으로 덮인다 */
 async function upsertComment(number, body) {
   const list = await api(`/repos/${REPO}/issues/${number}/comments?per_page=100`);
@@ -241,42 +180,15 @@ async function main() {
       continue;
     }
 
-    // mergeable은 상세 조회에서만 채워진다. 계산 중이면 null이 온다.
-    const detail = await api(`/repos/${REPO}/pulls/${brief.number}`);
-    if (!detail.ok) { console.log(`#${brief.number} 상세 조회 실패`); continue; }
-    const pr = detail.body;
-    const headSha = pr.head.sha;
-
-    const [runs, statuses, review, contains] = await Promise.all([
-      api(`/repos/${REPO}/commits/${headSha}/check-runs?per_page=100`),
-      api(`/repos/${REPO}/commits/${headSha}/status`),
-      reviewFacts(pr.number),
-      headContainsBase(pr.base.sha, headSha),
-    ]);
-
-    const facts = {
-      number: pr.number,
-      draft: !!pr.draft,
-      labels: (pr.labels || []).map(l => l.name),
-      baseRef: pr.base.ref,
-      headSha,
-      baseSha: pr.base.sha,
-      headContainsBase: contains,
-      mergeable: pr.mergeable,
-      mergeableState: pr.mergeable_state || 'unknown',
-      checks: (runs.ok ? (runs.body.check_runs || []) : []).map(c => ({
-        name: c.name, status: c.status, conclusion: c.conclusion, headSha: c.head_sha,
-      })),
-      statuses: (statuses.ok ? (statuses.body.statuses || []) : []).map(s => ({
-        context: s.context, state: s.state,
-      })),
-      unresolvedThreads: review.unresolvedThreads,
-      changesRequested: review.changesRequested,
-    };
-
-    // 검사 목록을 못 읽었으면 **빈 배열로 두지 않는다** — 그러면
-    // '검사가 없다'가 되어 CHECKS_MISSING으로 막힌다. 그게 맞는 결과다.
-    if (!runs.ok) facts.checks = [];
+    // 사실 수집은 `scripts/lib/pr-facts.mjs`가 한다 — **보고기와 같은 파일이다.**
+    // 여기서 따로 만들면 보고서가 "올려도 된다"고 한 PR을 이 러너가 막는다.
+    const facts = await gatherFacts({
+      api, graphql, repo: REPO, owner: OWNER, name: NAME,
+      number: brief.number, log: m => console.log(m),
+    });
+    if (!facts) continue;
+    const pr = { number: facts.number, head: { sha: facts.headSha } };
+    const headSha = facts.headSha;
 
     const v = autoMergeGate(facts);
     console.log(`#${pr.number} ${v.merge ? 'MERGE' : v.code} — ${v.reason}`);
