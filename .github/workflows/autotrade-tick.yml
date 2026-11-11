@@ -53,6 +53,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      # Node 판정기는 저장소 scripts/ 아래에 있다. checkout 없이 실행하면 파일이 없다.
+      - uses: actions/checkout@v4
       - name: 자동매매 예약 확인
         env:
           BASE:   ${{ secrets.EXIT_MONITOR_URL }}
