@@ -100,7 +100,7 @@ export default function MetaStrategyPanel({
       )}
 
       <div style={{ color: T.muted, fontSize: 10, lineHeight: 1.5, marginTop: 12 }}>
-        기준: 최근 승률 42% 미만 또는 점수 40 미만 → OFF · 점수 65+ &amp; 최근 승률 55%+ → ON. 배분은 점수 비례(5~60% 캡). 표본 부족 전략은 자동 전환하지 않습니다.
+        기준: 실제 체결 200회 이상에서만 자동 판정 · 최근 승률 42% 미만 또는 점수 40 미만 → OFF · 점수 65+ &amp; 최근 승률 55%+ → ON. 배분은 점수 비례(5~60% 캡). 표본 부족 전략은 자동 전환하지 않습니다.
       </div>
     </div>
   );
