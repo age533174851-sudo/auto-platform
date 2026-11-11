@@ -40,6 +40,10 @@ import { DURABILITY_NOTE } from '@/lib/runtime/persistentRuntime';
 // 각자 정하면 지갑과 자동매매가 같은 값을 다르게 적는다 — 실제로 그랬다.
 import { moneyText, pnlText, qtyText, shownValue, UNKNOWN_LABEL, type Tone } from '@/lib/ui/display';
 import { MIN_CONTROL_TARGET } from '@/lib/ui/panelPrefs';
+// **PAPER 실행을 여기서 새로 만들지 않는다.** 터미널이 쓰는 그 컴포넌트를
+// 그대로 올리고 인증만 넣어 준다 — 호출 경로(`/api/paper/run`)와 서버
+// 장부가 하나로 남는다. `manualOnly`라서 주기 타이머는 생기지 않는다.
+import { DemoRunner } from '@/components/terminal/DemoRunner';
 
 export default function MockAutoTrade() {
   const [auth, setAuth] = useState<string | null>(null);
@@ -233,6 +237,17 @@ export default function MockAutoTrade() {
           <div style={{ ...muted, marginTop: 8, color: msg.ok ? T.grn : T.red }}>{msg.text}</div>
         )}
       </div>
+
+      {/* ── PAPER 1회 실행 ──
+          **계좌가 시작된 뒤에만 보여 준다.** 계좌가 없을 때 누르면 실패만
+          뜨고, 사용자는 기능이 고장 난 줄 안다.
+          주기 반복은 **여기 없다** — 창을 닫으면 멈추는 타이머를 영속으로
+          읽게 두지 않는다. 서버 기반 반복은 별도 단계다. */}
+      {view.code === 'READY' && (
+        <div style={card}>
+          <DemoRunner auth={auth} manualOnly onChanged={load} />
+        </div>
+      )}
 
       {view.code === 'READY' && (
         <div style={card}>

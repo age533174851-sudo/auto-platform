@@ -46,6 +46,65 @@ const PATTERNS = [
   ['invalid_request', /invalid_request_error|\b400\b|bad request/i],
 ];
 
+/** 문구로 고르는 범주 + 문구 없이 적는 관측. **이 목록이 전부다** */
+export const CATEGORIES = [
+  'ok',
+  ...PATTERNS.map(([c]) => c),
+  'no_usage_record',
+  'no_execution_record',
+  'unknown',
+];
+
+/**
+ * 범주 → **누가 움직여야 하는가.** 한 곳에서만 정한다.
+ *
+ * 왜 여기인가
+ * ───────────
+ * 범주를 고르는 자리와 "그래서 어쩌라고"를 적는 자리가 갈라져 있었다.
+ * 워크플로의 `실패 원인 기록` 단계가 `"인증 단계에서 멈췄다면 시크릿이
+ * 없는 것입니다"`처럼 **스스로 원인을 또 추측**했고, 실제로 회차
+ * 41264530329은 `credit_or_billing`으로 분류됐는데 그 줄은 인증을
+ * 가리켰다. 같은 판단이 두 곳에 있으면 갈린다 — 갈렸다.
+ *
+ * 그래서 판단은 이 표 하나에만 둔다. 워크플로는 범주도 처방도 적지
+ * 않는다.
+ *
+ * `owner`가 뜻하는 것
+ * ───────────────────
+ * `human`  — 시스템이 할 수 없는 결정이다. 자금·키 발급·권한 부여는
+ *            `CLAUDE.md`가 사람에게 남긴 예외다. **다음 회차도 같은
+ *            자리에서 멈춘다** — 기다려서 풀리지 않는다.
+ * `system` — 다음 회차가 다시 하면 되는 것이거나 코드·설정 문제다.
+ *            사람을 부르지 않는다.
+ */
+const NEXT_ACTION = new Map([
+  ['ok', { owner: 'none', line: '실패가 아닙니다.' }],
+  ['credit_or_billing', { owner: 'human', line: '계정 크레딧·결제 쪽입니다 — 자금 결정은 사람만 합니다. 기다려도 다음 회차가 같은 자리에서 멈춥니다.' }],
+  ['auth_invalid', { owner: 'human', line: '키가 거부됐습니다 — 키 발급은 사람만 합니다. 값은 어디에도 적지 않습니다.' }],
+  ['permission_denied', { owner: 'human', line: '권한이 없습니다 — 권한을 여는 것은 사람만 합니다.' }],
+  ['model_not_found', { owner: 'human', line: '그 모델에 닿지 못합니다 — 모델 접근을 여는 것은 사람만 합니다.' }],
+  ['rate_limited', { owner: 'system', line: '일시적 속도 제한입니다 — 다음 회차가 다시 합니다. 사람 결정이 아닙니다.' }],
+  ['overloaded', { owner: 'system', line: '상대가 과부하입니다 — 다음 회차가 다시 합니다. 사람 결정이 아닙니다.' }],
+  ['timeout', { owner: 'system', line: '시간이 초과됐습니다 — 다음 회차가 다시 합니다. 사람 결정이 아닙니다.' }],
+  ['transport_error', { owner: 'system', line: '연결이 끊겼습니다 — 다음 회차가 다시 합니다. 사람 결정이 아닙니다.' }],
+  ['max_turns_exhausted', { owner: 'system', line: '턴 예산을 다 썼습니다 — 회차 설정 문제입니다. 사람 결정이 아닙니다.' }],
+  ['invalid_request', { owner: 'system', line: '요청이 거부됐습니다 — 코드·설정 문제입니다. 사람 결정이 아닙니다.' }],
+  ['no_usage_record', { owner: 'human', line: '사용 기록이 없고 오류 문구도 범주에 걸리지 않았습니다 — 원인 미확정입니다. 사람이 봐야 합니다.' }],
+  ['no_execution_record', { owner: 'human', line: '실행 기록 파일이 없습니다 — 원인 미확정입니다. 사람이 봐야 합니다.' }],
+]);
+
+/**
+ * 모르는 범주는 **사람에게 보낸다.**
+ *
+ * 기본값을 `system`으로 두면, 표에 올리는 것을 잊은 새 범주가 "다음
+ * 회차가 알아서 한다"로 적히고 영원히 조용히 실패한다. **확인하지
+ * 못한 것은 통과가 아니다.**
+ */
+export function nextAction(category) {
+  return NEXT_ACTION.get(category)
+    ?? { owner: 'human', line: '원인을 범주로 좁히지 못했습니다 — 사람이 봐야 합니다.' };
+}
+
 /**
  * 숫자 하나를 안전하게 읽는다. 못 읽으면 null — 0으로 바꾸지 않는다.
  *
@@ -155,6 +214,8 @@ export function render(c) {
     `- 사용 기록의 모델 종류 수: ${v(c.usageModelKinds)} (호출 횟수가 아닙니다)`,
     `- 권한 거부 수: ${v(c.permissionDenials)}`,
     '',
+    `- 다음에 움직일 쪽: ${{ human: '**사람**', system: '시스템(다음 회차)', none: '없음' }[nextAction(c.category).owner] ?? '**사람**'} — ${nextAction(c.category).line}`,
+    '',
     c.category === 'no_usage_record'
       ? '**모델 사용 기록이 없습니다.** 생성 요청에 닿지 못했을 수도 있고, SDK가'
         + ' 사용량을 기록하지 못했을 수도 있습니다 — 둘을 여기서 확정하지'
@@ -182,5 +243,28 @@ if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).
   if (path) { try { raw = readFileSync(path, 'utf8'); } catch { raw = null; } }
   // 보고용이다. **종료 코드로 회차 판정을 바꾸지 않는다** — 실제 실패는
   // Claude 단계가 이미 적었고, 여기서 0이 아닌 값을 주면 원인이 가려진다.
-  console.log(render(categorize(raw)));
+  const c = categorize(raw);
+  console.log(render(c));
+
+  // ── 결론이 단계 요약 밖으로 나가게 한다 ──
+  //
+  // 범주는 여기까지 잘 적혔는데 **`$GITHUB_STEP_SUMMARY` 안에만**
+  // 있었다. 실행 목록에서는 81회차가 전부 똑같은 `failure`로 보이고,
+  // 원인을 보려면 사람이 Actions를 열어 단계 요약까지 들어가야 했다 —
+  // `CLAUDE.md`가 금지한 "로그를 열어 확인해 주세요"다.
+  //
+  // 주석(annotation)은 실행 페이지에 그대로 뜬다. 그래서 들어가지
+  // 않아도 보인다.
+  //
+  // **stderr로 적는다.** 이 단계의 stdout은 `tee`로 단계 요약에
+  // 들어가므로, stdout에 적으면 `::error::` 문자열이 요약 본문에
+  // 글자로 박힌다. 워크플로 명령은 두 스트림 모두에서 읽힌다.
+  //
+  // 범주와 처방만 적는다. 오류 문구는 여기까지 올라오지 않는다.
+  const act = nextAction(c.category);
+  if (act.owner === 'human') {
+    console.error(`::error title=Claude 회차 중단 — 사람 결정 필요::${c.category} — ${act.line}`);
+  } else if (act.owner === 'system') {
+    console.error(`::warning title=Claude 회차 실패 — 다음 회차가 다시 합니다::${c.category} — ${act.line}`);
+  }
 }
