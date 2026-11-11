@@ -363,9 +363,87 @@ if (causeGaps.length > 0) {
   bad = true;
 }
 
+// ── 검사기 자신이 배선돼 있는가 ──
+//
+// 이 파일의 머리말은 **"만들어 놓고 배선을 안 하는 것을 CI가 잡는다"**다.
+// 그런데 지금까지 본 것은 `src/lib`의 판정 모듈뿐이었고, **검사기 자신이
+// 아무도 안 부르는 상태**는 보지 않았다.
+//
+// 실제로 그런 것이 있었다. `scripts/check-auto-merge-switches.mjs`는
+// 규칙 14개로 "라벨 없는 초안 PR이 합쳐지는 것"을 막는데(자기 시험까지
+// 통과한다), **어떤 워크플로도 그것을 부르지 않았다.** 저장소에 적힌
+// 그대로다 — **CI가 안 돌리는 검사기는 없는 검사기다.**
+//
+// 무엇을 '부른다'로 세는가: `.github/workflows/`의 워크플로, 또는
+// `scripts/run-tests.mjs`(CI가 돌리는 유일한 JS 진입점). **다른 검사기가
+// 이름을 언급하는 것은 세지 않는다** — 그 검사기 자신이 안 돌면 같이
+// 안 돈다.
+//
+// 주석은 호출이 아니다. YAML의 `#` 줄과 JS 주석을 걷어낸 뒤에 본다 —
+// "왜 아직 안 붙였나"를 주석으로 적으면 그 설명이 통과 근거가 되는
+// 모양을 이 저장소가 이미 겪었다.
+const CHECKER_ALLOW = new Map([
+  ['scripts/check-undefined.mjs',
+    '막는 것: 이 검사기는 tsc가 안 돌아도 초록을 켠다(fail-open). 그 상태로 '
+    + '배선하면 "검사가 돌고 있다"는 거짓 신호만 생긴다. #602가 먼저 그 '
+    + 'fail-open을 닫는다 — 닫힌 뒤에 배선하고 이 줄을 지운다'],
+]);
+
+const CHECK_RUNNER = 'scripts/run-tests.mjs';
+const checkerFiles = readdirSync('scripts')
+  .filter(f => /^check-.*\.mjs$/.test(f))
+  .map(f => `scripts/${f}`)
+  .sort();
+
+// 하나도 못 찾으면 **통과가 아니라 실패다.** 0개를 보고 초록을 켜는 검사는
+// 막는 것처럼 보이면서 아무것도 막지 않는다.
+if (checkerFiles.length === 0) {
+  console.error('\n❌ scripts/check-*.mjs를 하나도 찾지 못했습니다 — 이 규칙이 헛돌고 있습니다');
+  bad = true;
+}
+
+const checkerCallers = [];
+for (const wf of readdirSync('.github/workflows').filter(f => /\.ya?ml$/.test(f))) {
+  const text = readFileSync(join('.github/workflows', wf), 'utf8');
+  // YAML 주석 줄을 뺀다.
+  checkerCallers.push(text.split('\n').filter(l => !l.trim().startsWith('#')).join('\n'));
+}
+checkerCallers.push(stripComments(readFileSync(CHECK_RUNNER, 'utf8')));
+
+const unwiredCheckers = [];
+const staleCheckerAllow = [];
+for (const c of checkerFiles) {
+  const name = basename(c);
+  const called = checkerCallers.some(t => t.includes(name));
+  const allowed = CHECKER_ALLOW.has(c);
+  if (!called && !allowed) unwiredCheckers.push(c);
+  if (called && allowed) staleCheckerAllow.push(c);
+}
+
+if (unwiredCheckers.length > 0) {
+  console.error('\n❌ 아무도 부르지 않는 검사기:');
+  for (const c of unwiredCheckers) console.error(`   · ${c}`);
+  console.error('\n   CI가 안 돌리는 검사기는 없는 검사기입니다. 막는 것처럼 보이면서');
+  console.error('   아무것도 막지 않고, 그 사실을 아무도 모릅니다.');
+  console.error('\n   셋 중 하나를 하세요:');
+  console.error('     1. 워크플로나 scripts/run-tests.mjs에서 실제로 부른다');
+  console.error('     2. 아직이면 scripts/check-wiring.mjs의 CHECKER_ALLOW에 사유와 함께 적는다');
+  console.error('     3. 쓸 데가 없으면 지운다');
+  bad = true;
+}
+
+if (staleCheckerAllow.length > 0) {
+  console.error('\n⚠ CHECKER_ALLOW에 적혀 있는데 이미 배선된 검사기:');
+  for (const c of staleCheckerAllow) console.error(`   · ${c} — ${CHECKER_ALLOW.get(c)}`);
+  console.error('\n   지우세요. 면제 목록이 낡으면 다음에 진짜로 끊긴 것을 덮습니다.');
+  bad = true;
+}
+
 if (bad) process.exit(1);
 
 console.log(`✅ 판정 모듈 ${files.length}개 · 배선 안 된 것 0개`
   + (ALLOW.size > 0 ? ` (면제 ${ALLOW.size}개)` : ''));
 console.log(`✅ 청산 감시 200 응답 ${evidenceSeen.length}개 전부 워커 생존 증거를 싣는다`);
 console.log(`✅ 무인 회차 워크플로 ${HOURLY.length}개 전부 실패 원인을 진단기 한 곳에서만 정한다`);
+console.log(`✅ 검사기 ${checkerFiles.length}개 · 아무도 안 부르는 것 0개`
+  + (CHECKER_ALLOW.size > 0 ? ` (면제 ${CHECKER_ALLOW.size}개)` : ''));

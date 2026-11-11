@@ -16,6 +16,23 @@ execFileSync(process.execPath, ['--test', 'scripts/ten-slot-reconcile-evidence-o
 // 실제 PostgreSQL 원자성 검증. `TEN_SLOT_PG_URL`이 없으면 **건너뛴다고 말한다** —
 // 돌지 않은 것을 통과로 적지 않는다. 설정 방법은 그 파일 머리말에 있다.
 execFileSync(process.execPath, ['--test', 'scripts/ten-slot-pg.test.mjs'], { cwd: root, stdio: 'inherit' });
+// ── 아무도 부르지 않던 검사기를 여기서 부른다 ──
+//
+// `scripts/check-auto-merge-switches.mjs`는 규칙 14개로 **라벨 없는 초안
+// PR이 합쳐지는 것**을 막는다(자기 시험까지 통과한다). 그런데 어떤
+// 워크플로도 그것을 부르지 않았다 — 막는 것처럼 보이면서 아무것도 막지
+// 않는 상태였다. `check-wiring.mjs`가 이제 그것을 잡는다.
+//
+// **더 맞는 자리는 `ci.yml`의 독립 단계다.** 거기 넣으면 실패 원인이
+// 체크 이름으로 바로 보인다. 그런데 `.github/workflows/`는 무인 회차가
+// 손대지 않는 자리라(`check-autodev-safety.mjs`), CI가 실제로 돌리는 유일한
+// JS 진입점인 여기에 붙인다. 사람이 `ci.yml`로 옮기면 그때 이 줄을 지우고
+// `check-wiring.mjs`가 그 호출을 찾아낸다 — 어느 쪽이든 배선은 유지된다.
+//
+// 비용은 측정했다: 46ms. 이 파일은 변이 하네스가 44번 더 돌리므로
+// 총 2초 남짓이다(`verify` 기준선 ~20분).
+execFileSync(process.execPath, ['scripts/check-auto-merge-switches.mjs', '--self-test'],
+  { cwd: root, stdio: 'inherit' });
 const dir = mkdtempSync(join(tmpdir(), 'traigo-test-'));
 cpSync(join(root, 'src'), join(dir, 'src'), { recursive: true });
 
