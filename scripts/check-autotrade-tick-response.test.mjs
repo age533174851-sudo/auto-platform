@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -55,4 +55,12 @@ test('CLI does not echo server messages or sensitive payloads', () => {
     assert.match(run.stdout, /SCHEDULE_READ_OR_SERVER_FAILED/);
     assert.doesNotMatch(run.stdout + run.stderr, /DO_NOT_LEAK_SECRET/);
   } finally { rmSync(dir, { force: true, recursive: true }); }
+});
+
+test('workflow checks out repository before invoking the parser and never echoes the body', () => {
+  const workflow = readFileSync(new URL('../.github/workflows/autotrade-tick.yml', import.meta.url), 'utf8');
+  const checkout = workflow.indexOf('actions/checkout@v4');
+  const verifier = workflow.indexOf('node scripts/check-autotrade-tick-response.mjs');
+  assert.ok(checkout >= 0 && verifier > checkout, 'checkout must precede the parser');
+  assert.doesNotMatch(workflow, /^\s*cat "\$body"/m);
 });
