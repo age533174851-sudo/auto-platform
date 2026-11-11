@@ -90,7 +90,7 @@ jobs:
             echo "managed ADMIN_SECRET rejected — secret sync/deployment drift"
           fi
           if [ "$code" = "503" ]; then
-            echo "server not ready — 응답의 error 값을 보세요 (admin_secret_missing · supabase_not_configured)"
+            echo "server not ready — HTTP 503; 민감정보를 제외한 서버 측 진단을 확인하세요"
           fi
           if [ "$code" != "200" ]; then
             echo "자동매매 호출 실패 (HTTP ${code})"
@@ -99,8 +99,8 @@ jobs:
 
           # **200이 '진입했다'는 뜻은 아니다.**
           # 대부분의 호출은 "아직 간격 안 됨" 또는 "조건 불충족"으로 끝나고
-          # 그건 정상이다. 로그에 응답 전문이 남으므로 무엇을 했는지는
-          # 위 출력에서 확인한다. 여기서 진입 건수로 실패 판정을 하면
+          # 그건 정상이다. 아래 요약 판정이 실행·진입 보고·DB 조회 오류를
+          # 서로 구분한다. 여기서 진입 건수로 실패 판정을 하면
           # 정상적인 관망이 매번 빨간 X로 뜬다.
           # HTTP 200 does not prove the DB was read or a schedule was evaluated.
           # Unknown/failed reads must fail the workflow; zero enabled schedules is
