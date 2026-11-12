@@ -182,7 +182,7 @@ export function PaperChallengePanel({ selected, onSelect }: {
       {(rows ?? []).map(c => {
         const v = challengeStatusView(c);
         const pct = challengeProgressPct(c);
-        const left = challengeDaysLeft(c.endsAt);
+        const left = challengeDaysLeft(c.endsAt, undefined, c.status);
         const isSel = selected?.kind === 'CHALLENGE' && selected.challengeId === c.id;
         const cancellable = c.status === 'READY' || c.status === 'RUNNING';
         return (

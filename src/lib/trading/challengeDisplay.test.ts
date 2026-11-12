@@ -98,14 +98,32 @@ export function runChallengeDisplayTests() {
 
   // ── 남은 기간 ──
   test('남은 기간을 못 읽으면 0일로 적지 않는다', () => {
-    eq(challengeDaysLeft(null), null);
-    eq(challengeDaysLeft(''), null);
-    eq(challengeDaysLeft('not a date'), null);
+    eq(challengeDaysLeft(null, undefined, 'RUNNING'), null);
+    eq(challengeDaysLeft('', undefined, 'RUNNING'), null);
+    eq(challengeDaysLeft('not a date', undefined, 'RUNNING'), null);
   });
 
   test('지난 기간은 0일이다 (음수로 적지 않는다)', () => {
     const now = Date.parse('2026-06-01T00:00:00.000Z');
-    eq(challengeDaysLeft('2026-05-01T00:00:00.000Z', now), 0);
-    eq(challengeDaysLeft('2026-06-11T00:00:00.000Z', now), 10);
+    eq(challengeDaysLeft('2026-05-01T00:00:00.000Z', now, 'RUNNING'), 0);
+    eq(challengeDaysLeft('2026-06-11T00:00:00.000Z', now, 'RUNNING'), 10);
+  });
+
+  test('★ 끝난 챌린지에는 "남은 기간"이 없다 — 30일 중 3일째 취소해도 27일 남음으로 적지 않는다', () => {
+    // 취소·실패선·목표 달성은 기간보다 먼저 끝난다. 그때 ends_at은 여전히
+    // 미래이므로, 상태를 안 보면 "종료 · 27일 남음"이 한 카드에 같이 뜬다.
+    const now = Date.parse('2026-06-01T00:00:00.000Z');
+    const endsAt = '2026-06-28T00:00:00.000Z';
+    eq(challengeDaysLeft(endsAt, now, 'CLOSED'), null);
+    eq(challengeDaysLeft(endsAt, now, 'CLOSING'), null);
+  });
+
+  test('남은 기간은 시작 전·진행 중에만 센다 — 모르는 상태에서는 적지 않는다', () => {
+    const now = Date.parse('2026-06-01T00:00:00.000Z');
+    const endsAt = '2026-06-28T00:00:00.000Z';
+    eq(challengeDaysLeft(endsAt, now, 'RUNNING'), 27);
+    eq(challengeDaysLeft(endsAt, now, 'READY'), 27);
+    eq(challengeDaysLeft(endsAt, now, 'WEIRD'), null);
+    eq(challengeDaysLeft(endsAt, now, null), null);
   });
 }
