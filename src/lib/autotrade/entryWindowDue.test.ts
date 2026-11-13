@@ -26,7 +26,9 @@ export function runEntryWindowDueTests() {
     assert(W != null, '창이 없다');
     eq(W!.startMin, 9 * 60 + 10);
     eq(W!.endMin, 9 * 60 + 30);
-    eq(W!.graceMin, 30);
+    // 유예 30분 — 이제 "몇 분 더"가 아니라 "어느 분까지"로 적는다.
+    // 값은 그대로다: 10:00까지 깨운다 (#450에서 바꾼 것은 Exact100X 창뿐).
+    eq(W!.closeMin, 9 * 60 + 30 + 30);
   });
 
   test('창이 없는 전략은 null — 이 판정이 끼어들지 않는다', () => {
