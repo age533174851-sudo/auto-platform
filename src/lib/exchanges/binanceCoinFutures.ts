@@ -13,7 +13,7 @@
 // 전자는 사고고 후자는 그나마 거부다.
 import { createHmac } from 'crypto';
 import { numOrNull } from '../engine/orderFillFacts';
-import { parseLossless } from './losslessJson';
+import { parseLossless, parseErrorBody } from './losslessJson';
 
 const DAPI = 'https://dapi.binance.com';
 const DAPI_TESTNET = 'https://testnet.binancefuture.com';
@@ -45,7 +45,7 @@ async function dapiSigned(
     signal: AbortSignal.timeout(10_000),
   });
   if (!r.ok) {
-    const err = parseLossless(await r.text()).catch(() => ({}));
+    const err = parseErrorBody(await r.text());
     throw new Error(err.msg || `HTTP ${r.status}`);
   }
   return parseLossless(await r.text());
