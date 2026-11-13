@@ -617,6 +617,12 @@ export default function App() {
   // 여기 한 벌 더 들면 두 값이 갈리는 날 화면과 장부가 어긋난다.
   const [orderCtx,setOrderCtx]=useState<TradeContext|null>(null);
   const [orderName,setOrderName]=useState<string|undefined>(undefined);
+  const openPaperOrder=useCallback((ctx:TradeContext,name?:string)=>{
+    const parsed=readTradeContext(ctx);
+    if(!parsed) return;
+    setOrderName(name || parsed.symbol);
+    setOrderCtx(parsed);
+  },[]);
   // "얼마어치/몇 개"는 화면을 닫았다 열어도 유지된다 — 매번 다시 고르게
   // 하지 않는다.
   const [buyUnit,setBuyUnit]=useState<BuyUnit>('QUOTE');
@@ -923,7 +929,7 @@ export default function App() {
         case 'easy':         return <EasyModePage onNav={nav}/>;
         case 'watchlist':    return <WatchlistPage prices={prices} currency={currency} onNav={nav} onOpenAsset={openDetail} liveIds={priceLiveIds}/>;
         case 'market':       return <MarketPageComp prices={prices} onNav={nav} currency={currency} onOpenAsset={openDetail} onOpenPnL={openPnL}/>;
-        case 'trading':      return <TradingPageComp key={activeAsset?.id||'trading'} prices={prices} currency={currency} activeAsset={activeAsset} onOpenPnL={openPnL} priceRealAt={priceRealAt} priceSimSteps={priceSimSteps}/>;
+        case 'trading':      return <PositionsOrdersScreen auth={authHeader||undefined} onPaperOrder={openPaperOrder}/>;
         case 'auto':         return <AutoPageComp onNav={nav} currency={currency} onOpenAsset={openAsset} requireAuth={requireAuth}/>;
         case 'strategies':   return <StrategyBuilderPage onNav={nav}/>;
         case 'risk_settings':return <RiskSettingsPage/>;
@@ -962,7 +968,7 @@ export default function App() {
         case 'groups':       return <WatchGroupsPage prices={prices} currency={currency} onOpenAsset={openAsset}/>;
         // `case 'paper'`가 두 줄이었다. 뒤쪽은 **절대 실행되지 않는 죽은
         // 줄**이라 `currency`를 넘기도록 고쳐 놓아도 화면에는 닿지 않았다.
-        case 'paper':        return <PaperTradingPage prices={prices} onOpenAsset={openAsset}/>;
+        case 'paper':        return <PaperTradingPage prices={prices} onOpenAsset={openAsset} onPaperOrder={openPaperOrder}/>;
         case 'diagnostics':  return <DiagnosticsPage/>;
         case 'ops':          return <OpsPage/>;
         case 'settings':     return <SettingsPage lang={lang} setLang={setLang} currency={currency} setCurrency={setCurrency}/>;
@@ -991,7 +997,7 @@ export default function App() {
         <button onClick={()=>nav('home')} style={{background:'#2563EB',color:'#fff',border:'none',borderRadius:10,padding:'10px 20px',fontWeight:700,cursor:'pointer'}}>홈으로</button>
       </div>;
     }
-  },[tab,prices,nav,currency,lang,setLang,setCurrency,isAdminUser,activeAsset,openAsset,openPnL,pnlPrefill]);
+  },[tab,prices,nav,currency,lang,setLang,setCurrency,isAdminUser,activeAsset,openAsset,openPnL,pnlPrefill,openPaperOrder,authHeader]);
 
   const tickerAssets=prices.slice(0,14);
 
@@ -1101,7 +1107,7 @@ export default function App() {
                 openAsset({ ...detailAsset, _side:i.side }, 'trading');
                 return;
               }
-              setOrderName(detailAsset?.name || detailTarget.name);
+              // 상세와 매매·모의투자 탭은 같은 주문 진입 함수를 쓴다.
               // ★ **상세를 지우지 않는다.**
               //
               //   처음에는 여기서 `setDetailAsset(null)`을 했다. 그랬더니
@@ -1112,7 +1118,7 @@ export default function App() {
               //   주문 겹(10060)이 상세 겹(10050) **위에** 뜨므로 상세를
               //   살려 둬도 가려진다. 뒤로가기가 주문만 닫으면 상세가
               //   그대로 다시 보인다.
-              setOrderCtx(ctx);
+              openPaperOrder(ctx,detailAsset?.name || detailTarget.name);
             }}
           />
         </div>
@@ -1331,7 +1337,7 @@ export default function App() {
           {tab==='trading' ? (
             <div className="page-content" style={{padding:'12px 12px calc(var(--nav-h) + 20px)'}}>
               <ErrorBoundary onHome={() => nav('home')}>
-                <PositionsOrdersScreen auth={authHeader||undefined}/>
+                <PositionsOrdersScreen auth={authHeader||undefined} onPaperOrder={openPaperOrder}/>
               </ErrorBoundary>
             </div>
           ) : (
