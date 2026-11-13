@@ -283,35 +283,86 @@ export function deploymentVerdict(i: {
   const vercel = norm(i.vercelSha);
   const fly = norm(i.flySha);
 
+  // 짧은 SHA와 긴 SHA를 섞어 비교해도 맞게 한다.
+  const same = (a: string, b: string) => a.startsWith(b) || b.startsWith(a);
+
+  /**
+   * **두 값이 다르다고 확정할 수 있는가.**
+   *
+   * `a && b`는 지금의 `same`만 보면 군더더기처럼 보인다 — 한쪽이 빈
+   * 문자열이면 `'abc'.startsWith('')`가 true라 어차피 "같다"로 걸러지기
+   * 때문이다. **그 우연에 기대지 않는다.** 비교 방식을 접두사에서 다른
+   * 것으로 바꾸는 순간, 가드가 없으면 *읽지도 못한 값*이 "확정된 어긋남"으로
+   * 보고된다 — 모르는 것을 사고로 적는 쪽은 0으로 적는 쪽만큼 나쁘다.
+   *
+   * 그래서 "읽지 못한 값은 비교 대상이 아니다"를 **이 한 줄에만** 둔다.
+   */
+  const differs = (a: string, b: string) => Boolean(a) && Boolean(b) && !same(a, b);
+
   const missing: string[] = [];
   if (!main) missing.push('main');
   if (!vercel) missing.push('Vercel');
   if (!fly) missing.push('Fly');
-  if (missing.length > 0) {
-    return { code: 'UNKNOWN', matched: false,
-      reason: `${missing.join(' · ')} 버전을 읽지 못했습니다 — 같은 코드가 도는지 확인되지 않았습니다` };
-  }
 
-  // 짧은 SHA와 긴 SHA를 섞어 비교해도 맞게 한다.
-  const same = (a: string, b: string) => a.startsWith(b) || b.startsWith(a);
-  const behind: string[] = [];
-  if (!same(main, vercel)) behind.push('Vercel');
-  if (!same(main, fly)) behind.push('Fly');
-
-  if (behind.length > 0) {
+  // ── ★ 아는 것을 "모름"으로 적지 않는다 ──
+  //
+  // 예전에는 셋 중 하나라도 못 읽으면 **비교를 해 보기도 전에** UNKNOWN을
+  // 돌려줬다. 그런데 서버는 main의 SHA를 모르는 것이 정상이다(GitHub에
+  // 물어야 한다). 그래서 운영에서 이 판정은 거의 늘 UNKNOWN이었고,
+  // 2026-11-13에는 이런 모양이 됐다:
+  //
+  //   skew    MISMATCH  "웹은 220f800, 워커는 4f6ee8c — 다른 코드를 돌리고 있습니다"
+  //   verdict UNKNOWN   "main 버전을 읽지 못했습니다 — 같은 코드가 도는지 확인되지 않았습니다"
+  //
+  // **그 이유 문장은 거짓이다.** 서버는 둘이 다르다는 것을 확인했다.
+  // 그리고 둘이 다르면 `main = Vercel = Fly`는 main이 무엇이든 성립할 수
+  // 없다 — "셋이 같은가"의 답은 **확정적으로 아니오**다. 거기에 UNKNOWN을
+  // 적는 것은 가진 정보를 버리는 것이다.
+  //
+  // 이 모듈은 그 사실을 이미 알고 있었다. 아래 `runtimeSkew`의 주석이
+  // "판정 전체가 UNKNOWN이 되어 아무것도 못 본다"고 적어 두고 함수를
+  // **하나 더** 만들었다. 그런데 이 함수 자신은 그대로 눈이 멀어 있었다 —
+  // `CLAUDE.md`의 "경로가 둘인데 한쪽만 고침".
+  //
+  // 그래서 **아는 쌍부터 먼저 센다.** 읽은 두 값이 다르면 그것으로 끝이다.
+  const pairs: Array<[string, string, string, string]> = [
+    [main, vercel, 'main', 'Vercel'],
+    [main, fly, 'main', 'Fly'],
+    [vercel, fly, 'Vercel', 'Fly'],
+  ];
+  const proven = pairs
+    .filter(([a, b]) => differs(a, b))
+    .map(([a, b, an, bn]) => `${an} ${a.slice(0, 7)} ≠ ${bn} ${b.slice(0, 7)}`);
+  if (proven.length > 0) {
     return { code: 'MISMATCH', matched: false,
-      reason: `${behind.join(' · ')}가 main과 다른 코드를 돌리고 있습니다 — `
+      reason: `${proven.join(' · ')} — 다른 코드를 돌리고 있습니다. `
         + '머지됐다고 배포된 것이 아닙니다. 배포를 확인하세요' };
   }
+
   // ── 코드가 같아도 DB가 따라오지 않았으면 '배포 완료'가 아니다 ──
+  //
+  // **이것은 SHA를 다 읽지 못해도 확정되는 사실이다.** 코드가 무엇이든
+  // 적용되지 않은 마이그레이션이 있으면 배포는 끝나지 않았다. 그래서
+  // '못 읽었다(UNKNOWN)'보다 먼저 본다 — 아는 것을 모름으로 덮지 않는다.
   if (i.migrationsApplied === false) {
     const pend = Array.isArray(i.pendingMigrations) ? i.pendingMigrations : [];
     return {
       code: 'MISMATCH', matched: false,
-      reason: 'main · Vercel · Fly가 같은 코드를 돌리고 있지만 **DB 스키마가 따라오지 않았습니다**'
+      reason: (missing.length === 0 ? 'main · Vercel · Fly가 같은 코드를 돌리고 있지만 ' : '')
+        + '**DB 스키마가 따라오지 않았습니다**'
         + (pend.length ? ` (남은 마이그레이션 ${pend.length}개: ${pend.slice(0, 3).join(', ')})` : '')
-        + ' — 이 상태는 배포 완료가 아닙니다',
+        + ' — 이 상태는 배포 완료가 아닙니다'
+        + (missing.length > 0 ? ` (코드 버전은 ${missing.join(' · ')}를 확인하지 못했습니다)` : ''),
     };
+  }
+
+  // ── 확정된 어긋남이 없을 때만, 못 읽은 것을 못 읽었다고 적는다 ──
+  //
+  // **모르는 것을 "같다"로 읽지 않는다.** 아는 쌍이 서로 같아도 못 읽은
+  // 쪽이 남아 있으면 셋이 같다고 말할 수 없다.
+  if (missing.length > 0) {
+    return { code: 'UNKNOWN', matched: false,
+      reason: `${missing.join(' · ')} 버전을 읽지 못했습니다 — 같은 코드가 도는지 확인되지 않았습니다` };
   }
   if (i.migrationsApplied == null && i.migrationsApplied !== undefined) {
     // null = 확인하려 했는데 못 읽었다. **모르는 것을 '됐다'로 읽지 않는다.**

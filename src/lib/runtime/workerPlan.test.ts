@@ -128,6 +128,64 @@ export function runWorkerPlanTests() {
     }
   });
 
+  // ── 아는 것을 "모름"으로 적지 않는다 ──
+  //
+  // `UNKNOWN을 0으로 적지 않는다`의 쌍둥이다. 셋 중 하나를 못 읽었다고
+  // 해서 **이미 확정된 어긋남**까지 모름으로 덮으면, 읽는 사람은 사고가
+  // 난 날에도 "확인되지 않았습니다"만 본다.
+  //
+  // 2026-11-13 운영 실측이 정확히 그 모양이었다:
+  //
+  //   skew    MISMATCH  "웹은 220f800, 워커는 4f6ee8c — 다른 코드를 돌리고 있습니다"
+  //   verdict UNKNOWN   "main 버전을 읽지 못했습니다 — 같은 코드가 도는지 확인되지 않았습니다"
+  //
+  // 서버는 main 을 모르지만, 웹과 워커가 **다르다는 것은 확인했다.**
+  // 둘이 다르면 `main = Vercel = Fly` 는 main 이 무엇이든 성립할 수
+  // 없다 — 그러니 "셋이 같은가"의 답은 **확정적으로 아니오**다.
+  // 그 자리에 UNKNOWN 을 적는 것은 가진 정보를 버리는 것이다.
+  //
+  // 이 모듈은 이미 그 사실을 알고 있었다. 바로 아래 `runtimeSkew` 의
+  // 주석이 "판정 전체가 UNKNOWN 이 되어 아무것도 못 본다"고 적어 두고
+  // 함수를 **하나 더** 만들었다. 그런데 `deploymentVerdict` 자신은
+  // 그대로 눈이 멀어 있었다 — `CLAUDE.md` 의 "경로가 둘인데 한쪽만 고침".
+
+  test('★ main을 몰라도, 웹과 워커가 다르면 그것은 확정된 MISMATCH다', () => {
+    const v = deploymentVerdict({ mainSha: null, vercelSha: '220f800', flySha: '4f6ee8c' });
+    eq(v.code, 'MISMATCH', '아는 어긋남을 모름으로 덮었다');
+    eq(v.matched, false);
+    assert(v.reason.includes('220f800') && v.reason.includes('4f6ee8c'),
+      `어느 둘이 다른지 적어야 한다: ${v.reason}`);
+  });
+
+  test('★ main과 Vercel만 알아도, 둘이 다르면 확정된 MISMATCH다', () => {
+    const v = deploymentVerdict({ mainSha: 'aaa1111', vercelSha: 'bbb2222', flySha: null });
+    eq(v.code, 'MISMATCH');
+  });
+
+  test('★ main과 Fly만 알아도, 둘이 다르면 확정된 MISMATCH다', () => {
+    const v = deploymentVerdict({ mainSha: 'aaa1111', vercelSha: null, flySha: 'ccc3333' });
+    eq(v.code, 'MISMATCH');
+  });
+
+  test('아는 쌍이 서로 같으면 여전히 UNKNOWN이다 — 모르는 것을 "같다"로 읽지 않는다', () => {
+    const v = deploymentVerdict({ mainSha: null, vercelSha: 'a1b2c3d', flySha: 'a1b2c3d' });
+    eq(v.code, 'UNKNOWN', '아직 main을 모르므로 셋이 같다고 말할 수 없다');
+    eq(v.matched, false);
+    assert(v.reason.includes('main'), `무엇을 못 읽었는지 적어야 한다: ${v.reason}`);
+  });
+
+  test('★ 셋 다 모르면 UNKNOWN이다 — 비교할 쌍이 없다', () => {
+    const v = deploymentVerdict({ mainSha: null, vercelSha: null, flySha: null });
+    eq(v.code, 'UNKNOWN');
+  });
+
+  test('★ main을 몰라도 마이그레이션이 안 됐으면 배포 완료가 아니다', () => {
+    const v = deploymentVerdict({ mainSha: null, vercelSha: 'a1b2c3d', flySha: 'a1b2c3d',
+      migrationsApplied: false, pendingMigrations: ['097_x.sql', '098_y.sql'] });
+    eq(v.code, 'MISMATCH', 'main을 몰라도 DB가 안 따라온 것은 확정된 사실이다');
+    assert(v.reason.includes('097_x.sql'), v.reason);
+  });
+
   console.log('[배포 — 서버는 main을 모른다. 그래도 웹↔워커는 볼 수 있다]');
 
   test('웹과 워커가 다르면 그 자체로 사고다 — 8/15에 실제로 난 일', () => {
