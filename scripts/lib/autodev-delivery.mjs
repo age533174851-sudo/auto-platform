@@ -534,6 +534,83 @@ export const READ_TOOLS = [
   ['Grep', '파일을 내용으로 찾을 수 없습니다 — RED 를 재현할 자리를 못 찾습니다'],
 ];
 
+/**
+ * **읽기도 범위를 적는다.** 맨 `Read` 는 저장소 밖까지 연다.
+ *
+ * 러너에는 읽히면 안 되는 것이 저장소 밖에 있다:
+ *
+ *   `.git/config`              체크아웃이 넣어 둔 인증 헤더가 들어 있다
+ *   `~/.npmrc` · `~/.ssh/**`   러너 홈의 자격 증명
+ *   `/home/runner/work/_temp/` 러너가 시크릿을 잠깐 떨어뜨리는 자리
+ *   `/etc/**` · `/proc/**`     기계 자체
+ *
+ * 맨 `Read` 를 두고 금지로만 막으려면 위 목록을 **빠짐없이** 적어야 하는데,
+ * 빠뜨린 한 줄이 곧 구멍이다. 그래서 반대로 간다 — **읽을 수 있는 곳을
+ * 적고 나머지는 전부 닫는다.** 저장소 최상위는 몇 개뿐이라 감당된다.
+ *
+ * 최상위 파일은 와일드카드 없이 이름으로 적는다. `Read(*)` 로 적으면
+ * `*` 가 `/` 를 넘느냐에 따라 `.git/config` 가 들어올 수도 있는데,
+ * 그 뜻이 문서에 못 박혀 있지 않다 — 모르는 쪽을 열어 두지 않는다.
+ */
+export const READ_SCOPE = [
+  'src/**', 'scripts/**', 'worker/**', 'supabase/**', 'docs/**', 'public/**',
+  '.github/**',
+  'package.json', 'package-lock.json', 'tsconfig.json', 'CLAUDE.md', 'README.md',
+];
+
+/** 읽을 수 있어야 하는 대표 경로. 못 읽으면 회차가 일을 못 한다. */
+export const READ_SAMPLES = [
+  ['src/lib/kernel/sample.ts', '소스'],
+  ['scripts/check-wiring.mjs', '검사기'],
+  ['.github/workflows/ci.yml', 'CI 정의'],
+  ['package.json', '최상위 설정'],
+];
+
+/**
+ * **저장소 밖 민감 경로** — 허용 목록이 표현조차 못 해야 한다.
+ *
+ * 금지로 막는 것이 아니라 **닿지 않게** 한다. 금지 목록은 빠뜨리면
+ * 그만이지만, 허용에 없는 것은 애초에 물어보게 되고 답할 사람이 없다.
+ */
+export const SENSITIVE_READ_OUTSIDE = [
+  ['.git/config', '체크아웃이 넣어 둔 인증 헤더가 들어 있습니다'],
+  ['.git/credentials', '자격 증명이 들어 있습니다'],
+  ['/home/runner/.npmrc', '러너 홈의 자격 증명입니다'],
+  ['/home/runner/work/_temp/x.sh', '러너가 시크릿을 떨어뜨리는 자리입니다'],
+  ['~/.ssh/id_rsa', '비밀 키입니다'],
+  ['~/.git-credentials', '자격 증명입니다'],
+  ['/etc/passwd', '기계 자체입니다'],
+  ['../outside/secret.txt', '저장소 바깥입니다'],
+];
+
+/**
+ * **읽을 수 있는 범위 *안에* 있는 민감 경로** — 금지가 관문이다.
+ *
+ * `src/.env.local` 처럼 열어 둔 나무 안에 떨어진 것들. 쓰기 쪽 가-2 와
+ * 같은 이유로 여기는 금지로 막고, 그 금지가 빠지면 RED 로 센다.
+ */
+export const SENSITIVE_READ_INSIDE = [
+  ['.env', '시크릿이 담기는 자리입니다'],
+  ['src/.env.local', '시크릿이 담기는 자리입니다'],
+  ['scripts/deploy.pem', '비밀 키입니다'],
+  ['src/lib/signing.key', '비밀 키입니다'],
+];
+
+/**
+ * **아직 모르는 것.** 0 으로도 "없음" 으로도 적지 않는다.
+ *
+ * `Glob`·`Grep` 에 경로 범위를 줄 수 있는지가 문서에서 확인되지 않는다.
+ * 그래서 이 둘은 범위 없이 둔다 — 즉 **둘로는 저장소 밖 파일 이름과
+ * 내용을 볼 수 있을지 모른다.** 읽어서 내용을 꺼내는 `Read` 는 범위를
+ * 적었으므로 꺼내 가는 길은 좁지만, 이 자리를 "막았다"고 적지 않는다.
+ */
+export const KNOWN_UNKNOWNS = [
+  '`Glob`·`Grep` 에 경로 범위를 줄 수 있는지 문서에서 확인되지 않았습니다 — '
+    + '둘은 범위 없이 두었고, 저장소 밖을 훑을 수 있는지는 UNKNOWN 입니다',
+  '심링크로 울타리 밖을 가리키는 경로는 재지 못했습니다 — '
+    + '`ln` 은 Bash 허용 목록에 없지만 그것이 증명은 아닙니다',
+];
+
 /** 파일을 **바꾸는** 도구들. 어느 것이 열려 있든 같은 울타리를 받는다. */
 export const FILE_WRITE_TOOLS = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'];
 
@@ -625,15 +702,26 @@ export function fileRuleBody(rule, tool) {
   return m ? m[1] : null;
 }
 
-/** 경로를 정규화한다 — `src/../.github/x` 가 울타리를 넘지 못하게. */
+/**
+ * 경로를 정규화한다 — `src/../.github/x` 가 울타리를 넘지 못하게.
+ *
+ * **뿌리를 지운다.** 절대 경로(`/etc/passwd`)와 홈 경로(`~/.ssh/id_rsa`)는
+ * 접두어를 남긴 채 정규화한다. 처음에 나는 앞의 `/` 를 떼어 버렸는데,
+ * 그러면 `/home/runner/.npmrc` 가 `home/runner/.npmrc` 가 되어 **저장소
+ * 안의 상대 규칙과 맞아 버린다.** 뿌리가 다르면 영영 안 맞아야 한다.
+ */
 export function normalizePath(p) {
+  let t = String(p ?? '');
+  let root = '';
+  if (t.startsWith('~/') || t === '~') { root = '~/'; t = t.slice(1); }
+  else if (t.startsWith('/')) { root = '/'; }
   const out = [];
-  for (const seg of String(p ?? '').split('/')) {
+  for (const seg of t.split('/')) {
     if (seg === '' || seg === '.') continue;
     if (seg === '..') { out.pop(); continue; }
     out.push(seg);
   }
-  return out.join('/');
+  return root + out.join('/');
 }
 
 /**
@@ -643,10 +731,18 @@ export function normalizePath(p) {
  * (`Edit(src)` 가 `src/a.ts` 를 받을 수 있다고 본다). 금지된 경로를
  * 대조할 때 이쪽을 쓴다 — 모르는 쪽을 통과로 적지 않는다.
  */
-export function fileRuleMatches(pattern, path, { loose = false } = {}) {
-  const pat = String(pattern ?? '').replace(/^\.\//, '').replace(/^\/+/, '');
+export function fileRuleMatches(pattern, path, { loose = false, wide = false } = {}) {
+  let raw = String(pattern ?? '').replace(/^\.\//, '');
+  // 문서의 절대 경로 표기 `Read(//etc/x)` 는 `/etc/x` 를 뜻한다.
+  if (raw.startsWith('//')) raw = raw.slice(1);
+  const pat = raw;
   const target = normalizePath(path);
   if (pat === '') return false;
+
+  // **뿌리가 다르면 맞지 않는다.** 저장소 안의 상대 규칙은 절대·홈 경로를
+  // 가리킬 수 없고, 그 반대도 마찬가지다.
+  const rootOf = (x) => (x.startsWith('~/') || x === '~' ? '~' : x.startsWith('/') ? '/' : '');
+  if (rootOf(pat) !== rootOf(target)) return false;
 
   const esc = (s) => s.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
   const toRe = (p) => {
@@ -655,7 +751,9 @@ export function fileRuleMatches(pattern, path, { loose = false } = {}) {
     while (i < p.length) {
       if (p.startsWith('**/', i)) { re += '(?:[^/]+/)*'; i += 3; continue; }
       if (p.startsWith('**', i)) { re += '[\\s\\S]*'; i += 2; continue; }
-      if (p[i] === '*') { re += '[^/]*'; i += 1; continue; }
+      // `wide` 는 홑 `*` 도 `/` 를 넘는다고 읽는다 — 문서가 못 박지 않은
+      // 자리라 금지된 경로를 대조할 때 이 읽기도 함께 센다(fail-closed).
+      if (p[i] === '*') { re += (wide ? '[\\s\\S]*' : '[^/]*'); i += 1; continue; }
       if (p[i] === '?') { re += '[^/]'; i += 1; continue; }
       re += esc(p[i]); i += 1;
     }
@@ -676,14 +774,18 @@ export function fileRuleMatches(pattern, path, { loose = false } = {}) {
  * 경로 인자가 없는 맨 `Edit`·`Write` 는 **무엇이든** 표현한다 — 그것이
  * 가장 흔한 사고다.
  */
-export function pathExpressible(allowList, path, { loose = true } = {}) {
+export function pathExpressible(allowList, path, { loose = true, tools = FILE_WRITE_TOOLS, wide = true } = {}) {
   const hits = [];
   for (const rule of allowList) {
     const r = String(rule ?? '').trim();
-    for (const tool of FILE_WRITE_TOOLS) {
+    for (const tool of tools) {
       if (r === tool) { hits.push(r); break; }
       const body = fileRuleBody(r, tool);
-      if (body != null && fileRuleMatches(body, path, { loose })) { hits.push(r); break; }
+      if (body != null
+        && (fileRuleMatches(body, path, { loose })
+          || (wide && fileRuleMatches(body, path, { loose, wide: true })))) {
+        hits.push(r); break;
+      }
     }
   }
   return hits.length ? [...new Set(hits)] : null;
@@ -734,6 +836,13 @@ export function flowBlockers({ allow, deny, mode }) {
   for (const [tool, why] of READ_TOOLS) {
     if (!allowList.some((r) => r === tool || fileRuleBody(r, tool) != null)) {
       out.push(`${tool}: ${why}`);
+    }
+  }
+  // 범위를 적었으면 **실제로 읽혀야** 한다. 범위만 적고 못 읽으면
+  // "열었다"고 적힌 채로 회차가 또 멈춘다.
+  for (const [rp, what] of READ_SAMPLES) {
+    if (!pathExpressible(allowList, rp, { loose: false, tools: ['Read'], wide: false })) {
+      out.push(`Read(${rp}): 읽을 수 없습니다 (${what})`);
     }
   }
 
@@ -829,7 +938,26 @@ export function fileToolFindings({ allow, deny, mode }) {
     }
   }
 
-  // ⑥ 권한 자체를 꺼 버리는 모양.
+  // ⑥ **읽기 범위** — 저장소 밖 민감 경로는 허용이 표현조차 못 해야 한다.
+  //    `*` 가 `/` 를 넘는다는 읽기까지 함께 재므로 fail-closed 다.
+  for (const [rp, why] of SENSITIVE_READ_OUTSIDE) {
+    const rules = pathExpressible(allowList, rp, { tools: ['Read'] });
+    if (rules) {
+      found.push(`허용 목록이 \`${rp}\` 읽기를 표현할 수 있습니다 — ${why}`
+        + ` · 걸린 항목: ${rules.map((r) => `\`${r}\``).join(' · ')}`
+        + ' · 읽기 범위도 허용 목록이 관문입니다');
+    }
+  }
+
+  // ⑦ 읽을 수 있는 범위 **안**에 떨어진 민감 경로는 금지가 관문이다.
+  for (const [rp, why] of SENSITIVE_READ_INSIDE) {
+    if (pathExpressible(allowList, rp, { tools: ['Read'] }) && !pathDenied(denyList, rp, 'Read')) {
+      found.push(`금지 목록이 \`Read\`로 \`${rp}\` 읽는 것을 막지 않습니다 — ${why}`
+        + ' · 열어 둔 범위 안이라 금지가 관문입니다');
+    }
+  }
+
+  // ⑧ 권한 자체를 꺼 버리는 모양.
   for (const r of [...allowList, ...denyList]) {
     if (/bypassPermissions|dangerously-skip-permissions|acceptEdits/.test(r)) {
       found.push(`도구 목록에 권한을 꺼 버리는 모양이 있습니다: \`${r}\` — `
@@ -871,23 +999,24 @@ const FILE_LOOSE_CASES = [
 ];
 
 /** 실제로 올리려는 모양 — 이것이 통과하지 못하면 고쳐도 소용없다. */
+const READ_ALLOW = READ_SCOPE.map((p) => `Read(${p})`);
+const READ_DENY = [
+  'Read(**/.env*)', 'Read(**/*.pem)', 'Read(**/*.key)', 'Read(**/id_rsa*)',
+];
+const FENCE_DENY = [
+  'Edit(.github/**)', 'Write(.github/**)',
+  `Edit(${SUBMIT_SCRIPT})`, 'Edit(scripts/lib/autodev-delivery.mjs)',
+  'Edit(supabase/**)', 'Edit(**/.env*)',
+];
+
 export const LANE_FILE_TOOLS = {
   dev: {
-    allow: ['Read', 'Glob', 'Grep', 'Edit(src/**)', 'Edit(scripts/**)'],
-    deny: [
-      'Edit(.github/**)', 'Write(.github/**)',
-      `Edit(${SUBMIT_SCRIPT})`, 'Edit(scripts/lib/autodev-delivery.mjs)',
-      'Edit(supabase/**)', 'Edit(**/.env*)', 'Read(**/.env*)',
-      ...LANE_DENY_PATHS.dev.map((p) => `Edit(${p})`),
-    ],
+    allow: [...READ_ALLOW, 'Glob', 'Grep', 'Edit(src/**)', 'Edit(scripts/**)'],
+    deny: [...FENCE_DENY, ...READ_DENY, ...LANE_DENY_PATHS.dev.map((p) => `Edit(${p})`)],
   },
   trading: {
-    allow: ['Read', 'Glob', 'Grep', 'Edit(src/**)', 'Edit(scripts/**)', 'Edit(worker/**)'],
-    deny: [
-      'Edit(.github/**)', 'Write(.github/**)',
-      `Edit(${SUBMIT_SCRIPT})`, 'Edit(scripts/lib/autodev-delivery.mjs)',
-      'Edit(supabase/**)', 'Edit(**/.env*)', 'Read(**/.env*)',
-    ],
+    allow: [...READ_ALLOW, 'Glob', 'Grep', 'Edit(src/**)', 'Edit(scripts/**)', 'Edit(worker/**)'],
+    deny: [...FENCE_DENY, ...READ_DENY],
   },
 };
 
@@ -903,8 +1032,12 @@ const FILE_FLOW_CASES = [
   { what: 'trading 의 최종 목록은 흐름을 끊지 않는다', mode: 'trading',
     allow: [...LANE_FILE_TOOLS.trading.allow, ...BASH_FLOOR],
     deny: LANE_FILE_TOOLS.trading.deny, blocked: false },
-  { what: '`Read` 가 없으면 흐름이 끊긴다', mode: 'dev',
-    allow: [...LANE_FILE_TOOLS.dev.allow.filter((t) => t !== 'Read'), ...BASH_FLOOR],
+  { what: '`Read` 범위가 하나도 없으면 흐름이 끊긴다', mode: 'dev',
+    allow: [...LANE_FILE_TOOLS.dev.allow.filter((t) => fileRuleBody(t, 'Read') == null && t !== 'Read'),
+      ...BASH_FLOOR],
+    deny: LANE_FILE_TOOLS.dev.deny, blocked: true },
+  { what: '`Read` 범위가 소스를 빠뜨리면 흐름이 끊긴다', mode: 'dev',
+    allow: ['Read(docs/**)', 'Glob', 'Grep', 'Edit(src/**)', 'Edit(scripts/**)', ...BASH_FLOOR],
     deny: LANE_FILE_TOOLS.dev.deny, blocked: true },
   { what: '`Edit` 범위가 없으면 흐름이 끊긴다', mode: 'dev',
     allow: ['Read', 'Glob', 'Grep', ...BASH_FLOOR],
@@ -987,9 +1120,35 @@ export function fileToolSelfTest() {
     }
 
     // **범위를 넓히는 변이도 RED 가 나야 한다.**
-    for (const wide of ['Edit', 'Write', 'Edit(.github/**)', 'Edit(**)']) {
+    for (const wide of ['Edit', 'Write', 'Edit(.github/**)', 'Edit(**)',
+      'Read', 'Read(**)', 'Read(//etc/**)', 'Read(~/**)', 'Read(.git/**)']) {
       if (fileToolFindings({ allow: [...allow, wide], deny, mode }).length === 0) {
         failed.push(`${mode} 허용에 \`${wide}\`를 더해도 통과합니다`);
+      }
+    }
+
+    // **읽기 범위 밖 민감 경로를 허용이 표현하면 안 된다.**
+    const readable = SENSITIVE_READ_OUTSIDE
+      .filter(([rp]) => pathExpressible(allow, rp, { tools: ['Read'] }) != null);
+    if (readable.length > 0) {
+      failed.push(`${mode} 허용 목록이 저장소 밖 민감 경로 ${readable.length}개를 읽을 수 있습니다`
+        + ` — 첫 건: ${readable[0][0]}`);
+    }
+
+    // **범위 안 민감 경로는 금지가 빠지면 RED 가 나야 한다.**
+    for (const [rp] of SENSITIVE_READ_INSIDE) {
+      if (!pathExpressible(allow, rp, { tools: ['Read'] })) continue;
+      const weakened = deny.filter((r) => !fileRuleMatches(fileRuleBody(r, 'Read') ?? '\u0000', rp,
+        { loose: false }));
+      if (fileToolFindings({ allow, deny: weakened, mode }).length === 0) {
+        failed.push(`${mode} 금지에서 \`${rp}\` 보호를 빼도 통과합니다`);
+      }
+    }
+
+    // **읽을 수 있어야 하는 것은 실제로 읽혀야 한다.**
+    for (const [rp] of READ_SAMPLES) {
+      if (!pathExpressible(allow, rp, { loose: false, tools: ['Read'], wide: false })) {
+        failed.push(`${mode} 가 \`${rp}\` 를 읽지 못합니다 — 범위만 적고 손이 묶입니다`);
       }
     }
   }
@@ -1013,7 +1172,8 @@ export function fileToolSelfTest() {
   return {
     total: FILE_MATCH_CASES.length + FILE_LOOSE_CASES.length + FILE_FENCE_CASES.length
       + FILE_FLOW_CASES.length
-      + 2 * (3 + FENCE_PATHS_INSIDE.length + 4)
+      + 2 * (3 + FENCE_PATHS_INSIDE.length + 9 + 1
+        + SENSITIVE_READ_INSIDE.length + READ_SAMPLES.length)
       + LANE_DENY_PATHS.dev.length + 1,
     failed,
   };

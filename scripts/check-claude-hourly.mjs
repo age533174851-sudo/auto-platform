@@ -30,6 +30,9 @@ import {
   SUBMIT_SCRIPT,
   FENCE_PATHS_OUTSIDE,
   FENCE_PATHS_INSIDE,
+  SENSITIVE_READ_OUTSIDE,
+  READ_SCOPE,
+  KNOWN_UNKNOWNS,
 } from './lib/autodev-delivery.mjs';
 
 // 갈래가 둘이다. **둘 다** 같은 울타리를 가져야 한다 — 한쪽만 검사하면
@@ -564,9 +567,13 @@ if (bad === 0) {
     + '변경 안전 관문 · 금지 지시 보존 · 체크아웃 설정의 인증 바꿔치기 없음 · '
     + `금지된 명령 모양 ${FORBIDDEN_SHAPES.length}종을 허용 목록이 표현하지 못함`);
   console.log(`✅ 파일 도구 2갈래 — 찾기·읽기·고치기·시험·담기·올리기 흐름이 안 끊김 · `
+    + `읽기 범위 ${READ_SCOPE.length}곳만 열림 · `
+    + `저장소 밖 민감 경로 ${SENSITIVE_READ_OUTSIDE.length}곳을 허용이 표현하지 못함 · `
     + `바깥 울타리 ${FENCE_PATHS_OUTSIDE.length}곳을 허용이 표현하지 못함 · `
     + `안쪽 울타리 ${FENCE_PATHS_INSIDE.length}곳을 정확한 경로로 금지 · `
     + '경로 없는 맨 Edit/Write 없음 · 권한을 끄는 모양 없음');
+  // **못 잰 것을 0 이나 "없음"으로 적지 않는다.** 초록 옆에 같이 적는다.
+  for (const u of KNOWN_UNKNOWNS) console.log(`⚠️  아직 모르는 것 — ${u}`);
 } else {
   console.error('');
   console.error('   이 회차는 사람이 보고 있지 않은 시간에 돕니다.');
