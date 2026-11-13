@@ -186,6 +186,42 @@ export function runWorkerPlanTests() {
     assert(v.reason.includes('097_x.sql'), v.reason);
   });
 
+  // ── 뒤처진 이유가 응답 안에 있는데 아무도 잇지 않았다 (2026-11-13) ──
+  //
+  // 그날 운영 응답은 이 둘을 **나란히** 들고 있었다:
+  //
+  //   skew       웹은 220f800, 워커는 4f6ee8c — 다른 코드를 돌리고 있습니다
+  //   migrations applied=false · pending=[097_… , 098_…]
+  //
+  // 워커가 96커밋 뒤처진 **이유**는 `fly-deploy`가 11-07부터 매번
+  // `사람이 승인해야 하는 마이그레이션이 남아 있습니다 (097 · 098)`로
+  // 실패하고 있었기 때문이다. 그걸 알아내려고 워크플로 실행 1300건과
+  // 26KB 로그를 뒤져야 했다 — **값은 이미 응답 안에 있었는데** 두 사실이
+  // 한 문장으로 합쳐지지 않아서다.
+  //
+  // `CLAUDE.md`: "사람이 열어야 읽히는 사실은 없는 사실과 같다."
+
+  test('★★ 워커가 뒤처졌고 마이그레이션도 남았으면 두 사실을 같이 적는다 — 무엇을 해야 풀리는지까지', () => {
+    const v = deploymentVerdict({
+      mainSha: null, vercelSha: '220f8001', flySha: '4f6ee8c6',
+      migrationsApplied: false,
+      pendingMigrations: ['097_ten_slot_atomic_claim.sql', '098_ten_slot_apply_event.sql'],
+    });
+    eq(v.code, 'MISMATCH');
+    assert(/220f800/.test(v.reason) && /4f6ee8c/.test(v.reason), `어긋남이 안 적혔다: ${v.reason}`);
+    assert(/097/.test(v.reason), `막고 있는 것이 안 적혔다: ${v.reason}`);
+    assert(/승인/.test(v.reason), `무엇을 해야 풀리는지가 안 적혔다: ${v.reason}`);
+  });
+
+  test('★ 마이그레이션이 다 됐으면 승인을 요구하지 않는다 — 거짓 경보를 만들지 않는다', () => {
+    const v = deploymentVerdict({
+      mainSha: null, vercelSha: '220f8001', flySha: '4f6ee8c6', migrationsApplied: true,
+    });
+    eq(v.code, 'MISMATCH');
+    assert(!/승인/.test(v.reason), `할 일이 없는데 승인을 요구했다: ${v.reason}`);
+    assert(!/097/.test(v.reason), v.reason);
+  });
+
   console.log('[배포 — 서버는 main을 모른다. 그래도 웹↔워커는 볼 수 있다]');
 
   test('웹과 워커가 다르면 그 자체로 사고다 — 8/15에 실제로 난 일', () => {

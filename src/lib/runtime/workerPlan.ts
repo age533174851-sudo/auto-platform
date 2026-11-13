@@ -304,6 +304,30 @@ export function deploymentVerdict(i: {
   if (!vercel) missing.push('Vercel');
   if (!fly) missing.push('Fly');
 
+  // ── 막고 있는 것을 **이유 안에** 적는다 (#450 · 2026-11-13) ──
+  //
+  // 그날 이 응답은 "웹과 워커가 다른 코드를 돌린다"와 "마이그레이션 2개가
+  // 남았다"를 **나란히** 들고 있었다. 그런데 두 사실이 한 문장으로
+  // 합쳐지지 않아서, 워커가 96커밋 뒤처진 **이유**를 알아내려면
+  // `fly-deploy` 실행 1300건과 26KB 로그를 뒤져야 했다. 거기 적혀 있던
+  // 답은 이것이었다: "사람이 승인해야 하는 마이그레이션이 남아 있습니다".
+  //
+  // 값은 이미 여기 있었다. 적지 않았을 뿐이다 —
+  // `CLAUDE.md`: "사람이 열어야 읽히는 사실은 없는 사실과 같다."
+  //
+  // **문장은 한 곳에만 둔다.** 어긋남 쪽과 스키마 쪽이 각자 쓰면 언젠가
+  // 한쪽만 고쳐지고, 그때 화면과 화면이 다른 말을 한다.
+  const pendingList = i.migrationsApplied === false
+    ? (Array.isArray(i.pendingMigrations) ? i.pendingMigrations : [])
+    : null;
+  const pendingClause = pendingList === null ? '' :
+    '**DB 스키마가 따라오지 않았습니다**'
+    + (pendingList.length
+      ? ` (남은 마이그레이션 ${pendingList.length}개: ${pendingList.slice(0, 3).join(', ')})`
+      : '')
+    + ' — 이 상태는 배포 완료가 아닙니다. 남은 마이그레이션이 적용되어야 '
+    + '배포가 이어집니다 (위험 항목은 사람 승인이 필요합니다)';
+
   // ── ★ 아는 것을 "모름"으로 적지 않는다 ──
   //
   // 예전에는 셋 중 하나라도 못 읽으면 **비교를 해 보기도 전에** UNKNOWN을
@@ -336,7 +360,9 @@ export function deploymentVerdict(i: {
   if (proven.length > 0) {
     return { code: 'MISMATCH', matched: false,
       reason: `${proven.join(' · ')} — 다른 코드를 돌리고 있습니다. `
-        + '머지됐다고 배포된 것이 아닙니다. 배포를 확인하세요' };
+        + '머지됐다고 배포된 것이 아닙니다. '
+        // 막고 있는 것을 아는데 "배포를 확인하세요"로 끝내지 않는다.
+        + (pendingClause || '배포를 확인하세요') };
   }
 
   // ── 코드가 같아도 DB가 따라오지 않았으면 '배포 완료'가 아니다 ──
@@ -345,13 +371,10 @@ export function deploymentVerdict(i: {
   // 적용되지 않은 마이그레이션이 있으면 배포는 끝나지 않았다. 그래서
   // '못 읽었다(UNKNOWN)'보다 먼저 본다 — 아는 것을 모름으로 덮지 않는다.
   if (i.migrationsApplied === false) {
-    const pend = Array.isArray(i.pendingMigrations) ? i.pendingMigrations : [];
     return {
       code: 'MISMATCH', matched: false,
       reason: (missing.length === 0 ? 'main · Vercel · Fly가 같은 코드를 돌리고 있지만 ' : '')
-        + '**DB 스키마가 따라오지 않았습니다**'
-        + (pend.length ? ` (남은 마이그레이션 ${pend.length}개: ${pend.slice(0, 3).join(', ')})` : '')
-        + ' — 이 상태는 배포 완료가 아닙니다'
+        + pendingClause
         + (missing.length > 0 ? ` (코드 버전은 ${missing.join(' · ')}를 확인하지 못했습니다)` : ''),
     };
   }
