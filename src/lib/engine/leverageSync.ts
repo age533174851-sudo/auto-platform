@@ -180,3 +180,44 @@ export function leverageSyncSummary(r: LeverageSyncResult | null | undefined): s
   if (!r) return '배율을 확인하지 않았습니다';
   return r.ok ? r.reason : `🛑 ${r.reason}`;
 }
+
+/**
+ * Gate 계약을 **격리로 돌릴 때 쓸 배율.** 쓸 수 없으면 ok=false.
+ *
+ * Gate는 마진 모드를 배율로 표현한다(0 = 교차, 1 이상 = 격리). 그래서
+ * '격리로 바꾼다'는 '지금 배율을 다시 건다'이고, 그 배율은 **지금 포지션에서
+ * 읽은 값**이어야 한다.
+ *
+ * 실제로 있던 고장
+ * ────────────────
+ * 예전 라우트는 "못 읽으면 1배"였다. `getPositionGateFutures`는 오류를
+ * 삼키고 null을 주므로 조회가 한 번 실패하면 `leverage=1`을 **거래소에
+ * 썼다.** 100배로 열린 포지션이라면 사용자가 고른 배율이 조회 실패 하나로
+ * 1배가 된다 — 확인하지 못한 값을 기본값으로 눕힌 것이다.
+ *
+ *   · 못 읽음 / 칸 없음 / 깨진 값 / 1 미만의 양수 → **쓰지 않는다** (ok=false)
+ *   · 0 (Gate가 말한 교차)                         → 1배 격리 (예전 동작 유지)
+ *   · 1 이상                                       → 그 배율 그대로
+ */
+export function gateIsolateLeverage(
+  pos: { leverage?: unknown } | null | undefined,
+): { ok: true; leverage: number; reason: string } | { ok: false; leverage: null; reason: string } {
+  const unknown = (why: string) => ({
+    ok: false as const, leverage: null,
+    reason: `Gate 포지션의 지금 배율을 ${why} — 배율을 지어내 거래소에 쓰지 않습니다. `
+      + '격리 전환을 하지 않았습니다',
+  });
+  if (!pos) return unknown('읽지 못했습니다');
+  const raw = pos.leverage;
+  if (raw == null || (typeof raw === 'string' && raw.trim() === '')) {
+    return unknown('응답에서 찾지 못했습니다');
+  }
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return unknown(`해석하지 못했습니다 (${String(raw)})`);
+  // 0은 '모름'이 아니라 Gate가 확인해 준 교차다.
+  if (n === 0) {
+    return { ok: true, leverage: 1, reason: '교차(leverage=0)였습니다 — 1배 격리로 돌립니다' };
+  }
+  if (n < 1) return unknown(`해석하지 못했습니다 (${String(raw)})`);
+  return { ok: true, leverage: Math.round(n), reason: `지금 배율 ${Math.round(n)}배를 유지합니다` };
+}
