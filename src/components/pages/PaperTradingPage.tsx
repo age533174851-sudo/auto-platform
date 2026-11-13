@@ -23,15 +23,19 @@ import { LegacyLedgerBanner } from '@/components/trading/LegacyLedgerBanner';
 import { PaperChallengePanel } from '@/components/trading/PaperChallengePanel';
 import { usePaperTarget } from '@/lib/trading/usePaperTarget';
 import { isTradableLedger, legacyLedgerNotice } from '@/lib/trading/legacyLedger';
+import { PaperOrderEntry } from '@/components/trading/PaperOrderEntry';
+import type { TradeContext } from '@/lib/trading/tradeContext';
 
 const LEDGER = 'LOCAL_KRW_PAPER' as const;
 
 export default function PaperTradingPage({
   prices,
   onOpenAsset,
+  onPaperOrder,
 }: {
   prices?: Asset[];
   onOpenAsset?: (a: any, dest?: string) => void;
+  onPaperOrder: (ctx: TradeContext, name?: string) => void;
 }) {
   const [account, setAccount] = useState<PaperAccount | null>(null);
   const [search,  setSearch]  = useState('');
@@ -185,11 +189,8 @@ export default function PaperTradingPage({
         </div>
       )}
 
-      {/* ── 거래 화면은 여기 없다 ──
-          한동안 여기에 거래 화면을 붙였다. 그런데 사용자가 실제로 여는 길은
-          `/ → 매매`이고 그건 터미널이다. 여기에도 붙여 두면 **거래 화면이
-          둘**이 되고, 둘은 언젠가 갈린다. 이 화면은 장부를 고르고 성적을
-          보는 곳이고, 거래는 매매 탭 하나에서 한다. */}
+      {/* 장부와 성적을 보고, 아래 바로가기로 공용 주문 화면을 연다.
+          이 페이지에 별도의 주문 폼·체결 계산을 만들지 않는다. */}
 
       {/* 장부 고르기 — 매매 탭의 주문이 여기서 고른 장부로 나간다. */}
       <div style={{ marginBottom: 12 }}>
@@ -202,6 +203,8 @@ export default function PaperTradingPage({
 
       {/* MOCK 자동매매 패널 — 서버 모의 계좌를 읽는다(정본) */}
       <MockAutoTrade />
+
+      <div style={{marginBottom:12}}><PaperOrderEntry onOrder={onPaperOrder}/></div>
 
       {/* 전략 프로필 (고위험 단타 / 저위험 스윙 분리 운용) */}
       <StrategyProfilesPanel />
