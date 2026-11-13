@@ -40,7 +40,7 @@ import {
   kstMinuteOfDay, WINDOW_START_KST, WINDOW_END_KST, LATE_GRACE_MIN,
 } from '../strategies/originalV1';
 import {
-  FORCED_ENTRY_START_KST, FORCED_ENTRY_WINDOW_MIN,
+  FORCED_ENTRY_START_KST, FORCED_ENTRY_WINDOW_MIN, FORCED_ENTRY_LAST_MIN,
   FORCED_ENTRY_PROFILE_ID, FORCED_ENTRY_PRESET_ID,
 } from '../strategies/dailyForcedEntry';
 
@@ -49,8 +49,18 @@ export interface EntryWindow {
   startMin: number;
   /** 창 끝 (KST 자정부터의 분) */
   endMin: number;
-  /** 창이 닫힌 뒤 몇 분까지 늦게라도 판단하는가 */
-  graceMin: number;
+  /**
+   * **마지막으로 깨우는 분** (KST 자정부터의 분, 이 분 포함).
+   *
+   * 예전에는 `graceMin`을 두고 `endMin + graceMin`으로 그때그때 셌다.
+   * 그런데 라우트마다 끝 분을 포함하는지 아닌지가 달라서, 같은 창 값을
+   * 쓰고도 **경계가 한 분 어긋났다** (#450: Exact100X의 09:30).
+   *
+   * 그래서 "몇 분 더"가 아니라 **"어느 분까지"**를 각 전략 정본에서
+   * 받아 적는다. 깨우는 쪽이 라우트보다 넓어질 자리를 없앤다.
+   * 유예는 `closeMin - endMin`으로 그대로 보인다.
+   */
+  closeMin: number;
 }
 
 export type WindowDueCode =
@@ -90,7 +100,8 @@ export function entryWindowOf(
     return {
       startMin: WINDOW_START_KST.hh * 60 + WINDOW_START_KST.mm,
       endMin: WINDOW_END_KST.hh * 60 + WINDOW_END_KST.mm,
-      graceMin: LATE_GRACE_MIN,
+      // 이 창은 끝 분 뒤로 유예가 있고, 그 마지막 분까지 깨운다 (기존 그대로).
+      closeMin: WINDOW_END_KST.hh * 60 + WINDOW_END_KST.mm + LATE_GRACE_MIN,
     };
   }
 
@@ -112,7 +123,12 @@ export function entryWindowOf(
       // **이 창에는 유예가 없다.** `forcedEntryVerdict`가 창을 넘기면
       // AFTER_WINDOW로 끝낸다 — 깨우는 쪽이 더 늦게까지 깨우면,
       // 라우트는 매번 "창 지났습니다"만 돌려주고 평가만 낭비된다.
-      graceMin: 0,
+      //
+      // 그 주석은 원래부터 여기 있었는데 **코드가 그 말을 지키지 않았다.**
+      // `graceMin: 0`에 비교가 `nowMin > endMin + grace`라서 endMin(09:30)
+      // 자체는 창 안이었고, 라우트는 같은 분을 AFTER_WINDOW로 거부했다.
+      // 이제 끝 분을 세는 일을 정본에 맡긴다 — 넓어질 수가 없다.
+      closeMin: FORCED_ENTRY_LAST_MIN,
     };
   }
 
@@ -143,8 +159,7 @@ export function windowDueVerdict(i: {
     return { due: false, code: 'CLOCK_UNKNOWN', reason: '한국 시각을 읽지 못했습니다' };
   }
 
-  const closeMin = w.endMin + w.graceMin;
-  if (nowMin < w.startMin || nowMin > closeMin) {
+  if (nowMin < w.startMin || nowMin > w.closeMin) {
     return { due: false, code: 'OUTSIDE',
       reason: `창(${hhmm(w.startMin)}~${hhmm(w.endMin)} KST) 밖입니다` };
   }

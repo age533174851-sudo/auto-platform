@@ -46,6 +46,20 @@ export const FORCED_ENTRY_START_KST = { hh: 9, mm: 0 };
 export const FORCED_ENTRY_WINDOW_MIN = 30;
 
 /**
+ * 창의 **마지막 분** (KST 자정부터의 분). 이 분까지가 창 안이다.
+ *
+ * **경계를 세는 방식을 두 곳에 두지 않기 위한 값이다.** 예전에는
+ * 라우트가 `minute >= endMin`으로 09:30을 제외하고, 깨우는 쪽
+ * (`entryWindowDue.windowDueVerdict`)은 `nowMin > endMin + grace`로
+ * 09:30을 포함했다. 창 값은 둘 다 여기서 가져다 썼는데도 **세는 법이
+ * 달라서** 09:30 한 분 동안 스케줄러가 깨우고 라우트가 거부했다.
+ *
+ * 이제 양쪽 다 이 한 값만 본다.
+ */
+export const FORCED_ENTRY_LAST_MIN =
+  FORCED_ENTRY_START_KST.hh * 60 + FORCED_ENTRY_START_KST.mm + FORCED_ENTRY_WINDOW_MIN - 1;
+
+/**
  * 방향.
  *
  * 신호를 보지 않기로 했으므로 방향을 줄 것이 없다. **추측하지 않고
@@ -137,7 +151,7 @@ export function forcedEntryVerdict(i: {
     return no('BEFORE_WINDOW',
       `아직 진입 창 전입니다 (지금 ${hhmm(minute)} KST · 창 ${hhmm(startMin)}~${hhmm(endMin)})`, day);
   }
-  if (minute >= endMin) {
+  if (minute > FORCED_ENTRY_LAST_MIN) {
     return no('AFTER_WINDOW',
       `${day} 진입 창(${hhmm(startMin)}~${hhmm(endMin)} KST)이 지났습니다 — `
       + '지난 창을 뒤늦게 열지 않습니다', day);
