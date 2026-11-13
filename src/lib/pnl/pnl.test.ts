@@ -1,7 +1,8 @@
 // src/lib/pnl/pnl.test.ts
 // PnL 엔진 유닛 테스트 — 레버리지/수수료/롱숏/손익분기 검증.
 import { calcTradePnL } from './index';
-import { test, close, gt, lt, assert } from '../../test/harness';
+import { test, close, gt, lt, assert, eq } from '../../test/harness';
+import { formatKRW } from '../format';
 
 const feeCfg = { exchangeId: 'binance', makerRate: 0.001, takerRate: 0.001, slippage: 0.0005 } as any;
 const base = {
@@ -59,5 +60,26 @@ export function runPnlTests() {
     // 아주 작은 가격 이동 → 수수료가 이익을 잠식
     const r = calcTradePnL({ ...base, entryPrice: 100, exitPrice: 100.001, quantity: 1 });
     assert(!r.isViable || r.netPnL <= r.grossPnL, '비용 반영 확인');
+  });
+
+  // ── 손실 표시 ──
+  //
+  // 화면은 손익을 `formatKRW`로 그린다(모의투자 평가손익·실현손익, 매매
+  // 일지의 평균 손실·최악 거래, 포트폴리오 평가손익). 손실이 '₩0'으로
+  // 그려지면 빨간 '₩0'만 남고 **얼마를 잃었는지가 사라진다.**
+  test('손실은 ₩0이 아니라 음수 금액으로 그린다', () => {
+    eq(formatKRW(-50_000), '-₩50,000');
+    eq(formatKRW(-1_234_567), '-₩1,234,567');
+    eq(formatKRW(-250_000_000), '-₩2.5억');
+    eq(formatKRW(-3.5), '-₩3.50');
+  });
+
+  test('양수·0·비수치 표시는 그대로다', () => {
+    eq(formatKRW(50_000), '₩50,000');
+    eq(formatKRW(250_000_000), '₩2.5억');
+    eq(formatKRW(0), '₩0');
+    eq(formatKRW(-0), '₩0');
+    eq(formatKRW(NaN), '₩0');
+    eq(formatKRW(undefined), '₩0');
   });
 }

@@ -18,6 +18,8 @@ export function safePercent(value: unknown, decimals = 2): string {
 /** Safe KRW price string: "₩1,234,567" */
 export function formatKRW(value: unknown): string {
   const n = safeNumber(value, 0);
+  // 손실을 '₩0'으로 그리지 않는다 — 평가손익·실현손익이 이 함수로 그려진다.
+  if (n < 0) return '-' + formatKRW(-n);
   if (n >= 1e12) return '₩' + (n / 1e12).toFixed(1) + '조';
   if (n >= 1e8)  return '₩' + (n / 1e8).toFixed(1)  + '억';
   if (n >= 1e4)  return '₩' + Math.round(n).toLocaleString('ko-KR');
