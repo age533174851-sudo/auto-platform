@@ -24,6 +24,7 @@ import { PaperChallengePanel } from '@/components/trading/PaperChallengePanel';
 import { usePaperTarget } from '@/lib/trading/usePaperTarget';
 import { isTradableLedger, legacyLedgerNotice } from '@/lib/trading/legacyLedger';
 import { PaperOrderEntry } from '@/components/trading/PaperOrderEntry';
+import { PaperAutomationControl } from '@/components/trading/PaperAutomationControl';
 import type { TradeContext } from '@/lib/trading/tradeContext';
 
 const LEDGER = 'LOCAL_KRW_PAPER' as const;
@@ -203,6 +204,7 @@ export default function PaperTradingPage({
 
       {/* MOCK 자동매매 패널 — 서버 모의 계좌를 읽는다(정본) */}
       <MockAutoTrade />
+      <PaperAutomationControl />
 
       <div style={{marginBottom:12}}><PaperOrderEntry onOrder={onPaperOrder}/></div>
 

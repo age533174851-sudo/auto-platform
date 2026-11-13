@@ -134,9 +134,11 @@ export async function readPaperMarkPrice(
       const map = await fetchSpotPriceMap();
       v = Number(map.get(sym));
     } else {
-      const { getPremiumIndex } = await import('@/lib/exchanges/binanceFutures');
-      const px = await getPremiumIndex(sym, false);
-      v = Number(px?.markPrice);
+      const { readPremiumIndex } = await import('@/lib/exchanges/binanceFutures');
+      const px = await readPremiumIndex(sym, false);
+      // getPremiumIndex preserves expired cached quotes after an upstream error.
+      // A known old value cannot authorize a new fill or a protective settlement.
+      if (px.freshness === 'FRESH') v = Number(px.data?.markPrice);
     }
   } catch {
     v = NaN;
