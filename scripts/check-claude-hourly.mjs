@@ -23,6 +23,17 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { findOverrideKeys, selfTest, OAUTH_OVERRIDE_NAMES } from './lib/oauth-override-names.mjs';
+import {
+  deliveryFindings,
+  selfTest as deliverySelfTest,
+  FORBIDDEN_SHAPES,
+  SUBMIT_SCRIPT,
+  FENCE_PATHS_OUTSIDE,
+  FENCE_PATHS_INSIDE,
+  SENSITIVE_READ_OUTSIDE,
+  READ_SCOPE,
+  KNOWN_UNKNOWNS,
+} from './lib/autodev-delivery.mjs';
 
 // 갈래가 둘이다. **둘 다** 같은 울타리를 가져야 한다 — 한쪽만 검사하면
 // 느슨한 쪽으로 작업이 흘러간다.
@@ -35,6 +46,10 @@ const LANES = [
 
 let bad = 0;
 const err = (m) => { console.error(`❌ ${m}`); console.error(`::error::${m}`); bad += 1; };
+
+// 제출 통로의 판단은 `scripts/lib/autodev-delivery.mjs` 한 곳에 있다.
+// `scripts/autodev-submit.mjs`가 같은 파일을 쓴다 — 스크립트와 검사기가
+// 같은 판단을 해야 하므로 **로직을 복제하지 않는다**(`CLAUDE.md`).
 
 // ── ⓞ 이 검사기의 판단이 아직 살아 있는가 ──
 //
@@ -50,6 +65,22 @@ const err = (m) => { console.error(`❌ ${m}`); console.error(`::error::${m}`); 
 const SELF = selfTest();
 for (const f of SELF.failed) {
   err(`판단 자기 점검 실패 — ${f}`);
+}
+
+// 제출 통로 판단도 같은 자리에서 자기를 증명한다. **이 판단이 틀리면
+// ⑫a의 대조가 전부 거짓 음성이 된다** — 2026-11-04에 내가 허용 항목의
+// "이름"만 세다가 `Bash(git push -u origin:*)`로 `HEAD:main`과 뒤에
+// 붙은 `--force`를 열어 둔 자리가 그것이다.
+const DELIVERY_SELF = deliverySelfTest();
+for (const f of DELIVERY_SELF.failed) {
+  err(`제출 통로 판단 자기 점검 실패 — ${f}`);
+}
+
+// 통로가 가리키는 스크립트가 실제로 있어야 한다. 허용 목록에만 있고
+// 파일이 없으면 회차는 "통로가 있다"고 적힌 채로 아무것도 못 올린다
+// (저장소 상습 고장 ①: 만들어 놓고 배선을 안 함).
+if (!existsSync(SUBMIT_SCRIPT)) {
+  err(`${SUBMIT_SCRIPT}가 없습니다 — 허용 목록이 가리키는 통로의 실체가 없습니다`);
 }
 
 for (const lane of LANES) {
@@ -316,6 +347,62 @@ if (lane.mode === 'trading') {
   }
 }
 
+// ── ⑫a 작업물을 내보낼 통로가 있는가 (열어도 위험한 push는 계속 막는가) ──
+//
+// **울타리가 너무 좁으면 회차는 아무것도 못 한다.**
+//
+// 인증을 고친 뒤 두 갈래가 실제로 성공했는데(2026-11-03 Dev·Trading),
+// 둘 다 `✅ 변경 없음`으로 끝났다. 그때 허용 목록에는
+// `git switch -c`·`git add`·`git commit`·`git push`·`gh pr create`가
+// **하나도 없었다.** 즉 고칠 것을 찾아도 올릴 방법이 없었고, 어떤 회차든
+// 결과는 같았다 — "고칠 것이 없었다"와 "올릴 수 없었다"가 구분되지 않는다.
+//
+// 회차 지시는 "새 브랜치 + Draft PR"을 전제한다. 그 수단을 허용 목록에
+// 두지 않으면 지시가 성립하지 않는다. 그래서 **통로의 존재를 센다.**
+//
+// **그리고 이름을 세지 않는다.**
+//
+// 처음에 이 관문은 허용 목록에 이름이 있는지만 셌다. 그 셈으로는
+// 내가 그때 더한 `Bash(git push -u origin:*)`가 통과한다 — 그런데 그
+// 한 줄은 공식 문서의 매칭 규칙상 `git push -u origin HEAD:main`과
+// `git push -u origin claude/dev-x --force`를 **둘 다** 허용한다.
+// 금지 목록으로는 막히지 않는다(문서: "isn't a security boundary").
+//
+// 그래서 지금은 **모양으로 센다**: 금지된 명령 모양을 허용 목록이
+// 표현할 수 있는지 문서의 규칙으로 직접 대조한다. 복합 명령은 조각마다
+// 센다. 판단은 `scripts/lib/autodev-delivery.mjs`에 있고, 제출
+// 스크립트가 같은 파일을 쓴다.
+{
+  const am = src.match(/--allowedTools\s+"([^"]*)"/);
+  const dm = src.match(/--disallowedTools\s+"([^"]*)"/);
+
+  if (!am || !dm) {
+    // 못 읽은 것을 통과로 보지 않는다.
+    err(`${WF}: 허용·금지 목록을 읽지 못했습니다 — `
+      + '무엇이 열려 있는지 모르는 채로 통과시키지 않습니다');
+  } else {
+    for (const f of deliveryFindings({ allow: am[1], deny: dm[1], mode: lane.mode })) {
+      err(`${WF}: ${f}`);
+    }
+  }
+}
+
+// ── ⑫b 권한 자체를 꺼 버리지 않는가 ──
+//
+// 손(파일 도구)을 열 때 가장 싼 길은 `--permission-mode bypassPermissions`
+// 한 줄이다. 그러면 허용 목록이 아무 뜻도 없어지고 — 즉 ⑫·⑫a 의 대조가
+// 전부 거짓 초록이 된다. 울타리를 우회하는 것은 울타리를 지우는 것과 같다.
+//
+// 목록 안쪽은 `deliveryFindings` 가 보지만, 이 모양은 `claude_args` 의
+// 아무 줄에나 적을 수 있으므로 **파일 전체**에서 센다.
+{
+  for (const bad of ['bypassPermissions', 'dangerously-skip-permissions', 'acceptEdits']) {
+    if (src.includes(bad)) {
+      err(`${WF}: \`${bad}\`가 있습니다 — 권한을 꺼 버리면 허용 목록이 관문이 아닙니다`);
+    }
+  }
+}
+
 // ── ⑬ main 보호 규칙을 확인하고, 모르면 멈추는가 ──
 //
 // `contents: write`는 기술적으로 main push를 허용한다. 보호 규칙이
@@ -472,9 +559,21 @@ if (bad === 0) {
   console.log(`✅ 판단 자기 점검 ${SELF.total}/${SELF.total} — `
     + '인증 바꿔치기 이름을 키로 찾고, 품은 이름은 찾지 않고, 못 본 깊이를 '
     + '"없음"으로 적지 않고, 결과에 값을 섞지 않는다');
+  console.log(`✅ 제출 통로 판단 자기 점검 ${DELIVERY_SELF.total}/${DELIVERY_SELF.total} — `
+    + '허용 규칙을 문서의 매칭 규칙으로 대조하고, 복합 명령은 조각마다 세고, '
+    + '`:*` 두 읽기 중 어느 쪽으로든 금지된 모양이 통과하면 실패로 센다');
   console.log(`✅ 무인 회차 울타리 ${LANES.length}갈래 — 다른 워크플로 실행 불가 · `
     + '거래소/DB 시크릿 없음 · 도구 차단 · 겹침 방지 · 시간 상한 · '
-    + '변경 안전 관문 · 금지 지시 보존 · 체크아웃 설정의 인증 바꿔치기 없음');
+    + '변경 안전 관문 · 금지 지시 보존 · 체크아웃 설정의 인증 바꿔치기 없음 · '
+    + `금지된 명령 모양 ${FORBIDDEN_SHAPES.length}종을 허용 목록이 표현하지 못함`);
+  console.log(`✅ 파일 도구 2갈래 — 찾기·읽기·고치기·시험·담기·올리기 흐름이 안 끊김 · `
+    + `읽기 범위 ${READ_SCOPE.length}곳만 열림 · `
+    + `저장소 밖 민감 경로 ${SENSITIVE_READ_OUTSIDE.length}곳을 허용이 표현하지 못함 · `
+    + `바깥 울타리 ${FENCE_PATHS_OUTSIDE.length}곳을 허용이 표현하지 못함 · `
+    + `안쪽 울타리 ${FENCE_PATHS_INSIDE.length}곳을 정확한 경로로 금지 · `
+    + '경로 없는 맨 Edit/Write 없음 · 권한을 끄는 모양 없음');
+  // **못 잰 것을 0 이나 "없음"으로 적지 않는다.** 초록 옆에 같이 적는다.
+  for (const u of KNOWN_UNKNOWNS) console.log(`⚠️  아직 모르는 것 — ${u}`);
 } else {
   console.error('');
   console.error('   이 회차는 사람이 보고 있지 않은 시간에 돕니다.');
