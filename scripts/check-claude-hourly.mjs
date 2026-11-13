@@ -28,6 +28,8 @@ import {
   selfTest as deliverySelfTest,
   FORBIDDEN_SHAPES,
   SUBMIT_SCRIPT,
+  FENCE_PATHS_OUTSIDE,
+  FENCE_PATHS_INSIDE,
 } from './lib/autodev-delivery.mjs';
 
 // 갈래가 둘이다. **둘 다** 같은 울타리를 가져야 한다 — 한쪽만 검사하면
@@ -376,8 +378,24 @@ if (lane.mode === 'trading') {
     err(`${WF}: 허용·금지 목록을 읽지 못했습니다 — `
       + '무엇이 열려 있는지 모르는 채로 통과시키지 않습니다');
   } else {
-    for (const f of deliveryFindings({ allow: am[1], deny: dm[1] })) {
+    for (const f of deliveryFindings({ allow: am[1], deny: dm[1], mode: lane.mode })) {
       err(`${WF}: ${f}`);
+    }
+  }
+}
+
+// ── ⑫b 권한 자체를 꺼 버리지 않는가 ──
+//
+// 손(파일 도구)을 열 때 가장 싼 길은 `--permission-mode bypassPermissions`
+// 한 줄이다. 그러면 허용 목록이 아무 뜻도 없어지고 — 즉 ⑫·⑫a 의 대조가
+// 전부 거짓 초록이 된다. 울타리를 우회하는 것은 울타리를 지우는 것과 같다.
+//
+// 목록 안쪽은 `deliveryFindings` 가 보지만, 이 모양은 `claude_args` 의
+// 아무 줄에나 적을 수 있으므로 **파일 전체**에서 센다.
+{
+  for (const bad of ['bypassPermissions', 'dangerously-skip-permissions', 'acceptEdits']) {
+    if (src.includes(bad)) {
+      err(`${WF}: \`${bad}\`가 있습니다 — 권한을 꺼 버리면 허용 목록이 관문이 아닙니다`);
     }
   }
 }
@@ -545,6 +563,10 @@ if (bad === 0) {
     + '거래소/DB 시크릿 없음 · 도구 차단 · 겹침 방지 · 시간 상한 · '
     + '변경 안전 관문 · 금지 지시 보존 · 체크아웃 설정의 인증 바꿔치기 없음 · '
     + `금지된 명령 모양 ${FORBIDDEN_SHAPES.length}종을 허용 목록이 표현하지 못함`);
+  console.log(`✅ 파일 도구 2갈래 — 찾기·읽기·고치기·시험·담기·올리기 흐름이 안 끊김 · `
+    + `바깥 울타리 ${FENCE_PATHS_OUTSIDE.length}곳을 허용이 표현하지 못함 · `
+    + `안쪽 울타리 ${FENCE_PATHS_INSIDE.length}곳을 정확한 경로로 금지 · `
+    + '경로 없는 맨 Edit/Write 없음 · 권한을 끄는 모양 없음');
 } else {
   console.error('');
   console.error('   이 회차는 사람이 보고 있지 않은 시간에 돕니다.');

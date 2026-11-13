@@ -157,8 +157,8 @@ jobs:
           claude_args: |
             --max-turns 40
             --model claude-opus-5-5
-            --allowedTools "Bash(npm ci),Bash(npm ci --prefix worker),Bash(npm test),Bash(npm run build),Bash(npm run worker:build),Bash(npx tsc --noEmit),Bash(node scripts/check-:*),Bash(git status),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git fetch:*),Bash(gh pr list:*),Bash(gh pr view:*),Bash(gh issue list:*),Bash(git switch -c:*),Bash(git add:*),Bash(git commit:*),Bash(node scripts/autodev-submit.mjs:*)"
-            --disallowedTools "Bash(gh workflow run:*),Bash(gh pr merge:*),Bash(gh api --method POST:*),Bash(gh api -X POST:*),Bash(git push --force:*),Bash(git push origin main:*),Bash(git push -u origin main:*),Bash(curl:*),Bash(wget:*),Bash(psql:*),Bash(npx supabase:*),Bash(flyctl:*),Bash(vercel:*)"
+            --allowedTools "Bash(npm ci),Bash(npm ci --prefix worker),Bash(npm test),Bash(npm run build),Bash(npm run worker:build),Bash(npx tsc --noEmit),Bash(node scripts/check-:*),Bash(git status),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git fetch:*),Bash(gh pr list:*),Bash(gh pr view:*),Bash(gh issue list:*),Bash(git switch -c:*),Bash(git add:*),Bash(git commit:*),Bash(node scripts/autodev-submit.mjs:*),Read,Glob,Grep,Edit(src/**),Edit(scripts/**)"
+            --disallowedTools "Bash(gh workflow run:*),Bash(gh pr merge:*),Bash(gh api --method POST:*),Bash(gh api -X POST:*),Bash(git push --force:*),Bash(git push origin main:*),Bash(git push -u origin main:*),Bash(curl:*),Bash(wget:*),Bash(psql:*),Bash(npx supabase:*),Bash(flyctl:*),Bash(vercel:*),Edit(.github/**),Write(.github/**),Edit(scripts/autodev-submit.mjs),Edit(scripts/lib/autodev-delivery.mjs),Edit(supabase/**),Edit(**/.env*),Read(**/.env*),Edit(src/lib/engine/**),Edit(src/lib/strategies/**),Edit(src/lib/exchanges/**),Edit(src/lib/smoke/**),Edit(src/lib/execution/**),Edit(src/lib/risk/**),Edit(src/lib/backtest/**),Edit(worker/**)"
           prompt: |
             TRAIGO 무인 개발 — **일반 갈래** 1회차.
             저장소: ${{ github.repository }}
