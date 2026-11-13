@@ -48,6 +48,8 @@ const CLASSIFIED = new Map([
 
   // ── B. 새로고침 (화면에 있어도 된다) ──
   ['src/components/AutotradeControl.tsx', 'POLL — 서버 예약 상태를 다시 읽기만 한다'],
+  ['src/components/trading/PaperAutomationControl.tsx',
+    'POLL — 서버 PAPER 설정·평가 이력을 GET으로 읽는다. 반복 실행은 Worker가 깨우는 서버 경로가 맡는다'],
   ['src/components/AutoStatusBoard.tsx', 'POLL — 상태판 새로고침'],
   ['src/components/SmokeTestPanel.tsx',
     'POLL — 스모크 테스트 진행 상태를 다시 읽고 남은 시간을 센다. '
