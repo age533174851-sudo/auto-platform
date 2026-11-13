@@ -12,6 +12,10 @@ import { test, assert, eq } from '../../test/harness';
 import { entryWindowOf, windowDueVerdict } from './entryWindowDue';
 import { dueCheck } from './evaluationLoop';
 import { scheduleReadSummary } from './scheduleReadSummary';
+import { windowVerdict } from '../strategies/originalV1';
+import {
+  forcedEntryVerdict, FORCED_ENTRY_PROFILE_ID, FORCED_ENTRY_PRESET_ID,
+} from '../strategies/dailyForcedEntry';
 
 const MIN = 60_000;
 /** 그 한국시각(같은 날)의 UTC epoch. KST = UTC+9, 서머타임 없음 */
@@ -20,6 +24,72 @@ const W = entryWindowOf('my-original-v1');
 
 export function runEntryWindowDueTests() {
   console.log('[9시 진입 창 — 간격 위상이 창을 먹지 않는다]');
+
+  // ── 깨우는 쪽과 라우트가 **같은 분 집합**인가 (두 창 모두) ──
+  //
+  // #450에서 Exact100X 창이 이렇게 어긋나 있었다: 창 **값**은 둘 다
+  // 정본에서 가져다 썼는데 **끝 분을 세는 법**이 달라서, 09:30 한 분 동안
+  // 스케줄러가 깨우고 라우트가 AFTER_WINDOW로 거부했다. 값 비교로는
+  // 못 잡히고 **판정끼리 대조해야** 잡힌다.
+  //
+  // 그래서 두 창 모두에 대해 "깨우는 분 집합 = 라우트가 받는 분 집합"을
+  // 못 박는다. 한쪽만 넓으면 헛된 평가가 돌고, 한쪽만 좁으면 그날 그
+  // 전략이 창 안에서 한 번도 안 불린다 — 2026-08-13에 실제로 난 일이다.
+  //
+  // **지금 이 두 쌍은 어긋나 있지 않다.** 이 시험은 고장을 고친 기록이
+  // 아니라 **다시 어긋나지 못하게 하는 울타리**다 (그 울타리가 실제로
+  // 무는지는 변이로 확인했다).
+
+  /** 그 분에 창이 깨우는가 — 하루 1회 조건은 빼고 시각만 본다 */
+  const wakesAt = (w: any, m: number) => windowDueVerdict({
+    nowMs: kst(Math.floor(m / 60), m % 60),
+    lastRunAtMs: kst(0, 5), // 창 시작보다 훨씬 전 — WINDOW_DONE이 끼지 않게
+    window: w,
+  }).due;
+
+  const label = (m: number) =>
+    `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+
+  /** 두 집합이 다른 분을 전부 모아 적는다 — 첫 한 분만 보고 끝내지 않는다 */
+  const disagreements = (w: any, from: number, to: number, routeTakes: (m: number) => boolean) => {
+    const out: string[] = [];
+    for (let m = from; m <= to; m++) {
+      const woke = wakesAt(w, m);
+      const takes = routeTakes(m);
+      if (woke !== takes) out.push(`${label(m)} 깨움=${woke} 라우트=${takes}`);
+    }
+    return out;
+  };
+
+  test('★★★ my-original-v1 — 깨우는 분과 라우트가 받는 분이 같다 (09:00~10:30)', () => {
+    // 라우트와 **같은 호출 모양**으로 묻는다: route.ts는 graceMin을 넘기지
+    // 않고 기본값(LATE_GRACE_MIN)을 쓴다. 여기서 값을 넘기면 실제로 돌는
+    // 것과 다른 것을 시험하게 된다.
+    const takes = (m: number) => {
+      const v = windowVerdict({ nowMs: kst(Math.floor(m / 60), m % 60), lastEvaluatedDay: null });
+      return v.evaluate === true; // IN_WINDOW · LATE
+    };
+    const bad = disagreements(W, 9 * 60, 10 * 60 + 30, takes);
+    eq(bad.length, 0, `깨우는 쪽과 라우트가 다른 분: ${bad.join(' · ')}`);
+  });
+
+  test('★★★ Exact100X — 깨우는 분과 라우트가 받는 분이 같다 (08:50~09:40)', () => {
+    const w = entryWindowOf('scalp', {
+      profileId: FORCED_ENTRY_PROFILE_ID, presetId: FORCED_ENTRY_PRESET_ID,
+    });
+    const takes = (m: number) => {
+      const v = forcedEntryVerdict({
+        nowMs: kst(Math.floor(m / 60), m % 60), mode: 'TESTNET',
+        profileId: FORCED_ENTRY_PROFILE_ID, presetId: FORCED_ENTRY_PRESET_ID,
+        ordersTodayInWindow: 0,
+      });
+      // 시각 때문에 거부하는 것만 '창 밖'이다. 다른 거부 사유(중복·모름)는
+      // 창과 무관하므로 여기서 섞지 않는다.
+      return v.code !== 'BEFORE_WINDOW' && v.code !== 'AFTER_WINDOW';
+    };
+    const bad = disagreements(w, 8 * 60 + 50, 9 * 60 + 40, takes);
+    eq(bad.length, 0, `깨우는 쪽과 라우트가 다른 분: ${bad.join(' · ')}`);
+  });
 
   // ── 창 표 ────────────────────────────────────────
   test('창은 전략 정본에서 온다 (09:10~09:30 · 유예 30분)', () => {
