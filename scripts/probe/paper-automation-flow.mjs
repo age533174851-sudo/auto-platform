@@ -105,12 +105,16 @@ try {
   const ctx=await browser.newContext({viewport:{width:390,height:844},serviceWorkers:'block'});
   await ctx.addInitScript(({session})=>{
     localStorage.setItem('tg_ob',JSON.stringify('1'));localStorage.setItem('tg_seen_login_v1','1');
+    localStorage.setItem('tg_prefs_v1',JSON.stringify({uiLevel:'BEGINNER'}));
     localStorage.setItem('sb-127-auth-token',JSON.stringify(session));
     const Real=window.WebSocket;
     window.WebSocket=class extends EventTarget {
       static OPEN=1;static CLOSED=3;readyState=3;
-      constructor(url){super();if(!/binance/.test(String(url)))return new Real(url);}
-      close(){}send(){}
+      constructor(url){super();if(!/binance/.test(String(url)))return new Real(url);
+        this.timer=setInterval(()=>{this.readyState=1;this.onopen?.({});const sym=(String(url).match(/streams=([a-z0-9]+)@/)||[])[1]||'btcusdt';
+          this.onmessage?.({data:JSON.stringify({stream:sym+'@bookTicker',data:{b:'2999',a:'3001'}})});
+        },200);}
+      close(){clearInterval(this.timer);}send(){}
     };
   },{session});
   const page=await ctx.newPage();
@@ -118,7 +122,7 @@ try {
   // Let only the NEW real endpoint through. Unrelated dashboard integrations are fixtures.
   const dashboardRoute=async route=>{
     const u=new URL(route.request().url());
-    if(u.origin===origin && (u.pathname==='/api/paper/automation' || !u.pathname.startsWith('/api/')))return route.continue();
+    if(u.origin===origin && (['/api/paper/automation','/api/paper/order','/api/paper/positions','/api/paper/close'].includes(u.pathname) || !u.pathname.startsWith('/api/')))return route.continue();
     if(u.origin===`http://127.0.0.1:${gatewayPort}` && u.pathname==='/auth/v1/user')return route.continue();
     if(u.origin!==origin)return route.fulfill({status:200,contentType:'application/json',body:'[]'});
     const payload=u.pathname==='/api/paper/challenge'?{ok:true,challenges:[]}:u.pathname==='/api/paper/account'?{ok:true,started:true,account:{balance:10000},positions:[]}:u.pathname==='/api/prices'?{results:[]}:{ok:true,account:{balance:10000,available:10000},openPositions:[],data:[],news:[],connections:[]};
@@ -180,6 +184,15 @@ try {
   }
   // Re-open the actual screen to verify history, balances and reasons after reconnect.
   const resumed=await browser.newContext({viewport:{width:390,height:844},storageState});
+  await resumed.addInitScript(()=>{
+    const Real=window.WebSocket;
+    window.WebSocket=class extends EventTarget {
+      static OPEN=1;static CLOSED=3;readyState=3;
+      constructor(url){super();if(!/binance/.test(String(url)))return new Real(url);
+        this.timer=setInterval(()=>{this.readyState=1;this.onopen?.({});const sym=(String(url).match(/streams=([a-z0-9]+)@/)||[])[1]||'btcusdt';this.onmessage?.({data:JSON.stringify({stream:sym+'@bookTicker',data:{b:'2999',a:'3001'}})});},200);}
+      close(){clearInterval(this.timer);}send(){}
+    };
+  });
   const after=await resumed.newPage();
   await after.route('**/*',dashboardRoute);
   await after.goto(origin+'/?tab=paper',{waitUntil:'domcontentloaded',timeout:120000});
@@ -187,9 +200,27 @@ try {
   assert.ok((await after.getByRole('list',{name:'자동 모의 체결 이력'}).innerText()).includes('LIQUIDATION'));
   assert.ok((await after.getByTestId('paper-automation').innerText()).includes('실현 손익'));
   await after.screenshot({path:join(out,'settled-history.png'),fullPage:true});
+  // Verify #621's SHORT UI through the actual manual API and committed ledger too.
+  quote(3000);
+  await after.getByLabel('모의 시장').selectOption('USDM');
+  await after.getByRole('button',{name:'모의 숏',exact:true}).click();
+  await after.getByTestId('buy-pct-25').click();
+  assert.equal(await after.getByTestId('buy-cta').isDisabled(),true,'stop required before confirmation');
+  await after.getByTestId('sl-2').click();
+  await after.locator('[data-testid="buy-cta"]:enabled').waitFor();
+  await after.getByTestId('buy-cta').click();
+  const orderResponse=after.waitForResponse(r=>r.url().endsWith('/api/paper/order') && r.request().method()==='POST');
+  await after.getByTestId('buy-confirm').click();
+  const manualReply=await orderResponse;const manualBody=await manualReply.json();
+  assert.equal(manualReply.status(),200,JSON.stringify(manualBody));assert.equal(manualBody.ok,true);
+  const manualPosition=JSON.parse(q("SELECT row_to_json(p) FROM paper_positions p WHERE status='open'")[0]);
+  assert.equal(manualPosition.side,'SHORT');assert.equal(manualPosition.market,'USDM');assert.ok(manualPosition.stop_loss>3000);
+  assert.equal((await call('/api/paper/close',{positionId:manualPosition.id})).body.ok,true);
+  assert.equal(q(`SELECT status FROM paper_positions WHERE id='${manualPosition.id}'`)[0],'closed');
+  await after.screenshot({path:join(out,'manual-short.png'),fullPage:true});
   await resumed.close();
-  writeFileSync(join(out,'evidence.json'),JSON.stringify({localPostgres:true,officialPostgrest:true,fixtureAuth:true,fixtureQuotes:true,browserClosedBeforeTicks:true,serverProcessRestarted:true,firstTick:tick.body,finalStatus:status.body,missingQuotes:noPrice.body,exits},null,2));
-  console.log('PASS browser start -> real API/PostgREST/PG -> browser closed -> server restarted -> repeated cycles -> virtual fill/fee -> stop -> protective SL/TP/LIQUIDATION; MAX_HOLD; history; stale quotes blocked');
+  writeFileSync(join(out,'evidence.json'),JSON.stringify({localPostgres:true,officialPostgrest:true,fixtureAuth:true,fixtureQuotes:true,browserClosedBeforeTicks:true,serverProcessRestarted:true,firstTick:tick.body,finalStatus:status.body,missingQuotes:noPrice.body,exits,manualShort:{positionId:manualPosition.id,side:manualPosition.side,stopLoss:manualPosition.stop_loss,reply:manualBody}},null,2));
+  console.log('PASS browser start -> real API/PostgREST/PG -> browser closed -> server restarted -> repeated cycles -> virtual fill/fee -> stop -> protective SL/TP/LIQUIDATION; MAX_HOLD; history; stale quotes blocked; manual SHORT UI/API/DB/close');
 } catch(e) {
   console.log('Offline position diagnostics:',q('SELECT row_to_json(p) FROM paper_positions p'));
   throw e;
