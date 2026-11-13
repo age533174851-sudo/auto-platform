@@ -21,7 +21,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { T } from '@/lib/constants';
 import { Bot, Server, Sparkles, RefreshCw } from 'lucide-react';
 import { readMockHeartbeat } from '@/lib/engineStatus';
-import { autoRuntimeView, runtimeContradictions, type Tone } from '@/lib/engine/autoRuntimeView';
+import { autoRuntimeView, runtimeContradictions, type Tone, deploymentFactsOf } from '@/lib/engine/autoRuntimeView';
 
 type Health = 'running' | 'degraded' | 'stopped' | 'absent' | 'loading';
 
@@ -62,10 +62,7 @@ export default function AutoStatusBoard({ authHeader }: { authHeader?: string })
     try {
       const dr = await fetch('/api/system/deployment', { cache: 'no-store' });
       const dj = await dr.json();
-      setDeploy({
-        code: dj?.verdict?.code ?? dj?.skew?.code ?? null,
-        webSha: dj?.vercel?.sha ?? null, workerSha: dj?.fly?.sha ?? null,
-      });
+      setDeploy(deploymentFactsOf(dj));
     } catch { setDeploy(null); }
     setRefreshing(false);
   }, [authHeader]);
