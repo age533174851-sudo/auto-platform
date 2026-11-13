@@ -100,13 +100,27 @@ jobs:
       - name: 유닛 테스트
         run: npm test
 
-      # Claude 무인 회차 진단기 — #533.
+      # ── `.mjs` 시험 — 이름을 적지 않고 전부 돌린다 ──
+      #
       # `npm test`는 TypeScript 러너라 `.mjs` 시험이 안 걸린다. 여기서
-      # 돌리지 않으면 **PR에서 한 번도 안 돈다** — 이 저장소가 이미 당한 모양이다.
-      - name: Claude 회차 진단기 회귀 (민감정보 유출 0 포함)
-        run: |
-          node --test scripts/test-claude-api-preflight.mjs
-          node --test scripts/test-claude-exec-category.mjs
+      # 돌리지 않으면 **PR에서 한 번도 안 돈다** — 이 저장소가 이미 당한
+      # 모양이다. 그 주석은 원래부터 여기 있었는데, 정작 이 단계는
+      # **파일 이름 두 개를 손으로 적어** 두고 있었다.
+      #
+      # 그 사이 `scripts/test-*.mjs`는 다섯 개가 됐고, 나머지 셋은
+      # 한 번도 돌지 않았다 — `test-pipeline.mjs`는 main에서 **죽어
+      # 있는데도** CI가 초록이었다(#593이 그 RED를 찾았다).
+      #
+      # 그래서 목록을 한 줄 늘리는 대신 **목록을 없앴다.** 다음에 생기는
+      # 시험은 아무것도 안 해도 돈다. 글롭이 아무것도 못 맞히면 `node`가
+      # 없는 경로로 실패하므로, 조용히 0건을 돌리는 일은 없다.
+      - name: .mjs 시험 전부 (손으로 적은 목록 없음)
+        run: node --test scripts/test-*.mjs
+
+      # 위 글롭이 다시 이름 목록으로 되돌아가지 못하게 못 박는다.
+      # "CI가 안 돌리는 검사기는 없는 검사기다" — 그 판정을 코드로 둔다.
+      - name: .mjs 시험 배선 검사 (디스크의 시험 = CI가 돌리는 시험)
+        run: node scripts/check-ci-script-tests.mjs
 
       # ── 워커 빌드 ──
       #

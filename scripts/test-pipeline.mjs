@@ -9,7 +9,7 @@
  * 실행: node scripts/test-pipeline.mjs
  */
 import { execSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, cpSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, cpSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -21,57 +21,52 @@ function check(name, cond, detail = '') {
   else { fail++; console.log(`  ✗ ${name}${detail ? ' — ' + detail : ''}`); }
 }
 
-// 필요한 모듈 복사 + 상대경로로 변환
-const files = [
-  ['src/lib/engine/tradingPipeline.ts', 'tradingPipeline.ts'],
-  ['src/lib/engine/riskManager.ts', 'riskManager.ts'],
-  ['src/lib/engine/signalGateway.ts', 'signalGateway.ts'],
-  ['src/lib/strategies/dailyBattle.ts', 'dailyBattle.ts'],
-  ['src/lib/strategies/riskVeto.ts', 'riskVeto.ts'],
-  ['src/lib/strategies/volatilityBaseline.ts', 'volatilityBaseline.ts'],
-  ['src/lib/calendar/econCalendar.ts', 'econCalendar.ts'],
-  ['src/lib/derivatives/index.ts', 'derivatives.ts'],
-  ['src/lib/strategies/regime.ts', 'regime.ts'],
-  ['src/lib/autotrade/dynamicSizing.ts', 'dynamicSizing.ts'],
-  ['src/lib/strategies/regime.ts', 'regime.ts'],
-];
-for (const [src, dst] of files) {
-  try { cpSync(src, join(dir, dst)); } catch {}
-}
+// 필요한 모듈을 **tsc가 import를 따라가게** 해서 모은다.
+//
+// 예전에는 복사할 파일 목록과 경로 치환 목록을 여기 손으로 적어 뒀다.
+// 그 표는 `tradingPipeline.ts`의 import를 베낀 사본이라, import가 하나
+// 늘면 이 스크립트만 모르고 깨졌다. 실제로 `expansionMode`와 `ladderGate`가
+// 추가되자 이 시험은 `MODULE_NOT_FOUND`로 죽었고, CI 필수 검사에 안 들어가
+// 있어서 그 RED가 가려져 있었다.
+// (`CLAUDE.md`: 같은 판단이 두 곳에 있으면 언젠가 갈린다.)
+//
+// 표를 한 줄 더 늘리면 다음에 또 같은 자리에서 깨진다. 그래서 **표 자체를
+// 없앴다.** tsc에 진입 파일만 주면 import 그래프를 스스로 따라가 필요한
+// 파일을 전부 컴파일하고, 디렉터리 구조를 그대로 내보낸다. 상대 import는
+// 그대로 맞으므로 치환할 것이 없고, 평탄화하지 않으니 `safety/types.ts`와
+// `exchanges/types.ts`처럼 이름이 같은 파일이 서로를 덮을 일도 없다.
+const ENTRY = 'src/lib/engine/tradingPipeline.ts';
+const CALENDAR = 'src/lib/calendar/econCalendar.ts';
 
-// import 경로 정리
-const fixes = [
-  ['tradingPipeline.ts', [
-    ["../strategies/dailyBattle", "./dailyBattle.js"],
-    ["../strategies/riskVeto", "./riskVeto.js"],
-    ["../strategies/volatilityBaseline", "./volatilityBaseline.js"],
-    ["../calendar/econCalendar", "./econCalendar.js"],
-    ["./riskManager", "./riskManager.js"],
-    ["./signalGateway", "./signalGateway.js"],
-    ["../derivatives", "./derivatives.js"],
-  ]],
-  ['riskManager.ts', [["./signalGateway", "./signalGateway.js"]]],
-  ['dailyBattle.ts', [["./riskVeto", "./riskVeto.js"]]],
-];
-import { readFileSync } from 'node:fs';
-for (const [file, reps] of fixes) {
-  const p = join(dir, file);
-  try {
-    let s = readFileSync(p, 'utf8');
-    for (const [from, to] of reps) s = s.split(`'${from}'`).join(`'${to}'`);
-    writeFileSync(p, s);
-  } catch {}
+// 타입 오류는 **적되** 여기서 멈추지 않는다. tsc는 타입 오류가 있어도
+// JS를 내보내고, 이 시험이 보는 것은 배선이지 타입이 아니다. 저장소의
+// 타입 기준선은 프로젝트 tsconfig로 재는 `npx tsc --noEmit`이 본다 —
+// 여기 오류 개수를 그 기준선으로 읽으면 안 된다(설정이 다르다).
+let tscOut = '';
+try {
+  tscOut = execSync(
+    `npx tsc ${ENTRY} ${CALENDAR} --outDir ${dir} --rootDir . `
+    + `--module commonjs --target es2020 --skipLibCheck --lib es2020,dom`,
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+} catch (e) { tscOut = String(e?.stdout || '') + String(e?.stderr || ''); }
+const tscErrors = (tscOut.match(/error TS/g) || []).length;
+if (tscErrors) console.log(`  (tsc 타입 오류 ${tscErrors}건 — 이 시험의 판정 대상은 아니다)`);
+
+// **산출물이 없으면 멈춘다.** 빠진 모듈로 돌린 결과는 통과도 실패도 아니다.
+const entryJs = join(dir, ENTRY.replace(/\.ts$/, '.js'));
+const calendarJs = join(dir, CALENDAR.replace(/\.ts$/, '.js'));
+for (const [label, f] of [[ENTRY, entryJs], [CALENDAR, calendarJs]]) {
+  if (!existsSync(f)) {
+    console.log(`  \u2717 ${label} 컴파일 산출물이 없습니다 — 시험을 돌리지 않습니다`);
+    if (tscOut.trim()) console.log(tscOut.trim().split('\n').slice(0, 20).map(l => '      ' + l).join('\n'));
+    process.exit(1);
+  }
 }
 
 console.log('통합 테스트: DB → Calendar → 5v5 → Veto → Risk Manager\n');
 
-try {
-  execSync(`cd ${dir} && npx tsc *.ts --module commonjs --target es2020 --skipLibCheck --lib es2020,dom 2>&1 | grep -c "error TS" || true`,
-    { encoding: 'utf8' });
-} catch {}
-
-const { runTradingPipeline, describePipeline } = await import(join(dir, 'tradingPipeline.js'));
-const { clearCalendarCache } = await import(join(dir, 'econCalendar.js'));
+const { runTradingPipeline, describePipeline } = await import(entryJs);
+const { clearCalendarCache } = await import(calendarJs);
 
 // ── 테스트 데이터 ──
 function makeDaily(n, trend, vol, seed) {
@@ -191,7 +186,7 @@ check('승인 경로 존재', anyApproved || r4.stage === 'risk',
 
 // ── ⑦ 외부 신호(웹훅) Veto 게이트 — 우회 불가 증명 ──
 console.log('\n⑦ 외부 신호 Veto 게이트 (웹훅 경로)');
-const { applyVetoToSignal } = await import(join(dir, 'tradingPipeline.js'));
+const { applyVetoToSignal } = await import(entryJs);
 
 // 캘린더 없음 + 고배율 외부 신호 → 차단되어야 함
 clearCalendarCache();
