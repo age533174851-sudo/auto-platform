@@ -974,6 +974,18 @@ jobs:
       - name: 상태판 문장 검사
         run: node scripts/check-status-claims.mjs
 
+      # ── 내려받기가 깨진 것을 "검사 실패"처럼 보이게 두지 않는가 ──
+      #
+      # 아래 actionlint 단계가 바이너리를 내려받아 체크섬을 잰다. `--fail`
+      # 없는 `curl` 은 HTTP 오류에서도 0 으로 끝나고 오류 본문을 파일로
+      # 남기므로, **내려받기 실패가 체크섬 불일치로 둔갑한다.** 읽는 사람은
+      # 바꿔치기를 의심하게 된다.
+      #
+      # 체크섬을 빼는 대신 **그 둘을 구분**한다. 상태코드를 직접 보는 API
+      # 호출(`%{http_code}`)은 본문이 필요하므로 세지 않는다.
+      - name: CI 내려받기 검사
+        run: node scripts/check-ci-downloads.mjs
+
       # ── 워크플로 문법 검사 ──
       #
       # **유효한 YAML과 유효한 워크플로는 다르다.**
@@ -997,7 +1009,14 @@ jobs:
         run: |
           set -euo pipefail
           url="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
-          curl -sSL -o /tmp/actionlint.tgz "$url"
+          # `--fail` 이 없으면 HTTP 오류에서도 curl 이 0 으로 끝나고 **오류 본문이
+          # 파일이 된다.** 그러면 다음 줄의 체크섬이 틀려서, 내려받기가 깨진 것이
+          # "바이너리가 바꿔치기됐다"처럼 보인다 — 2026-11-08 PR #595 의
+          # `verify` 가 그렇게 빨개졌다. `--retry` 는 한 번 깜빡인 내려받기가
+          # 필수 검사를 빨갛게 만들지 않게 한다. **체크섬은 그대로 둔다.**
+          curl --fail --silent --show-error --location \
+            --retry 3 --retry-all-errors --retry-delay 2 --max-time 120 \
+            -o /tmp/actionlint.tgz "$url"
           echo "${ACTIONLINT_SHA256}  /tmp/actionlint.tgz" | sha256sum -c -
           tar xzf /tmp/actionlint.tgz -C /tmp actionlint
           /tmp/actionlint -color
