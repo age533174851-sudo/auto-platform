@@ -66,6 +66,10 @@ function applyMigration() {
     const tmp = `${process.env.TMPDIR || '/tmp'}/pccm-reapply.sql`;
     writeFileSync(tmp, sql);
     return applyFile(tmp);
+  }, (p) => {
+    // 어느 파일이 재적용 불가인지 남긴다 — 이름이 없으면 전부 뒤져야 한다.
+    console.error(`  ✗ ${p}를 다시 세우지 못했습니다`
+      + ' — 이 파일이 재적용 가능한지 보세요 (CREATE … IF NOT EXISTS · DROP POLICY IF EXISTS)');
   });
 }
 function proofGreen() {
