@@ -25,11 +25,16 @@
 //   ⑤ 청산가가 요청에서 오지 않는다
 //   ⑥ 출처 표에서 현물과 선물이 **다른** 출처를 쓴다
 //   ⑦ `readPaperMarkPrice`가 출처를 인자로 받지 않는다
+//   ⑧ 손절·익절 수정(`/api/paper/modify`)도 같은 함수로 방향을 본다
+//      — 발동은 감시기가 `readPaperMarkPrice(p.market)`로 정한다. 수정이
+//        선물 마크가(만료 캐시 포함)로 방향을 보면, 현물 포지션에서
+//        "걸자마자 발동하는" 손절이 검사를 통과한다.
 import { readFileSync } from 'node:fs';
 
 const ORDER  = 'src/app/api/paper/order/route.ts';
 const CLOSE  = 'src/app/api/paper/close/route.ts';
 const SOURCE = 'src/lib/engine/paperPriceSource.ts';
+const MODIFY = 'src/app/api/paper/modify/route.ts';
 
 let bad = 0;
 const err = (m) => { console.error(`❌ ${m}`); bad += 1; };
@@ -43,6 +48,7 @@ const code = (s) => s.split('\n').filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l)).joi
 const order = code(read(ORDER));
 const close = code(read(CLOSE));
 const src   = code(read(SOURCE));
+const modify = code(read(MODIFY));
 
 // ── ① 라우트가 가격 출처를 직접 부르지 않는다 ──
 //
@@ -96,6 +102,27 @@ if (/\|\|\s*['"]USDM['"]/.test(src) || /\?\?\s*['"]USDM['"]/.test(src)) {
   err(`${SOURCE}에 기본 시장 폴백이 있습니다 — 빈 값과 오타가 전부 선물이 됩니다`);
 }
 
+// ── ⑧ 손절·익절 수정이 발동과 같은 가격으로 방향을 본다 ──
+//
+// 수정 라우트의 방향 검사는 "이 손절이 걸자마자 발동하는가"를 묻는다.
+// 발동을 정하는 것은 감시기이고, 감시기는 포지션의 시장 가격을 쓴다.
+// 다른 시장의 가격으로 물으면 답이 감시기와 갈린다.
+for (const fn of ['getPremiumIndex', 'fetchSpotPriceMap', 'premiumIndex', 'ticker/price']) {
+  if (modify.includes(fn)) {
+    err(`${MODIFY}이 가격 출처를 직접 부릅니다 (${fn})`
+      + ' — 손절 방향을 발동(감시기)과 다른 시장 가격으로 봅니다');
+  }
+}
+if (!/\.select\('[^']*\bmarket\b[^']*'\)/.test(modify)) {
+  err(`${MODIFY}가 포지션의 market 칸을 읽지 않습니다 — 현물 포지션의 손절을 선물 가격으로 봅니다`);
+}
+if (!/readPaperMarkPrice\(\s*pos\.market\s*,/.test(modify)) {
+  err(`${MODIFY}가 readPaperMarkPrice에 pos.market을 넘기지 않습니다`);
+}
+if (/\|\|\s*['"]USDM['"]/.test(modify) || /\?\?\s*['"]USDM['"]/.test(modify)) {
+  err(`${MODIFY}에 시장 폴백이 있습니다 — 포지션에 적힌 시장을 그대로 써야 합니다`);
+}
+
 // ── ⑤ 청산가는 요청에서 오지 않는다 ──
 for (const [name, body] of [[ORDER, order], [CLOSE, close]]) {
   if (/(body|searchParams|params)[^\n]{0,60}(exitPrice|exit_price|markPrice|mark_price|fillPrice)/i.test(body)) {
@@ -136,4 +163,5 @@ if (bad > 0) {
   process.exit(1);
 }
 console.log('✅ 모의 가격 출처 — 진입·청산이 같은 함수 · 시장별 출처 분리 ·'
-  + ' pos.market 반영 · 모르는 시장 fail-closed · 요청 가격 비수신');
+  + ' pos.market 반영 · 모르는 시장 fail-closed · 요청 가격 비수신 ·'
+  + ' 손절·익절 수정도 같은 가격으로 방향 확인');
