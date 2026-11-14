@@ -102,6 +102,18 @@ export function OrderControls({
         disabled={!canOrder}
       />
 
+      <ProtectionControls form={form}/>
+
+      {/* 예상값과 막힌 사유는 **이 칸 밖**에 있다(`OrderEstimate`).
+          좁은 기기에서 이 칸은 안에서 스크롤한다 — 증거금·청산가가 그
+          스크롤에 딸려 올라가면 주문 직전에 안 보인다. */}
+    </div>
+  );
+}
+
+/** 간편·프로가 같은 손절 입력과 요청 필드를 사용한다. */
+export function ProtectionControls({ form }: { form: TradeForm }) {
+  return <>
       {/* ── 손절 거리 ──
           사이징이 아니다. 위 슬라이더는 "얼마나 크게", 이 줄은 "어디서 나올까"다.
           **선물은 손절이 필수다**(`buildPaperPlan`) — 그래서 이 줄이 숨으면
@@ -145,11 +157,7 @@ export function OrderControls({
         ) : null}
       </div>
 
-      {/* 예상값과 막힌 사유는 **이 칸 밖**에 있다(`OrderEstimate`).
-          좁은 기기에서 이 칸은 안에서 스크롤한다 — 증거금·청산가가 그
-          스크롤에 딸려 올라가면 주문 직전에 안 보인다. */}
-    </div>
-  );
+  </>;
 }
 
 const sel: React.CSSProperties = {

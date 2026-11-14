@@ -17,7 +17,7 @@
 //   7. 공식 Supabase 재생 워크플로가 운영과 연결되지 않는가
 import { readFileSync, existsSync, globSync } from 'node:fs';
 import { join } from 'node:path';
-import { buildManifest, renderManifest, OUT, LEGACY, loadPlan, MIG_DIR } from './gen-migration-manifest.mjs';
+import { buildManifest, renderManifest, OUT, LEGACY, loadPlan, MIG_DIR, readMigrationFiles } from './gen-migration-manifest.mjs';
 
 let bad = 0;
 const err = (m) => { console.error(`::error::${m}`); bad += 1; };
@@ -155,6 +155,63 @@ const CHORE_PHRASES = [
   ];
 
   const plan = await loadPlan();
+
+  // ── 파일이 **자기 위험도를 스스로 거짓으로 적지 않는가** ──
+  //
+  //   097은 머리말에 이렇게 적어 뒀다:
+  //
+  //       -- ADDITIVE 전용이다. 기존 표·칸을 만들지도 지우지도 고치지도 않는다.
+  //
+  //   그런데 같은 파일에 `DROP FUNCTION` 3개와 `DROP POLICY` 4개가 있고,
+  //   판정기는 그 파일을 **DESTRUCTIVE**로 분류한다. 관문은 이미 막고
+  //   있으니 **코드가 위험한 것이 아니다 — 문서가 거짓인 것이다.**
+  //
+  //   왜 그게 위험한가: 승인하는 사람이 매니페스트가 아니라 SQL 머리말을
+  //   읽고 "자동 적용 가능한 ADDITIVE"로 오판할 수 있다. 이 저장소에서
+  //   주석이 코드와 갈린 자리는 전부 사고가 됐다 —
+  //   `getPriceOrdersGateFutures`의 "못 읽으면 null"(구현은 `[]`),
+  //   `ten_slot_events`의 "추가만 한다"(아무것도 강제하지 않았다).
+  //
+  //   판정을 여기서 다시 적지 않는다. **위 `plan.classifyMigration`이
+  //   정본이다** — "DROP이 있으면 DESTRUCTIVE"로 세면 086(DROP TRIGGER)·
+  //   093(DROP CONSTRAINT)처럼 정당한 ADDITIVE가 오탐으로 걸린다.
+  //   실제로 그 둘은 DROP을 갖고도 ADDITIVE로 분류된다.
+  // 두 가지를 본다.
+  //
+  //   ① 파일 어디든 `ADDITIVE 전용`이라고 적혀 있는가 (097이 그랬다)
+  //   ② **`위험 분류` 선언 블록**이 추가 전용이라고 말하는가 (098이 그랬다)
+  //
+  // ②를 따로 두는 이유: `추가만`이라는 말 자체는 **정당할 때가 있다.**
+  // 098의 표 주석은 `증거 로그 … 추가만 한다 — UPDATE·DELETE·TRUNCATE는
+  // 트리거가 거부한다`고 적는데, 그건 표의 **런타임 성질**에 대한 참인
+  // 문장이다. 그걸 잡으면 오탐이고, 오탐이 한 번 나면 다음부터 아무도
+  // 이 검사를 안 본다. 그래서 **위험 분류를 말하는 자리**로 좁힌다.
+  const ADDITIVE_CLAIM = /ADDITIVE\s*전용/;
+  const ADDITIVE_WORDS = /ADDITIVE|추가만/;
+  /** `위험 분류` 머리말 다음의 주석 줄들 — 이 파일이 자기 위험을 선언하는 자리 */
+  function riskDeclarationOf(sql) {
+    const lines = sql.split('\n');
+    const out = [];
+    for (let i = 0; i < lines.length; i++) {
+      if (!/^\s*--.*위험\s*분류/.test(lines[i])) continue;
+      for (let j = i + 1; j < lines.length && j <= i + 8; j++) {
+        if (!/^\s*--/.test(lines[j])) break;   // 주석이 끝나면 블록도 끝이다
+        out.push(lines[j]);
+      }
+    }
+    return out.join('\n');
+  }
+  for (const f of readMigrationFiles()) {
+    const cls = plan.classifyMigration(f.sql);
+    if (cls.risk === 'ADDITIVE') continue;
+    const where = ADDITIVE_CLAIM.test(f.sql) ? '파일 안에 "ADDITIVE 전용"이라고'
+      : ADDITIVE_WORDS.test(riskDeclarationOf(f.sql)) ? '`위험 분류` 선언이 추가 전용이라고'
+        : null;
+    if (!where) continue;
+    err(`${f.name}은 ${cls.risk}로 분류되는데 ${where} 적혀 있습니다`);
+    console.error('   → 승인하는 사람이 머리말만 읽으면 자동 적용 가능한 변경으로 오판합니다.');
+    console.error(`   → 분류 근거: ${cls.reasons.join(' · ')}`);
+  }
 
   for (const c of CONTRACTS) {
     let sql = null;
