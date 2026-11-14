@@ -119,6 +119,25 @@ async function check(label, scenario, expect) {
   want(`${label} · hook 호출 횟수`, expect.hookCalls, r.hookCalls);
   want(`${label} · 종료코드`, expect.exit, r.code);
   if (expect.outcome) want(`${label} · 결말`, expect.outcome, outcome);
+  // **조용히 넘길 일과 사람이 봐야 할 일을 가린다.**
+  //
+  //   `::notice::` 는 초록 런에 묻힌다. 스스로 풀리지 않는 상태를 그렇게
+  //   적으면 아무도 모른 채 몇 주가 간다 — 2026-11-13 실측에서 Fly 워커가
+  //   11/01 커밋(main 대비 96 커밋 뒤)으로 돌고 있었고, 이 경로는 그동안
+  //   매번 `::notice::재배포하지 않았습니다 (SKIP_NOT_VERCEL_ONLY)` 만
+  //   남겼다.
+  if (expect.annotation) {
+    const lvl = /^::error::/m.test(r.out) ? 'error'
+      : /^::warning::/m.test(r.out) ? 'warning'
+      : /^::notice::/m.test(r.out) ? 'notice' : 'none';
+    want(`${label} · 알림 수준`, expect.annotation, lvl);
+  }
+  // **`d.reason` 이 아니라 우리가 적은 문장을 본다.** 느슨하게 'Fly' 만
+  // 찾으면 판정 이유에 이미 들어 있는 그 단어에 걸려, 사람이 할 일을
+  // 지워도 통과한다(변이 M4 가 그 자리를 잡았다).
+  if (expect.says) {
+    want(`${label} · 사람이 할 일이 적혀 있다`, true, r.out.includes(expect.says));
+  }
   // **주소가 로그에 새면 그 자체가 실패다.**
   if (r.out.includes('zzz-secret-path-should-never-be-printed')) {
     bad(`${label} · hook 주소가 로그에 없다`, '없음', '있음');
@@ -134,7 +153,18 @@ console.log('── Vercel 재배포 복구 실행 증명 (흉내 서버 · 운�
 // ══ 누르지 않아야 하는 자리 ══
 await check('hook 미설정', { hook: false }, { code: 'SKIP_NO_HOOK', hookCalls: 0, exit: 0 });
 await check('이미 같음', { deployment: body({ vercel: MAIN }) }, { code: 'SKIP_MATCHED', hookCalls: 0, exit: 0 });
-await check('Fly도 뒤처짐', { deployment: body({ fly: OLD }) }, { code: 'SKIP_NOT_VERCEL_ONLY', hookCalls: 0, exit: 0 });
+// ★ **Fly 가 뒤처진 것은 스스로 풀리지 않는다.**
+//
+//   Vercel 만 다시 미는 것이 옳지 않다는 판정(`SKIP_NOT_VERCEL_ONLY`)은
+//   맞다 — 절반만 밀린 배포를 재배포로 덮으면 안 된다. 틀린 것은 그것을
+//   **조용히** 넘긴 것이다. 이 상태는 사람이 Fly 를 다시 배포하기 전까지
+//   영원히 그대로고, 그동안 이 워크플로는 초록으로 끝난다.
+//
+//   같은 파일이 `SKIP_ATTEMPTS_EXHAUSTED` 에는 이미
+//   `::error::… 사람이 봐야 합니다` + 종료코드 1 을 쓴다. 같은 종류다.
+await check('Fly도 뒤처짐', { deployment: body({ fly: OLD }) },
+  { code: 'SKIP_NOT_VERCEL_ONLY', hookCalls: 0, exit: 1,
+    annotation: 'error', says: 'Fly Worker 를 다시 배포해야 합니다' });
 await check('마이그레이션 대기', { deployment: body({ pending: 2 }) }, { code: 'SKIP_MIGRATIONS_PENDING', hookCalls: 0, exit: 0 });
 await check('워커 죽음', { deployment: body({ alive: false }) }, { code: 'SKIP_WORKER', hookCalls: 0, exit: 0 });
 await check('지난 시도를 못 셈', { runsStatus: 500 }, { code: 'SKIP_UNKNOWN', hookCalls: 0, exit: 0 });
