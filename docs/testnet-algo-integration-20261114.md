@@ -18,7 +18,7 @@ USER smoke attempts `72194749-2648-49b8-9da7-de0e0476884f` (BTC) and `260ba1eb-2
 - The real smoke settlement reads both books, cancels only the current parent's Algo IDs, proves position zero and residual zero, and reconciles durable child intents. Another parent's same-strategy Algo text cannot authorize cancellation.
 - Ambiguous child state blocks new entries. The existing authenticated recovery control can append two real flat observations at least ten minutes apart, expiring after six hours; original child state remains unchanged and the same child still cannot be resent.
 - The Binance smoke result now returns actual fill/settled/protection evidence used by enteredVerdict. STARTED additionally requires durable HOLDING/deadline/identity readback; an unconfirmed write is UNKNOWN.
-- Legacy -4120 text now identifies an Algo transport problem; it no longer claims that switching to LIVE fixes the issue.
+- The legacy executor no longer suggests switching to LIVE. The independent missing-fallback-reason extraction belongs to Claude #631; this integration leaves that legacy function unchanged to avoid overlapping ownership.
 
 ## Evidence and limits
 
@@ -41,3 +41,11 @@ No production schema apply, merge, deployment or actual new venue order/cancel w
 Failure/readback ambiguity stops further experiments. A triggered/expired order is not forged into CANCELED; if its terminal/position evidence cannot be verified, it remains blocked for explicit reconciliation. A DB outage cannot be called a scheduled close: the holding-write fault path returns UNKNOWN and preserves protection/connection fences rather than STARTED.
 
 Rollback: stop new smoke experiments through the existing control; complete/prove cleanup of any open cycle before reverting. Revert/redeploy the runtime patch with a reviewed PR. Keep migration 100 and all intent/evidence data; dropping the column would discard ownership/recovery evidence. Reverting to the old transport reintroduces -4120 and is not a reason to resume experiments.
+
+## Exact-head CI follow-up: PAPER claim race
+
+CI run 43549284321 at the first integrated head found two PAPER claim responses instead of one. A SELECT can retain its earlier snapshot while another claimant commits. Because 099 did not change the settings row, the late candidate could lock the current run and rotate its still-valid token. The final fill fence prevented this observation from proving duplicate fills; it is still a real lease violation.
+
+A deterministic native test pauses the candidate with a test-only RLS/advisory barrier, commits another claim, then resumes it. RED: the stale candidate stole the live lease. New migration **101** rechecks the locked run before rotating its token; 099 remains unchanged. Lease duration and PAPER risk/interval/strategy settings remain unchanged. GREEN: native PAPER **10/10**, plus actual browser → Next/PostgREST/PG → browser close → server restart → repeated PAPER cycles and all protective exit fixtures. The native test adds no production hooks or privileges.
+
+Release approval therefore covers **100 + 101**, #525 and this integration, followed by web/Worker deployment and one real SAFE TESTNET cycle. Retain 101's compatible lease correction on rollback; do not restore the known race. Latest-head checks supersede the failed first run and must pass before any release.

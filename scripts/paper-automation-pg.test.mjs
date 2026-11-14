@@ -15,6 +15,8 @@ else {
   process.on('exit', () => { dropScratchDb(target, db); });
   const migration = resolve(root, 'supabase/migrations/099_paper_automation.sql');
   if (existsSync(migration) && !process.env.PAPER_AUTOMATION_RED) psqlFile(target, db, migration);
+  const leaseFix = resolve(root, 'supabase/migrations/101_paper_claim_lease_recheck.sql');
+  if (existsSync(leaseFix) && !process.env.PAPER_CLAIM_RED && !process.env.PAPER_AUTOMATION_RED) psqlFile(target, db, leaseFix);
   const q = sql => psql(target, db, sql);
   const uid = 'ab000000-0000-0000-0000-000000000001';
   q(`INSERT INTO paper_accounts(user_id,is_default,balance,initial_balance,started_at) VALUES ('${uid}',true,10000,10000,now())`);
@@ -47,6 +49,50 @@ else {
     assert.equal(replies.filter(r=>r.out.trim()==='DUPLICATE').length,7);
     assert.equal(q('SELECT balance FROM paper_accounts')[0],'9999.95');
     assert.equal(q('SELECT count(*) FROM paper_positions')[0],'1');
+  });
+  test('candidate snapshot taken before another claim cannot rotate its live lease', async () => {
+    start();
+    const role = `claim_${db}`;
+    const holderName = `${role}_holder`, waiterName = `${role}_waiter`;
+    const lock = 845101;
+    q(`CREATE ROLE ${role} NOLOGIN NOSUPERUSER NOBYPASSRLS;
+      GRANT USAGE ON SCHEMA public TO ${role};
+      GRANT SELECT,UPDATE ON paper_automation_settings TO ${role};
+      GRANT SELECT,INSERT,UPDATE ON paper_automation_runs TO ${role};
+      GRANT EXECUTE ON FUNCTION paper_auto_claim() TO ${role};
+      CREATE FUNCTION claim_test_barrier() RETURNS boolean LANGUAGE plpgsql AS $$ BEGIN
+        PERFORM pg_advisory_xact_lock(${lock}); RETURN true; END $$;
+      CREATE POLICY claim_test_select ON paper_automation_settings FOR SELECT TO ${role} USING (claim_test_barrier());
+      CREATE POLICY claim_test_update ON paper_automation_settings FOR UPDATE TO ${role} USING (true);
+      CREATE POLICY claim_test_runs ON paper_automation_runs FOR ALL TO ${role} USING (true) WITH CHECK (true)`);
+    // Database is dropped by the earlier exit handler, releasing role grants.
+    process.on('exit', () => psql(target, target.url.pathname.slice(1) || 'postgres', `DROP ROLE IF EXISTS ${role}`));
+    const holder = psqlSpawn(target,db,[`SET application_name='${holderName}'`, `SELECT pg_advisory_lock(${lock}); SELECT pg_sleep(15)`]);
+    const until = async sql => {
+      for (let n=0;n<100;n++) {
+        if(q(sql)[0]==='1')return;
+        await new Promise(r=>setTimeout(r,25));
+      }
+      throw Error('claim snapshot barrier not reached');
+    };
+    let waiter;
+    try {
+      await until(`SELECT count(*) FROM pg_stat_activity WHERE application_name='${holderName}' AND wait_event='PgSleep'`);
+      waiter = psqlSpawn(target,db,[`SET application_name='${waiterName}'; SET ROLE ${role}`, 'SELECT * FROM paper_auto_claim()']);
+      await until(`SELECT count(*) FROM pg_stat_activity WHERE application_name='${waiterName}' AND wait_event='advisory'`);
+      // The waiting SELECT already owns its statement snapshot. This claimant
+      // bypasses only TEST RLS and commits before that snapshot can continue.
+      const first = claim();
+      q(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name='${holderName}' AND datname=current_database()`);
+      const second = await waiter.done;
+      assert.equal(second.code,0,second.err);
+      assert.equal(second.out.includes('lease_token'),false,'stale candidate stole a fresh lease');
+      assert.equal(q(`SELECT lease_token FROM paper_automation_runs WHERE id='${first.id}'`)[0],first.lease_token);
+    } finally {
+      q(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name IN ('${holderName}','${waiterName}') AND datname=current_database()`);
+      holder.child.kill('SIGTERM'); waiter?.child.kill('SIGTERM');
+      await holder.done;
+    }
   });
   test('Stop acknowledges only after revoking the final write', () => {
     start();const r=claim();

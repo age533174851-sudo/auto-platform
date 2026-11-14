@@ -1571,8 +1571,9 @@ export async function placeFuturesTPSL(
           success: false,
           envUnsupported: bothBlocked,
           message: bothBlocked
-            ? `${label} 주문 연결 오류(-4120): 조건부 주문을 Algo API로 전송해야 합니다. `
-              + `기존 주소에서 ${opts.type} 주문이 거절됐습니다.`
+            ? `${label}을(를) 거래소에 걸 수 없습니다 — ${testnet ? '바이낸스 데모(demo-fapi)' : '이 환경'}가 `
+              + `${opts.type} 주문을 받지 않습니다(-4120). 전량 청산·수량 지정 두 방식을 다 시도했습니다. `
+              + `키·권한·수량 문제가 아닙니다.`
             : `${label} 부착 실패 — 두 가지 방식을 다 시도했습니다. `
               + `원문: ${msg} / ${String(e2?.message || e2)}`,
         };

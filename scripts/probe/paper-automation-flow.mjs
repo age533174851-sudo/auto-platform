@@ -20,7 +20,7 @@ const root=resolve(import.meta.dirname,'../..');
 const tmp=mkdtempSync(join(tmpdir(),'paper-auto-flow-'));
 const out=process.env.PROBE_OUT || '/tmp/paper-automation-flow';mkdirSync(out,{recursive:true});
 const names=readdirSync(join(root,'supabase/migrations'));
-const ids=[10,25,33,71,72,74,75,81,82,83,84,85,86,87,88,99];
+const ids=[10,25,33,71,72,74,75,81,82,83,84,85,86,87,88,99,101];
 const db=createScratchDb(target,'paper_flow',ids.map(id=>join(root,'supabase/migrations',names.find(n=>n.startsWith(String(id).padStart(3,'0')+'_')))));
 const q=sql=>psql(target,db,sql);
 const session=probeSession(),uid=session.user.id;

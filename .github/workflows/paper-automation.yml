@@ -18,6 +18,7 @@ on:
       - 'src/lib/exchanges/binanceAlgo*.ts'
       - 'scripts/binance-algo-pg.test.mjs'
       - 'supabase/migrations/100_testnet_algo_intents.sql'
+      - 'supabase/migrations/101_paper_claim_lease_recheck.sql'
   workflow_dispatch:
 permissions:
   contents: read
