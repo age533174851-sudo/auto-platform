@@ -45,6 +45,13 @@ export interface EvaluationResult {
   raw: any;
   /** 경계 있는 사유 코드. 화이트리스트를 통과한 값만 들어온다 */
   reasonCode?: string;
+  /**
+   * **왜 09:00 강제 진입도 안 났는가.** 화이트리스트를 통과한 값만.
+   *
+   * 신호가 없을 때 라우트는 강제 진입을 한 번 더 본다. 그 판정이 없으면
+   * "신호가 없었다"와 "창 밖이었다"와 "이미 냈다"가 한 문장으로 뭉친다.
+   */
+  forcedEntryCode?: string;
 }
 
 export interface RunContext {
@@ -78,7 +85,8 @@ export function outcomeOf(input: {
   httpOk: boolean;
   status?: number | null;
   body: any;
-}): { outcome: EvaluationOutcome; summary: string; reasonCode?: string } {
+}): { outcome: EvaluationOutcome; summary: string; reasonCode?: string;
+  forcedEntryCode?: string } {
   const b = input.body ?? {};
 
   if (!input.httpOk) {
@@ -130,8 +138,35 @@ export function outcomeOf(input: {
   //
   //   화이트리스트에 없는 값은 싣지 않는다. 거래소·전략이 보낸 임의
   //   문자열이 장부에 들어가면 경계가 사라진다.
-  return { outcome: 'NO_SIGNAL', summary: `정상 평가 완료 · 진입 조건 없음${diagnostic}`,
-    ...(known ? { reasonCode } : {}) };
+  // ★ **왜 강제 진입도 안 했는지**도 같이 남긴다.
+  //
+  //   `scalp` 라우트는 신호가 없으면 09:00 KST 창을 한 번 더 보고, 안 되면
+  //   그 이유를 응답에 값으로 싣는다. 그 자리의 주석이 이렇게 적는다:
+  //
+  //     "없으면 '신호가 없었다'와 '창 밖이었다'와 '이미 냈다'가
+  //      구분되지 않는다." — src/app/api/autotrade/scalp/route.ts
+  //
+  //   그런데 여기서 그 값을 버리고 있었다. 그래서 운영 장부에 남는 줄은
+  //   `진입 안 함: … 사유코드 VOLUME_BELOW_THRESHOLD` 뿐이었고, 09:00 창이
+  //   열렸는데 안 들어간 것인지 창 밖이라 안 본 것인지 읽을 수 없었다
+  //   (2026-11-13 #450 실측). 라우트가 적어 보낸 증거를 읽는 쪽이 버리는
+  //   모양 — `CLAUDE.md` 의 "경로가 둘인데 한쪽만 고침"이다.
+  //
+  //   `reasonCode` 와 같은 규칙을 쓴다: 화이트리스트 밖 값은 싣지 않고,
+  //   문장에만 묻지 않고 **칸으로도** 남긴다.
+  const knownForcedCodes = [
+    'BEFORE_WINDOW', 'AFTER_WINDOW', 'ALREADY_TODAY', 'HISTORY_UNKNOWN',
+    'NOT_TESTNET', 'NOT_EXACT100X', 'CLOCK_UNREADABLE', 'SIZING_UNKNOWN',
+  ];
+  const fe = b?.forcedEntry;
+  const forcedCode = typeof fe?.code === 'string' ? fe.code : '';
+  const forcedKnown = knownForcedCodes.includes(forcedCode);
+  const forcedNote = forcedKnown ? ` · 강제진입 ${forcedCode}` : '';
+
+  return { outcome: 'NO_SIGNAL',
+    summary: `정상 평가 완료 · 진입 조건 없음${diagnostic}${forcedNote}`,
+    ...(known ? { reasonCode } : {}),
+    ...(forcedKnown ? { forcedEntryCode: forcedCode } : {}) };
 }
 
 export interface RunStrategyDeps {
@@ -189,6 +224,7 @@ export async function runStrategy(
     summary: o.summary, raw: res.body,
     // 없으면 칸을 만들지 않는다 — 'UNKNOWN'으로 메우지 않는다.
     ...(o.reasonCode ? { reasonCode: o.reasonCode } : {}),
+    ...(o.forcedEntryCode ? { forcedEntryCode: o.forcedEntryCode } : {}),
   };
 }
 
