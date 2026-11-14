@@ -153,7 +153,9 @@ export async function startAttempt(sb: any, i: StartAttemptInput): Promise<Start
 
   const apiT0 = Date.now();
   const posBefore = await ops.readOpenPosition(venue, i.symbol);
-  const ordersBefore = await ops.readProtectiveOrders(venue, i.symbol);
+  // Binance has TWO disjoint order books: ordinary + Algo conditional.
+  // Regular 0 alone never authorizes a new smoke position.
+  const ordersBefore = await ops.readAllOpenOrdersForSmoke(venue, i.symbol);
   let apiMax = Date.now() - apiT0;
 
   const pf = preflightVerdict({

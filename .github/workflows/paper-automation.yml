@@ -10,6 +10,11 @@ on:
       - 'scripts/probe/paper-automation-flow.mjs'
       - 'supabase/migrations/099_paper_automation.sql'
       - '.github/workflows/paper-automation.yml'
+      - 'src/lib/smoke/**'
+      - 'src/app/api/autotrade/smoke-test/attest-exposure/**'
+      - 'src/components/SmokeExposureRecovery.tsx'
+      - 'src/components/AutotradeControl.tsx'
+      - 'scripts/probe/smoke-exposure-flow.mjs'
   workflow_dispatch:
 permissions:
   contents: read
@@ -65,3 +70,6 @@ jobs:
       - name: Browser to API to durable ledger, with browser closed during ticks
         run: |
           NODE_PATH="$RUNNER_TEMP/paper-probe/node_modules" PAPER_AUTO_POSTGREST_BIN="$RUNNER_TEMP/postgrest" node scripts/probe/paper-automation-flow.mjs
+      - name: Owner recovery UI to API to PostgreSQL, resumed in a new browser
+        run: |
+          NODE_PATH="$RUNNER_TEMP/paper-probe/node_modules" PAPER_AUTO_POSTGREST_BIN="$RUNNER_TEMP/postgrest" node scripts/probe/smoke-exposure-flow.mjs

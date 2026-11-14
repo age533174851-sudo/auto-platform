@@ -11,10 +11,12 @@ import { test, eq, assert } from '../../test/harness';
 import {
   smokeRequestVerdict, stepsOf, smokeVerdict, holdUntilMs, closeDue,
   smokeBlocksStrategy, preflightVerdict, unprotectedExposureVerdict,
-  smokeTestnetVerdict, unresolvedExposureBlock,
+  smokeTestnetVerdict, unresolvedExposureBlock, legacySmokeExposureVerdict,
   STEP_ORDER, HOLD_CHOICES, DEFAULT_HOLD_MIN, MAX_HOLD_MIN, SMOKE_STRATEGY_ID,
   type StepId, type StepState,
 } from './smokePlan';
+import { confirmedBinanceOpenOrders, combinedSmokeOpenOrderEvidence } from '../engine/venuePositionOps';
+import { requireBinanceVenueRows } from '../exchanges/binanceFutures';
 
 const OK_BODY = {
   symbol: 'ETHUSDT', side: 'LONG', connectionId: 'conn-1', mode: 'TESTNET',
@@ -29,6 +31,244 @@ const allSteps = (state: StepState, over: Partial<Record<StepId, StepState>> = {
 };
 
 export function runSmokePlanTests() {
+  // ── Regression: failed Binance GET must not become an empty account ──
+  test('★ openOrders HTTP failure with orders:[] is UNKNOWN, not zero', () => {
+    const orders = confirmedBinanceOpenOrders({ success: false, orders: [] });
+    eq(orders, null, 'A failed read must not impersonate zero open orders');
+    const verdict = preflightVerdict({
+      position: { ok: true, found: false, qty: 0 }, orders,
+    });
+    eq(verdict.ok, false);
+    eq(verdict.code, 'UNKNOWN');
+  });
+
+  test('★ successful openOrders with [] alone permits empty-order preflight', () => {
+    const orders = confirmedBinanceOpenOrders({ success: true, orders: [] });
+    assert(Array.isArray(orders));
+    eq(orders!.length, 0);
+    const verdict = preflightVerdict({
+      position: { ok: true, found: false, qty: 0 }, orders,
+    });
+    eq(verdict.code, 'CLEAR');
+  });
+
+  test('★ successful openOrders reporting live order must remain blocked', () => {
+    const orders = confirmedBinanceOpenOrders({
+      success: true, orders: [{ orderId: 'order-1', type: 'LIMIT' }],
+    });
+    const verdict = preflightVerdict({
+      position: { ok: true, found: false, qty: 0 }, orders,
+    });
+    eq(verdict.ok, false);
+    eq(verdict.code, 'ORDERS_OPEN');
+  });
+
+  test('★ malformed or missing Binance result cannot impersonate a successful empty list', () => {
+    for (const x of [
+      null, undefined, { orders: [] }, { success: false, orders: [] },
+      { success: true, orders: null },
+      { success: true, orders: {} },
+      { success: 'true', orders: [] },
+    ] as any[]) {
+      eq(confirmedBinanceOpenOrders(x), null);
+    }
+  });
+
+  test('★ 200 responses with non-array positionRisk payload fail closed', () => {
+    for (const malformed of [null, undefined, {}, { positions: [] }, false, 0, '[]']) {
+      let rejected = false;
+      try { requireBinanceVenueRows(malformed, 'INVALID_POSITION_RISK_SHAPE'); }
+      catch (e: any) { rejected = String(e?.message).includes('INVALID_POSITION_RISK_SHAPE'); }
+      assert(rejected, 'Malformed positionRisk was interpreted as an empty position list');
+    }
+    eq(requireBinanceVenueRows([], 'INVALID_POSITION_RISK_SHAPE').length, 0);
+  });
+
+  test('★ 200 responses with non-array openOrders payload fail closed', () => {
+    for (const malformed of [null, undefined, {}, { orders: [] }, 0, false]) {
+      let rejected = false;
+      try { requireBinanceVenueRows(malformed, 'INVALID_OPEN_ORDERS_SHAPE'); }
+      catch (e: any) { rejected = String(e?.message).includes('INVALID_OPEN_ORDERS_SHAPE'); }
+      assert(rejected, 'Malformed openOrders was interpreted as no open orders');
+    }
+    eq(requireBinanceVenueRows([{ orderId: '1' }], 'INVALID_OPEN_ORDERS_SHAPE').length, 1);
+  });
+
+  test('★ Binance regular [] but Algo TP/SL order is NOT empty preflight', () => {
+    const orders = combinedSmokeOpenOrderEvidence(
+      { success: true, orders: [] },
+      { success: true, orders: [{ algoId: 'algo-12', symbol: 'BTCUSDT', orderType: 'STOP_MARKET' }] },
+    );
+    assert(Array.isArray(orders));
+    eq(orders!.length, 1);
+    eq(orders![0].kind, 'ALGO');
+    const verdict = preflightVerdict({ position: { ok: true, found: false, qty: 0 }, orders });
+    eq(verdict.code, 'ORDERS_OPEN');
+  });
+
+  test('★ Binance Algo API failure + regular zero = UNKNOWN, never CLEAR', () => {
+    const orders = combinedSmokeOpenOrderEvidence(
+      { success: true, orders: [] },
+      { success: false, orders: [] },
+    );
+    eq(orders, null);
+    eq(preflightVerdict({ position: { ok: true, found: false, qty: 0 }, orders }).code,
+      'UNKNOWN');
+  });
+
+  test('★ Binance ordinary API failure + Algo zero = UNKNOWN, never CLEAR', () => {
+    const orders = combinedSmokeOpenOrderEvidence(
+      { success: false, orders: [] }, { success: true, orders: [] },
+    );
+    eq(orders, null);
+  });
+
+  test('★ Binance two successful empty books = preflight CLEAR (not order authorization)', () => {
+    const orders = combinedSmokeOpenOrderEvidence(
+      { success: true, orders: [] }, { success: true, orders: [] },
+    );
+    eq(orders?.length, 0);
+    eq(preflightVerdict({ position: { ok: true, found: false, qty: 0 }, orders }).code,
+      'CLEAR');
+  });
+
+  test('★ malformed Algo readback and missing success cannot invent zero protection', () => {
+    for (const x of [null, { success: true, orders: null },
+      { success: true, orders: {} }, { orders: [] }] as any[]) {
+      const orders = combinedSmokeOpenOrderEvidence({ success: true, orders: [] }, x);
+      eq(orders, null);
+    }
+    let rejected = false;
+    try { requireBinanceVenueRows({ orders: [] }, 'INVALID_OPEN_ALGO_ORDERS_SHAPE'); }
+    catch (e: any) { rejected = String(e?.message).includes('INVALID_OPEN_ALGO_ORDERS_SHAPE'); }
+    assert(rejected, 'Malformed 200 Algo payload must block');
+  });
+
+  test('★ Binance new smoke cannot use sole ordinary order list as preflight evidence', () => {
+    // Explicit source-level wiring check so a future refactor cannot regress
+    // to the old single book read while these isolated helper tests stay green.
+    const fs = require('fs') as typeof import('fs');
+    const path = require('path') as typeof import('path');
+    const code = fs.readFileSync(path.resolve(process.cwd(), 'src/lib/smoke/startAttempt.ts'), 'utf8');
+    assert(code.includes('ops.readAllOpenOrdersForSmoke(venue, i.symbol)'));
+    assert(!code.includes('const ordersBefore = await ops.readProtectiveOrders(venue, i.symbol)'));
+  });
+
+  test('★ legacy read-only diagnostic with 3 successful empty reads is NOT authorization', () => {
+    const r = legacySmokeExposureVerdict({
+      symbol: 'BTCUSDT',
+      positionRead: { success: true, positions: [] },
+      regularOrderRead: { success: true, orders: [] },
+      algoOrderRead: { success: true, orders: [] },
+    });
+    eq(r.code, 'OBSERVED_FLAT_NOW');
+    eq(r.positionCount, 0);
+    eq(r.regularOrderCount, 0);
+    eq(r.algoOrderCount, 0);
+    eq(r.canClearHistoricalUnknown, false);
+    eq(r.mayStartSmoke, false);
+  });
+
+  test('★ old -1111 history cannot clear if regular or Algo order still exists', () => {
+    for (const [regular,algo] of [[1,0],[0,1],[2,3]]) {
+      const r = legacySmokeExposureVerdict({
+        symbol: 'BTCUSDT',
+        positionRead: { success: true, positions: [] },
+        regularOrderRead: { success: true, orders: Array(regular).fill({}) },
+        algoOrderRead: { success: true, orders: Array(algo).fill({}) },
+      });
+      eq(r.code, 'EXPOSURE_OPEN');
+      eq(r.mayStartSmoke, false);
+    }
+  });
+
+  test('★ legacy venue cannot report flat while BTCUSDT position remains open', () => {
+    const r = legacySmokeExposureVerdict({
+      symbol: 'BTCUSDT',
+      positionRead: { success: true,
+        positions: [{ symbol: 'BTCUSDT', amount: 0.002, side: 'LONG' }] },
+      regularOrderRead: { success: true, orders: [] },
+      algoOrderRead: { success: true, orders: [] },
+    });
+    eq(r.code, 'EXPOSURE_OPEN');
+    eq(r.positionCount, 1);
+    eq(r.canClearHistoricalUnknown, false);
+  });
+
+  test('★ a failure in any of 3 signed reads remains UNKNOWN, even if 2 are empty', () => {
+    const base: any = {
+      symbol: 'BTCUSDT',
+      positionRead: { success: true, positions: [] },
+      regularOrderRead: { success: true, orders: [] },
+      algoOrderRead: { success: true, orders: [] },
+    };
+    for (const key of ['positionRead', 'regularOrderRead', 'algoOrderRead']) {
+      const r = legacySmokeExposureVerdict({
+        ...base, [key]: { success: false, orders: [], positions: [] },
+      });
+      eq(r.code, 'UNKNOWN');
+      eq(r.mayStartSmoke, false);
+    }
+  });
+
+  test('★ malformed authenticated position and Algo 200 payload fail UNKNOWN', () => {
+    for (const invalid of [
+      { success: true, positions: {} },
+      { success: true, positions: [{ symbol: 'BTCUSDT', amount: NaN }] },
+      { success: true, positions: [{ symbol: 'BTCUSDT', amount: null }] },
+    ]) {
+      const r = legacySmokeExposureVerdict({
+        symbol: 'BTCUSDT', positionRead: invalid,
+        regularOrderRead: { success: true, orders: [] },
+        algoOrderRead: { success: true, orders: [] },
+      });
+      eq(r.code, 'UNKNOWN');
+    }
+  });
+
+  test('★ legacy diagnostic has no data writes and only authentication-owned rows', () => {
+    const fs = require('fs') as typeof import('fs');
+    const path = require('path') as typeof import('path');
+    const route = fs.readFileSync(path.resolve(process.cwd(),
+      'src/app/api/autotrade/smoke-test/legacy-evidence/route.ts'), 'utf8');
+    assert(route.includes("resolveUserId(req.headers.get('authorization'), null, null)"));
+    assert(route.includes(".eq('id', testId).eq('user_id', userId).maybeSingle()"));
+    assert(route.includes("creds.isTestnetRaw !== true"));
+    assert(route.includes('getFuturesOpenAlgoOrders('));
+    assert(route.includes('getFuturesOpenOrders('));
+    assert(route.includes('getFuturesPositions('));
+    assert(!/\.insert\s*\(|\.update\s*\(|\.delete\s*\(|\.upsert\s*\(/.test(route));
+    assert(!route.includes("export async function GET("),
+      'GET route with cross-site links might allow unreviewed account scans');
+  });
+
+  test('★ historical -1111 UNKNOWN row PZ PASS without ORDERS_ZERO remains blocked', () => {
+    const prior = {
+      id: 'synthetic-legacy-1111', connection_id: 'conn-1', state: 'UNKNOWN',
+      steps: {
+        PREFLIGHT: { state: 'PASS' },
+        ENTRY: { state: 'FAIL', note: '[-1111] Precision error' },
+        POSITION_ZERO: { state: 'PASS' },
+      },
+    };
+    const v = unresolvedExposureBlock({ rows: [prior], connectionId: 'conn-1' });
+    eq(v.blocked, true);
+    eq(v.code, 'EXPOSURE_UNKNOWN');
+    eq(v.offenders.length, 1);
+  });
+
+  test('★ legacy unknown only clears after BOTH venue-zero facts are recorded', () => {
+    const v = unresolvedExposureBlock({
+      rows: [{
+        id: 'synthetic-legacy-1111', connection_id: 'conn-1', state: 'UNKNOWN',
+        steps: { POSITION_ZERO: { state: 'PASS' }, ORDERS_ZERO: { state: 'PASS' } },
+      }],
+      connectionId: 'conn-1',
+    });
+    eq(v.blocked, false);
+    eq(v.code, 'CLEAR');
+  });
+
   console.log('[스모크 테스트 — 시작 요청 검사]');
 
   test('제대로 된 요청은 값으로 확정된다', () => {
