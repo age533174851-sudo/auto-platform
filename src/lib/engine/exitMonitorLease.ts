@@ -332,10 +332,24 @@ export async function acquireExitLease(i: {
     }
   } catch (e: any) { ok = false; writeFailed = true; err = String(e?.message || e); }
 
+  // ── 못 잡았으면 **권한을 내려놓는다** ──
+  //
+  // 두 갈래를 삼항으로 접어 두었더니 `check-exit-authority`가 "경합에서
+  // 졌을 때 실행 권한을 내려놓지 않습니다"로 막았다. 동작은 맞았지만
+  // **판정이 글자로 읽히지 않았다.** 검사기를 고치는 쪽이 아니라 코드를
+  // 읽히게 펴는 쪽이 맞다 — 거래소 쓰기는 되돌릴 수 없고, 그 앞의
+  // 권한 판정은 사람이 한눈에 확인할 수 있어야 한다.
+  //
+  // 두 갈래를 가르는 이유도 코드에 남는다:
+  //   · 경합 패배(RACE_LOST) — 다른 실행이 주인이다. **정상이다.**
+  //   · 쓰기 실패(WRITE_FAILED) — 누가 주인인지 **모른다.** 경고가 필요하다.
+  // 어느 쪽이든 `granted: false`다. 모르면 쓰지 않는다.
+  const skipReason = `임차를 잡지 못해 이번은 건너뜁니다: ${String(err || '').slice(0, 200)}`;
+  if (!ok && writeFailed) {
+    return { code: 'WRITE_FAILED', granted: false, myFence: null, tracked: true, reason: skipReason };
+  }
   if (!ok) {
-    return { code: writeFailed ? 'WRITE_FAILED' : 'RACE_LOST',
-      granted: false, myFence: null, tracked: true,
-      reason: `임차를 잡지 못해 이번은 건너뜁니다: ${String(err || '').slice(0, 200)}` };
+    return { code: 'RACE_LOST', granted: false, myFence: null, tracked: true, reason: skipReason };
   }
   return { code: 'ACQUIRED', granted: true, myFence, tracked: true, reason: d.reason };
 }
