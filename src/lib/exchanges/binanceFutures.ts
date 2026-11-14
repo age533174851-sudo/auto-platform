@@ -79,6 +79,16 @@ export async function getFuturesBalance(key: string, secret: string, testnet = t
   } catch (e: any) { return { success: false, message: e.message || '잔고 조회 실패' }; }
 }
 
+/**
+ * A syntactically successful HTTP response still needs the expected array
+ * shape before it can prove no open positions or open orders. An object,
+ * null, or other malformed response is UNKNOWN, NEVER an empty account.
+ */
+export function requireBinanceVenueRows(data: unknown, errorCode: string): any[] {
+  if (!Array.isArray(data)) throw new Error(errorCode);
+  return data;
+}
+
 export interface FuturesPosition {
   symbol: string; side: 'LONG' | 'SHORT' | 'FLAT'; amount: number;
   entryPrice: number; markPrice: number; unrealizedPnl: number; leverage: number; liquidationPrice: number;
@@ -1672,6 +1682,30 @@ export async function getFuturesOpenOrders(key: string, secret: string, testnet 
     }));
     return { success: true, orders, unaddressable };
   } catch (e: any) { return { success: false, message: e.message || '미체결 조회 실패', orders: [] as FuturesOpenOrder[], unaddressable: 0 }; }
+}
+
+/**
+ * Binance USD-M conditional TP/SL/trailing orders migrated to the
+ * SEPARATE Algo Service order book. A successful regular openOrders read
+ * DOES NOT establish zero conditional orders. This function is READ-ONLY.
+ *
+ * Official docs: GET /fapi/v1/openAlgoOrders (signed; symbol optional).
+ * Missing/unsupported endpoint, permission error, malformed 200 payload
+ * must return success:false, never an empty successful account.
+ */
+export async function getFuturesOpenAlgoOrders(
+  key: string, secret: string, testnet = true, symbol?: string,
+): Promise<{ success: boolean; orders: any[]; message?: string }> {
+  try {
+    const params: Record<string, string | number> = { algoType: 'CONDITIONAL' };
+    if (symbol) params.symbol = symbol.toUpperCase().replace('/', '');
+    const data = await fapiSigned('GET', '/fapi/v1/openAlgoOrders', key, secret, testnet, params);
+    const orders = requireBinanceVenueRows(data, 'INVALID_OPEN_ALGO_ORDERS_SHAPE');
+    return { success: true, orders };
+  } catch (e: any) {
+    return { success: false, orders: [],
+      message: String(e?.message || 'Algo openOrders read failed') };
+  }
 }
 
 /**
