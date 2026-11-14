@@ -1,0 +1,67 @@
+name: paper-automation-offline
+on:
+  pull_request:
+    paths:
+      - 'src/lib/engine/paperAutomation.ts'
+      - 'src/app/api/paper/automation/**'
+      - 'src/app/api/paper/exit-monitor/**'
+      - 'src/components/trading/PaperAutomationControl.tsx'
+      - 'scripts/paper-automation-pg.test.mjs'
+      - 'scripts/probe/paper-automation-flow.mjs'
+      - 'supabase/migrations/099_paper_automation.sql'
+      - '.github/workflows/paper-automation.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: paper-automation-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  official-schema-replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Full migration replay on the official local Supabase stack
+        uses: ./.github/actions/supabase-local
+      - name: New PAPER RPCs exist with restricted execution
+        run: |
+          psql "$(cat /tmp/db-url)" -v ON_ERROR_STOP=1 -c "DO \$\$ BEGIN IF to_regprocedure('public.paper_auto_claim()') IS NULL OR has_function_privilege('authenticated','public.paper_auto_claim()','EXECUTE') THEN RAISE EXCEPTION 'PAPER automation schema or RPC permission invalid'; END IF; END \$\$;"
+  local-paper:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17.11
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: offline-test-only
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEN_SLOT_PG_URL: postgresql://postgres:offline-test-only@127.0.0.1:5432/postgres
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Real PostgreSQL concurrency, stop, lease and recovery
+        run: node --test scripts/paper-automation-pg.test.mjs
+      - name: Offline browser tools and official PostgREST
+        run: |
+          npm install --prefix "$RUNNER_TEMP/paper-probe" --package-lock=false playwright@1.62.1
+          "$RUNNER_TEMP/paper-probe/node_modules/.bin/playwright" install --with-deps chromium
+          curl -fsSL https://github.com/PostgREST/postgrest/releases/download/v13.0.7/postgrest-v13.0.7-linux-static-x86-64.tar.xz -o "$RUNNER_TEMP/postgrest.tar.xz"
+          echo "4153f81ccc40e7b735edc89cd84b49da25ba27eb37d57c7f6a82c9005a0b762b  $RUNNER_TEMP/postgrest.tar.xz" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/postgrest.tar.xz" -C "$RUNNER_TEMP"
+      - name: Browser to API to durable ledger, with browser closed during ticks
+        run: |
+          NODE_PATH="$RUNNER_TEMP/paper-probe/node_modules" PAPER_AUTO_POSTGREST_BIN="$RUNNER_TEMP/postgrest" node scripts/probe/paper-automation-flow.mjs
