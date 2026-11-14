@@ -275,4 +275,90 @@ export function runPaperCloseReviewTests() {
     eq((rowOf(rows, 'MARGIN').value as any).amount, 74.99);
     eq((rowOf(rows, 'LEVERAGE').value as any).text, '10배');
   });
+
+  // ══════════ 서버 쪽 · 포지션을 못 읽은 것은 "없음"이 아니다 ══════════
+  //
+  // 확인 창이 보내는 `/api/paper/close`가 포지션 SELECT의 `error`를 버리고
+  // `data`만 보고 있었다. DB가 잠깐 실패하면 **있는 포지션을** 404
+  // `not_found`로 답했다 — 사용자는 포지션이 사라진 줄 안다. 같은 장부를
+  // 읽는 `/api/paper/positions`는 이미 503 `positions_unreadable`로 갈라 둔
+  // 규칙이다.
+  closeRouteFacts();
+}
+
+/** 실제 라우트 핸들러를 가짜 DB에 붙여 한 번 부른다 */
+async function hitCloseRoute(read: { data: any; error: any }, uid = 'u-1') {
+  const serverPath = require.resolve('../supabase/server');
+  const adminPath = require.resolve('../supabase/admin');
+  const routePath = require.resolve('../../app/api/paper/close/route');
+  const prevServer = require.cache[serverPath];
+  const prevAdmin = require.cache[adminPath];
+  let selects = 0;
+  let rpcs = 0;
+  const db = {
+    from: (_t: string) => {
+      const q: any = {
+        select: () => { selects++; return q; },
+        eq: () => q,
+        maybeSingle: async () => read,
+      };
+      return q;
+    },
+    rpc: async () => { rpcs++; return { data: null, error: { message: '부르면 안 된다' } }; },
+  };
+  require.cache[serverPath] = {
+    id: serverPath, filename: serverPath, loaded: true, exports: {
+      getSupabaseAdmin: () => db,
+      resolveUserId: async () => uid,
+      getUserIdFromRequest: async () => uid,
+      serviceRoleKeyRole: () => 'service_role',
+    },
+  } as any;
+  delete require.cache[adminPath];
+  delete require.cache[routePath];
+  let POST: (r: any) => Promise<any>;
+  try {
+    POST = require(routePath).POST;
+  } finally {
+    delete require.cache[routePath];
+    delete require.cache[adminPath];
+    if (prevServer) require.cache[serverPath] = prevServer; else delete require.cache[serverPath];
+    if (prevAdmin) require.cache[adminPath] = prevAdmin;
+  }
+  const req = {
+    json: async () => ({ positionId: 'p1' }),
+    headers: { get: () => null },
+  };
+  const res = await POST!(req);
+  return { status: res.status as number, json: await res.json(), selects, rpcs };
+}
+
+function closeRouteFacts() {
+  test('★ 포지션 조회가 실패하면 503 position_unreadable — 404 not_found로 적지 않는다', async () => {
+    const r = await hitCloseRoute({ data: null, error: { message: 'connection reset' } });
+    eq(r.selects, 1, '포지션을 읽으러 가지 않았다');
+    eq(r.status, 503);
+    eq(r.json.ok, false);
+    eq(r.json.error, 'position_unreadable');
+    assert(String(r.json.message).includes('없다는 뜻이 아닙니다'),
+      `모름을 없음과 가르는 문장이 없다: ${r.json.message}`);
+    eq(r.rpcs, 0, '못 읽은 포지션을 닫으러 갔다');
+  });
+
+  test('정말 없는 포지션은 그대로 404 not_found', async () => {
+    const r = await hitCloseRoute({ data: null, error: null });
+    eq(r.status, 404);
+    eq(r.json.error, 'not_found');
+    eq(r.rpcs, 0);
+  });
+
+  test('남의 포지션은 그대로 404 not_found — 있다는 사실도 알려 주지 않는다', async () => {
+    const r = await hitCloseRoute({
+      data: { id: 'p1', user_id: 'someone-else', symbol: 'ETHUSDT', status: 'open', market: 'USDM' },
+      error: null,
+    });
+    eq(r.status, 404);
+    eq(r.json.error, 'not_found');
+    eq(r.rpcs, 0);
+  });
 }
