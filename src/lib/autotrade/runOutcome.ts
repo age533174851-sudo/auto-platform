@@ -83,6 +83,57 @@ export function blockCodeOf(body: any): string {
   return '';
 }
 
+/**
+ * 본문 스스로 "관문이 막았다"고 말하는가.
+ *
+ * **`ok`도 HTTP 상태도 묻지 않는다.** 2026-11-14에 Gate TESTNET 예약의
+ * 자동 평가(FLY_WORKER)가 이렇게 기록됐다:
+ *
+ *     FAILED · 실행기가 응답하지 못했습니다 — 3개 항목이 주문을 막습니다:
+ *     거래소와 앱 상태 일치, 결과 미확정 주문 없음, 손절이 청산보다 먼저
+ *
+ * 실행기는 **응답했다.** 사전 점검 세 개가 주문을 막았을 뿐이다. 차단
+ * 응답(409)이 `...base`를 펼치면서 `ok: true`를 그대로 달고 나갔고, 읽는
+ * 쪽은 `ok === false`를 차단의 전제조건으로 요구했다.
+ *
+ * 이 판정이 **세 곳에 따로 있었다** — `outcomeOf`의 `!httpOk` 가지,
+ * `outcomeOf`의 `checklist.allowed` 가지, 그리고 `classifyRun`. 셋이
+ * 갈라졌고, 갈라진 자리에서 터졌다. `CLAUDE.md`의 "경로가 둘인데 한쪽만
+ * 고침"이라 **한 곳으로 모은다.**
+ *
+ * `code`·`rejectCode`는 일부러 보지 않는다 — `blockCodeOf`와 다른 점이다.
+ * 그 칸에는 전송·거래소 오류 코드도 들어오고, 그것까지 차단으로 읽으면
+ * 이번에는 **진짜 실패가 차단으로 숨는다.** 방향만 반대인 같은 고장이다.
+ */
+export function bodySaysBlocked(body: any): boolean {
+  if (!body || typeof body !== 'object') return false;
+  const b = body as any;
+  // 점검 목록이 돌았고 막았다. `undefined`는 '안 돌았다'이지 '막혔다'가 아니다.
+  if (b.checklist?.allowed === false) return true;
+  // 라우트가 코드로 선언한 차단. 공백만 있는 값은 선언이 아니다 — 모름을
+  // 차단으로 적지 않는다.
+  if (typeof b.blocked === 'string' && b.blocked.trim() !== '') return true;
+  if (b.blocked === true) return true;
+  // 막은 항목 목록이 실제로 있다
+  if (Array.isArray(b.blockers) && b.blockers.length > 0) return true;
+  // 예전 모양
+  if (b.error === 'blocked') return true;
+  return false;
+}
+
+/**
+ * 막은 항목들을 사람이 읽는 이름으로 편다.
+ *
+ * `preTradeChecklist`의 `blockers`는 **객체 배열**(`{ id, label, ... }`)이다.
+ * 그대로 `join`하면 요약에 `[object Object] · [object Object]`가 찍힌다.
+ */
+export function blockerNames(blockers: any): string[] {
+  if (!Array.isArray(blockers)) return [];
+  return blockers
+    .map((x: any) => (typeof x === 'string' ? x : String(x?.label ?? x?.id ?? '')))
+    .filter((x: string) => x.trim() !== '');
+}
+
 function textOf(body: any): string {
   return str(body?.message) || str(body?.error) || str(body?.reason) || str(body?.note);
 }

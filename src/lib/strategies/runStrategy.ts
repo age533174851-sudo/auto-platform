@@ -24,6 +24,8 @@
 // 그 안에 묻힌다.
 
 import { resolveStrategy, type StrategySpec } from './registry';
+// 워커 빌드에는 `@/` 별칭이 없다 — 상대경로로 간다.
+import { bodySaysBlocked, blockerNames } from '../autotrade/runOutcome';
 
 export type EvaluationOutcome =
   /** 진입했다 */
@@ -105,36 +107,33 @@ export function outcomeOf(input: {
   //   ① **진짜 나간 주문을 덮지 않는다.** 진입 증거가 있으면 ENTERED가 이긴다.
   //   ② **임의 문자열을 장부에 넣지 않는다.** 코드 값 자체는 요약에 싣지
   //      않고, 라우트가 쓴 사람 문장(`message`·`error`)만 쓴다.
+  //
+  // **차단 판정은 `bodySaysBlocked` 한 곳에 있다.** 예전에는 이 함수 안에만
+  // 두 벌(`!httpOk` 가지 · `checklist.allowed` 가지)이 있었고 화면 쪽
+  // `classifyRun`에 또 한 벌이 있었다. 세 벌이 갈라졌고, 2026-11-14에
+  // Gate 예약이 갈라진 자리로 떨어졌다 — 그 설명은 술어 쪽에 적어 뒀다.
   const enteredEvidence = b?.executed === true || b?.entered === true || b?.order || b?.orderId;
-  const blockedCode = typeof b?.blocked === 'string' ? b.blocked.trim() : '';
-  if (!enteredEvidence && (blockedCode !== '' || b?.outcome === 'BLOCKED')) {
+  if (!enteredEvidence && (bodySaysBlocked(b) || b?.outcome === 'BLOCKED')) {
     const why = String(b?.message || b?.error || '').trim();
-    return { outcome: 'BLOCKED', summary: why || '안전장치가 막았습니다' };
+    // 사람 문장이 없으면 막은 항목 이름으로 대신한다. `blockers`는 객체
+    // 배열이라 그냥 join하면 `[object Object]`가 찍힌다.
+    const names = blockerNames(b?.checklist?.blockers ?? b?.blockers);
+    return {
+      outcome: 'BLOCKED',
+      summary: why
+        || (names.length > 0 ? `주문이 막혔습니다 — ${names.slice(0, 2).join(' · ')}` : '안전장치가 막았습니다'),
+    };
   }
 
   if (!input.httpOk) {
-    // 관문이 막은 것과 실행기가 죽은 것은 다르다. 서버가 이유를 줬으면 그것을 쓴다.
-    const blocked = b?.ok === false && (b?.checklist || b?.error === 'blocked' || b?.blockers);
+    // 여기까지 왔으면 **관문이 막았다는 증거가 본문에 없다.** 위에서 이미
+    // 걸렀으므로, 남은 비정상 응답은 실행기 쪽 실패다.
     const why = String(b?.message || b?.error || `HTTP ${input.status ?? '?'}`);
-    return blocked
-      ? { outcome: 'BLOCKED', summary: why }
-      : { outcome: 'FAILED', summary: `실행기가 응답하지 못했습니다 — ${why}` };
+    return { outcome: 'FAILED', summary: `실행기가 응답하지 못했습니다 — ${why}` };
   }
 
-  if (b?.executed === true || b?.entered === true || b?.order || b?.orderId) {
+  if (enteredEvidence) {
     return { outcome: 'ENTERED', summary: String(b?.message || '진입했습니다') };
-  }
-
-  // 점검 목록이 막았는가. `allowed === false`만 본다 — undefined는 '안 돌았다'다.
-  const allowed = b?.checklist?.allowed;
-  if (allowed === false) {
-    const blockers = Array.isArray(b?.checklist?.blockers) ? b.checklist.blockers : [];
-    return {
-      outcome: 'BLOCKED',
-      summary: blockers.length > 0
-        ? `주문이 막혔습니다 — ${blockers.slice(0, 2).join(' · ')}`
-        : String(b?.error || '주문이 막혔습니다'),
-    };
   }
   if (b?.ok === false) {
     return { outcome: 'FAILED', summary: String(b?.message || b?.error || '실행에 실패했습니다') };

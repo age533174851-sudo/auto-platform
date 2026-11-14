@@ -210,4 +210,69 @@ test('★ blocked 칸 없이 outcome만 적어 보내는 라우트도 알아본�
   eq(v.summary, '판단 창이 아닙니다');
 });
 
+
+// ══════════════════════════════════════════════════════════
+// 2026-11-14 Gate 실측 — `ok: true`를 달고 오는 차단
+// ══════════════════════════════════════════════════════════
+
+test('★ 차단 응답이 ok:true로 와도 FAILED로 적지 않는다 (Gate 실측)', () => {
+  // **운영에서 실제로 나온 본문이다.** daily-ladder·scalp의 차단 응답은
+  // `...base`를 펼치면서 `ok: true`를 그대로 달고 409로 나간다.
+  //
+  // Gate TESTNET ETHUSDT 예약의 자동 평가(FLY_WORKER)가 이렇게 적혔다:
+  //
+  //   FAILED · 실행기가 응답하지 못했습니다 — 3개 항목이 주문을 막습니다: …
+  //
+  // 실행기는 응답했다. 사람은 워커와 네트워크를 보러 가고, 정작 고쳐야
+  // 할 세 항목(STATE_RECONCILE · UNRESOLVED_ORDERS · LIQUIDATION_DISTANCE)은
+  // 아무도 안 본다.
+  const summary = '3개 항목이 주문을 막습니다: 거래소와 앱 상태 일치, 결과 미확정 주문 없음, 손절이 청산보다 먼저';
+  const v = outcomeOf({ httpOk: false, status: 409, body: {
+    ok: true, executed: false, blocked: 'CHECKLIST_BLOCKED', error: summary,
+    checklist: { allowed: false, blockers: [
+      { id: 'STATE_RECONCILE', label: '거래소와 앱 상태 일치' },
+      { id: 'UNRESOLVED_ORDERS', label: '결과 미확정 주문 없음' },
+      { id: 'LIQUIDATION_DISTANCE', label: '손절이 청산보다 먼저' },
+    ] },
+  } });
+  eq(v.outcome, 'BLOCKED');
+  eq(v.summary, summary);
+  assert(!v.summary.includes('응답하지 못했습니다'),
+    `실행기가 응답했는데 안 했다고 적으면 안 된다: ${v.summary}`);
+});
+
+test('★ blocked 코드가 없어도 점검 목록이 막았으면 차단이다', () => {
+  // `blocked` 칸 하나만 보면 이 모양을 놓친다 — 그러면 또 갈린다.
+  const v = outcomeOf({ httpOk: false, status: 409, body: {
+    ok: true, executed: false,
+    checklist: { allowed: false, blockers: [{ id: 'LEVERAGE_MATCH', label: '배율 일치' }] },
+  } });
+  eq(v.outcome, 'BLOCKED');
+  assert(v.summary.includes('배율 일치'), v.summary);
+});
+
+test('★ 막은 항목 이름을 [object Object]로 적지 않는다', () => {
+  // `preTradeChecklist`의 blockers는 객체 배열이다.
+  const v = outcomeOf({ httpOk: true, body: {
+    ok: true, executed: false,
+    checklist: { allowed: false, blockers: [
+      { id: 'STATE_RECONCILE', label: '거래소와 앱 상태 일치' },
+      { id: 'UNRESOLVED_ORDERS', label: '결과 미확정 주문 없음' },
+    ] },
+  } });
+  eq(v.outcome, 'BLOCKED');
+  assert(!v.summary.includes('[object'), v.summary);
+  assert(v.summary.includes('거래소와 앱 상태 일치'), v.summary);
+});
+
+test('★ 반대로 새지 않는다 — 진짜 실패는 여전히 FAILED다', () => {
+  // 이 수정이 넓게 새면 **진짜 실패가 차단으로 숨는다.** 방향만 반대인 같은 고장이다.
+  eq(outcomeOf({ httpOk: false, status: 502, body: { ok: false, error: 'bad gateway' } }).outcome, 'FAILED');
+  eq(outcomeOf({ httpOk: false, status: 500, body: null }).outcome, 'FAILED');
+  eq(outcomeOf({ httpOk: false, status: 500, body: { ok: false, code: 'ECONNREFUSED' } }).outcome,
+    'FAILED', 'code 칸은 차단 증거가 아니다');
+  eq(outcomeOf({ httpOk: false, status: 504, body: { ok: false, rejectCode: 'TIMEOUT' } }).outcome,
+    'FAILED', 'rejectCode도 아니다');
+});
+
 }
