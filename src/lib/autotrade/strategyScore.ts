@@ -113,9 +113,10 @@ export function tradesFromSummary(s: { id: string; winRate: number; totalPnl: nu
 
 // AI 추천: 최고 점수 전략
 export function recommendStrategy(list: { id: string; name: string; score: StrategyScore }[]): { id: string; name: string; score: StrategyScore } | null {
-  // 추천은 최소 60% 신뢰도(약 120개 실제 거래)가 있어야 한다.
-  // 표본이 적으면 '추천 없음'이 정답이다.
-  const eligible = list.filter(x => x.score.confidence >= 60);
+  // 추천은 신뢰도 100%(200개 실제 거래)에 도달한 전략만 대상으로 한다.
+  // 백테스트 판정의 검증 표본선과 같은 기준을 써서 화면마다 기준이
+  // 달라지는 일을 막는다. 표본이 적으면 '추천 없음'이 정답이다.
+  const eligible = list.filter(x => x.score.confidence >= 100);
   if (!eligible.length) return null;
   return [...eligible].sort((a, b) => b.score.score - a.score.score)[0];
 }

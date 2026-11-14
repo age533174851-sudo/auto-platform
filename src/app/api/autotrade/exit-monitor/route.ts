@@ -30,6 +30,7 @@ import {
   type WakeAuth, resolveWakeSource, resolveWakeCadence,
   WAKE_SOURCE_HEADER, WAKE_INTERVAL_HEADER, WAKE_EXPECTED_AT_HEADER,
 } from '@/lib/engine/exitMonitorWake';
+import { readExecutorEvidence } from '@/lib/runtime/executorEvidence';
 
 /** 임차를 잃어 거래소를 바꾸지 않았을 때 남기는 말 (한 곳에서만 적는다) */
 const LEASE_LOST_MSG = '실행 권한(임차)이 넘어가 거래소 주문을 보내지 않았습니다';
@@ -554,6 +555,25 @@ export async function GET(req: NextRequest) {
   const runner = resolveWakeSource(req.headers.get(WAKE_SOURCE_HEADER), wakeAuth.kind);
   const holder = `${runner ?? 'unknown'}:${String(req.headers.get('x-traigo-worker') || '').trim() || 'anon'}`;
 
+  // ── 워커가 살아 있는가 — 응답에 **같이 적는다** ──
+  //
+  //   워커는 5분마다 이 라우트를 부르고, 백업 회차는 한 시간에 한 번
+  //   부른 뒤 **응답 본문을 Actions 로그에 그대로 남긴다.** 그래서 이
+  //   블록을 실으면 워커 생존이 사람 손을 타지 않고 기록된다.
+  //
+  //   `/api/worker/status`에도 같은 사실이 있지만 그 라우트는 인증이
+  //   필요하고 **아무 자동 회차도 부르지 않는다** — 사람이 로그인해서
+  //   열어 보기 전에는 어디에도 안 적혔다. `CLAUDE.md`가 금지한
+  //   "fly logs를 열어 확인해 주세요"가 거기서 나왔다.
+  //
+  //   **응답마다 그때 새로 읽는다.** 회차 하나가 최대 60초까지 돌 수
+  //   있고 `STOPPED_AFTER_MS`가 60초다 — 시작할 때 한 번 읽어 두면
+  //   응답에 실린 나이가 최대 1분 낡는다. 그 1분이 '중단'과 '정상'을
+  //   가르는 폭이다. 읽기 한 번은 그보다 싸다.
+  //
+  //   판정·임계값은 `judgeExecutor` 한 곳에 있다. 여기서 다시 적지 않는다.
+  const executorNow = () => readExecutorEvidence(sb);
+
   // ── 예정보다 얼마나 늦었는가 ──
   //
   // 부르는 쪽이 **자기가 실제로 쓰는** 간격과 예정 시각을 알려줄 때만
@@ -575,9 +595,14 @@ export async function GET(req: NextRequest) {
   });
   if (!lease.granted) {
     // **기다리지 않는다.** 그쪽이 하면 되는 일이다. 거래소 쓰기는 0이다.
+    // 둘을 합친다 — main 이 더한 `executor`(누가 돌고 있나)와, 이 PR 이
+    // 더한 판정(임차를 **못 읽은 것**을 성공한 SKIP 으로 적지 않기).
+    // 예전에는 여기가 언제나 `ok: true, skipped: true` 였다. 그래서 DB
+    // 조회가 실패해도 화면에는 "정상적으로 건너뛰었다"로 보였다.
     const verdict = exitLeaseWakeVerdict(lease);
     return NextResponse.json({ ok: verdict.ok, skipped: verdict.skipped,
-      code: lease.code, message: lease.reason },
+      code: lease.code, message: lease.reason,
+      executor: await executorNow() },
       { status: verdict.status, headers: { 'Cache-Control': 'no-store' } });
   }
   const myFence = lease.myFence;
@@ -1689,6 +1714,7 @@ async function runLifecycleSweep(
     }
     return NextResponse.json({
       ok: earlyOutcome.ok, dryRun, checked: decisions.length, actionable: actionable.length,
+      executor: await executorNow(),
       alerts, recovery, orphanCleanups, sweep, coverage, lifecycle,
       decisions: decisions.map(d => ({
         symbol: d.symbol, action: d.action, reason: d.reason,
@@ -1719,6 +1745,7 @@ async function runLifecycleSweep(
     });
     return NextResponse.json({
       ok: true, skipped: true, code: 'LEASE_LOST', checked: decisions.length, actionable: 0,
+      executor: await executorNow(),
       orphanCleanups, sweep, coverage, lifecycle,
       message: '실행 도중 임차가 다른 워커에게 넘어가 주문을 내지 않았습니다 — 그쪽이 같은 판단을 합니다',
     }, { headers: { 'Cache-Control': 'no-store' } });
@@ -1913,6 +1940,7 @@ async function runLifecycleSweep(
 
   return NextResponse.json({
     ok: outcome.ok, checked: decisions.length, actionable: actionable.length, alerts, recovery,
+    executor: await executorNow(),
     orphanCleanups, sweep, coverage, lifecycle, results,
     runId, cronLogError: cronLog.error,
   }, { headers: { 'Cache-Control': 'no-store' } });
