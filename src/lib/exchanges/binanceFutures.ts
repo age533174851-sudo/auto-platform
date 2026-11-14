@@ -12,6 +12,8 @@ import {
 export type { PositionRiskProvenance, SymbolPositionRisk };
 import { parseLossless, venueIdOf } from './losslessJson';
 import { quantizeOrder, qtyGridFor, type SymbolFilters } from './quantize';
+import { queryBinanceAlgoByClientId, parseBinanceAlgoAcceptance, inspectBinanceAlgoCancellationEvidence,
+  binanceAlgoCancellationIdentifier } from './binanceAlgoContract';
 
 const FUTURES_BASE         = 'https://fapi.binance.com';
 const TESTNET_FUTURES_BASE = 'https://demo-fapi.binance.com';
@@ -62,6 +64,24 @@ async function fapiSigned(
   // (2026-08-16: 2089209928026685400 → 마지막 자릿수 반올림 → 취소 실패).
   // **거래소가 번호를 키우기 시작한 뒤에 알아채면 늦는다.**
   return parseLossless(await r.text());
+}
+
+/**
+ * TESTNET-only, individually scoped, signed READ-ONLY Algo observation.
+ *
+ * This is intentionally NOT a smoke order sender or cancel endpoint.
+ * Can only query an already known stable clientAlgoId with the verified
+ * same-owner TESTNET connection's credentials. Unknown/404/timeout cannot
+ * be interpreted as a rejected POST or permission to resend.
+ */
+export async function getFuturesAlgoByClientIdReadOnly(
+  key: string, secret: string, testnet: boolean,
+  symbol: string, clientAlgoId: string,
+) {
+  return queryBinanceAlgoByClientId({
+    environment: testnet === true ? 'TESTNET' : 'LIVE',
+    symbol, clientAlgoId,
+  }, (path, params) => fapiSigned('GET', path, key, secret, true, params));
 }
 
 export interface FuturesBalance { asset: string; balance: number; availableBalance: number; unrealizedPnl: number; }
@@ -1619,10 +1639,99 @@ export async function placeFuturesTrailingStop(
 }
 
 export async function cancelFuturesOrder(key: string, secret: string, symbol: string, orderId: number | string, testnet = true) {
+  if (String(orderId).startsWith('algo:')) return cancelTestnetAlgoOrder(key, secret, symbol, String(orderId), testnet);
   try {
     await fapiSigned('DELETE', '/fapi/v1/order', key, secret, testnet, { symbol: symbol.toUpperCase().replace('/', ''), orderId });
     return { success: true, message: '주문 취소됨' };
   } catch (e: any) { return { success: false, message: e.message || '취소 실패' }; }
+}
+
+/** Algo writes are opt-in and TESTNET-only; legacy LIVE transport is unchanged. */
+export async function postTestnetAlgoOrder(key: string, secret: string, payload: Record<string, string>) {
+  return fapiSigned('POST', '/fapi/v1/algoOrder', key, secret, true, payload);
+}
+export async function readTestnetAlgoOrder(key: string, secret: string, symbol: string,
+  identity: { algoId?: string; clientAlgoId?: string }) {
+  if (!/^[A-Z0-9]{5,24}$/.test(symbol)) throw new Error('ALGO_QUERY_IDENTITY_REQUIRED');
+  let params: Record<string, string>;
+  if (typeof identity.algoId === 'string' && /^[1-9][0-9]*$/.test(identity.algoId) && identity.clientAlgoId == null) {
+    params = { algoId: identity.algoId };
+  } else if (typeof identity.clientAlgoId === 'string' && /^[.A-Z:/a-z0-9_-]{1,36}$/.test(identity.clientAlgoId) && identity.algoId == null) {
+    params = { clientAlgoId: identity.clientAlgoId };
+  } else throw new Error('ALGO_QUERY_IDENTITY_REQUIRED');
+  // Query Algo Order accepts algoId/clientAlgoId, not a symbol parameter.
+  // Symbol ownership is verified against the returned order instead.
+  const row = await fapiSigned('GET', '/fapi/v1/algoOrder', key, secret, true, params);
+  if (row?.symbol !== symbol) throw new Error('ALGO_QUERY_SYMBOL_MISMATCH');
+  return row;
+}
+export async function freshTestnetAlgoReference(symbol: string): Promise<{ price: number; atMs: number } | null> {
+  try {
+    const r = await fetch(`${futuresBase(true)}/fapi/v1/premiumIndex?symbol=${encodeURIComponent(symbol)}`,
+      { cache: 'no-store', signal: AbortSignal.timeout(8000) });
+    if (!r.ok) return null;
+    const d = parseLossless(await r.text()), price = Number(d?.markPrice), atMs = Number(d?.time);
+    return d?.symbol === symbol && Number.isFinite(price) && price > 0
+      && Number.isSafeInteger(atMs) && atMs > 0 && atMs <= Date.now() && Date.now() - atMs <= 5000 ? { price, atMs } : null;
+  } catch { return null; }
+}
+
+export async function cancelTestnetAlgoOrder(key: string, secret: string, symbol: string, ref: string, testnet: boolean) {
+  const match = /^algo:([1-9][0-9]*)$/.exec(ref);
+  if (testnet !== true || !match) return { success: false, message: 'VERIFIED_TESTNET_ALGO_REF_REQUIRED' };
+  const identifier = binanceAlgoCancellationIdentifier({ kind: 'ALGO', algoId: match[1] });
+  if (!identifier.ok || !identifier.algoId) return { success: false, message: 'ALGO_CANCEL_IDENTITY_UNKNOWN' };
+  const algoId = identifier.algoId;
+  try {
+    const before = await readTestnetAlgoOrder(key, secret, symbol, { algoId });
+    if (venueIdOf(before?.algoId) !== algoId || before?.symbol !== symbol
+        || before?.algoType !== 'CONDITIONAL' || typeof before?.clientAlgoId !== 'string'
+        || !['STOP_MARKET', 'TAKE_PROFIT_MARKET'].includes(before.orderType)
+        || !['BUY', 'SELL'].includes(before.side) || before.positionSide !== 'BOTH'
+        || !['MARK_PRICE', 'CONTRACT_PRICE'].includes(before.workingType)
+        || !Number.isFinite(Number(before.triggerPrice)) || Number(before.triggerPrice) <= 0
+        || (before.closePosition !== true && before.reduceOnly !== true)
+        || !['NEW', 'CANCELED'].includes(before.algoStatus)) {
+      return { success: false, message: 'ALGO_CANCEL_IDENTITY_UNKNOWN' };
+    }
+    const payload = { symbol, side: before.side, type: before.orderType, clientAlgoId: before.clientAlgoId,
+      workingType: before.workingType, triggerPrice: String(before.triggerPrice) };
+    const accepted = parseBinanceAlgoAcceptance(before, payload);
+    if (!accepted.acceptedAlgoId) return { success: false, message: 'ALGO_CANCEL_IDENTITY_UNKNOWN' };
+    const receipt = before.algoStatus === 'CANCELED' ? null
+      : await fapiSigned('DELETE', '/fapi/v1/algoOrder', key, secret, true, { algoId });
+    const [after, open] = await Promise.all([
+      readTestnetAlgoOrder(key, secret, symbol, { algoId }), getFuturesOpenAlgoOrders(key, secret, true, symbol),
+    ]);
+    const knownBook = open.success === true && Array.isArray(open.orders)
+      && open.orders.every(o => /^[1-9][0-9]*$/.test(venueIdOf(o?.algoId) || '')
+        && typeof o?.clientAlgoId === 'string' && o.clientAlgoId && o?.symbol === symbol);
+    const proof = inspectBinanceAlgoCancellationEvidence({ expectedPayload: payload, accepted, deleteReceipt: receipt,
+      ...(before.algoStatus === 'CANCELED' ? { priorCanceledLookup: { success: true, order: before } } : {}),
+      orderLookup: { success: true, order: after }, openLookup: { success: knownBook, orders: open.orders } });
+    const confirmed = proof.code === 'CANCEL_OBSERVED_POSITION_UNKNOWN';
+    return { success: confirmed, message: confirmed ? 'Algo 단일 주문 취소 재조회 확인' : 'ALGO_CANCEL_UNKNOWN' };
+  } catch { return { success: false, message: 'ALGO_CANCEL_UNKNOWN' }; }
+}
+
+/** A namespaced protective view; malformed rows and either failed book block. */
+export async function getTestnetProtectiveOrders(key: string, secret: string, symbol: string) {
+  const [regular, algo] = await Promise.all([
+    getFuturesOpenOrders(key, secret, true, symbol), getFuturesOpenAlgoOrders(key, secret, true, symbol),
+  ]);
+  if (!regular.success || !algo.success || !Array.isArray(regular.orders) || !Array.isArray(algo.orders)) {
+    return { success: false, orders: [] as any[] };
+  }
+  const mapped: any[] = [];
+  for (const row of algo.orders) {
+    const id = venueIdOf(row?.algoId);
+    if (!id || !/^[1-9][0-9]*$/.test(id) || row?.symbol !== symbol
+        || row?.algoType !== 'CONDITIONAL' || row?.algoStatus !== 'NEW'
+        || typeof row?.clientAlgoId !== 'string' || !row.clientAlgoId) return { success: false, orders: [] as any[] };
+    mapped.push({ ...row, orderId: `algo:${id}`, clientOrderId: row.clientAlgoId,
+      type: row.orderType, stopPrice: row.triggerPrice, closePositionKnown: row.closePosition != null });
+  }
+  return { success: true, orders: [...regular.orders, ...mapped] };
 }
 
 // 미체결 주문 조회 (TP/SL 등) — type별 stopPrice 추출용

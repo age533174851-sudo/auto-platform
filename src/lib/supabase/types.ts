@@ -1087,6 +1087,7 @@ export type Database = {
       }
       live_orders: {
         Row: {
+          testnet_algo_intents: Json
           acked_at: string | null
           attempt_count: number
           avg_price: number | null
@@ -1118,6 +1119,7 @@ export type Database = {
           user_id: string | null
         }
         Insert: {
+          testnet_algo_intents?: Json
           acked_at?: string | null
           attempt_count?: number
           avg_price?: number | null
@@ -1149,6 +1151,7 @@ export type Database = {
           user_id?: string | null
         }
         Update: {
+          testnet_algo_intents?: Json
           acked_at?: string | null
           attempt_count?: number
           avg_price?: number | null

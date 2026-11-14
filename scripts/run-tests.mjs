@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const root = process.cwd();
+execFileSync(process.execPath, ['--test', 'scripts/binance-algo-pg.test.mjs'], { cwd: root, stdio: 'inherit' });
 execFileSync(process.execPath, ['--test', 'scripts/smoke-workflow-evidence.test.mjs'], { cwd: root, stdio: 'inherit' });
 // Offline ten-slot model is deliberately separate from live order execution.
 execFileSync(process.execPath, ['--test', 'scripts/ten-slot-offline.test.mjs'], { cwd: root, stdio: 'inherit' });
@@ -190,6 +191,8 @@ import { runSpotStrategyTests } from './src/lib/strategies/spotStrategies.test';
 import { runSpotOrderPlanTests } from './src/lib/strategies/spotOrderPlan.test';
 import { runCombinedTests } from './src/lib/strategies/combined.test';
 import { runBinanceHostTests } from './src/lib/exchanges/binanceHosts.test';
+import { runBinanceAlgoContractTests } from './src/lib/exchanges/binanceAlgoContract.test';
+import { runBinanceAlgoReadRouteTests } from './src/test/integration/binanceAlgoReadRoute.test';
 import { runAuthErrorTests } from './src/lib/exchanges/authError.test';
 import { runErrorTextTests } from './src/lib/http/errorText.test';
 import { runAutotradeHealthTests } from './src/lib/engine/autotradeHealth.test';
@@ -396,10 +399,11 @@ import { runCreatorIntakeTests } from './src/lib/signals/creatorIntake.test';
 import { runSignalPathTests } from './src/lib/signals/signalPath.test';
 import { runVenueBarsTests } from './src/lib/markets/venueBars.test';
 import { runLoginDiagnosticTests } from './src/lib/auth/loginDiagnostic.test';
+import { runBinanceAlgoExecutionTests } from './src/test/integration/binanceAlgoExecution.test';
 import { summary, flushAsync } from './src/test/harness';
 console.log('════════ TRAIGO 코어 유닛 테스트 ════════');
 runPnlTests(); runBacktestTests(); runRiskManagerTests(); runExitPlanTests(); runPaperDispatchTests(); runPaperOpenAtomicTests(); runPaperEventTimeTests(); runPaperChallengeSweepTests(); runPaperCapacityTests(); runPaperExitSweepTests(); runPaperExitSweepMoreTests(); runExcursionTests(); runPositionGuardTests(); runStateReconcileTests(); runOrderLifecycleTests(); runUnknownResolverTests(); runDataQualityTests(); runOperatingModeTests();
-runEntry100xTests(); runMaxOpenPositionsGateTests(); runOrderFillFactsTests(); runLedgerFillQtyTests(); runReconcileLedgerStatusTests(); runHoldingEvidenceTests(); runFoundOrderLedgerTests(); runProvenFillTests(); runOtherVenueLedgerTests(); runCoinMFillTests(); runFailureRecoveryTests(); runCredentialExposureTests(); runMarketTypeTests(); runWalletTests(); runCoinMTests(); runCostBasisTests(); runLedgerTests(); runSpotStrategyTests(); runSpotOrderPlanTests(); runCombinedTests(); runBinanceHostTests(); runAuthErrorTests(); runErrorTextTests(); runAutotradeHealthTests(); runOverlayStackTests(); runThemeTests(); runPositionViewTests(); runDisplayTests(); runStatusTests(); runPaperRunnerModeTests(); runDueDiagViewTests(); runInventoryTests(); runPracticeEnvTests();
+runEntry100xTests(); runMaxOpenPositionsGateTests(); runOrderFillFactsTests(); runLedgerFillQtyTests(); runReconcileLedgerStatusTests(); runHoldingEvidenceTests(); runFoundOrderLedgerTests(); runProvenFillTests(); runOtherVenueLedgerTests(); runCoinMFillTests(); runFailureRecoveryTests(); runCredentialExposureTests(); runMarketTypeTests(); runWalletTests(); runCoinMTests(); runCostBasisTests(); runLedgerTests(); runSpotStrategyTests(); runSpotOrderPlanTests(); runCombinedTests(); runBinanceHostTests(); runBinanceAlgoContractTests(); runAuthErrorTests(); runErrorTextTests(); runAutotradeHealthTests(); runOverlayStackTests(); runThemeTests(); runPositionViewTests(); runDisplayTests(); runStatusTests(); runPaperRunnerModeTests(); runDueDiagViewTests(); runInventoryTests(); runPracticeEnvTests();
 runOrderViewTests(); runNewsSchemaTests(); runAnalyzeOneTests(); runCollectTests(); runEnrichPlanTests(); runConsensusTests(); runPricingTests(); runCalendarTests(); runRetentionTests(); runAdminGateTests(); runCommandTests(); runKeymapTests(); runPreTradeChecklistTests(); runReconcileEvidenceTests(); runAutoMergeGateTests(); runAutoRebaseTests();
 runDeployDispatchTests(); runExecutorHealthTests(); runManualPlanTests(); runCloseQtyTests(); runLosslessJsonTests(); runGatePlanTests();
 runFuturesExecTests(); runPromotionMapTests(); runTradeModeTests(); runPaperPlanTests(); runDailyLossTests(); runRegimeGateTests(); runTrailPlanTests(); runPaperRunnerTests(); runAllocationTests(); runStatsTests(); runRoutingTests(); runGateSpotPlanTests(); runLossStreakTests(); runTradeVetoTests(); runCalibrationTests(); runRecordPredictionTests(); runSubAccountTests(); runExitRulesTests(); runSafetyLogTests(); runFredTests(); runEventGuardTests(); runStopVerifyTests();
@@ -444,6 +448,12 @@ runExitPolicyTests(); runRunRequestTests(); runBacktestVerdictTests(); runAiResu
   await runForcedEntryRouteTests();
   await runHoldExtensionIntegrationTests();
   await runKillCloseIntegrationTests();
+  await flushAsync();
+  // Signed-GET Algo evidence uses synthetic encryption and intercepts
+  // global fetch. Isolate AFTER all older integration stubs are restored.
+  await runBinanceAlgoReadRouteTests();
+  await flushAsync();
+  await runBinanceAlgoExecutionTests();
   await flushAsync();
   const s = summary();
   console.log('\\n결과: ' + s.passed + ' 통과 / ' + s.failed + ' 실패');

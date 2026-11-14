@@ -144,13 +144,21 @@ export async function settleAttempt(sb: any, row: any, opts: SettleOptions = {})
     // 주문이 UNKNOWN이 되고, UNKNOWN은 안전을 이유로 안 지우므로
     // 거래소에 계속 쌓인다. 실제로 그렇게 쌓였다(2026-08-15).
     await phase('CLEANING_PROTECTION');
-    const orders = await ops.readProtectiveOrders(venue, row.symbol);
+    const orders = await ops.readSmokeProtectiveOrders(venue, row.symbol);
     const ownedIds = ownedOrderIds({ placed: [row.sl_order_id, row.tp_order_id] });
 
     const plan = orphanCleanupPlan({
       position: { ok: after.ok, found: after.found, qty: after.qty },
       orders, myStrategyId: SMOKE_STRATEGY_ID, ownedIds,
     });
+    // Algo strategy text is insufficient ownership evidence. Preserve another
+    // parent's orders even if it uses the same strategy prefix.
+    const otherAlgo = plan.cancel.filter(id => id.startsWith('algo:') && !ownedIds.includes(id));
+    if (otherAlgo.length) {
+      plan.cancel = plan.cancel.filter(id => !otherAlgo.includes(id));
+      plan.keep.push(...otherAlgo.map(id => ({ id, class: 'UNKNOWN' as const,
+        reason: '다른 주문 의도의 Algo 보호주문입니다 — 이 회차는 취소하지 않습니다' })));
+    }
 
     // ── 취소하고 **재조회로 사라진 것까지 확인한다** ──
     //
@@ -166,7 +174,10 @@ export async function settleAttempt(sb: any, row: any, opts: SettleOptions = {})
       cancelled: plan.ok ? ledger.entries.filter(e => e.state === 'CANCEL_CONFIRMED').map(e => e.id) : null,
     });
 
-    const leftover = plan.ok ? (cx.leftover ?? await ops.readProtectiveOrders(venue, row.symbol)) : orders;
+    // Cancellation uses its existing owned-ID regular-order path; final absence evidence
+    // must independently cover BOTH Binance order books (regular + Algo).
+    // An unknown Algo read must never become ORDERS_ZERO PASS.
+    const leftover = await ops.readAllOpenOrdersForSmoke(venue, row.symbol);
     const rv = residualVerdict({
       position: { ok: after.ok, found: after.found, qty: after.qty },
       orders: leftover, myStrategyId: SMOKE_STRATEGY_ID, ownedIds,
@@ -193,11 +204,23 @@ export async function settleAttempt(sb: any, row: any, opts: SettleOptions = {})
     const tpNote = idNote('익절', row.tp_order_id);
 
     // **취소 장부와 잔여 판정이 둘 다 통과해야 통과다.**
-    const ordersOk = rv.ok && ledger.ok;
+    let algoReconciled = true;
+    if ([row.sl_order_id, row.tp_order_id].some(id => String(id || '').startsWith('algo:'))) {
+      algoReconciled = false;
+      if (cv.closed && venue.exchange === 'binance' && venue.testnet === true) {
+        try {
+          const { findAlgoParent } = await import('../exchanges/binanceAlgoStore');
+          const { cleanupTestnetAlgoParent } = await import('../exchanges/binanceAlgoExecution');
+          const scope = await findAlgoParent(sb, row.user_id, row.connection_id, row.client_order_id);
+          if (scope) algoReconciled = await cleanupTestnetAlgoParent(sb, scope, venue, row.symbol);
+        } catch { algoReconciled = false; }
+      }
+    }
+    const ordersOk = rv.ok && ledger.ok && algoReconciled;
     steps.ORDERS_ZERO = ordersOk
       ? step('PASS', `${slNote} · ${tpNote} · ${rv.reason}`)
-      : (rv.code === 'ORDERS_UNKNOWN' || ledger.code === 'UNKNOWN')
-        ? step('UNKNOWN', `${slNote} · ${tpNote} · ${rv.ok ? ledger.reason : rv.reason} — ${cleaned.reason}`)
+      : (rv.code === 'ORDERS_UNKNOWN' || ledger.code === 'UNKNOWN' || !algoReconciled)
+        ? step('UNKNOWN', `${slNote} · ${tpNote} · ${rv.ok ? ledger.reason : rv.reason} — ${cleaned.reason}${!algoReconciled ? ' · Algo 의도 장부 확인 불가' : ''}`)
         // **남으면 FAIL이다.** 그 주문이 다음 진입을 친다.
         : step('FAIL', `${slNote} · ${tpNote} · ${ledger.ok ? rv.reason : ledger.reason}`);
 
