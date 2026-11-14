@@ -121,6 +121,7 @@ export async function GET(req: NextRequest) {
     // 새 주문에 배정할 수 있는 잔고. 판단은 `/api/paper/account`와 **같은
     // 함수**다 — 사이징 슬라이더가 어느 라우트를 읽든 같은 답을 봐야 한다.
     const { availableView } = await import('@/lib/engine/paperAvailable');
+    const { ledgerLiquidationPrice } = await import('@/lib/trading/ledgerLiquidation');
     const av = availableView(account.balance, open);
 
     return NextResponse.json({
@@ -146,7 +147,9 @@ export async function GET(req: NextRequest) {
         notional: Number(p.notional), leverage: Number(p.leverage), margin: Number(p.margin),
         stopLoss: p.stop_loss != null ? Number(p.stop_loss) : null,
         takeProfit: p.take_profit != null ? Number(p.take_profit) : null,
-        liquidationPrice: Number(p.liquidation_price),
+        // **모르는 청산가는 null이다.** 현물은 장부에 0이 저장된다(`liq ?? 0`)
+        // — `Number(...)`로 내보내면 포지션 줄이 "청산가 0.00"을 그린다.
+        liquidationPrice: ledgerLiquidationPrice(p),
         openedAt: p.opened_at,
       })),
       recentClosed: closedList.map((p: any) => ({
