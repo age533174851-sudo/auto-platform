@@ -239,6 +239,7 @@ import { runEntryWindowDueTests } from './src/lib/autotrade/entryWindowDue.test'
 import { runForcedEntryWindowWakeTests } from './src/lib/autotrade/forcedEntryWindowWake.test';
 import { runEvaluationLoopTests } from './src/lib/autotrade/evaluationLoop.test';
 import { runRunSummaryTests } from './src/lib/autotrade/runSummary.test';
+import { runRunnerStaleConnectionTests } from './src/test/integration/runnerStaleConnectionIntegration.test';
 import { runSchedulePollTests } from './src/lib/autotrade/schedulePoll.test';
 import { runRunOutcomeTests } from './src/lib/autotrade/runOutcome.test';
 import { runFirstEvalRaceTests } from './src/lib/autotrade/firstEvalRace.test';
@@ -441,6 +442,7 @@ runExitPolicyTests(); runRunRequestTests(); runBacktestVerdictTests(); runAiResu
   await runPrecisionMatrixTests();
   await runSmokeStartRouteTests();
   await runForcedEntryRouteTests();
+  await runRunnerStaleConnectionTests();
   await runHoldExtensionIntegrationTests();
   await runKillCloseIntegrationTests();
   await flushAsync();
