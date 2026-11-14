@@ -367,7 +367,7 @@ export async function runCronAuthRouteTests(): Promise<void> {
   // ══════════ ⑥ cleanup: COUNT와 DELETE 사이 동시 삽입 (Issue #471) ══════════
   // 실제 GET + 가짜 Supabase. COUNT 시점 4,999건, DELETE 시점 5,099건.
   // DELETE는 반드시 사전에 선택한 PK의 유한 집합으로만 수행해야 한다.
-  async function cleanupConcurrentInsertCase(dropOne = false) {
+  async function cleanupConcurrentInsertCase(dropOne = false, unverifiable = false) {
     const prevSecret = process.env.CRON_SECRET;
     const resolved = require.resolve(ROUTES[0].path);
     const prevServer = require.cache[serverPath];
@@ -425,6 +425,11 @@ export async function runCronAuthRouteTests(): Promise<void> {
               },
               select(_column: string) {
                 calls.push('bounded_delete');
+                // **삭제는 나갔는데 결과를 못 읽은 경우.** 몇 건이 지워졌는지
+                // 알 수 없다 — 0 도 아니고 요청한 수도 아니다.
+                if (unverifiable) {
+                  return Promise.resolve({ error: { message: '삭제 결과 조회 실패' }, data: null });
+                }
                 const ids = new Set(selectedIds || []);
                 if (dropOne && !dropped && ids.size > 0) {
                   const first = ids.values().next().value;
@@ -472,6 +477,25 @@ export async function runCronAuthRouteTests(): Promise<void> {
     assert(!race.calls.includes('unbounded_delete'), '삭제 대상 ID를 고정하지 않았다');
     eq(race.json.tables.find((t: any) => t.table === 'news_articles')?.deleted, 4_999);
     eq(race.json.totalDeleted, 4_999);
+  });
+
+  // ── 모름과 불완전은 다른 값이다 ──
+  //
+  // 아래 raceDrop 은 **아는 사실**이다: 4999 를 지우려다 4998 을 지웠고,
+  // 4998 은 확인된 숫자다. 그때 합계를 null 로 적으면 아는 것을 모른다고
+  // 적는 것이고, "얼마나 지워졌나"에 아무도 답할 수 없게 된다.
+  //
+  // 이 아래 unverified 는 **정말 모르는 경우**다. 삭제는 나갔는데 결과를
+  // 못 읽었다. 그때 0 으로 더하면 합계가 조용히 거짓이 된다.
+  //
+  // 두 경우가 같은 응답을 내면 둘 중 하나는 반드시 거짓말이다.
+  const unverified = await cleanupConcurrentInsertCase(false, true);
+  test('★★ 삭제 결과를 못 읽었으면 합계를 0으로 더하지 않는다 (모름 ≠ 0)', () => {
+    const row = unverified.json.tables.find((t: any) => t.table === 'news_articles');
+    eq(row?.deleted, null, '못 읽은 건수를 숫자로 적었다');
+    eq(unverified.json.totalDeleted, null, '모르는 것을 0으로 더해 합계를 지어냈다');
+    eq(unverified.json.ok, false);
+    assert(String(row?.skipped || '').length > 0, '왜 모르는지가 응답에 없다');
   });
 
   const raceDrop = await cleanupConcurrentInsertCase(true);
