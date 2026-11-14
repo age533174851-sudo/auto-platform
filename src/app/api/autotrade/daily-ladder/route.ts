@@ -1174,13 +1174,58 @@ export async function GET(req: NextRequest) {
       : msg;
   }
 
+  // ── 예약이 가리키는 연결이 아직 있는가 ──
+  //
+  // 이 판정은 목록 API에만 있었고 **실행기에는 없었다.** 실행기가 보는
+  // 것은 `evaluationLoop`의 `NO_CONNECTION`뿐인데, 그건 연결 id가 비어
+  // 있을 때만 난다. id가 적혀 있는데 그 행이 사라진 경우는 그냥 통과하고,
+  // 간격이 안 됐으면 '건너뜀'이 되어 **ok로 집계된다.**
+  //
+  // 그래서 화면 위에는 "4개 중 2개가 막혀 있습니다", 아래에는 "4건 확인 ·
+  // 실패 0건"이 같이 떴다(2026-11-14). 같은 4줄을 두고 두 문장이 갈렸다.
+  //
+  // 판정은 `scheduleConnState` 한 곳에 있다. 여기서 다시 쓰지 않고 부른다.
+  // **못 읽으면 null이다** — 빈 배열로 두면 모든 예약이 막힘으로 뜬다.
+  let connRows: any[] | null = null;
+  if (!readError && rows.length > 0) {
+    try {
+      const uids = [...new Set(rows.map((r: any) => String(r.user_id || '')).filter(Boolean))];
+      if (uids.length === 0) {
+        connRows = [];
+      } else {
+        const { data, error } = await (sb as any).from('exchange_connections')
+          .select('id, user_id, exchange_id, label, is_testnet').in('user_id', uids);
+        if (!error) connRows = Array.isArray(data) ? data : [];
+      }
+    } catch { /* null 그대로 — 막혔다고 적지 않는다 */ }
+  }
+
   const results: any[] = [];
   if (!readError) {
     const origin = new URL(req.url).origin;
     const { evaluateIfDue } = await import('@/lib/autotrade/evaluationRunner');
+    const { scheduleConnState } = await import('@/lib/engine/schedulePlan');
+    const { blockedByConnection } = await import('@/lib/autotrade/runSummary');
     const nowMs = Date.now();
 
     for (const r of rows) {
+      // ── 돌 수 없는 줄은 '건너뜀'이 아니다 ──
+      //
+      // 간격을 보기 전에 본다. 연결이 사라진 예약은 간격이 됐든 안 됐든
+      // 주문을 낼 수 없다. 간격 검사에 맡기면 '아직 때가 아님'으로 묻힌다.
+      const mineConns = connRows === null
+        ? null
+        : connRows.filter((c: any) => String(c.user_id) === String(r.user_id));
+      const cv = scheduleConnState(r.connection_id, mineConns as any);
+      const blk = blockedByConnection(cv.state);
+      if (blk) {
+        results.push({
+          symbol: r.symbol, mode: r.mode,
+          ok: false, blocked: true, code: blk.code, detail: cv.message,
+        });
+        continue;
+      }
+
       // ── 예약 줄이 고른 전략으로 부른다 ──
       //
       // 예전에는 이 자리에서 **daily-ladder POST를 직접** 불렀다. 그래서
@@ -1250,8 +1295,7 @@ export async function GET(req: NextRequest) {
       readError ? 'failed' : rows.length === 0 ? 'skipped' : 'ok',
       // 확인한 줄 수 · 실제 진입 · 실패를 나눠 적는다. '성공 N건'만 적으면
       // 진입하지 않은 날도 매매가 일어난 것처럼 읽힌다.
-      readError || `${rows.length}건 확인 · 진입 ${results.filter(x => x.executed).length}건`
-        + ` · 실패 ${results.filter(x => !x.ok).length}건`,
+      readError || (await import('@/lib/autotrade/runSummary')).runSummary(results, rows.length).text,
       startedAt);
     cronLogError = lg.error;
   } catch (e: any) { cronLogError = String(e?.message || e); }
