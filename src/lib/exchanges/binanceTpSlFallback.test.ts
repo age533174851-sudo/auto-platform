@@ -24,6 +24,7 @@ import { test, assert, eq } from '../../test/harness';
 import { netTest, withFetch } from '../../test/netStub';
 import { tpslFailureVerdict, placeFuturesTPSL } from './binanceFutures';
 
+const PATH = '/fapi/v1/order';
 const E4120 = '[-4120] Order type not supported for this endpoint. '
   + 'Please use the Algo Order API endpoints instead.';
 
@@ -34,7 +35,7 @@ export function runBinanceTpSlFallbackTests() {
     const v = tpslFailureVerdict({
       label: '손절', type: 'STOP_MARKET', testnet: true,
       firstError: E4120, secondError: null,
-      retrySkippedReason: '수량을 몰라',
+      retrySkippedReason: '수량을 몰라', endpoint: PATH,
     });
     assert(/-4120/.test(v.message), `원문이 사라졌다: ${v.message}`);
     assert(/수량/.test(v.message), `못 한 이유가 없다: ${v.message}`);
@@ -44,18 +45,42 @@ export function runBinanceTpSlFallbackTests() {
   test('★★ 두 모양 다 막혔을 때만 환경 탓이라고 적는다', () => {
     const v = tpslFailureVerdict({
       label: '손절', type: 'STOP_MARKET', testnet: true,
-      firstError: E4120, secondError: E4120, retrySkippedReason: null,
+      firstError: E4120, secondError: E4120, retrySkippedReason: null, endpoint: PATH,
     });
     eq(v.envUnsupported, true);
     assert(/받지 않습니다/.test(v.message), v.message);
-    assert(/키·권한·수량 문제가 아닙니다/.test(v.message), v.message);
+    assert(/키·권한·수량 문제는 아닙니다/.test(v.message), v.message);
+  });
+
+  test('★★ 같은 경로로 두 번 거절된 것을 "이 환경은 못 한다"로 넓히지 않는다', () => {
+    // #631 검수 지적(2026-11-14). 두 모양 모두 **같은 엔드포인트**로 나갔다.
+    // 거래소는 "Algo 주문 API를 쓰라"고 답했을 뿐, 보호가 불가능하다고
+    // 하지 않았다. 경로 하나의 거절을 환경 전체로 읽으면 사용자는
+    // 가능한 길을 두고 포기하거나 실전으로 옮긴다.
+    const v = tpslFailureVerdict({
+      label: '손절', type: 'STOP_MARKET', testnet: true,
+      firstError: E4120, secondError: E4120, retrySkippedReason: null, endpoint: PATH,
+    });
+    assert(v.message.includes(PATH), `어느 경로가 거절했는지 없다: ${v.message}`);
+    assert(/Algo/.test(v.message), `거래소가 안내한 길이 없다: ${v.message}`);
+    assert(/뜻은 아닙니다/.test(v.message), `한 경로의 거절을 환경 전체로 넓혔다: ${v.message}`);
+    assert(!/실전|LIVE/.test(v.message), `실전으로 가라고 암시했다: ${v.message}`);
+  });
+
+  test('★ 한 모양만 거절된 문장도 실전을 권하지 않는다', () => {
+    const v = tpslFailureVerdict({
+      label: '손절', type: 'STOP_MARKET', testnet: true,
+      firstError: E4120, secondError: null, retrySkippedReason: '수량을 몰라', endpoint: PATH,
+    });
+    assert(v.message.includes(PATH), v.message);
+    assert(!/실전|LIVE/.test(v.message), v.message);
   });
 
   test('★ 둘 다 시도했는데 다른 이유로 막히면 환경 탓을 하지 않는다', () => {
     const v = tpslFailureVerdict({
       label: '익절', type: 'TAKE_PROFIT_MARKET', testnet: true,
       firstError: E4120, secondError: '[-2019] Margin is insufficient.',
-      retrySkippedReason: null,
+      retrySkippedReason: null, endpoint: PATH,
     });
     eq(v.envUnsupported, false);
     assert(/-2019/.test(v.message), v.message);
@@ -65,7 +90,7 @@ export function runBinanceTpSlFallbackTests() {
     const v = tpslFailureVerdict({
       label: '손절', type: 'STOP_MARKET', testnet: true,
       firstError: '[-2019] Margin is insufficient.', secondError: null,
-      retrySkippedReason: '수량을 몰라',
+      retrySkippedReason: '수량을 몰라', endpoint: PATH,
     });
     eq(v.envUnsupported, false);
     assert(/-2019/.test(v.message), v.message);
@@ -78,7 +103,7 @@ export function runBinanceTpSlFallbackTests() {
     // 모르는 것은 적지 않는다.
     const v = tpslFailureVerdict({
       label: '손절', type: 'STOP_MARKET', testnet: true,
-      firstError: E4120, secondError: null, retrySkippedReason: null,
+      firstError: E4120, secondError: null, retrySkippedReason: null, endpoint: PATH,
     });
     eq(v.envUnsupported, false);
     assert(/-4120/.test(v.message), v.message);
@@ -88,7 +113,7 @@ export function runBinanceTpSlFallbackTests() {
   test('실계좌면 환경 이름을 데모라고 적지 않는다', () => {
     const v = tpslFailureVerdict({
       label: '손절', type: 'STOP_MARKET', testnet: false,
-      firstError: E4120, secondError: E4120, retrySkippedReason: null,
+      firstError: E4120, secondError: E4120, retrySkippedReason: null, endpoint: PATH,
     });
     assert(!/데모/.test(v.message), v.message);
   });
@@ -126,6 +151,9 @@ export function runBinanceTpSlFallbackTests() {
     eq(r.success, false);
     assert(/-4120/.test(r.message), `원문이 사라졌다: ${r.message}`);
     assert(/수량/.test(r.message), `못 한 이유가 사유에 없다: ${r.message}`);
+    // 문장에 적힌 경로가 **실제로 나간 URL**과 같아야 한다.
+    assert(r.message.includes('/fapi/v1/order') && orders[0].includes('/fapi/v1/order'),
+      `적힌 경로와 나간 경로가 다르다: ${r.message} / ${orders[0]}`);
     eq(r.envUnsupported, false, '한 모양만 보고 환경 탓으로 단정했다');
     // 한 번만 나갔는데 "둘 다 해 봤다"고 적으면 그건 거짓말이다.
     // 가드를 빼면 2차 시도가 fetch 전에 스스로 던지므로 주문 수는 그대로
