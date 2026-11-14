@@ -9,9 +9,9 @@
  * 실행: node scripts/test-pipeline.mjs
  */
 import { execSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, cpSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname, resolve, basename } from 'node:path';
 
 const dir = mkdtempSync(join(tmpdir(), 'pipeline-'));
 let pass = 0, fail = 0;
@@ -21,47 +21,70 @@ function check(name, cond, detail = '') {
   else { fail++; console.log(`  ✗ ${name}${detail ? ' — ' + detail : ''}`); }
 }
 
-// 필요한 모듈 복사 + 상대경로로 변환
-const files = [
-  ['src/lib/engine/tradingPipeline.ts', 'tradingPipeline.ts'],
-  ['src/lib/engine/riskManager.ts', 'riskManager.ts'],
-  ['src/lib/engine/signalGateway.ts', 'signalGateway.ts'],
-  ['src/lib/strategies/dailyBattle.ts', 'dailyBattle.ts'],
-  ['src/lib/strategies/riskVeto.ts', 'riskVeto.ts'],
-  ['src/lib/strategies/volatilityBaseline.ts', 'volatilityBaseline.ts'],
-  ['src/lib/calendar/econCalendar.ts', 'econCalendar.ts'],
-  ['src/lib/derivatives/index.ts', 'derivatives.ts'],
-  ['src/lib/strategies/regime.ts', 'regime.ts'],
-  ['src/lib/autotrade/dynamicSizing.ts', 'dynamicSizing.ts'],
-  ['src/lib/strategies/regime.ts', 'regime.ts'],
-];
-for (const [src, dst] of files) {
-  try { cpSync(src, join(dir, dst)); } catch {}
+// ── 어떤 파일을 복사할지는 **import를 따라가서** 정한다 ──
+//
+// 예전에는 복사할 파일 목록과 경로 치환 목록을 손으로 적어 뒀다.
+// 그리고 `tradingPipeline.ts`가 `../strategies/expansionMode`를 쓰기
+// 시작한 날, 그 목록은 따라가지 않았다. 이 테스트는 그날부터
+//
+//   Error: Cannot find module '../strategies/expansionMode'
+//
+// 로 죽어 있었다. CI가 이 파일을 돌리지 않아서 아무도 몰랐다 —
+// CI가 안 돌리는 검사기는 없는 검사기다.
+//
+// 같은 사실(= 이 파이프라인이 무엇에 기대는가)이 두 곳에 적혀 있으면
+// 언젠가 갈린다. 그래서 목록을 지우고 **진입점에서 상대 import를 따라
+// 전부 끌어온다.** 새 모듈을 쓰기 시작해도 고칠 목록이 없다.
+const ENTRIES = ['src/lib/engine/tradingPipeline.ts', 'src/lib/calendar/econCalendar.ts'];
+
+/** './x' 나 'y/index' 같은 상대 지정자를 실제 파일로 푼다 */
+function resolveTs(fromFile, spec) {
+  const base = resolve(dirname(fromFile), spec);
+  for (const c of [`${base}.ts`, `${base}.tsx`, `${base}/index.ts`, `${base}/index.tsx`]) {
+    if (existsSync(c)) return c;
+  }
+  return null;
 }
 
-// import 경로 정리
-const fixes = [
-  ['tradingPipeline.ts', [
-    ["../strategies/dailyBattle", "./dailyBattle.js"],
-    ["../strategies/riskVeto", "./riskVeto.js"],
-    ["../strategies/volatilityBaseline", "./volatilityBaseline.js"],
-    ["../calendar/econCalendar", "./econCalendar.js"],
-    ["./riskManager", "./riskManager.js"],
-    ["./signalGateway", "./signalGateway.js"],
-    ["../derivatives", "./derivatives.js"],
-  ]],
-  ['riskManager.ts', [["./signalGateway", "./signalGateway.js"]]],
-  ['dailyBattle.ts', [["./riskVeto", "./riskVeto.js"]]],
-];
-import { readFileSync } from 'node:fs';
-for (const [file, reps] of fixes) {
-  const p = join(dir, file);
-  try {
-    let s = readFileSync(p, 'utf8');
-    for (const [from, to] of reps) s = s.split(`'${from}'`).join(`'${to}'`);
-    writeFileSync(p, s);
-  } catch {}
+const SPEC = /\bfrom\s*'([^']+)'|\bimport\s*\(\s*'([^']+)'/g;
+
+// 전이 폐포를 모은다. 패키지(상대경로가 아닌 것)는 건드리지 않는다.
+const graph = new Map();
+const queue = ENTRIES.map(e => resolve(e));
+while (queue.length) {
+  const f = queue.shift();
+  if (graph.has(f)) continue;
+  const text = readFileSync(f, 'utf8');
+  const deps = new Map();
+  for (const m of text.matchAll(SPEC)) {
+    const spec = m[1] ?? m[2];
+    if (!spec || !spec.startsWith('.')) continue;
+    const t = resolveTs(f, spec);
+    if (!t) continue;
+    deps.set(spec, t);
+    queue.push(t);
+  }
+  graph.set(f, { text, deps });
 }
+
+// 평평한 이름. index.ts는 디렉터리 이름을 쓴다(예전 'derivatives.ts'와 같다).
+const flat = new Map();
+const used = new Set();
+for (const f of graph.keys()) {
+  let name = basename(f).replace(/\.tsx?$/, '');
+  if (name === 'index') name = basename(dirname(f));
+  let n = name;
+  for (let i = 2; used.has(n); i++) n = `${basename(dirname(f))}_${name}_${i}`;
+  used.add(n);
+  flat.set(f, n);
+}
+
+for (const [f, { text, deps }] of graph) {
+  let s = text;
+  for (const [spec, target] of deps) s = s.split(`'${spec}'`).join(`'./${flat.get(target)}.js'`);
+  writeFileSync(join(dir, `${flat.get(f)}.ts`), s);
+}
+console.log(`  (import를 따라 ${graph.size}개 모듈을 끌어왔습니다)`);
 
 console.log('통합 테스트: DB → Calendar → 5v5 → Veto → Risk Manager\n');
 
