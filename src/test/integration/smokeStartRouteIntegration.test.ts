@@ -241,6 +241,40 @@ export async function runSmokeStartRouteTests() {
 
     const attOf = (db: FakeDb) => (db.row('smoke_tests', { id: ATT })?.steps as any)?._attestation ?? null;
 
+    const listConn = '33333333-3333-4333-8333-333333333333';
+    async function listCandidates(owner: string | null = 'u-1', connection = conn({ id: listConn })) {
+      const db = new FakeDb();
+      db.seed('exchange_connections', [connection]);
+      db.seed('smoke_tests', [
+        legacySmoke({ connection_id: listConn }),
+        legacySmoke({ id: 'foreign-row', connection_id: listConn, user_id: 'other' }),
+        legacySmoke({ id: 'other-connection', connection_id: 'other' }),
+      ]);
+      const r = loadRoute(db, owner, attestRoutePath);
+      try {
+        if (!r.GET) return { status: 501, json: {} as any, db };
+        const res = await r.GET({ url: `http://localhost/api/autotrade/smoke-test/attest-exposure?connectionId=${listConn}`,
+          headers: new Headers() });
+        return { status: res.status, json: await res.json(), db };
+      } finally { r.restore(); }
+    }
+    const CANDIDATES = await listCandidates();
+    const FOREIGN_LIST = await listCandidates('other');
+    const LIVE_LIST = await listCandidates('u-1', conn({ id: listConn, is_testnet: false }));
+    const ANON_LIST = await listCandidates(null);
+    test('#344 owner can discover recovery candidates without exposing foreign rows or secrets', () => {
+      eq(CANDIDATES.status, 200);
+      eq(CANDIDATES.json.candidates.length, 1);
+      eq(CANDIDATES.json.candidates[0].id, ATT);
+      eq(CANDIDATES.db.writes.length, 0);
+      assert(!JSON.stringify(CANDIDATES.json).includes('api_secret'), 'credential leaked');
+    });
+    test('#344 candidate listing rejects foreign, LIVE and anonymous access', () => {
+      eq(FOREIGN_LIST.status, 404);
+      eq(LIVE_LIST.status, 409);
+      eq(ANON_LIST.status, 401);
+    });
+
     // ── 관측을 순차로 먼저 돌린다 ──
     const FIRST = await attest(emptyVenue());
     const DONE = await attest(emptyVenue(), {

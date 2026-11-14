@@ -30,7 +30,7 @@ import {
   getFuturesPositions, getFuturesOpenOrders, getFuturesOpenAlgoOrders,
 } from '@/lib/exchanges/binanceFutures';
 import { legacySmokeExposureVerdict } from '@/lib/smoke/smokePlan';
-import { planAttestation, observationOf } from '@/lib/smoke/exposureAttestation';
+import { planAttestation, observationOf, attestationVerdict } from '@/lib/smoke/exposureAttestation';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -48,6 +48,37 @@ function stepState(steps: any, id: string): string | null {
   if (v == null) return null;
   const st = typeof v === 'string' ? v : v?.state;
   return st == null ? null : String(st).toUpperCase();
+}
+
+/** Owner-facing discovery only; never decrypt credentials or query the venue. */
+export async function GET(req: NextRequest) {
+  const userId = await resolveUserId(req.headers.get('authorization'), null, null);
+  if (!userId) return bad('AUTH_REQUIRED', 401);
+  const connectionId = new URL(req.url).searchParams.get('connectionId');
+  if (!connectionId || !UUID.test(connectionId)) return bad('BAD_CONNECTION_ID', 400);
+  const sb = getSupabaseAdmin();
+  if (!sb) return bad('DATABASE_UNAVAILABLE', 503);
+  try {
+    const connection = await (sb as any).from('exchange_connections')
+      .select('id,exchange_id,is_testnet').eq('id', connectionId).eq('user_id', userId).maybeSingle();
+    if (connection.error) return bad('CONNECTION_UNREADABLE', 503);
+    if (!connection.data) return bad('NOT_FOUND', 404);
+    if (connection.data.exchange_id !== 'binance' || connection.data.is_testnet !== true) {
+      return bad('VERIFIED_TESTNET_REQUIRED', 409);
+    }
+    const rows = await (sb as any).from('smoke_tests').select('id,symbol,steps')
+      .eq('user_id', userId).eq('connection_id', connectionId).eq('mode', 'TESTNET')
+      .eq('state', 'UNKNOWN').in('symbol', ['BTCUSDT', 'ETHUSDT'])
+      .order('created_at', { ascending: true }).limit(100);
+    if (rows.error || !Array.isArray(rows.data)) return bad('SMOKE_ROW_UNREADABLE', 503);
+    return NextResponse.json({ ok: true, candidates: rows.data.map((row: any) => ({
+      id: row.id, symbol: row.symbol,
+      canObserve: stepState(row.steps, 'ORDERS_ZERO') !== 'FAIL'
+        && stepState(row.steps, 'POSITION_ZERO') !== 'FAIL',
+      attested: attestationVerdict(row.steps?._attestation, Date.now()).accepted,
+      firstObservedAt: row.steps?._attestation?.first?.at ?? null,
+    })), truncated: rows.data.length === 100 }, { headers: NO_STORE });
+  } catch { return bad('SMOKE_ROW_UNREADABLE', 503); }
 }
 
 export async function POST(req: NextRequest) {

@@ -48,6 +48,7 @@ import { A } from '@/lib/theme/colors';
 import { strategyRunRequest } from '@/lib/strategies/runRequest';
 import { LEGACY_STRATEGY_ID } from '@/lib/strategies/registry';
 import SmokeTestPanel from './SmokeTestPanel';
+import SmokeExposureRecovery from './SmokeExposureRecovery';
 import { MIN_CONTROL_TARGET } from '@/lib/ui/panelPrefs';
 import { dueDiagView } from '@/lib/ui/dueDiagView';
 
@@ -1426,6 +1427,10 @@ export default function AutotradeControl({ onSnapshot, onReload }: {
 
           기능은 그대로 두고 **여는 방식만** 바꾼다. 서버로 나가는 값도,
           저장 의미도 건드리지 않는다. */}
+        {conns.some((c: any) => String(c.id) === String(connId)
+          && c.exchange_id === 'binance' && c.is_testnet === true)
+          && <SmokeExposureRecovery key={connId} auth={auth} connectionId={connId} />}
+
       <button onClick={() => setCreateOpen(v => !v)}
         aria-expanded={createOpen}
         style={{
