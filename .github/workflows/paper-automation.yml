@@ -15,6 +15,9 @@ on:
       - 'src/components/SmokeExposureRecovery.tsx'
       - 'src/components/AutotradeControl.tsx'
       - 'scripts/probe/smoke-exposure-flow.mjs'
+      - 'src/lib/exchanges/binanceAlgo*.ts'
+      - 'scripts/binance-algo-pg.test.mjs'
+      - 'supabase/migrations/100_testnet_algo_intents.sql'
   workflow_dispatch:
 permissions:
   contents: read
@@ -32,6 +35,25 @@ jobs:
       - name: New PAPER RPCs exist with restricted execution
         run: |
           psql "$(cat /tmp/db-url)" -v ON_ERROR_STOP=1 -c "DO \$\$ BEGIN IF to_regprocedure('public.paper_auto_claim()') IS NULL OR has_function_privilege('authenticated','public.paper_auto_claim()','EXECUTE') THEN RAISE EXCEPTION 'PAPER automation schema or RPC permission invalid'; END IF; END \$\$;"
+      - name: Algo schema exists and authenticated owners cannot forge intent evidence
+        run: |
+          psql "$(cat /tmp/db-url)" -v ON_ERROR_STOP=1 <<'SQL'
+          BEGIN;
+          INSERT INTO public.live_orders(id,user_id,client_order_id,exchange,mode,symbol,side,quantity,status)
+          VALUES('a1000000-0000-4000-8000-000000000001','a1000000-0000-4000-8000-000000000002','offline-algo-rls','binance','TESTNET','BTCUSDT','BUY',1,'FAILED');
+          SELECT set_config('request.jwt.claims','{"sub":"a1000000-0000-4000-8000-000000000002","role":"authenticated"}',true);
+          SET LOCAL ROLE authenticated;
+          DO $$ DECLARE changed integer; BEGIN
+            IF (SELECT count(*) FROM public.live_orders WHERE id='a1000000-0000-4000-8000-000000000001') <> 1 THEN RAISE EXCEPTION 'owner SELECT missing'; END IF;
+            BEGIN
+              WITH edits AS (UPDATE public.live_orders SET testnet_algo_intents='{"forged":{"state":"CANCELED"}}' WHERE id='a1000000-0000-4000-8000-000000000001' RETURNING id) SELECT count(*) INTO changed FROM edits;
+              IF changed <> 0 THEN RAISE EXCEPTION 'owner can forge Algo evidence'; END IF;
+            EXCEPTION WHEN insufficient_privilege THEN NULL;
+            END;
+          END $$;
+          RESET ROLE;
+          ROLLBACK;
+          SQL
   local-paper:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -70,6 +92,9 @@ jobs:
       - name: Browser to API to durable ledger, with browser closed during ticks
         run: |
           NODE_PATH="$RUNNER_TEMP/paper-probe/node_modules" PAPER_AUTO_POSTGREST_BIN="$RUNNER_TEMP/postgrest" node scripts/probe/paper-automation-flow.mjs
+      - name: Atomic TESTNET Algo child intents and lost DB response recovery
+        run: |
+          PAPER_AUTO_POSTGREST_BIN="$RUNNER_TEMP/postgrest" node --test scripts/binance-algo-pg.test.mjs
       - name: Owner recovery UI to API to PostgreSQL, resumed in a new browser
         run: |
           NODE_PATH="$RUNNER_TEMP/paper-probe/node_modules" PAPER_AUTO_POSTGREST_BIN="$RUNNER_TEMP/postgrest" node scripts/probe/smoke-exposure-flow.mjs

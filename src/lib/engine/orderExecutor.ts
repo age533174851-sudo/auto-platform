@@ -71,6 +71,8 @@ export interface ExecuteArgs {
    * **안 넘기면 지금까지와 똑같다.** 기존 호출부의 바이트는 바뀌지 않는다.
    */
   adoptIntent?: boolean;
+  /** Staged TESTNET smoke transport only; never changes LIVE strategy policy. */
+  testnetAlgoProtection?: boolean;
   /**
    * 이 주문을 낸 것이 누구인가.
    *
@@ -567,6 +569,21 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
   // 갈린다(바이낸스 익절은 policy를 보지 않았다). 축을 나눠서 두 거래소가
   // 같은 계약을 같게 실행하도록 한다.
   const noFixedTp = args.takeProfitPolicy === 'NO_FIXED_TP';
+  const useAlgo = args.testnetAlgoProtection === true;
+  if (useAlgo) {
+    if (exchange !== 'binance' || mode !== 'TESTNET' || args.reduceOnly === true
+        || !String(args.signalId || '').startsWith('smoke-test:')
+        || (args.orderType ?? 'MARKET') !== 'MARKET'
+        || policy !== 'REQUIRED' || noFixedTp || !(Number(args.stopLoss) > 0)) {
+      return { ok: false, status: 'REJECTED', clientOrderId, message: 'TESTNET_SMOKE_ALGO_SCOPE_REQUIRED' };
+    }
+    try {
+      const { testnetAlgoConnectionClear } = await import('../exchanges/binanceAlgoStore');
+      if (!await testnetAlgoConnectionClear(sb, args.userId, args.connectionId)) {
+        return { ok: false, status: 'UNKNOWN', clientOrderId, message: 'ALGO_LEDGER_UNRESOLVED_OR_UNREADABLE' };
+      }
+    } catch { return { ok: false, status: 'UNKNOWN', clientOrderId, message: 'ALGO_LEDGER_UNREADABLE' }; }
+  }
   const orderType = args.orderType ?? 'MARKET';
   // 청산이면 방향이 뒤집힌다. plan.side는 '무슨 포지션을 다루는가'이고
   // reduceOnly는 그것을 줄이는 주문이므로 반대 방향으로 보내야 한다.
@@ -830,6 +847,15 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
   try {
     if (exchange === 'binance') {
       const bf = await import('@/lib/exchanges/binanceFutures');
+      if (useAlgo) {
+        const [positionMode, reference] = await Promise.all([
+          bf.getFuturesPositionMode(apiKey, apiSecret, true), bf.freshTestnetAlgoReference(plan.symbol),
+        ]);
+        if (positionMode.mode !== 'ONE_WAY' || !reference) {
+          await update({ status: 'REJECTED', error_message: 'ALGO_MODE_OR_REFERENCE_NOT_CONFIRMED' });
+          return { ok: false, status: 'REJECTED', clientOrderId, message: 'ALGO_MODE_OR_REFERENCE_NOT_CONFIRMED' };
+        }
+      }
 
       // ── 2) 거래소에 이미 같은 주문이 있는지 확인 ──
       try {
@@ -1120,6 +1146,25 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       // (SHORT는 반대). 반올림으로 처리하면 손절이 한 틱 가까워지거나
       // 익절이 한 틱 멀어져 **닿지 않는 보호주문**이 된다.
       const tick = filters?.tickSize && filters.tickSize > 0 ? filters.tickSize : null;
+      const placeProtection = async (opts: Parameters<typeof bf.placeFuturesTPSL>[2], sequence = 0) => {
+        if (!useAlgo) return bf.placeFuturesTPSL(apiKey, apiSecret, opts, testnet);
+        const [{ executeTestnetAlgoProtection }, { protectiveClientOrderId }] = await Promise.all([
+          import('../exchanges/binanceAlgoExecution'), import('./orderOwnership'),
+        ]);
+        const [positionMode, reference] = await Promise.all([
+          bf.getFuturesPositionMode(apiKey, apiSecret, true), bf.freshTestnetAlgoReference(plan.symbol),
+        ]);
+        if (positionMode.mode !== 'ONE_WAY' || !reference) return { success: false, message: 'ALGO_REFERENCE_OR_MODE_UNKNOWN' };
+        return executeTestnetAlgoProtection(sb, { userId: args.userId, connectionId: args.connectionId, parentId: orderRowId }, {
+          environment: 'TESTNET', symbol: plan.symbol, positionMode: 'ONE_WAY', closes: plan.side,
+          side: opts.side, type: opts.type, triggerPrice: opts.stopPrice, tickSize: tick,
+          workingType: 'MARK_PRICE', referencePrice: reference.price, referenceObservedAtMs: reference.atMs,
+          evaluatedAtMs: Date.now(), maxReferenceAgeMs: 5000, closeAll: opts.quantity == null,
+          ...(opts.quantity != null ? { quantity: opts.quantity, quantityStep: filters?.limitQty?.stepSize, reduceOnly: true } : {}),
+          clientAlgoId: protectiveClientOrderId(clientOrderId, opts.type === 'STOP_MARKET' ? 'STOP_LOSS' : 'TAKE_PROFIT', sequence),
+        }, { post: payload => bf.postTestnetAlgoOrder(apiKey, apiSecret, payload),
+          readOpen: symbol => bf.getFuturesOpenAlgoOrders(apiKey, apiSecret, true, symbol) }, sequence);
+      };
       /** 조건부 주문의 reduceOnly 수량에도 LOT_SIZE와 MARKET_LOT_SIZE를
        * **모두** 적용한다. MARKET_LOT_SIZE.stepSize=0은 비활성이라는 뜻이고
        * 이때도 LOT_SIZE를 반드시 지켜야 한다. 필터 조회 실패 시 청산
@@ -1138,14 +1183,14 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
         const slTrig = roundTrigger(args.stopLoss, plan.side, 'STOP', tick);
         const sl = slTrig.price == null
           ? { success: false, message: `손절가를 호가 단위에 맞추지 못했습니다: ${slTrig.note}` } as any
-          : await bf.placeFuturesTPSL(apiKey, apiSecret, {
+          : await placeProtection({
           symbol: plan.symbol, side: closeSide, stopPrice: slTrig.price, type: 'STOP_MARKET',
           // 1차는 closePosition(그때 있는 전량)이 맞다. -4120 대체 방식은
           // 거래소가 **증명한 체결 수량**만 사용한다. res.qty는 origQty를
           // 우선 돌려줄 수 있어 실제 체결 수량이 아니다. 체결 증거가 없으면
           // 추정 수량으로 reduceOnly 주문을 보내지 않는다.
           fallbackQuantity: protQty(fill.filledQty) ?? null,
-        }, testnet);
+        });
         if ((sl as any)?.success) slId = String((sl as any).orderId);
         else {
           slError = String((sl as any)?.message || '원인 불명');
@@ -1154,11 +1199,7 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
           // 이 말이 없으면 같은 시도를 반복하게 되고, 시도마다 진입·청산
           // 수수료가 나간다(실제로 잔고가 그렇게 줄었다).
           if ((sl as any)?.envUnsupported) {
-            slError += testnet
-              ? ' — 이 환경에서는 거래소 손절을 걸 수 없으므로, 여기서 손절 있는 진입은 불가능합니다.'
-                + ' 실전(fapi)은 STOP_MARKET을 받으므로 이 제약은 데모에만 해당합니다.'
-                + ' 모의(PAPER) 모드는 앱이 직접 손절을 계산하므로 연습에 쓸 수 있습니다.'
-              : ' — 거래소가 조건부 주문을 받지 않습니다. 손절 없이 진입하지 않습니다.';
+            slError += ' — 손절 주문 연결을 복구해야 합니다. 손절 없이 진입을 완료하지 않습니다.';
           }
         }
       }
@@ -1166,11 +1207,14 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       const tpIds: string[] = [];
       if (args.reduceOnly) {
         // 위와 같은 이유 — 나가는 주문에 익절 사다리를 걸지 않는다
+      } else if (useAlgo && !slId) {
+        // A failed/ambiguous stop goes straight to the existing unwind path;
+        // do not submit an additional take-profit while protection is unknown.
       } else if (noFixedTp) {
         // 고정 익절을 쓰지 않는 계약이다. **여기가 예전에 Gate와 갈렸다** —
         // 이 자리에는 정책 검사가 없어서 익절이 그대로 나갔다.
       } else if (args.exitPlan) {
-        for (const o of args.exitPlan.orders) {
+        for (const [sequence, o] of args.exitPlan.orders.entries()) {
           if (o.kind !== 'PARTIAL_TP') continue;   // 손절은 위에서 이미 걸었다
           const pTrig = roundTrigger(o.price, plan.side, 'TAKE_PROFIT', tick);
           if (pTrig.price == null) continue;   // 격자에 못 올리면 안 보낸다
@@ -1178,10 +1222,10 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
           // PARTIAL_TP에 quantity를 생략하면 closePosition=true가 되어
           // 부분 익절이 전량 청산으로 바뀐다. 절대로 그대로 보내지 않는다.
           if (partialQty == null) continue;
-          const r = await bf.placeFuturesTPSL(apiKey, apiSecret, {
+          const r = await placeProtection({
             symbol: plan.symbol, side: closeSide, stopPrice: pTrig.price,
             type: 'TAKE_PROFIT_MARKET', quantity: partialQty,
-          }, testnet);
+          }, sequence);
           if ((r as any)?.success) tpIds.push(String((r as any).orderId));
           // 분할 익절 실패는 진입을 되돌릴 사유가 아니다 — 손절은 이미 걸려
           // 있으므로 손실은 고정된다. 이익 확보만 덜 되는 것이다.
@@ -1191,9 +1235,9 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
         const tpTrig = roundTrigger(args.takeProfit, plan.side, 'TAKE_PROFIT', tick);
         const tp = tpTrig.price == null
           ? { success: false, message: `익절가를 호가 단위에 맞추지 못했습니다: ${tpTrig.note}` } as any
-          : await bf.placeFuturesTPSL(apiKey, apiSecret, {
+          : await placeProtection({
           symbol: plan.symbol, side: closeSide, stopPrice: tpTrig.price, type: 'TAKE_PROFIT_MARKET',
-        }, testnet);
+        });
         if ((tp as any)?.success) tpId = String((tp as any).orderId);
       }
       await update({ sl_order_id: slId || null, tp_order_id: tpId || null });
@@ -1213,7 +1257,9 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
         const { verifyStopAttached, shouldUnwind } = await import('./stopVerify');
         let openOrders: any[] | null = null;
         try {
-          const oo: any = await bf.getFuturesOpenOrders(apiKey, apiSecret, testnet, plan.symbol);
+          const oo: any = useAlgo
+            ? await bf.getTestnetProtectiveOrders(apiKey, apiSecret, plan.symbol)
+            : await bf.getFuturesOpenOrders(apiKey, apiSecret, testnet, plan.symbol);
           // success가 false여도 orders: []를 돌려준다. 그 빈 배열을 그대로
           // 넘기면 **조회 실패가 '손절 없음'이 되어 포지션이 청산된다.**
           openOrders = oo?.success && Array.isArray(oo.orders) ? oo.orders : null;
@@ -1385,6 +1431,13 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
             : ` · ⚠ ${ledger.reason}`;
         }
 
+        if (closed && useAlgo) {
+          const { cleanupTestnetAlgoParent } = await import('../exchanges/binanceAlgoExecution');
+          const cleaned = await cleanupTestnetAlgoParent(sb,
+            { userId: args.userId, connectionId: args.connectionId, parentId: orderRowId },
+            { apiKey, apiSecret, testnet }, plan.symbol);
+          tpCleanupNote += cleaned ? ' · Algo 보호주문 정리·장부 확인' : ' · Algo 정리 확인 불가 — 새 진입 차단';
+        }
         const detail = `손절 부착 실패(${slError})`;
         if (closed) {
           await update({ status: 'FAILED', error_message: `${detail} — 포지션을 즉시 청산했습니다` });
@@ -1431,6 +1484,20 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
         : { remaining: null, note: '' };
       if (args.reduceOnly) {
         await update({ error_message: closeCheck.remaining === 0 ? null : closeCheck.note.trim() || null });
+      }
+
+      if (useAlgo) {
+        const books = await bf.getTestnetProtectiveOrders(apiKey, apiSecret, plan.symbol);
+        const owned = new Set([slId, tpId, ...tpIds].filter(Boolean));
+        const protection = readbackProtective({ venue: 'binance', positionSide: plan.side,
+          expectedStop: args.stopLoss, expectedTakeProfit: args.takeProfit,
+          orders: books.success ? books.orders.filter(order => owned.has(String(order.orderId))) : null });
+        return { ok: true, status: fill.status, clientOrderId, exchangeOrderId: String(res.orderId),
+          filledQty: fill.filledQty ?? undefined, avgPrice: fill.avgPrice ?? undefined,
+          settled: fill.status === 'FILLED' && Number(fill.filledQty) > 0 && Number(fill.avgPrice) > 0,
+          slOrderId: slId, tpOrderId: tpId, protection,
+          leverageConfirmed: true, positionModeConfirmed: true,
+          message: protection.reason || 'TESTNET Algo 보호주문 재조회 완료' };
       }
 
       return {

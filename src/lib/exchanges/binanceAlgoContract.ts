@@ -1,13 +1,13 @@
-// Binance USD-M Algo Service conditional STOP/TP contract — OFFLINE ONLY.
+// Pure Binance USD-M Algo Service conditional STOP/TP contracts.
 //
 // Official API as reviewed 2026-10-16:
 // POST /fapi/v1/algoOrder, algoType=CONDITIONAL, triggerPrice,
 // clientAlgoId and response.algoId (distinct from regular orderId).
 //
 // CRITICAL: this module makes NO network requests, imports no exchange
-// credentials and is NOT connected to startAttempt/placeFuturesTPSL.
-// It is only a future adapter contract until tested with a real TESTNET
-// signed GET/POST, safe cancellation/reconciliation, and release policies.
+// credentials. The TESTNET smoke integration in binanceAlgoExecution.ts
+// supplies separate owner/realm gates, durable intents and actual transport.
+// executionAuthorized:false here is never a runtime authorization grant.
 //
 // Binance docs:
 // https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/New-Algo-Order
@@ -428,6 +428,9 @@ export function inspectBinanceAlgoCancellationEvidence(i: {
   expectedPayload: Record<string, string> | null;
   accepted: AcceptedAlgoOrder;
   deleteReceipt: any;
+  /** Actual signed observation from before this call; permits a read-only
+   * retry after a lost DELETE reply, without manufacturing a receipt. */
+  priorCanceledLookup?: { success?: unknown; order?: any };
   orderLookup: { success?: unknown; order?: unknown } | null | undefined;
   openLookup: { success?: unknown; orders?: unknown } | null | undefined;
 }): {
@@ -453,10 +456,15 @@ export function inspectBinanceAlgoCancellationEvidence(i: {
   const lossless = (n: any) => typeof n === 'string' && /^[1-9][0-9]*$/.test(n)
     ? n : typeof n === 'number' && Number.isSafeInteger(n) && n > 0
       ? String(n) : null;
-  if (!i.deleteReceipt ||
+  const prior = i.priorCanceledLookup;
+  const previouslyCanceled = prior?.success === true && prior.order?.algoStatus === 'CANCELED'
+    && parseBinanceAlgoAcceptance(prior.order, p).acceptedAlgoId === accepted.acceptedAlgoId
+    && prior.order?.positionSide === 'BOTH' && prior.order?.workingType === p.workingType
+    && Number(prior.order?.triggerPrice) === Number(p.triggerPrice);
+  if (!previouslyCanceled && (!i.deleteReceipt ||
       lossless(i.deleteReceipt.algoId) !== accepted.acceptedAlgoId ||
       i.deleteReceipt.clientAlgoId !== p.clientAlgoId ||
-      ![200, '200'].includes(i.deleteReceipt.code)) {
+      ![200, '200'].includes(i.deleteReceipt.code))) {
     return result('RECEIPT_UNKNOWN');
   }
   const query = i?.orderLookup;

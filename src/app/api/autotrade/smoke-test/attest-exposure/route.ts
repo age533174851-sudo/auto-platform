@@ -98,7 +98,7 @@ export async function POST(req: NextRequest) {
   let row: any;
   try {
     const r = await (sb as any).from('smoke_tests')
-      .select('id,user_id,connection_id,symbol,state,mode,steps,created_at')
+      .select('id,user_id,connection_id,symbol,state,mode,steps,created_at,client_order_id')
       .eq('id', testId).eq('user_id', userId).maybeSingle();
     if (r.error) throw new Error('unreadable');
     row = r.data;
@@ -179,6 +179,15 @@ export async function POST(req: NextRequest) {
   if (!Array.isArray(wrote?.data) || wrote.data.length !== 1 || wrote.data[0]?.id !== row.id) {
     return bad('ATTESTATION_WRITE_UNCONFIRMED', 409,
       { rows: Array.isArray(wrote?.data) ? wrote.data.length : null });
+  }
+  // Same authenticated real observations also fence ambiguous Algo children.
+  // This preserves their original state and never grants a resend of them.
+  if (typeof row.client_order_id === 'string' && row.client_order_id) {
+    try {
+      const { attestParentAlgoIntents } = await import('@/lib/exchanges/binanceAlgoStore');
+      await attestParentAlgoIntents(sb, userId, row.connection_id, row.client_order_id,
+        observationOf(observed, nowMs), nowMs);
+    } catch { return bad('ALGO_ATTESTATION_WRITE_UNCONFIRMED', 503); }
   }
 
   return NextResponse.json({

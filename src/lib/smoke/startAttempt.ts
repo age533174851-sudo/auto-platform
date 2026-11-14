@@ -230,6 +230,7 @@ export async function startAttempt(sb: any, i: StartAttemptInput): Promise<Start
       signalId: `${SMOKE_STRATEGY_ID}:${row.id}`,
       clientOrderId,
       exchange, mode: 'TESTNET', source: 'MANUAL',
+      testnetAlgoProtection: exchange === 'binance',
       protectionPolicy: 'REQUIRED',
       stopLoss: i.side === 'LONG' ? ref * (1 - ep.spec.stopPct / 100) : ref * (1 + ep.spec.stopPct / 100),
       takeProfit: i.side === 'LONG' ? ref * (1 + (ep.spec.takeProfitPct ?? 0) / 100)
@@ -411,9 +412,16 @@ export async function startAttempt(sb: any, i: StartAttemptInput): Promise<Start
       reason: `진입 확인 · ${i.holdMin}분 뒤 자동 청산`,
     });
 
-    const { data: fresh } = await sb.from('smoke_tests').select('*').eq('id', row.id).maybeSingle();
+    const readback = await sb.from('smoke_tests').select('*').eq('id', row.id)
+      .eq('user_id', i.userId).eq('connection_id', i.connectionId).maybeSingle();
+    const fresh = readback.data;
+    if (readback.error || !fresh || fresh.id !== row.id || fresh.state !== 'HOLDING'
+        || Date.parse(String(fresh.hold_until)) !== until || fresh.client_order_id !== clientOrderId
+        || fresh.sl_order_id !== common.sl_order_id || fresh.tp_order_id !== common.tp_order_id) {
+      throw new Error('자동 청산 마감의 저장을 확인하지 못했습니다 — 진입과 보호주문 대조가 필요합니다');
+    }
     return {
-      ok: true, code: 'STARTED', row: fresh ?? row, status: 200,
+      ok: true, code: 'STARTED', row: fresh, status: 200,
       message: `진입 확인 — ${i.holdMin}분 뒤 서버가 전량 청산합니다`,
     };
   } catch (e: any) {

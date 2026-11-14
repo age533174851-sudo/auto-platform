@@ -614,14 +614,13 @@ export function runBinanceAlgoContractTests() {
     }).ok, false);
   });
 
-  test('Contract is not connected to production POST or DELETE until venue readback tests exist', () => {
-    // Binance adapter still contains the known legacy stopPrice /order call;
-    // never claim this research builder migrates it by itself.
+  test('Pure Algo contract owns no network or signed write transport', () => {
+    // Runtime scope/authority is tested through the actual executor. This
+    // pure builder/classifier must never acquire a transport of its own.
     const fs = require('fs') as typeof import('fs');
     const path = require('path') as typeof import('path');
     const source = fs.readFileSync(path.resolve(process.cwd(),
-      'src/lib/exchanges/binanceFutures.ts'), 'utf8');
-    assert(!source.includes('buildBinanceConditionalAlgoPayload('));
-    assert(!source.includes('binanceAlgoCancellationIdentifier('));
+      'src/lib/exchanges/binanceAlgoContract.ts'), 'utf8');
+    assert(!/\bfetch\s*\(|\bfapiSigned\s*\(/.test(source));
   });
 }

@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const root = process.cwd();
+execFileSync(process.execPath, ['--test', 'scripts/binance-algo-pg.test.mjs'], { cwd: root, stdio: 'inherit' });
 execFileSync(process.execPath, ['--test', 'scripts/smoke-workflow-evidence.test.mjs'], { cwd: root, stdio: 'inherit' });
 // Offline ten-slot model is deliberately separate from live order execution.
 execFileSync(process.execPath, ['--test', 'scripts/ten-slot-offline.test.mjs'], { cwd: root, stdio: 'inherit' });
@@ -398,6 +399,7 @@ import { runCreatorIntakeTests } from './src/lib/signals/creatorIntake.test';
 import { runSignalPathTests } from './src/lib/signals/signalPath.test';
 import { runVenueBarsTests } from './src/lib/markets/venueBars.test';
 import { runLoginDiagnosticTests } from './src/lib/auth/loginDiagnostic.test';
+import { runBinanceAlgoExecutionTests } from './src/test/integration/binanceAlgoExecution.test';
 import { summary, flushAsync } from './src/test/harness';
 console.log('════════ TRAIGO 코어 유닛 테스트 ════════');
 runPnlTests(); runBacktestTests(); runRiskManagerTests(); runExitPlanTests(); runPaperDispatchTests(); runPaperOpenAtomicTests(); runPaperEventTimeTests(); runPaperChallengeSweepTests(); runPaperCapacityTests(); runPaperExitSweepTests(); runPaperExitSweepMoreTests(); runExcursionTests(); runPositionGuardTests(); runStateReconcileTests(); runOrderLifecycleTests(); runUnknownResolverTests(); runDataQualityTests(); runOperatingModeTests();
@@ -450,6 +452,8 @@ runExitPolicyTests(); runRunRequestTests(); runBacktestVerdictTests(); runAiResu
   // Signed-GET Algo evidence uses synthetic encryption and intercepts
   // global fetch. Isolate AFTER all older integration stubs are restored.
   await runBinanceAlgoReadRouteTests();
+  await flushAsync();
+  await runBinanceAlgoExecutionTests();
   await flushAsync();
   const s = summary();
   console.log('\\n결과: ' + s.passed + ' 통과 / ' + s.failed + ' 실패');

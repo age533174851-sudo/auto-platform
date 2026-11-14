@@ -40,7 +40,7 @@ export interface VenueCall {
   authed: boolean;
 }
 
-export interface VenueReply {
+export interface VenueResponse {
   status?: number;
   /** 본문. 함수면 호출 순서(0부터)를 받아 매번 다른 응답을 줄 수 있다 */
   json?: any | ((callIndex: number) => any);
@@ -49,6 +49,8 @@ export interface VenueReply {
   /** 응답이 오지 않는다 — AbortSignal.timeout과 같은 모양 */
   timeout?: boolean;
 }
+
+export type VenueReply = VenueResponse | ((call: VenueCall) => VenueResponse | Promise<VenueResponse>);
 
 type Matcher = (c: VenueCall) => boolean;
 
@@ -89,7 +91,7 @@ export class FakeVenue {
   /** 주문 전송 횟수 — 중복 주문 판정의 핵심 숫자 */
   orderSends(): VenueCall[] {
     return this.calls.filter((c) => c.method === 'POST'
-      && /\/order\b|\/orders\b/.test(c.path));
+      && /\/(?:order|orders|algoOrder)\b/.test(c.path));
   }
 
   install(): () => void {
@@ -116,18 +118,19 @@ export class FakeVenue {
       const n = this.hits.get(rule.label) ?? 0;
       this.hits.set(rule.label, n + 1);
 
-      if (rule.reply.timeout) {
+      const reply = typeof rule.reply === 'function' ? await rule.reply(call) : rule.reply;
+      if (reply.timeout) {
         // 실제 타임아웃과 같은 모양 — AbortSignal.timeout이 던지는 오류다.
         const e: any = new Error('The operation was aborted due to timeout');
         e.name = 'TimeoutError';
         throw e;
       }
-      if (rule.reply.throws) throw new Error(rule.reply.throws);
+      if (reply.throws) throw new Error(reply.throws);
 
-      const bodyVal = typeof rule.reply.json === 'function'
-        ? (rule.reply.json as (i: number) => any)(n)
-        : rule.reply.json;
-      const status = rule.reply.status ?? 200;
+      const bodyVal = typeof reply.json === 'function'
+        ? (reply.json as (i: number) => any)(n)
+        : reply.json;
+      const status = reply.status ?? 200;
       const text = JSON.stringify(bodyVal ?? {});
       return {
         ok: status >= 200 && status < 300,
@@ -180,6 +183,7 @@ export interface FakeDbOptions {
   updateFailure?: { table: string; mode: 'error' | 'zero-rows' | 'missing-data' | 'wrong-id' };
   /** Another writer changes the row between the initial read and UPDATE. */
   beforeUpdate?: (table: string, rows: any[]) => void;
+  algoSchema?: boolean;
 }
 
 export class FakeDb {
@@ -207,7 +211,7 @@ export class FakeDb {
 
   from(table: string): any {
     const db = this;
-    const filters: { col: string; vals: any[] }[] = [];
+    const filters: { col: string; vals: any[]; negate?: boolean }[] = [];
     // 범위 조건(`gte`·`lte`). 창 단위로 센 줄을 읽는 질의가 쓴다 —
     // 이것이 없으면 그런 질의가 **시험에서만** 터진다.
     const ranges: { col: string; op: 'gte' | 'lte'; val: any }[] = [];
@@ -225,8 +229,8 @@ export class FakeDb {
     const apply = () => {
       let out = db.rows[table] ?? [];
       for (const f of filters) out = out.filter((r) => f.vals.some((v) =>
-        r[f.col] === v || (f.col === 'steps' && typeof v === 'string'
-          && JSON.stringify(r[f.col]) === v)));
+        r[f.col] === v || (['steps', 'testnet_algo_intents'].includes(f.col) && typeof v === 'string'
+          && JSON.stringify(r[f.col]) === v)) !== !!f.negate);
       for (const g of ranges) {
         const bound = cmpVal(g.val);
         out = out.filter((r) => {
@@ -277,6 +281,7 @@ export class FakeDb {
         return builder;
       },
       eq(col: string, val: any) { filters.push({ col, vals: [val] }); return builder; },
+      neq(col: string, val: any) { filters.push({ col, vals: [val], negate: true }); return builder; },
       in(col: string, vals: any[]) { filters.push({ col, vals: [...vals] }); return builder; },
       gte(col: string, val: any) { ranges.push({ col, op: 'gte', val }); return builder; },
       lte(col: string, val: any) { ranges.push({ col, op: 'lte', val }); return builder; },
@@ -291,7 +296,8 @@ export class FakeDb {
           if (f && f.table === table) {
             return { data: null, error: { code: f.code, message: `insert 실패 (${f.code})` } };
           }
-          const row = { id: `row-${++db.seq}`, ...pending.patch };
+          const row = { id: `row-${++db.seq}`,
+            ...(db.opts.algoSchema && table === 'live_orders' ? { testnet_algo_intents: {} } : {}), ...pending.patch };
           db.rows[table] = (db.rows[table] ?? []).concat([row]);
           db.writes.push({ table, kind: 'insert', patch: { ...pending.patch } });
           return { data: { id: row.id, status: row.status }, error: null };

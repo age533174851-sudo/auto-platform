@@ -466,6 +466,16 @@ export async function readAllOpenOrdersForSmoke(
   }
 }
 
+export async function readSmokeProtectiveOrders(c: VenueCreds, symbol: string): Promise<any[] | null> {
+  if (c.exchange !== 'binance') return readProtectiveOrders(c, symbol);
+  if (c.testnet !== true) return null;
+  try {
+    const bf = await import('../exchanges/binanceFutures');
+    const result = await bf.getTestnetProtectiveOrders(c.apiKey, c.apiSecret, symbol);
+    return result.success === true ? result.orders : null;
+  } catch { return null; }
+}
+
 /**
  * **이 id들만** 취소한다. 목록을 통째로 지우지 않는다.
  *
@@ -556,7 +566,8 @@ export async function cancelExact(
     }
 
     // **여기가 핵심이다.** 요청 결과가 아니라 목록을 다시 읽어 확인한다.
-    leftover = await readProtectiveOrders(c, symbol);
+    leftover = c.exchange === 'binance' && ids.some(id => id.startsWith('algo:'))
+      ? await readSmokeProtectiveOrders(c, symbol) : await readProtectiveOrders(c, symbol);
     if (leftover == null) break;   // 못 읽었다 — 더 지워도 확인할 수 없다
     const present = leftover.map(row => String((row as any)?.id ?? (row as any)?.orderId ?? '')).filter(Boolean);
     pending = pending.filter(id => present.includes(id));
