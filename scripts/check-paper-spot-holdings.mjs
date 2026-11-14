@@ -318,6 +318,12 @@ function body(name) {
   if (!/status !== 'SOLD' && status !== 'REPLAYED'/.test(sellr)) {
     fail(`${SELLR}: 모르는 결과를 성공으로 흘려보냅니다`);
   }
+  // 재시도는 처음 손익을 돌려준다 — 체결가도 처음 것이어야 한다.
+  // 방금 읽은 시세를 바로 실으면 "처음 손익 + 지금 시세"가 섞인다.
+  if (/exitPrice:\s*px\.price/.test(sellr) || !/sellReceiptPrice\(/.test(sellr)) {
+    fail(`${SELLR}: 응답 체결가를 sellReceiptPrice로 고르지 않습니다 — `
+       + 'REPLAYED에 지금 시세를 처음 체결가처럼 싣습니다');
+  }
 }
 
 // ══════════════ ⑦ 장부를 못 정하면 기본 계좌로 안 내려간다 ══════════════
