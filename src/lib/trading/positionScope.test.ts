@@ -19,8 +19,11 @@
 // 그래서 한 화면의 포지션 줄은 **다시 읽지 않는다.** 주문에 쓰는 바로 그
 // `usePaperLedger` 결과를 그대로 받는다. 읽는 곳과 쓰는 곳이 같은 객체이면
 // 어긋날 자리가 없다.
+import { readFileSync } from 'fs';
+import { resolve } from 'path';
 import { test, eq, assert } from '../../test/harness';
 import { targetQuery, targetRequestFields, type PaperTarget } from './paperTarget';
+import { ledgerLiquidationPrice } from './ledgerLiquidation';
 
 export function runPositionScopeTests() {
   console.log('[포지션 계좌 범위]');
@@ -114,5 +117,42 @@ export function runPositionScopeTests() {
       '기본 계좌와 챌린지가 같은 보유를 봅니다');
     assert(sellBody(DEFAULT_T).challengeId !== sellBody(CHALLENGE_T).challengeId,
       '기본 계좌 매도와 챌린지 매도가 같은 장부로 나갑니다');
+  });
+
+  // ── ★ 포지션 줄의 청산가: 모르는 것을 0으로 그리지 않는다 ──
+  //
+  // 현물 모의 매수는 `liq ?? 0`으로 장부에 청산가 0이 저장된다. 조회
+  // 라우트가 그걸 `Number(...)`로 내보내면 포지션 줄에 "청산가 0.00"이
+  // 뜬다 — "곧 청산된다"와 "청산이 없다"가 같은 모양이 된다.
+  console.log('[포지션 줄 청산가]');
+
+  test('★ 현물 줄은 장부에 0이 있어도 청산가가 없다 (null)', () => {
+    eq(ledgerLiquidationPrice({ market: 'SPOT', liquidation_price: 0 }), null);
+    eq(ledgerLiquidationPrice({ market: 'SPOT', liquidation_price: '0' }), null);
+  });
+
+  test('★ 옛 줄의 NULL은 0이 아니라 null이다', () => {
+    eq(ledgerLiquidationPrice({ market: 'USDM', liquidation_price: null }), null);
+    eq(ledgerLiquidationPrice({ liquidation_price: undefined }), null);
+  });
+
+  test('★ 선물의 0·음수·비숫자는 "모름" 표식이다 — 실제 청산가는 0보다 크다', () => {
+    eq(ledgerLiquidationPrice({ market: 'USDM', liquidation_price: 0 }), null);
+    eq(ledgerLiquidationPrice({ market: 'USDM', liquidation_price: -5 }), null);
+    eq(ledgerLiquidationPrice({ market: 'USDM', liquidation_price: 'abc' }), null);
+  });
+
+  test('선물의 실제 청산가는 그대로 나간다 (NUMERIC 문자열 포함)', () => {
+    eq(ledgerLiquidationPrice({ market: 'USDM', liquidation_price: 54321.5 }), 54321.5);
+    eq(ledgerLiquidationPrice({ market: 'USDM', liquidation_price: '150000' }), 150000);
+  });
+
+  test('★ 조회 라우트가 청산가를 이 함수로 낸다 — Number(...)로 0을 만들지 않는다', () => {
+    const route = readFileSync(
+      resolve(__dirname, '../../app/api/paper/positions/route.ts'), 'utf8');
+    assert(route.includes('liquidationPrice: ledgerLiquidationPrice(p)'),
+      '/api/paper/positions가 청산가를 ledgerLiquidationPrice로 내지 않습니다');
+    assert(!/liquidationPrice:\s*Number\(p\.liquidation_price\)/.test(route),
+      '/api/paper/positions가 청산가를 Number(...)로 바꿔 0을 만듭니다');
   });
 }
