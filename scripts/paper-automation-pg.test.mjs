@@ -52,6 +52,35 @@ else {
     assert.equal(replies.filter(r=>r.out.includes('lease_token')).length,1);
     assert.equal(q("SELECT count(*) FROM paper_automation_runs WHERE state='CLAIMED'")[0],'1');
   });
+  // **한 번만 돌리는 경합 시험은 경합을 못 잡는다.**
+  //
+  // 바로 위 시험은 8중 깨우기를 한 번 돌린다. 103 없이 로컬 PostgreSQL 16에서
+  // 실제로 센 재현율은 회당 15%였다 (20회 중 3회 · 40회 중 6회). 즉 한 번만
+  // 돌리면 **85%는 초록으로 지나간다** — 그 초록은 "경합이 없다"는 뜻이 아니다.
+  //
+  // 그래서 같은 경합을 여러 번 돌린다. 회당 15%면 30회에서 적어도 한 번
+  // 잡을 확률이 1-0.85^30 = 99.2%다. 103을 적용하고 센 결과는 0/40 · 0/100
+  // 으로 실패가 없었다 — 고쳐진 상태에서 이 시험은 흔들리지 않는다.
+  //
+  // **세는 것은 회차 수가 아니라 토큰 수다.** 증상은 회차가 둘이 되는 것이
+  // 아니라 같은 회차에 lease_token이 두 번 발급되는 것이다 (뒤에 들어온
+  // 깨우기가 ELSE 복구 가지를 타고 먼저 돌던 워커의 회차를 조용히 빼앗는다).
+  // 유일 인덱스는 INSERT가 아니므로 위반되지 않고, 회차 수는 1로 보인다.
+  const RACE_ROUNDS = 30;
+  test(`8 simultaneous wakeups stay single-token across ${RACE_ROUNDS} rounds`, async () => {
+    const broken = [];
+    for (let i = 0; i < RACE_ROUNDS; i++) {
+      start();
+      const replies = await raceClaims(target, db, Array(8).fill('SELECT * FROM paper_auto_claim()'));
+      const failed = replies.filter(r => r.code !== 0).length;
+      const tokens = replies.filter(r => r.out.includes('lease_token')).length;
+      const claimed = q("SELECT count(*) FROM paper_automation_runs WHERE state='CLAIMED'")[0];
+      if (tokens !== 1 || claimed !== '1' || failed) {
+        broken.push(`${i + 1}회: 토큰 ${tokens} · CLAIMED ${claimed}${failed ? ` · psql 실패 ${failed}` : ''}`);
+      }
+    }
+    assert.deepEqual(broken, [], `경합 ${broken.length}/${RACE_ROUNDS}회\n${broken.join('\n')}`);
+  });
   test('8 simultaneous fill retries debit the existing ledger only once', async () => {
     start(); const r=claim();
     const replies=await raceClaims(target,db,Array(8).fill(fill(r)));
