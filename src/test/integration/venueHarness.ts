@@ -170,6 +170,16 @@ export interface FakeDbOptions {
   failInsertCode?: { table: string; code: string };
   /** select를 실패시킨다 */
   failSelectsOn?: string;
+  /**
+   * UPDATE의 **결과**를 바꾼다.
+   *
+   * `error`는 DB가 오류를 돌려준 경우, `zero-rows`는 **오류 없이 0행**인
+   * 경우다. 뒤쪽이 더 조용해서 더 위험하다 — 조건에 걸린 줄이 없는데
+   * `error: null`이라 성공으로 읽힌다.
+   */
+  updateFailure?: { table: string; mode: 'error' | 'zero-rows' | 'missing-data' | 'wrong-id' };
+  /** Another writer changes the row between the initial read and UPDATE. */
+  beforeUpdate?: (table: string, rows: any[]) => void;
 }
 
 export class FakeDb {
@@ -214,7 +224,9 @@ export class FakeDb {
 
     const apply = () => {
       let out = db.rows[table] ?? [];
-      for (const f of filters) out = out.filter((r) => f.vals.includes(r[f.col]));
+      for (const f of filters) out = out.filter((r) => f.vals.some((v) =>
+        r[f.col] === v || (f.col === 'steps' && typeof v === 'string'
+          && JSON.stringify(r[f.col]) === v)));
       for (const g of ranges) {
         const bound = cmpVal(g.val);
         out = out.filter((r) => {
@@ -228,12 +240,23 @@ export class FakeDb {
 
     const flushUpdate = () => {
       if (!pending || pending.kind !== 'update') return { data: [], error: null };
+      db.opts.beforeUpdate?.(table, db.rows[table] ?? []);
       if (db.opts.failUpdatesOn === table) {
         return { data: [], error: { message: `DB 쓰기 실패 (${table})`, code: 'XX000' } };
       }
       if (pending.patch.status === 'ACKED' && db.opts.failAckUpdate) {
         if (db.opts.failAckUpdate === 'throw') throw new Error('DB ACK 연결 끊김');
         if (db.opts.failAckUpdate === 'error') return { data: [], error: { code: 'XX000', message: 'DB ACK 쓰기 실패' } };
+        return { data: [], error: null };
+      }
+      const uf = db.opts.updateFailure;
+      if (uf && uf.table === table) {
+        if (uf.mode === 'missing-data') return { data: null, error: null };
+        if (uf.mode === 'wrong-id') return { data: [{ id: 'wrong-row' }], error: null };
+        if (uf.mode === 'error') {
+          return { data: null, error: { message: `DB 쓰기 실패 (${table})`, code: 'XX000' } };
+        }
+        // **오류 없이 0행.** 조건에 걸린 줄이 없었다는 뜻이고 성공이 아니다.
         return { data: [], error: null };
       }
       const where: Record<string, any> = {};
