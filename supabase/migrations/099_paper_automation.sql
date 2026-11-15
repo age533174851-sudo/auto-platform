@@ -1,6 +1,24 @@
 -- Browser-independent PAPER runner. No exchange scheduler or live ledger changes.
 -- Lock order: settings -> run -> existing paper account -> existing money RPC.
-CREATE TABLE public.paper_automation_settings (
+--
+-- 재적용 가능해야 한다 (#636)
+-- ───────────────────────────
+-- `restoreCanonical()` 은 정본 085 를 되세운 뒤 **085 뒤의 모든 번호
+-- 마이그레이션을 다시 세운다** — 085 만 되세우면 086 이 넣은 가드를
+-- 덮어버리기 때문이다. 그래서 086 이후는 전부 재적용 가능해야 한다.
+--
+-- 086 · 088 · 097 · 098 은 전부 그렇게 쓰여 있었는데 **099 만 빠져
+-- 있었다**(CREATE 5개 중 IF NOT EXISTS 0개). 그래서 2026-11-13 이 파일이
+-- 들어온 날부터 `paper-challenge-mutations.mjs` 가 기준선조차 세우지
+-- 못했고, **뮤테이션 증명 19건이 한 번도 돌지 않았다.**
+--
+-- `CLAUDE.md` 가 이름 붙인 고장 그대로다 — "경로가 둘인데 한쪽만 고침."
+-- 관례가 일곱 곳에 있는데 여덟 번째에서 빠졌다.
+--
+-- ★ 결과 스키마는 바뀌지 않는다. 빈 DB 에 처음 적용한 결과는 이전과
+--   같고, 이미 적용된 운영 DB 에서 이 파일이 다시 실행되지도 않는다.
+--   바뀌는 것은 **두 번째 적용이 실패하지 않는다**는 것뿐이다.
+CREATE TABLE IF NOT EXISTS public.paper_automation_settings (
   user_id uuid PRIMARY KEY,
   paper_account_id uuid NOT NULL,
   account_started_at timestamptz NOT NULL,
@@ -13,8 +31,8 @@ CREATE TABLE public.paper_automation_settings (
   updated_at timestamptz NOT NULL DEFAULT now(),
   FOREIGN KEY (paper_account_id,user_id) REFERENCES public.paper_accounts(id,user_id)
 );
-CREATE INDEX paper_automation_due ON public.paper_automation_settings(next_run_at) WHERE enabled;
-CREATE TABLE public.paper_automation_runs (
+CREATE INDEX IF NOT EXISTS paper_automation_due ON public.paper_automation_settings(next_run_at) WHERE enabled;
+CREATE TABLE IF NOT EXISTS public.paper_automation_runs (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id uuid NOT NULL REFERENCES public.paper_automation_settings(user_id),
   generation bigint NOT NULL,
@@ -26,13 +44,17 @@ CREATE TABLE public.paper_automation_runs (
   created_at timestamptz NOT NULL DEFAULT now(),
   finished_at timestamptz
 );
-CREATE UNIQUE INDEX paper_automation_one_claim ON public.paper_automation_runs(user_id) WHERE state='CLAIMED';
-CREATE INDEX paper_automation_history ON public.paper_automation_runs(user_id,created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS paper_automation_one_claim ON public.paper_automation_runs(user_id) WHERE state='CLAIMED';
+CREATE INDEX IF NOT EXISTS paper_automation_history ON public.paper_automation_runs(user_id,created_at DESC);
 ALTER TABLE public.paper_automation_settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.paper_automation_runs ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS paper_automation_settings_owner ON public.paper_automation_settings;
 CREATE POLICY paper_automation_settings_owner ON public.paper_automation_settings FOR SELECT TO authenticated USING (user_id=auth.uid());
+DROP POLICY IF EXISTS paper_automation_runs_owner ON public.paper_automation_runs;
 CREATE POLICY paper_automation_runs_owner ON public.paper_automation_runs FOR SELECT TO authenticated USING (user_id=auth.uid());
+DROP POLICY IF EXISTS paper_automation_settings_service ON public.paper_automation_settings;
 CREATE POLICY paper_automation_settings_service ON public.paper_automation_settings FOR ALL TO service_role USING (true) WITH CHECK (true);
+DROP POLICY IF EXISTS paper_automation_runs_service ON public.paper_automation_runs;
 CREATE POLICY paper_automation_runs_service ON public.paper_automation_runs FOR ALL TO service_role USING (true) WITH CHECK (true);
 REVOKE ALL ON public.paper_automation_settings,public.paper_automation_runs FROM PUBLIC,anon,authenticated;
 GRANT SELECT ON public.paper_automation_settings,public.paper_automation_runs TO authenticated;
