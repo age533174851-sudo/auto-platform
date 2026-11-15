@@ -14,6 +14,7 @@
 // 그리고 다중화의 **핵심 한 줄**도 함께 본다 — 099의 사용자 단위 유일
 // 인덱스를 지우지 않으면, 봇 하나가 도는 동안 나머지가 영원히 막힌다.
 import { readFileSync, existsSync } from 'node:fs';
+import { stripJsComments } from './lib/strip-comments.mjs';
 
 const MIG = 'supabase/migrations/102_paper_multi_bot.sql';
 const APP = 'src/lib/engine/paperAutomation.ts';
@@ -27,8 +28,14 @@ const read = (p) => {
 };
 
 const sql = read(MIG);
-const app = read(APP);
-const route = read(ROUTE);
+// **주석을 지운 뒤에 본다.**
+//
+// 주석에도 코드와 같은 문자열이 적혀 있으면, 코드에서 그 줄을 지워도
+// 규칙이 계속 만족된다 — 실제로 `bots.error`를 설명하는 주석 때문에
+// `bots.error` 가드를 지운 변이가 안 잡혔다. 주석으로 만족되는 검사기는
+// 검사기가 아니다. 규칙 하나를 고치는 대신 그 종류를 없앤다.
+const app = stripJsComments(read(APP));
+const route = stripJsComments(read(ROUTE));
 
 // ── ① 봇 이름 규칙이 같은가 ──
 const dbRe = /CHECK \(bot_id ~ '([^']+)'\)/.exec(sql);
@@ -103,7 +110,8 @@ if (app && /strategy_id === 'paper-auto-v1'/.test(app)) {
     + ' — 새 봇의 포지션이 시간 청산을 영원히 못 받습니다');
 }
 // 저장하지 않으면 다음 회차에 전략이 사라진다.
-if (route && !/p_config\s*:\s*\{[^}]*signal\s*:/.test(route)) {
+// 축약 표기(`signal`)도 저장이다. 콜론만 찾으면 멀쩡한 코드를 오탐한다.
+if (route && !/p_config\s*:\s*\{[^}]*\bsignal\b/.test(route)) {
   fail(`${ROUTE}: 전략을 config에 저장하지 않습니다 — 다음 회차에 사라집니다`);
 }
 // 화면이 따로 해석하면 러너와 다른 답을 낼 수 있다 — 같은 함수를 쓴다.
@@ -112,8 +120,38 @@ if (route && /config[\s\S]{0,40}\.signal/.test(route) && !/readBotSignal/.test(r
     + ' — 러너와 같은 readBotSignal을 써야 판정이 갈리지 않습니다');
 }
 
+// ── ⑥ 전략을 안 적은 요청이 봇의 전략을 되돌리지 않는가 ──
+//
+// `paper_auto_control`의 `ON CONFLICT`는 `config=p_config`로 config를
+// **통째로 교체**한다. 그래서 요청에 전략이 없을 때 기본값을 채워 보내면,
+// 전략을 안 보내는 옛 화면이 봇을 다시 켤 때마다 그 봇이 조용히 추세
+// 추종으로 바뀐다 — 이름은 그대로인 채 한 strategy_id 아래 두 전략의
+// 기록이 섞이고, 봇을 나눈 이유가 그때 사라진다.
+if (app && !/signal:\s*EntrySignalId\s*\|\s*null/.test(app)) {
+  fail(`${APP}: 요청의 전략이 "안 적음"과 "추세 추종"을 구분하지 않습니다`
+    + ' — 구분하지 않으면 옛 화면이 켤 때마다 봇의 전략이 되돌아갑니다');
+}
+if (route && !/paper_automation_settings[\s\S]{0,200}?select\('config'\)/.test(route)) {
+  fail(`${ROUTE}: 전략을 안 적은 요청에서 이미 저장된 전략을 읽지 않습니다`
+    + ' — RPC가 config를 통째로 교체하므로 그 봇의 전략이 기본값으로 되돌아갑니다');
+}
+// `[]`는 미지정이 아니다. String([])가 빈 문자열이라 느슨하게 보면 통과한다.
+if (app && !/function signalOmitted/.test(app)) {
+  fail(`${APP}: "안 적음" 판정이 한 곳에 없습니다`
+    + " — String([])가 빈 문자열이라 signal:[] 같은 잘못된 값이 미지정으로 샙니다");
+}
+
+// ── ⑦ 봇 목록을 못 읽은 것을 "봇 없음"으로 적지 않는가 ──
+//
+// `bots.error`를 보지 않으면 `bots.data`가 null이 되고, 포지션 질의가
+// 기본 봇으로만 좁혀져 **다른 봇의 거래가 조용히 사라진다.** 오류도 안 난다.
+if (route && !/bots\.error/.test(route)) {
+  fail(`${ROUTE}: bots 질의 오류를 보지 않습니다`
+    + ' — 목록을 못 읽으면 다른 봇의 거래가 조용히 사라집니다(없음으로 적힙니다)');
+}
+
 if (bad > 0) {
   console.error(`\n모의 봇 다중화 검사 실패: ${bad}건`);
   process.exit(1);
 }
-console.log('✅ 모의 봇 다중화 — 이름 규칙 일치 · 봇 단위 유일 인덱스 · 기본 봇 보존 · 화면 배선 · 봇별 전략 배선');
+console.log('✅ 모의 봇 다중화 — 이름 규칙 일치 · 봇 단위 유일 인덱스 · 기본 봇 보존 · 화면 배선 · 봇별 전략 배선 · 전략 되돌림 방지 · 목록 실패 fail-closed');

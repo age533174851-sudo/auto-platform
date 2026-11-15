@@ -59,11 +59,24 @@ export function runPaperMultiBotTests() {
   // 새 컬럼이 아니라 099부터 있던 `config`에 넣는다 — 컬럼·CHECK·RPC
   // 시그니처를 새로 만들면 서로 어긋날 자리가 세 개 생긴다.
 
-  test('★★ 전략을 안 적으면 지금까지 돌던 전략이다', () => {
-    // 기본값이 바뀌면 paper-auto-v1의 기록이 다른 기계의 기록이 된다.
-    eq(start().signal, DEFAULT_ENTRY_SIGNAL);
-    eq(start({ signal: undefined }).signal, DEFAULT_ENTRY_SIGNAL);
-    eq(start({ signal: '' }).signal, DEFAULT_ENTRY_SIGNAL);
+  test('★★ 요청에 전략을 안 적으면 null이다 — "추세 추종"이 아니다', () => {
+    // 이 구분이 없으면 고장이 난다: `paper_auto_control`의 ON CONFLICT가
+    // `config=p_config`로 config를 **통째로 교체**하므로, 여기서 기본값을
+    // 채우면 전략을 안 보내는 옛 화면이 봇을 다시 켤 때마다 그 봇이 조용히
+    // 추세 추종으로 바뀐다. 이름은 그대로인 채 한 strategy_id 아래 두 전략의
+    // 기록이 섞이고, 이 기능이 존재하는 이유인 비교가 그때 망가진다.
+    //
+    // 그래서 "안 적었다"를 그대로 올려 보내고, 저장하는 쪽이 이미 저장된
+    // 전략을 지킨다.
+    eq(start().signal, null);
+    eq(start({ signal: undefined }).signal, null);
+    eq(start({ signal: '' }).signal, null);
+    eq(start({ signal: '   ' }).signal, null);
+  });
+
+  test('★★ 저장된 config에 전략이 없으면 지금까지 돌던 전략이다', () => {
+    // 저장된 쪽은 다르다 — 읽을 때는 기본값이 맞다. 099 시절 config에는
+    // signal이 아예 없고, 그 봇은 추세 추종으로 돌고 있었다.
     for (const cfg of [undefined, null, {}, { signal: null }, { signal: '' }, { signal: '  ' },
                        [1, 2], 'nope', 7]) {
       const r = readBotSignal(cfg as unknown);
@@ -103,14 +116,14 @@ export function runPaperMultiBotTests() {
 
   test('stop 은 전략과 무관하다 — 끄는 데 전략 이름이 필요하지 않다', () => {
     const v = parsePaperAutomationControl({ action: 'stop', botId: 'grid-box' });
-    eq(v!.signal, DEFAULT_ENTRY_SIGNAL);
+    eq(v!.signal, null);
     eq(v!.enabled, false);
   });
 
   test('★ 봇 이름과 전략은 따로다 — 이름에서 전략을 유추하지 않는다', () => {
     // 'breakout-1'이라는 이름의 봇이 추세 추종으로 돌 수도 있다. 이름 규칙으로
     // 전략을 정하면 이름을 바꾸는 순간 전략이 바뀐다.
-    eq(start({ botId: 'breakout-1' }).signal, DEFAULT_ENTRY_SIGNAL);
+    eq(start({ botId: 'breakout-1' }).signal, null);
     eq(start({ botId: 'breakout-1', signal: 'mean-revert' }).signal, 'mean-revert');
   });
 }

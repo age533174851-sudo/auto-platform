@@ -31,12 +31,23 @@ export const DEFAULT_PAPER_BOT = 'paper-auto-v1';
  * 컬럼·CHECK·RPC 시그니처를 새로 만들면 그 셋이 서로 어긋날 수 있는 자리가
  * 세 개 생긴다 — 이미 끝까지 흐르는 통로가 있으면 그것을 쓴다.
  */
+/**
+ * **"안 적었다"는 `null`·`undefined`·공백 문자열뿐이다.**
+ *
+ * `String([])`가 빈 문자열이라서, 느슨하게 보면 `signal: []`이 "안 적음"으로
+ * 통과한다. `[]`는 미지정이 아니라 잘못된 값이고, 잘못된 값은 거절해야 한다.
+ */
+function signalOmitted(raw: unknown): boolean {
+  if (raw == null) return true;
+  return typeof raw === 'string' && raw.trim() === '';
+}
+
 export function readBotSignal(config: unknown): { signal: EntrySignalId; bad: string | null } {
   const raw = config && typeof config === 'object' && !Array.isArray(config)
     ? (config as Record<string, unknown>).signal : undefined;
   // 안 적혀 있으면 지금까지 돌던 전략이다. 그래야 `paper-auto-v1`의 기록이
   // 이어진다.
-  if (raw == null || String(raw).trim() === '') return { signal: DEFAULT_ENTRY_SIGNAL, bad: null };
+  if (signalOmitted(raw)) return { signal: DEFAULT_ENTRY_SIGNAL, bad: null };
   const got = parseEntrySignal(raw);
   // **적혀 있는데 모르는 값이면 기본값으로 돌리지 않는다.** 돌리면 오타 하나로
   // 추세 추종이 돌면서 그 봇의 성적표에 적히고, 그 전략을 평가할 방법이
@@ -48,20 +59,35 @@ export function readBotSignal(config: unknown): { signal: EntrySignalId; bad: st
 }
 
 export function parsePaperAutomationControl(body: unknown):
-  { enabled: boolean; symbol: string; interval: number; botId: string; signal: EntrySignalId } | null {
+  { enabled: boolean; symbol: string; interval: number; botId: string;
+    /**
+     * **`null`은 "안 적었다"는 뜻이고 "추세 추종"이 아니다.**
+     *
+     * `paper_auto_control`의 `ON CONFLICT`는 `config=p_config`로 config를
+     * **통째로 교체**한다. 그래서 여기서 null을 기본값으로 채우면, 전략을
+     * 안 보내는 옛 화면이 봇을 다시 켤 때마다 그 봇이 조용히 추세 추종으로
+     * 바뀐다 — 이름은 그대로인 채 한 `strategy_id` 아래 두 전략의 기록이
+     * 섞이고, 이 기능이 존재하는 이유인 비교가 그때 망가진다.
+     *
+     * 그래서 "안 적었다"를 그대로 올려 보내고, 저장하는 쪽이 **이미 저장된
+     * 전략을 지킨다.**
+     */
+    signal: EntrySignalId | null } | null {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
   const b = body as Record<string, unknown>;
   // **안 적으면 옛 봇이다.** 이 줄이 없으면 예전 화면이 보내던 요청이
   // 새 봇을 만들어 버리고, 돌던 봇은 멈춘 것처럼 보인다.
   const botId = b.botId == null || b.botId === '' ? DEFAULT_PAPER_BOT : String(b.botId);
   if (!PAPER_BOT_ID.test(botId)) return null;
-  if (b.action === 'stop') return { enabled: false, symbol: 'BTCUSDT', interval: 60, botId, signal: DEFAULT_ENTRY_SIGNAL };
+  // 끄는 데는 전략이 필요하지 않다. null은 "안 적었다"다.
+  if (b.action === 'stop') return { enabled: false, symbol: 'BTCUSDT', interval: 60, botId, signal: null };
   if (b.action !== 'start' || !['BTCUSDT','ETHUSDT'].includes(String(b.symbol))
       || ![60,300,900].includes(b.interval as number)) return null;
   // 모르는 전략 이름은 **400으로 거절한다.** 조용히 기본값으로 켜 주면
   // 사용자는 역추세 봇을 켰다고 생각하는데 추세 추종이 돈다.
-  const signal = b.signal == null || b.signal === '' ? DEFAULT_ENTRY_SIGNAL : parseEntrySignal(b.signal);
-  if (!signal) return null;
+  const omitted = signalOmitted(b.signal);
+  const signal = omitted ? null : parseEntrySignal(b.signal);
+  if (!omitted && !signal) return null;
   return { enabled: true, symbol: b.symbol as string, interval: b.interval as number, botId, signal };
 }
 
