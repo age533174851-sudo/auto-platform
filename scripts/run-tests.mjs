@@ -144,6 +144,7 @@ import { runMigrationStatusTests } from './src/lib/system/migrationStatus.test';
 import { runWalletTruthTests } from './src/lib/portfolio/walletTruth.test';
 import { runWalletTruthViewTests } from './src/lib/portfolio/walletTruthView.test';
 import { runSmokePlanTests } from './src/lib/smoke/smokePlan.test';
+import { runGateRecoveryTests } from './src/lib/smoke/gateRecovery.test';
 import { runSmokeRunTests } from './src/lib/smoke/smokeRun.test';
 import { runCancelRunTests } from './src/lib/smoke/cancelRun.test';
 import { runExitPolicyTests } from './src/lib/strategies/exitPolicy.test';
@@ -406,6 +407,7 @@ runOrderViewTests(); runNewsSchemaTests(); runAnalyzeOneTests(); runCollectTests
 runDeployDispatchTests(); runExecutorHealthTests(); runManualPlanTests(); runCloseQtyTests(); runLosslessJsonTests(); runGatePlanTests(); runBinanceTpSlFallbackTests();
 runFuturesExecTests(); runPromotionMapTests(); runTradeModeTests(); runPaperPlanTests(); runDailyLossTests(); runRegimeGateTests(); runTrailPlanTests(); runPaperRunnerTests(); runAllocationTests(); runStatsTests(); runRoutingTests(); runGateSpotPlanTests(); runLossStreakTests(); runTradeVetoTests(); runCalibrationTests(); runRecordPredictionTests(); runSubAccountTests(); runExitRulesTests(); runSafetyLogTests(); runFredTests(); runEventGuardTests(); runStopVerifyTests();
 runManualOverrideTests();
+runGateRecoveryTests();
 runWebhookAuthTests();
 runShortGuardTests();
 runEmergencyLevelTests();
