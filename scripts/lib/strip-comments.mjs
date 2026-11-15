@@ -40,3 +40,29 @@ export function stripJsComments(t) {
   }
   return out;
 }
+
+/**
+ * YAML(과 그 안의 `run:` 셸) 주석 제거.
+ *
+ * `#`은 줄 맨 앞이거나 **공백 뒤**일 때만 주석이다 — `a#b`는 값이고,
+ * 인용부호 안의 `#`도 값이다. 그 구분을 안 하면 `--retry 3 # 이유`의
+ * `#` 뒤만 지우려다 `"color: #fff"`까지 잘라 먹는다.
+ *
+ * **왜 필요한가** — 검사기가 주석 처리된 줄을 "그 단계가 있다"로 읽으면,
+ * 그 단계를 주석으로 덮어도 초록이 된다. 2026-11-13에 CI 내려받기
+ * 검사기에서 실제로 그랬다(#619).
+ */
+export function stripYamlComments(t) {
+  const out = [];
+  for (const line of String(t).split('\n')) {
+    let q = null, cut = -1;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (q) { if (c === q) q = null; continue; }
+      if (c === '"' || c === "'") { q = c; continue; }
+      if (c === '#' && (i === 0 || /\s/.test(line[i - 1]))) { cut = i; break; }
+    }
+    out.push(cut < 0 ? line : line.slice(0, cut));
+  }
+  return out.join('\n');
+}
