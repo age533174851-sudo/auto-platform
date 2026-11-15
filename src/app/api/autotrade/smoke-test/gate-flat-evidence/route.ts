@@ -1,3 +1,4 @@
+import type { SupabaseClient } from '@supabase/supabase-js';
 import { NextRequest, NextResponse } from 'next/server';
 import { readGateTestnetExposure } from '@/lib/exchanges/gateFutures';
 import { toGateContract } from '@/lib/exchanges/gatePlan';
@@ -24,14 +25,17 @@ export async function GET(req: NextRequest) {
   if (!db) return failure('DATABASE_UNAVAILABLE', 503);
 
   try {
-    const { data: row, error } = await db.from('smoke_tests')
+    // smoke_tests is absent from the generated Database table types.
+    const smokeLedger = db as unknown as SupabaseClient;
+    const { data: row, error } = await smokeLedger.from('smoke_tests')
       .select('id,connection_id,symbol,mode,state')
       .eq('id', testId).eq('user_id', userId).maybeSingle();
     if (error) return failure('SMOKE_ROW_UNREADABLE', 503);
     if (!row) return failure('NOT_FOUND', 404);
 
     const contract = typeof row.symbol === 'string' ? toGateContract(row.symbol) : null;
-    if (row.mode !== 'TESTNET' || row.state !== 'FAIL' || !row.connection_id || !contract) {
+    if (row.mode !== 'TESTNET' || row.state !== 'FAIL' || typeof row.connection_id !== 'string'
+        || !UUID.test(row.connection_id) || !contract) {
       return failure('GATE_TESTNET_FAILURE_REQUIRED', 409);
     }
 
@@ -48,7 +52,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({
       ok: readable,
       code: !readable ? 'UNREADABLE' : flat ? 'FLAT' : 'EXPOSURE_PRESENT',
-      testId: row.id,
+      testId,
       symbol: row.symbol,
       observedAt: new Date().toISOString(),
       ...evidence,
