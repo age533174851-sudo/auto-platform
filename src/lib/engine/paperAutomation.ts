@@ -8,6 +8,10 @@ import { availableView } from './paperAvailable';
 import { readPaperMarkPrice, paperPriceFailed } from './paperPriceSource';
 import { collectPaperDailyLoss } from '../risk/dailyLossCheck';
 import { collectRegime } from '../risk/regimeCheck';
+import {
+  parseEntrySignal, DEFAULT_ENTRY_SIGNAL, ENTRY_SIGNAL_IDS,
+  type EntrySignalId,
+} from './entrySignals';
 
 export interface PaperAutomationResult { code: string; message: string; positionId?: string; }
 /**
@@ -19,18 +23,72 @@ export const PAPER_BOT_ID = /^[a-z0-9][a-z0-9-]{1,62}$/;
 /** 안 적으면 이 봇. 099 시절부터 돌던 그 봇이다 */
 export const DEFAULT_PAPER_BOT = 'paper-auto-v1';
 
+/**
+ * 봇이 쓸 진입 전략을 `config.signal`에 넣는다.
+ *
+ * **새 컬럼을 만들지 않는다.** `paper_automation_settings.config`는 099부터
+ * 있고 `paper_auto_control`이 그대로 저장하며 러너가 `run.config`로 읽는다.
+ * 컬럼·CHECK·RPC 시그니처를 새로 만들면 그 셋이 서로 어긋날 수 있는 자리가
+ * 세 개 생긴다 — 이미 끝까지 흐르는 통로가 있으면 그것을 쓴다.
+ */
+/**
+ * **"안 적었다"는 `null`·`undefined`·공백 문자열뿐이다.**
+ *
+ * `String([])`가 빈 문자열이라서, 느슨하게 보면 `signal: []`이 "안 적음"으로
+ * 통과한다. `[]`는 미지정이 아니라 잘못된 값이고, 잘못된 값은 거절해야 한다.
+ */
+function signalOmitted(raw: unknown): boolean {
+  if (raw == null) return true;
+  return typeof raw === 'string' && raw.trim() === '';
+}
+
+export function readBotSignal(config: unknown): { signal: EntrySignalId; bad: string | null } {
+  const raw = config && typeof config === 'object' && !Array.isArray(config)
+    ? (config as Record<string, unknown>).signal : undefined;
+  // 안 적혀 있으면 지금까지 돌던 전략이다. 그래야 `paper-auto-v1`의 기록이
+  // 이어진다.
+  if (signalOmitted(raw)) return { signal: DEFAULT_ENTRY_SIGNAL, bad: null };
+  const got = parseEntrySignal(raw);
+  // **적혀 있는데 모르는 값이면 기본값으로 돌리지 않는다.** 돌리면 오타 하나로
+  // 추세 추종이 돌면서 그 봇의 성적표에 적히고, 그 전략을 평가할 방법이
+  // 사라진다.
+  return got
+    ? { signal: got, bad: null }
+    : { signal: DEFAULT_ENTRY_SIGNAL,
+        bad: `알 수 없는 진입 전략입니다: ${String(raw).slice(0, 40)} (가능: ${ENTRY_SIGNAL_IDS.join(' · ')})` };
+}
+
 export function parsePaperAutomationControl(body: unknown):
-  { enabled: boolean; symbol: string; interval: number; botId: string } | null {
+  { enabled: boolean; symbol: string; interval: number; botId: string;
+    /**
+     * **`null`은 "안 적었다"는 뜻이고 "추세 추종"이 아니다.**
+     *
+     * `paper_auto_control`의 `ON CONFLICT`는 `config=p_config`로 config를
+     * **통째로 교체**한다. 그래서 여기서 null을 기본값으로 채우면, 전략을
+     * 안 보내는 옛 화면이 봇을 다시 켤 때마다 그 봇이 조용히 추세 추종으로
+     * 바뀐다 — 이름은 그대로인 채 한 `strategy_id` 아래 두 전략의 기록이
+     * 섞이고, 이 기능이 존재하는 이유인 비교가 그때 망가진다.
+     *
+     * 그래서 "안 적었다"를 그대로 올려 보내고, 저장하는 쪽이 **이미 저장된
+     * 전략을 지킨다.**
+     */
+    signal: EntrySignalId | null } | null {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
   const b = body as Record<string, unknown>;
   // **안 적으면 옛 봇이다.** 이 줄이 없으면 예전 화면이 보내던 요청이
   // 새 봇을 만들어 버리고, 돌던 봇은 멈춘 것처럼 보인다.
   const botId = b.botId == null || b.botId === '' ? DEFAULT_PAPER_BOT : String(b.botId);
   if (!PAPER_BOT_ID.test(botId)) return null;
-  if (b.action === 'stop') return { enabled: false, symbol: 'BTCUSDT', interval: 60, botId };
+  // 끄는 데는 전략이 필요하지 않다. null은 "안 적었다"다.
+  if (b.action === 'stop') return { enabled: false, symbol: 'BTCUSDT', interval: 60, botId, signal: null };
   if (b.action !== 'start' || !['BTCUSDT','ETHUSDT'].includes(String(b.symbol))
       || ![60,300,900].includes(b.interval as number)) return null;
-  return { enabled: true, symbol: b.symbol as string, interval: b.interval as number, botId };
+  // 모르는 전략 이름은 **400으로 거절한다.** 조용히 기본값으로 켜 주면
+  // 사용자는 역추세 봇을 켰다고 생각하는데 추세 추종이 돈다.
+  const omitted = signalOmitted(b.signal);
+  const signal = omitted ? null : parseEntrySignal(b.signal);
+  if (!omitted && !signal) return null;
+  return { enabled: true, symbol: b.symbol as string, interval: b.interval as number, botId, signal };
 }
 
 const n = (v: unknown): number | null => v == null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v);
@@ -49,7 +107,14 @@ export async function evaluatePaperAutomation(sb: any, run: any,
   sources = paperAutomationSources): Promise<PaperAutomationResult> {
   if (run.entry_position_id) return { code: 'ENTERED', positionId: run.entry_position_id,
     message: '이전 회차의 영속 체결을 복구했습니다' };
-  const cfg = { ...DEFAULT_RUNNER, ...run.config };
+  // `signal`은 설정값이 아니라 **전략 선택**이다. RunnerConfig에 섞어 넣으면
+  // `readRunnerConfig`가 모르는 키를 들고 다니게 된다.
+  const { signal: _signalKey, ...runCfg } = (run.config ?? {}) as Record<string, unknown>;
+  const cfg = { ...DEFAULT_RUNNER, ...runCfg };
+  const bot = readBotSignal(run.config);
+  // 적혀 있는데 모르는 전략이면 **진입하지 않는다.** 이 회차를 기본 전략으로
+  // 돌려 버리면 그 체결이 이 봇의 기록이 된다.
+  if (bot.bad) return { code: 'SIGNAL_UNKNOWN', message: bot.bad };
   const rows = async () => {
     const r = await sb.from('paper_positions').select('*').eq('user_id',run.user_id)
       .eq('paper_account_id',run.paper_account_id).eq('status','open');
@@ -59,7 +124,10 @@ export async function evaluatePaperAutomation(sb: any, run: any,
   let positions = await rows();
   // Time exits belong only to this runner and its explicit, persisted policy.
   // Global SL/TP/liquidation safety continues independently even after Stop.
-  const own = positions.filter(p => p.strategy_id === 'paper-auto-v1' && p.market === 'USDM');
+  // **이 봇의 포지션만 본다.** `paper_auto_open`이 `strategy_id`에 봇 이름을
+  // 적으므로(102번), 'paper-auto-v1'로 묶어 두면 새 봇의 포지션은 시간 청산을
+  // 영원히 못 받는다 — 손절·익절은 전역 경로가 보지만 보유시간은 이 러너만 본다.
+  const own = positions.filter(p => p.strategy_id === run.bot_id && p.market === 'USDM');
   const quotes = new Map<string, number>();
   for (const symbol of new Set<string>([run.symbol,...own.map(p => p.symbol)])) {
     const price = await sources.price('USDM', symbol);
@@ -88,7 +156,13 @@ export async function evaluatePaperAutomation(sb: any, run: any,
   const verdict = regime.verdict;
   const entry = planEntry({ symbol:run.symbol,regimeStatus:!verdict.regime?.dataOk ? 'unknown'
       : verdict.blockEntries ? 'blocked' : 'ok', regimeReason:verdict.reason,
-    trend:verdict.regime?.trend ?? null,markPrice:quotes.get(run.symbol) ?? null,
+    trend:verdict.regime?.trend ?? null,
+    // 국면이 이미 계산해 둔 관측값(종가·EMA·ATR·박스·돌파선)을 그대로 넘긴다.
+    // 이것이 없으면 역추세·돌파는 방향을 내지 않는다 — 없는 값을 0으로 바꿔
+    // 계산하는 대신 쉰다.
+    view:verdict.regime?.dataOk ? (verdict.regime?.view ?? null) : null,
+    signal:bot.signal,
+    markPrice:quotes.get(run.symbol) ?? null,
     availableUsd:available.available,openCount:positions.length,cfg });
   if (entry.kind !== 'OPEN') return { code: 'WAIT', message: entry.reason };
   const plan = buildPaperPlan({ symbol:run.symbol,side:entry.side!,market:'USDM',
@@ -102,7 +176,10 @@ export async function evaluatePaperAutomation(sb: any, run: any,
     return sb.rpc('paper_auto_open',{ p_run_id:run.id,p_token:run.lease_token,p_order:args });
   } };
   const fill = await dispatchPaperEntry(fenced,{ userId:run.user_id,mode:'PAPER',
-    strategyId:'paper-auto-v1',signalId:`paper-auto:${run.id}`,plan:plan.plan,
+    // SQL(`paper_auto_open`)이 `s.bot_id`를 strategy_id로 적으므로 이 값은
+    // 쓰이지 않지만, 두 자리가 다른 이름을 들고 있으면 읽는 사람이 어느 쪽이
+    // 진짜인지 모른다.
+    strategyId:String(run.bot_id ?? DEFAULT_PAPER_BOT),signalId:`paper-auto:${run.id}`,plan:plan.plan,
     entryPrice:quotes.get(run.symbol)!,stopLoss:entry.stopPrice,takeProfit:entry.takeProfit,
     market:'USDM',marginMode:'ISOLATED' });
   return { code:fill.ok ? (fill.positionId ? 'ENTERED' : fill.code) : 'ENTRY_FAILED',
