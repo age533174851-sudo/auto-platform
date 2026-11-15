@@ -301,6 +301,10 @@ export async function startAttempt(sb: any, i: StartAttemptInput): Promise<Start
       filledQty: exec?.filledQty ?? null,
       avgPrice: exec?.avgPrice ?? null,
       rejected: exec?.ok === false,
+      // **거래소가 왜 거절했는지 함께 넘긴다.** 여기는 실제 TESTNET
+      // 주문이 나가는 경로다 — 스모크가 FAIL로 끝났을 때 사유가 없으면
+      // 사람이 거래소 화면을 따로 열어 봐야 한다.
+      rejectedReason: exec?.ok === false ? (exec?.message ?? null) : null,
       position: posAfter,
       leverageConfirmed: exec?.leverageConfirmed ?? null,
       positionModeConfirmed: exec?.positionModeConfirmed ?? null,
