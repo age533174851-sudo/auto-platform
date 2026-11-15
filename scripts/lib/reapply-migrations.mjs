@@ -12,8 +12,74 @@
 // 검사 순서가 바뀌었을 뿐인데 계약이 깨진 것처럼 보인다 — 반대로, 계약이
 // 실제로 깨졌는데 초록이 나올 수도 있다.
 //
-// 그래서 되돌릴 때는 **그 파일과 그 뒤 번호 전부**를 다시 세운다.
+// 그래서 되돌릴 때는 그 파일을 덮어쓴 **뒤 번호도 함께** 다시 세운다.
+//
+// 처음에는 "뒤 번호 전부"였다. 그게 멈췄다 (#636)
+// ───────────────────────────────────────────────
+// 전부 다시 세우면 **086 이후 모든 마이그레이션이 재적용 가능해야 한다**는
+// 요구가 생긴다. 어디에도 적혀 있지 않고, 검사기도 없고, 깨져도 그 자리에서는
+// 안 보인다. 2026-11-13에 `099_paper_automation.sql`이 `IF NOT EXISTS` 없이
+// 들어왔고, 그날부터 모의 챌린지 뮤테이션 증명 19건이 **한 번도 돌지 않았다.**
+// 아무도 몰랐다.
+//
+// 그 요구는 고칠 수도 없었다 — 이미 적용된 마이그레이션은
+// `src/lib/system/migrationLineage.ts`의 `BASE_FILE_CHANGED`가 수정을 막는다.
+// 관문이 옳다. 즉 **만족시킬 방법이 없는 요구**였다.
+//
+// 그런데 099는 애초에 되돌릴 것이 없었다. 085도 086도 087도 정의하지 않는
+// 표와 함수를 만들 뿐이다. 다시 세울 이유가 처음부터 없었다.
+//
+// 재적용의 목적은 "뒤엣것이 **이 파일의 정의를 덮어쓴 것**을 복원하는 것"이다.
+// 그러니 덮어쓴 것만 다시 세운다. 2026-11-15 기준으로 실제 대상은 이뿐이다:
+//
+//     085 → 086 · 088 (paper_open_position · paper_settle_close)
+//     086 → 088       (같은 둘)
+//     087 → 없음
+//
+// 대상이 줄면 요구도 줄어든다. 그리고 남은 대상은 **덮어쓰는 파일**이라
+// 본질적으로 `CREATE OR REPLACE`다 — 재적용이 원래 안전한 모양이다.
+//
+// ★ 자동으로 따라온다. 목록을 손으로 적지 않는다.
+//   나중에 102가 `paper_open_position`을 다시 정의하면 그 순간부터
+//   대상에 들어온다. 사람이 이 주석을 고칠 필요가 없다.
 import { readdirSync, readFileSync } from 'node:fs';
+
+/**
+ * 이 SQL이 **정의하는** 객체 이름들.
+ *
+ * 부르기만 하는 것은 세지 않는다 — 099는 `paper_open_position`을 호출하지만
+ * 정의하지 않는다. 호출까지 세면 099가 다시 끌려 들어오고, 이 수정이
+ * 아무것도 고치지 못한다.
+ */
+export function definedObjects(sql) {
+  const out = new Set();
+  const pats = [
+    /\bCREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+([a-zA-Z_][\w.]*)/gi,
+    /\bCREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+([a-zA-Z_][\w.]*)/gi,
+    /\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:MATERIALIZED\s+)?VIEW\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-zA-Z_][\w.]*)/gi,
+  ];
+  for (const re of pats) {
+    for (const m of String(sql).matchAll(re)) out.add(m[1].replace(/^public\./i, ''));
+  }
+  return out;
+}
+
+/**
+ * `name`을 덮어쓰는 뒤 번호 파일만 고른다.
+ *
+ * @param {string} dir
+ * @param {string} name
+ * @returns {string[]} 번호 순 경로
+ */
+export function redefinitionsAfter(dir, name) {
+  const base = definedObjects(readFileSync(`${dir}/${name}`, 'utf8'));
+  if (base.size === 0) return [];
+  return migrationsFrom(dir, name, { includeSelf: false }).filter(p => {
+    const later = definedObjects(readFileSync(p, 'utf8'));
+    for (const o of later) if (base.has(o)) return true;
+    return false;
+  });
+}
 
 /**
  * `name` 이후(포함)의 번호 마이그레이션 파일 경로를 번호 순으로 돌려준다.
@@ -54,7 +120,9 @@ export function migrationsFrom(dir, name, { includeSelf = true } = {}) {
  * @returns {boolean} 전부 세웠는가
  */
 export function reapplyAfter(dir, name, install, onFail) {
-  for (const p of migrationsFrom(dir, name, { includeSelf: false })) {
+  // **덮어쓴 것만** 다시 세운다. 상관없는 파일까지 세우면 그 파일들이
+  // 전부 재적용 가능해야 한다는 숨은 요구가 생긴다 (#636).
+  for (const p of redefinitionsAfter(dir, name)) {
     if (!install(readFileSync(p, 'utf8'))) {
       // **첫 실패에서 멈추고 그 이름을 남긴다.** 뒤엣것을 계속 세워 봐야
       // 이미 어긋난 상태 위에 쌓는 것이고, 로그만 길어진다.
