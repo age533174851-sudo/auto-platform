@@ -289,6 +289,23 @@ export class FakeDb {
         // await로 바로 끝나는 체인 (update().eq() · select().in() 등)
         const run = async () => {
           if (pending?.kind === 'update') return flushUpdate();
+          // **`.select()` 없이 끝나는 insert 도 쓰기다.**
+          //
+          // 여기가 비어 있어서 `await from(t).insert(row)` 가 조용히
+          // 아무 일도 안 하고 `error: null` 로 끝났다. 그런 모양을 쓰는
+          // 운영 코드(`recordCronRun` 이 그렇다)는 통합 시험에서
+          // **쓰지 않았는데 성공으로 읽혔다.** 못 적은 것을 적었다고
+          // 읽는 것이 이 하네스에서 가장 나쁜 거짓말이다.
+          if (pending?.kind === 'insert') {
+            const f = db.opts.failInsertCode;
+            if (f && f.table === table) {
+              return { data: null, error: { code: f.code, message: `insert 실패 (${f.code})` } };
+            }
+            const row = { id: `row-${++db.seq}`, ...pending.patch };
+            db.rows[table] = (db.rows[table] ?? []).concat([row]);
+            db.writes.push({ table, kind: 'insert', patch: { ...pending.patch } });
+            return { data: [{ ...row }], error: null };
+          }
           if (builder.__selectFails) {
             // **개수 질의도 실패는 실패다.** 0건으로 돌려주면 호출부의
             // fail-closed 분기가 시험에서 영영 안 돈다.
