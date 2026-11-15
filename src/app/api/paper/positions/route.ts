@@ -10,6 +10,7 @@
 //
 // **청산은 여기에 없다.** `/api/paper/close` 하나뿐이다 (아래 POST 주석 참고).
 import { NextRequest, NextResponse } from 'next/server';
+import { paperReturnVerdict } from '@/lib/portfolio/paperAccount';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -136,9 +137,27 @@ export async function GET(req: NextRequest) {
         totalPnl: Number(account.total_pnl),
         totalFees: Number(account.total_fees),
         tradeCount: Number(account.trade_count),
-        returnPct: Number(account.initial_balance) > 0
-          ? ((Number(account.balance) - Number(account.initial_balance)) / Number(account.initial_balance)) * 100
-          : 0,
+        // **판정 한 곳을 쓴다.** 예전에는 이 줄이 직접 계산했고 두 가지가
+        // 틀렸다: ① 충전액을 수익으로 셌고 ② 종잣돈이 0이면 **0%로
+        // 적었다** — 모르는 것을 0으로 적는 자리였다(#592).
+        //
+        // 미실현손익은 이 라우트가 현재가를 읽어 넣지 않으므로 여기서는
+        // 모른다 → 판정이 UNKNOWN을 주고 수익률은 null이 된다. 추정치로
+        // 채우지 않는다.
+        ...(() => {
+          const r = paperReturnVerdict({
+            initialBalance: account.initial_balance,
+            totalEquity: account.balance,
+            realizedPnl: account.total_pnl,
+            // **이 라우트는 현재가를 읽지 않으므로 미실현을 모른다.**
+            // null을 주면 판정이 UNKNOWN을 돌려주고 수익률은 null이 된다.
+            // 0으로 주면 "미실현 0"이라는 거짓이 되고, 열린 포지션이 있을 때
+            // 수익률이 틀린다. 총자산이 필요한 화면은 `/api/paper/account`가
+            // 답한다.
+            unrealizedPnl: null,
+          });
+          return { netPnl: r.netPnl, returnPct: r.returnPct, returnPctReason: r.reason };
+        })(),
       },
       openPositions: (Array.isArray(open) ? open : []).map((p: any) => ({
         id: p.id, symbol: p.symbol, side: p.side, bucket: p.bucket,
