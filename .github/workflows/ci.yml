@@ -391,6 +391,15 @@ jobs:
       - name: 마이그레이션 배선 검사
         run: node scripts/check-migrations.mjs
 
+      # ── 필수 체크가 "생기지도 않는" 자리를 막는가 ──
+      #
+      # `auto-merge.yml` 이 만드는 `auto-merge-gate` 는 main ruleset 의
+      # 필수 검사다. 그 워크플로의 `concurrency.group` 이 상수면 서로
+      # 상관없는 PR 들이 한 줄에 서고, 대기 중인 run 이 서로 취소된다 —
+      # 체크가 빨갛지 않고 **아예 없어서** 아무 데도 이유가 안 남는다.
+      - name: 필수 체크 워크플로 검사 (트리거 · 겹침 제어)
+        run: node scripts/check-required-check-workflow.mjs
+
       # ── 마이그레이션 카탈로그 타입 검사 ──
       #
       # 050이 옛 유니크를 찾으려고 `array_agg(att.attname …) = ARRAY['symbol',
