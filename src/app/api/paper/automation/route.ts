@@ -1,6 +1,7 @@
 import { NextRequest,NextResponse } from 'next/server';
 import { getSupabaseAdmin,resolveUserId } from '@/lib/supabase/admin';
-import { parsePaperAutomationControl,DEFAULT_PAPER_BOT } from '@/lib/engine/paperAutomation';
+import { parsePaperAutomationControl,readBotSignal,DEFAULT_PAPER_BOT } from '@/lib/engine/paperAutomation';
+import { ENTRY_SIGNAL_LABEL } from '@/lib/engine/entrySignals';
 import { readRunnerConfig } from '@/lib/engine/paperRunner';
 
 export const dynamic = 'force-dynamic';
@@ -27,7 +28,9 @@ export async function GET(req: NextRequest) {
     sb.from('paper_accounts').select('id,balance,total_pnl,total_fees,started_at').eq('user_id',uid).eq('is_default',true).maybeSingle(),
     // 봇 전부. **더하기만 한다** — 위 `settings`의 모양은 그대로 둬서
     // 예전 화면이 깨지지 않는다.
-    sb.from('paper_automation_settings').select('bot_id,enabled,symbol,interval_seconds,next_run_at,updated_at')
+    // `config`까지 읽는다 — 봇이 **어느 전략으로** 도는지는 화면이 꼭 알아야
+    // 한다. 이름만 보여 주면 역추세 봇인지 돌파 봇인지 구분할 수 없다.
+    sb.from('paper_automation_settings').select('bot_id,enabled,symbol,interval_seconds,config,next_run_at,updated_at')
       .eq('user_id',uid).order('bot_id'),
   ]);
   if (settings.error || runs.error || account.error || !Array.isArray(runs.data))
@@ -41,7 +44,16 @@ export async function GET(req: NextRequest) {
     .order('opened_at',{ascending:false}).limit(10) : { data:[],error:null };
   if (positions.error) return json({ok:false,error:'positions_unreadable',message:'모의 체결 이력을 읽지 못했습니다'},503);
   const { id: _accountId,...accountView } = account.data ?? {};
-  return json({ok:true,settings:settings.data,bots:bots.data ?? null,runs:runs.data,account:account.data ? accountView : null,positions:positions.data});
+  // 전략은 **판정하는 쪽과 같은 함수로** 읽는다. 화면이 따로 `config.signal`을
+  // 해석하면 러너와 다른 답을 낼 수 있고, 그러면 "화면에는 돌파인데 추세
+  // 추종이 도는" 상태가 된다.
+  const botView = (bots.data ?? []).map((b:any) => {
+    const { signal,bad } = readBotSignal(b.config);
+    const { config: _cfg,...rest } = b;
+    return { ...rest,signal,signalLabel:ENTRY_SIGNAL_LABEL[signal],
+      ...(bad ? { signalWarning:bad } : {}) };
+  });
+  return json({ok:true,settings:settings.data,bots:bots.data ? botView : null,runs:runs.data,account:account.data ? accountView : null,positions:positions.data});
 }
 export async function POST(req: NextRequest) {
   const { uid,sb } = await context(req);
@@ -50,7 +62,8 @@ export async function POST(req: NextRequest) {
   const input = parsePaperAutomationControl(await req.json().catch(()=>null));
   if (!input) return json({ok:false,error:'invalid_control'},400);
   const result = await sb.rpc('paper_auto_control',{ p_user_id:uid,p_bot_id:input.botId,p_enabled:input.enabled,
-    p_symbol:input.symbol,p_interval:input.interval,p_config:{...readRunnerConfig(k=>process.env[k]),maxOpenPositions:1} });
+    p_symbol:input.symbol,p_interval:input.interval,
+    p_config:{...readRunnerConfig(k=>process.env[k]),maxOpenPositions:1,signal:input.signal} });
   if (result.error) return json({ok:false,error:'control_failed',message:'설정을 저장하지 못했습니다. 기본 모의 계좌를 먼저 시작하고 다시 시도하세요.'},409);
   return json({ok:true,settings:result.data});
 }

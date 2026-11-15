@@ -78,8 +78,42 @@ if (route && /\.eq\('strategy_id','paper-auto-v1'\)/.test(route)) {
     + ' — 새 봇이 낸 거래가 보이지 않습니다');
 }
 
+// ── ⑤ 봇마다 다른 전략으로 도는가 ──
+//
+// 이 저장소에서 가장 자주 나는 고장이 **만들어 놓고 배선을 안 함**이다.
+// `entrySignals.ts`에 역추세·돌파가 있어도 러너가 그것을 안 고르면
+// 봇을 몇 개 만들든 전부 같은 전략으로 돈다 — 그러면 비교할 것이 없다.
+if (app && !/signal\s*:\s*bot\.signal/.test(app)) {
+  fail(`${APP}: planEntry에 봇의 전략을 넘기지 않습니다`
+    + ' — 봇을 여러 개 만들어도 전부 같은 전략으로 돕니다');
+}
+// 관측값을 안 넘기면 역추세·돌파는 방향을 내지 못하고 영원히 쉰다.
+if (app && !/view\s*:\s*verdict\.regime\?\.dataOk/.test(app)) {
+  fail(`${APP}: planEntry에 국면 관측값(view)을 넘기지 않습니다`
+    + ' — 역추세·돌파가 재료 없이 영원히 쉽니다');
+}
+// 모르는 전략을 기본값으로 돌리면 그 체결이 그 봇의 성적표에 적힌다.
+if (app && !/SIGNAL_UNKNOWN/.test(app)) {
+  fail(`${APP}: 저장된 전략 이름이 모르는 값일 때 회차를 멈추지 않습니다`
+    + ' — 기본 전략으로 돌면 그 체결이 다른 봇의 기록이 됩니다');
+}
+// 시간 청산은 이 러너만 본다. 기본 봇으로 묶여 있으면 새 봇은 영원히 못 받는다.
+if (app && /strategy_id === 'paper-auto-v1'/.test(app)) {
+  fail(`${APP}: 자기 포지션을 'paper-auto-v1'로 거릅니다`
+    + ' — 새 봇의 포지션이 시간 청산을 영원히 못 받습니다');
+}
+// 저장하지 않으면 다음 회차에 전략이 사라진다.
+if (route && !/p_config\s*:\s*\{[^}]*signal\s*:/.test(route)) {
+  fail(`${ROUTE}: 전략을 config에 저장하지 않습니다 — 다음 회차에 사라집니다`);
+}
+// 화면이 따로 해석하면 러너와 다른 답을 낼 수 있다 — 같은 함수를 쓴다.
+if (route && /config[\s\S]{0,40}\.signal/.test(route) && !/readBotSignal/.test(route)) {
+  fail(`${ROUTE}: config.signal을 직접 해석합니다`
+    + ' — 러너와 같은 readBotSignal을 써야 판정이 갈리지 않습니다');
+}
+
 if (bad > 0) {
   console.error(`\n모의 봇 다중화 검사 실패: ${bad}건`);
   process.exit(1);
 }
-console.log('✅ 모의 봇 다중화 — 이름 규칙 일치 · 봇 단위 유일 인덱스 · 기본 봇 보존 · 화면 배선');
+console.log('✅ 모의 봇 다중화 — 이름 규칙 일치 · 봇 단위 유일 인덱스 · 기본 봇 보존 · 화면 배선 · 봇별 전략 배선');
