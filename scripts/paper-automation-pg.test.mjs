@@ -13,8 +13,20 @@ if (!target.ok) test('PAPER automation PostgreSQL not run', { skip: target.reaso
 else {
   const db = createScratchDb(target, 'paper_auto', ids.map(id => resolve(root, 'supabase/migrations', names.find(n => n.startsWith(String(id).padStart(3,'0')+'_')))));
   process.on('exit', () => { dropScratchDb(target, db); });
-  const migration = resolve(root, 'supabase/migrations/099_paper_automation.sql');
-  if (existsSync(migration) && !process.env.PAPER_AUTOMATION_RED) psqlFile(target, db, migration);
+  // **운영이 쓰는 모양으로 올린다.**
+  //
+  // 전에는 099만 올렸다. 그래서 102가 바꾼 claim 함수와 claim 인덱스를
+  // 실제 PostgreSQL로 검증하는 곳이 **없었다** — 이 시험이 그 유일한
+  // 자리인데 운영이 쓰지 않는 스키마를 보고 있었다.
+  //
+  // 목록을 손으로 적는 것이 바로 그 드리프트의 원인이므로,
+  // `scripts/check-paper-automation-migrations.mjs`가 이 목록이 저장소의
+  // `09*`/`1??_paper*` 마이그레이션을 전부 담고 있는지 CI에서 센다.
+  const LATE = ['099_paper_automation.sql','102_paper_multi_bot.sql','103_paper_auto_claim_lock.sql'];
+  for (const name of LATE) {
+    const migration = resolve(root, 'supabase/migrations', name);
+    if (existsSync(migration) && !process.env.PAPER_AUTOMATION_RED) psqlFile(target, db, migration);
+  }
   const q = sql => psql(target, db, sql);
   const uid = 'ab000000-0000-0000-0000-000000000001';
   q(`INSERT INTO paper_accounts(user_id,is_default,balance,initial_balance,started_at) VALUES ('${uid}',true,10000,10000,now())`);
@@ -101,5 +113,27 @@ else {
     assert.match(psql(target,db,`SET ROLE authenticated; SELECT * FROM paper_auto_claim()`,{expectError:true}).error,/permission denied/);
     assert.match(psql(target,db,`SET ROLE authenticated; UPDATE paper_automation_settings SET enabled=true`,{expectError:true}).error,/permission denied/);
     assert.equal(q('SELECT count(*) FROM paper_automation_settings WHERE enabled')[0],'1');
+  });
+  // 103이 경합을 막으면서 생긴 성질. 봇마다 권고 잠금을 잡고 **못 잡으면
+  // 건너뛰므로**, 한 봇이 도는 동안 다른 봇이 막히지 않아야 한다.
+  //
+  // 이 시험이 없으면 누가 후보 루프를 `LIMIT 1`로 "단순화"하고, 그러면 맨 앞
+  // 봇이 회차를 들고 있는 45초 동안 **나머지 봇 전부가 멈춘다** — 봇을
+  // 여러 개 만든 이유가 사라진다.
+  test('a bot holding a run does not block another bot from claiming', () => {
+    start(); const first=claim();
+    assert.equal(first.bot_id,'paper-auto-v1');
+    q(`SELECT paper_auto_control('${uid}','bot-two',true,'BTCUSDT',60)`);
+    const second=claim();
+    assert.ok(second&&second.lease_token,'두 번째 봇이 막혔다');
+    assert.equal(second.bot_id,'bot-two');
+    assert.notEqual(second.id,first.id);
+    assert.notEqual(second.lease_token,first.lease_token);
+    assert.equal(q("SELECT count(*) FROM paper_automation_runs WHERE state='CLAIMED'")[0],'2');
+    // 그리고 **같은 봇은 두 번 잡히지 않는다** — 둘 다 리스가 살아 있으므로.
+    assert.equal(q('SELECT count(*) FROM paper_auto_claim()')[0],'0');
+    // 뒷정리: 이 봇이 남으면 다음 시험의 '도래한 봇' 수가 달라진다.
+    q(`DELETE FROM paper_automation_runs WHERE bot_id='bot-two';
+       DELETE FROM paper_automation_settings WHERE bot_id='bot-two'`);
   });
 }
