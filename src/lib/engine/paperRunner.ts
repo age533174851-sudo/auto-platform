@@ -19,6 +19,11 @@
 // 돌려 보는 것이다 — 그 규칙에 우위가 있는지는 백테스트가 답할 질문이다.
 
 import { exitOnMark, DEFAULT_EXIT } from './exitRules';
+import {
+  entrySignal, DEFAULT_ENTRY_SIGNAL, ENTRY_SIGNAL_LABEL,
+  type EntrySignalId,
+} from './entrySignals';
+import type { RegimeView } from '../risk/regime';
 
 export interface PaperBar {
   close: number;
@@ -125,6 +130,21 @@ export interface EntryInput {
   regimeReason: string;
   /** 국면이 알려준 추세 방향 */
   trend: 'uptrend' | 'downtrend' | 'sideways' | null;
+  /**
+   * 국면이 함께 준 관측값 — 종가·EMA·ATR·박스·돌파선.
+   *
+   * 추세 추종은 이것 없이도 돌지만(추세 방향만 쓴다), 역추세·돌파는
+   * 이것이 없으면 방향을 내지 않는다. 없는 것을 0으로 바꿔 계산하면
+   * "폭 0인 박스의 바닥"·"전고점 0 돌파"가 되어 무조건 진입이 된다.
+   */
+  view?: RegimeView | null;
+  /**
+   * 어느 진입 전략으로 판정할지. 없으면 지금까지 돌던 추세 추종이다.
+   *
+   * 기본값을 바꾸면 `paper-auto-v1`의 기록이 조용히 다른 기계의 기록이
+   * 되므로, 기본값은 고정이고 바꾸려면 **명시해야** 한다.
+   */
+  signal?: EntrySignalId;
   markPrice: number | null;
   /** 진입에 쓸 수 있는 가상 잔고 */
   availableUsd: number | null;
@@ -135,10 +155,16 @@ export interface EntryInput {
 /**
  * 지금 새로 들어갈 것인가.
  *
- * 규칙은 하나다: **추세 방향으로만 들어간다.** 상승 추세면 롱, 하락 추세면
- * 숏, 횡보면 들어가지 않는다.
+ * **방향은 전략이 정하고, 크기는 여기서 정한다.**
  *
- * 이 규칙이 돈을 번다고 말하지 않는다. 정해진 규칙을 그대로 지키는지
+ * 전에는 "추세 방향으로만 들어간다"가 이 함수 안에 박혀 있었다. 그래서
+ * 전략을 몇 개 만들든 전부 추세 추종의 변주였다. 이제 방향은
+ * `entrySignals.ts`가 정하고(기본값은 그 추세 추종 그대로), 수량·손절·
+ * 익절은 전략과 무관하게 **같은 식**으로 정한다 — 전략마다 사이징이
+ * 다르면 어느 쪽이 좋았는지가 아니라 어느 쪽이 더 크게 걸었는지를 보는
+ * 것이 된다.
+ *
+ * 어느 규칙이 돈을 번다고 말하지 않는다. 정해진 규칙을 그대로 지키는지
  * 보려는 것이고, 우위가 있는지는 백테스트가 답할 질문이다.
  */
 export function planEntry(i: EntryInput): RunnerAction {
@@ -150,8 +176,15 @@ export function planEntry(i: EntryInput): RunnerAction {
   if (i.regimeStatus !== 'ok') {
     return { kind: 'NONE', reason: i.regimeReason || '국면 판정이 진입을 허용하지 않습니다' };
   }
-  if (!i.trend || i.trend === 'sideways') {
-    return { kind: 'NONE', reason: '횡보장 — 추세 방향이 없어 진입하지 않습니다' };
+  // 방향은 **전략이** 정한다. 수량·손절·익절은 아래에서 전략과 무관하게
+  // 같은 식으로 정한다 — 그래야 전략들의 성적표를 비교할 수 있다.
+  const signalId = i.signal ?? DEFAULT_ENTRY_SIGNAL;
+  const sig = entrySignal(signalId, { trend: i.trend, view: i.view, markPrice: i.markPrice });
+  if (!sig.side) {
+    return { kind: 'NONE',
+      reason: signalId === DEFAULT_ENTRY_SIGNAL
+        ? sig.reason
+        : `[${ENTRY_SIGNAL_LABEL[signalId] ?? signalId}] ${sig.reason}` };
   }
   const price = Number(i.markPrice);
   if (!Number.isFinite(price) || price <= 0) {
@@ -162,7 +195,7 @@ export function planEntry(i: EntryInput): RunnerAction {
     return { kind: 'NONE', reason: '가용 잔고를 확인하지 못했습니다 — 충전이 필요할 수 있습니다' };
   }
 
-  const side: 'LONG' | 'SHORT' = i.trend === 'uptrend' ? 'LONG' : 'SHORT';
+  const side: 'LONG' | 'SHORT' = sig.side;
 
   // 수량: 걸 위험 금액 ÷ 손절까지의 거리.
   //
@@ -195,8 +228,7 @@ export function planEntry(i: EntryInput): RunnerAction {
     kind: 'OPEN', side, quantity: qty,
     stopPrice: Number(stopPrice.toFixed(6)),
     takeProfit: takeProfit != null ? Number(takeProfit.toFixed(6)) : undefined,
-    reason: `${i.trend === 'uptrend' ? '상승' : '하락'} 추세 — ${side} 진입 `
-          + `(위험 ${cfg.riskPctPerTrade}% · 손절 ${cfg.stopPct}%)`,
+    reason: `${sig.reason} (위험 ${cfg.riskPctPerTrade}% · 손절 ${cfg.stopPct}%)`,
   };
 }
 
