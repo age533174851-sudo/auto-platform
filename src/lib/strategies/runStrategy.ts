@@ -24,6 +24,8 @@
 // 그 안에 묻힌다.
 
 import { resolveStrategy, type StrategySpec } from './registry';
+// 워커 빌드에는 `@/` 별칭이 없다 — 상대경로로 간다.
+import { bodySaysBlocked, blockerNames } from '../autotrade/runOutcome';
 
 export type EvaluationOutcome =
   /** 진입했다 */
@@ -89,29 +91,57 @@ export function outcomeOf(input: {
   forcedEntryCode?: string } {
   const b = input.body ?? {};
 
-  if (!input.httpOk) {
-    // 관문이 막은 것과 실행기가 죽은 것은 다르다. 서버가 이유를 줬으면 그것을 쓴다.
-    const blocked = b?.ok === false && (b?.checklist || b?.error === 'blocked' || b?.blockers);
-    const why = String(b?.message || b?.error || `HTTP ${input.status ?? '?'}`);
-    return blocked
-      ? { outcome: 'BLOCKED', summary: why }
-      : { outcome: 'FAILED', summary: `실행기가 응답하지 못했습니다 — ${why}` };
-  }
-
-  if (b?.executed === true || b?.entered === true || b?.order || b?.orderId) {
-    return { outcome: 'ENTERED', summary: String(b?.message || '진입했습니다') };
-  }
-
-  // 점검 목록이 막았는가. `allowed === false`만 본다 — undefined는 '안 돌았다'다.
-  const allowed = b?.checklist?.allowed;
-  if (allowed === false) {
-    const blockers = Array.isArray(b?.checklist?.blockers) ? b.checklist.blockers : [];
+  // ── 관문이 막은 것과 실행기가 죽은 것은 다른 사실이다 ──
+  //
+  // 라우트들은 거부를 **`blocked` 칸의 코드**로 말한다 —
+  // `scalp/route.ts`의 `MIGRATION_PENDING`·`KILL_SWITCH`·`NO_CONNECTION`,
+  // `my-original-v1`의 `EXIT_RULE_NOT_CONFIGURED` 같은 값들이다. 그런데
+  // 아래 판정은 `checklist`·`blockers`·`error === 'blocked'` 세 모양만
+  // 알아봤다. **보내는 어휘와 읽는 어휘가 갈렸다** — 이 저장소가 제일
+  // 자주 겪은 고장 그대로다(경로가 둘인데 한쪽만 고침). 그래서 이렇게 됐다:
+  //
+  //   · `503` + `blocked:'MIGRATION_PENDING'` → **FAILED**
+  //     `last_result`가 "실행기가 응답하지 못했습니다"가 된다. 2026-11-10
+  //     운영 기록이 정확히 그 문장이었고, 읽는 사람은 워커·호스팅·결제를
+  //     의심하게 된다. 멈춰 있던 것은 워커가 아니라 **마이그레이션 기록**이다.
+  //   · `200` + `ok:true` + `blocked:'EXIT_RULE_NOT_CONFIGURED'` → **NO_SIGNAL**
+  //     100배 전략이 손절·익절 규칙이 없어 거부한 것이 "정상 평가 완료 ·
+  //     진입 조건 없음"으로 적힌다. 화면 색은 **초록**이 된다 — 거짓으로
+  //     안심시키는 쪽이고, 거짓으로 겁주는 것과 똑같이 나쁘다.
+  //
+  // 읽는 자리는 여기 하나다. 라우트마다 본문을 고쳐 맞추면 또 갈린다.
+  //
+  // 지키는 것 둘:
+  //   ① **진짜 나간 주문을 덮지 않는다.** 진입 증거가 있으면 ENTERED가 이긴다.
+  //   ② **임의 문자열을 장부에 넣지 않는다.** 코드 값 자체는 요약에 싣지
+  //      않고, 라우트가 쓴 사람 문장(`message`·`error`)만 쓴다.
+  //
+  // **차단 판정은 `bodySaysBlocked` 한 곳에 있다.** 예전에는 이 함수 안에만
+  // 두 벌(`!httpOk` 가지 · `checklist.allowed` 가지)이 있었고 화면 쪽
+  // `classifyRun`에 또 한 벌이 있었다. 세 벌이 갈라졌고, 2026-11-14에
+  // Gate 예약이 갈라진 자리로 떨어졌다 — 그 설명은 술어 쪽에 적어 뒀다.
+  const enteredEvidence = b?.executed === true || b?.entered === true || b?.order || b?.orderId;
+  if (!enteredEvidence && (bodySaysBlocked(b) || b?.outcome === 'BLOCKED')) {
+    const why = String(b?.message || b?.error || '').trim();
+    // 사람 문장이 없으면 막은 항목 이름으로 대신한다. `blockers`는 객체
+    // 배열이라 그냥 join하면 `[object Object]`가 찍힌다.
+    const names = blockerNames(b?.checklist?.blockers ?? b?.blockers);
     return {
       outcome: 'BLOCKED',
-      summary: blockers.length > 0
-        ? `주문이 막혔습니다 — ${blockers.slice(0, 2).join(' · ')}`
-        : String(b?.error || '주문이 막혔습니다'),
+      summary: why
+        || (names.length > 0 ? `주문이 막혔습니다 — ${names.slice(0, 2).join(' · ')}` : '안전장치가 막았습니다'),
     };
+  }
+
+  if (!input.httpOk) {
+    // 여기까지 왔으면 **관문이 막았다는 증거가 본문에 없다.** 위에서 이미
+    // 걸렀으므로, 남은 비정상 응답은 실행기 쪽 실패다.
+    const why = String(b?.message || b?.error || `HTTP ${input.status ?? '?'}`);
+    return { outcome: 'FAILED', summary: `실행기가 응답하지 못했습니다 — ${why}` };
+  }
+
+  if (enteredEvidence) {
+    return { outcome: 'ENTERED', summary: String(b?.message || '진입했습니다') };
   }
   if (b?.ok === false) {
     return { outcome: 'FAILED', summary: String(b?.message || b?.error || '실행에 실패했습니다') };
