@@ -1426,10 +1426,16 @@ export interface FuturesOrderResult {
   success: boolean; message: string; orderId?: number | string;
   symbol?: string; side?: string; qty?: number; price?: number; raw?: any;
   /**
-   * 이 **거래 환경**이 그 주문 유형을 아예 안 받는가(-4120).
+   * **지금 쓰는 일반 주문 경로**(`/fapi/v1/order`)가 그 주문 유형을
+   * 안 받는가(-4120). 아는 두 모양을 다 보내 봤을 때만 true다.
    *
    * 파라미터를 고쳐서 될 일이 아니라는 뜻이다. 이게 없으면 화면이
    * 키·권한·수량을 의심하게 만든다 — 거기엔 고칠 것이 없다.
+   *
+   * **"이 환경은 보호주문을 못 건다"는 뜻이 아니다.** 두 모양 모두 같은
+   * 경로로 나갔고, 거래소는 Algo 주문 API를 쓰라고 답했다. 그 경로의
+   * 지원은 #346이 다룬다. 이름이 `env`인 것은 과거 흔적이고, #346과
+   * 같은 식별자를 동시에 바꾸지 않으려고 그대로 둔다.
    */
   envUnsupported?: boolean;
 }
@@ -1459,6 +1465,94 @@ export async function placeFuturesOrder(
     };
   } catch (e: any) { return { success: false, message: e.message || '주문 실패' }; }
 }
+
+/**
+ * 보호주문(TP/SL) 부착이 실패했을 때, **무엇을 시도했고 무엇을 왜 못 했는지**
+ * 적는다.
+ *
+ * 왜 따로 꺼냈나
+ * ──────────────
+ * 2026-11-14 스모크에서 사용자가 받은 문장은 영어 원문 한 줄이었다:
+ *
+ *   진입 실패: 손절 부착 실패([-4120] Order type not supported for this
+ *   endpoint. Please use the Algo Order API endpoints instead.)
+ *
+ * 아래 `placeFuturesTPSL`은 이 상황을 판단할 줄 안다 — 두 모양을 바꿔
+ * 시도하고, 둘 다 막히면 "환경이 안 받습니다"라고 쓴다. 그런데 **대체
+ * 시도를 못 하는 갈래**(수량을 몰라 건너뜀)에서는 그 판단이 통째로
+ * 사라지고 원문만 남았다. 사용자는 API 키 권한과 IP를 뒤졌다. 둘 다
+ * 원인이 아니었다.
+ *
+ * 판단이 두 갈래에 흩어져 있으면 한쪽만 고쳐진다. 그래서 한 곳에 두고
+ * 시험을 붙인다(`binanceTpSlFallback.test.ts`).
+ *
+ * 규칙
+ * ────
+ *  · 두 모양 다 -4120 → **그 엔드포인트**가 안 받는다고 단정해도 된다.
+ *    환경 전체로 넓히지는 않는다 — 두 모양 모두 **같은 경로**로 나갔고,
+ *    거래소는 "Algo 주문 API를 쓰라"고 답했다. 경로 하나의 거절을
+ *    "이 환경은 보호주문을 못 건다"로 읽으면, 사용자는 보호가 가능한
+ *    길이 있는데도 포기하거나 실전으로 옮긴다.
+ *    (2026-11-14 #631 검수 지적. 제가 한 과장이었다.)
+ *  · 한 모양만 시도 → 그 모양이 거절됐다는 것까지만. 대신 **대체를 못 한
+ *    이유**를 적는다. 안 적으면 사용자가 엉뚱한 곳을 뒤진다.
+ *  · -4120과 무관한 실패 → 원문 그대로. 없는 설명을 붙이지 않는다.
+ */
+export function tpslFailureVerdict(i: {
+  label: string;
+  type: string;
+  testnet: boolean;
+  /** 1차 시도의 거래소 원문 */
+  firstError: string;
+  /** 2차(대체) 시도의 원문. 시도하지 않았으면 null */
+  secondError?: string | null;
+  /** 대체를 시도하지 못한 이유(예: '수량을 몰라'). 시도했으면 null */
+  retrySkippedReason?: string | null;
+  /**
+   * 두 모양이 **실제로 나간 경로**. 문장이 추측이 되지 않게 호출부가 넘긴다.
+   * 보내는 곳과 적는 곳이 갈리면 경로를 바꿨을 때 문장만 옛것으로 남는다.
+   */
+  endpoint: string;
+}): { envUnsupported: boolean; message: string } {
+  const BLOCKED = /-4120|not supported for this endpoint|Algo Order/i;
+  const env = i.testnet ? '바이낸스 데모(demo-fapi)' : '이 환경';
+  const ALGO = '거래소는 Algo 주문 API를 쓰라고 답했습니다';
+  const second = i.secondError ?? null;
+
+  if (second !== null) {
+    if (BLOCKED.test(i.firstError) && BLOCKED.test(second)) {
+      return {
+        envUnsupported: true,
+        message: `${i.label}을(를) 지금 경로로는 걸 수 없습니다 — ${env}의 일반 주문 경로`
+          + `(${i.endpoint})가 ${i.type}을(를) 받지 않습니다(-4120). ${ALGO}. `
+          + `전량 청산·수량 지정 두 모양을 다 시도했지만 둘 다 같은 경로로 나갔습니다 — `
+          + `이 환경이 보호주문을 아예 걸 수 없다는 뜻은 아닙니다. `
+          + `키·권한·수량 문제는 아닙니다.`,
+      };
+    }
+    return {
+      envUnsupported: false,
+      message: `${i.label} 부착 실패 — 두 가지 방식을 다 시도했습니다. `
+        + `원문: ${i.firstError} / ${second}`,
+    };
+  }
+
+  if (BLOCKED.test(i.firstError) && i.retrySkippedReason) {
+    return {
+      envUnsupported: false,
+      message: `${i.label} 부착 실패 — ${env}의 일반 주문 경로(${i.endpoint})가 이 모양의 `
+        + `${i.type}을(를) 받지 않았습니다(-4120). ${ALGO}. `
+        + `전량 청산 방식만 시도했고, 대체 방식(수량 지정)은 ${i.retrySkippedReason} `
+        + `시도하지 못했습니다. 두 모양 다 막혔는지는 아직 확인되지 않았습니다. `
+        + `원문: ${i.firstError}`,
+    };
+  }
+
+  return { envUnsupported: false, message: i.firstError || 'TP/SL 실패' };
+}
+
+/** 보호주문이 실제로 나가는 경로. 사유 문장도 이 값을 쓴다 — 갈리지 않게. */
+const TPSL_ORDER_PATH = '/fapi/v1/order';
 
 export async function placeFuturesTPSL(
   key: string, secret: string,
@@ -1504,7 +1598,7 @@ export async function placeFuturesTPSL(
     } else {
       params.closePosition = 'true';
     }
-    return fapiSigned('POST', '/fapi/v1/order', key, secret, testnet, params);
+    return fapiSigned('POST', TPSL_ORDER_PATH, key, secret, testnet, params);
   };
 
   // 원래 쓰던 모양. 수량을 알면 reduceOnly, 모르면 closePosition.
@@ -1534,22 +1628,28 @@ export async function placeFuturesTPSL(
         return { success: true, message: `${label} 설정 (대체 방식)`, orderId: d2.orderId, symbol: d2.symbol, raw: d2 };
       } catch (e2: any) {
         // 두 모양 다 -4120이면 파라미터 문제가 아니라 **환경 문제**다.
-        // 그렇게 말해야 사용자가 키·권한·수량을 뒤지지 않는다.
-        const bothBlocked = /-4120|not supported for this endpoint|Algo Order/i
-          .test(String(e2?.message || e2));
-        return {
-          success: false,
-          envUnsupported: bothBlocked,
-          message: bothBlocked
-            ? `${label}을(를) 거래소에 걸 수 없습니다 — ${testnet ? '바이낸스 데모(demo-fapi)' : '이 환경'}가 `
-              + `${opts.type} 주문을 받지 않습니다(-4120). 전량 청산·수량 지정 두 방식을 다 시도했습니다. `
-              + `키·권한·수량 문제가 아닙니다.`
-            : `${label} 부착 실패 — 두 가지 방식을 다 시도했습니다. `
-              + `원문: ${msg} / ${String(e2?.message || e2)}`,
-        };
+        // 문장을 여기서 짓지 않는다 — 판정은 tpslFailureVerdict 한 곳에 있다.
+        const v = tpslFailureVerdict({
+          label, type: opts.type, testnet, endpoint: TPSL_ORDER_PATH,
+          firstError: msg, secondError: String(e2?.message || e2),
+        });
+        return { success: false, envUnsupported: v.envUnsupported, message: v.message };
       }
     }
-    return { success: false, message: msg || 'TP/SL 실패' };
+
+    // 대체를 **시도하지 못한** 갈래. 예전에는 여기서 거래소 원문만 던졌고,
+    // 바로 윗줄이 할 줄 아는 판단이 통째로 사라졌다. 사용자는 그 영어를
+    // 보고 키 권한과 IP를 뒤졌다 — 거기엔 고칠 것이 없었다.
+    //
+    // 같은 판정기를 지난다. 한 모양만 시도했으니 환경 탓으로 단정하지는
+    // 않고, **무엇을 못 했고 왜 못 했는지**를 남긴다.
+    const skipped = retriable && other === 'quantity' && !canRetryWithQty;
+    const v = tpslFailureVerdict({
+      label, type: opts.type, testnet, endpoint: TPSL_ORDER_PATH,
+      firstError: msg, secondError: null,
+      retrySkippedReason: skipped ? '수량을 몰라' : null,
+    });
+    return { success: false, envUnsupported: v.envUnsupported, message: v.message };
   }
 }
 
