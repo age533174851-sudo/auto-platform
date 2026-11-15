@@ -1,6 +1,10 @@
 -- TESTNET conditional intents live beside their existing entry intent.
 -- Contains order identities/payload/evidence only; never API credentials.
 ALTER TABLE public.live_orders ADD COLUMN IF NOT EXISTS testnet_algo_intents jsonb NOT NULL DEFAULT '{}'::jsonb;
+-- PostgreSQL has no ADD CONSTRAINT IF NOT EXISTS, so drop first. Without this,
+-- a second application fails with 42710 and whatever is replaying stops there.
+-- 086 · 088 · 097 · 098 all follow this convention; #636 is what it costs not to.
+ALTER TABLE public.live_orders DROP CONSTRAINT IF EXISTS live_orders_algo_intents_object;
 ALTER TABLE public.live_orders ADD CONSTRAINT live_orders_algo_intents_object
   CHECK (jsonb_typeof(testnet_algo_intents) = 'object');
 CREATE INDEX IF NOT EXISTS live_orders_unfinished_algo_owner
