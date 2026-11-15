@@ -10,14 +10,27 @@ import { collectPaperDailyLoss } from '../risk/dailyLossCheck';
 import { collectRegime } from '../risk/regimeCheck';
 
 export interface PaperAutomationResult { code: string; message: string; positionId?: string; }
+/**
+ * 봇 이름. **DB가 받는 모양과 같아야 한다** — 102번의
+ * `paper_automation_settings_bot_id_shape`가 같은 정규식으로 막는다.
+ * 여기서 먼저 걸러야 사용자가 409 대신 400을 받는다.
+ */
+export const PAPER_BOT_ID = /^[a-z0-9][a-z0-9-]{1,62}$/;
+/** 안 적으면 이 봇. 099 시절부터 돌던 그 봇이다 */
+export const DEFAULT_PAPER_BOT = 'paper-auto-v1';
+
 export function parsePaperAutomationControl(body: unknown):
-  { enabled: boolean; symbol: string; interval: number } | null {
+  { enabled: boolean; symbol: string; interval: number; botId: string } | null {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
   const b = body as Record<string, unknown>;
-  if (b.action === 'stop') return { enabled: false, symbol: 'BTCUSDT', interval: 60 };
+  // **안 적으면 옛 봇이다.** 이 줄이 없으면 예전 화면이 보내던 요청이
+  // 새 봇을 만들어 버리고, 돌던 봇은 멈춘 것처럼 보인다.
+  const botId = b.botId == null || b.botId === '' ? DEFAULT_PAPER_BOT : String(b.botId);
+  if (!PAPER_BOT_ID.test(botId)) return null;
+  if (b.action === 'stop') return { enabled: false, symbol: 'BTCUSDT', interval: 60, botId };
   if (b.action !== 'start' || !['BTCUSDT','ETHUSDT'].includes(String(b.symbol))
       || ![60,300,900].includes(b.interval as number)) return null;
-  return { enabled: true, symbol: b.symbol as string, interval: b.interval as number };
+  return { enabled: true, symbol: b.symbol as string, interval: b.interval as number, botId };
 }
 
 const n = (v: unknown): number | null => v == null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v);

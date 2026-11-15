@@ -173,6 +173,11 @@ jobs:
             echo "::error::시작 요청이 HTTP ${code}로 실패했습니다 — 위 응답의 error·message가 단계를 적고 있습니다"
             exit 1
           fi
+          python3 - "$body" >> "$GITHUB_OUTPUT" <<'PY'
+          import json, sys, uuid
+          run_id = json.load(open(sys.argv[1])).get('run', {}).get('id')
+          print(f"run_id={uuid.UUID(run_id)}")
+          PY
           # 200이어도 `ok:false`일 수 있다 — 거래소가 막았거나 사전 확인이
           # 걸린 경우다. **그것을 성공으로 적지 않는다.**
           if ! python3 -c "import json,sys; sys.exit(0 if json.load(open('$body')).get('ok') else 1)"; then
@@ -230,6 +235,8 @@ jobs:
       # 적힌다.** 그래서 마지막에 한 번 더 읽는다.
       - name: 증거 — 회차별 단계와 잔여
         if: always()
+        env:
+          EXPECTED_RUN_ID: ${{ steps.start.outputs.run_id }}
         run: |
           set -euo pipefail
           B="${BASE%/}"
@@ -249,16 +256,31 @@ jobs:
           # 것을 그대로 옮기고, 모르는 것이 하나라도 있으면 이 작업은
           # 빨갛게 끝난다 — 모르는 것은 통과가 아니다.
           python3 - "$body" <<'PY'
-          import json, sys
+          import json, sys, os, math
           d = json.load(open(sys.argv[1]))
           runs = d.get('runs') or []
-          if not runs:
-              print('::error::이 사용자의 스모크 묶음이 하나도 없습니다 — 시작이 기록되지 않았습니다')
+          expected = os.environ.get('EXPECTED_RUN_ID')
+          matches = [r for r in runs if expected and r.get('id') == expected]
+          if d.get('ok') is not True or len(matches) != 1:
+              print('::error::이번 시작 요청의 묶음을 확인하지 못했습니다 — 다른 실행으로 대신하지 않습니다')
               sys.exit(1)
-          r = runs[0]
+          r = matches[0]
           print(f"묶음 {r.get('id')} · {r.get('symbol')} · 상태 {r.get('state')} · 회차 {r.get('attempts')}")
           bad = 0
-          for t in (r.get('tests') or []):
+          tests = r.get('tests') or []
+          requested = int(os.environ['ATTEMPTS'])
+          if (r.get('state') != 'DONE' or r.get('attempts') != requested
+                  or len(tests) != requested
+                  or sorted(t.get('attemptNo', 0) for t in tests) != list(range(1, requested + 1))
+                  or (r.get('summary') or {}).get('pass') is not True):
+              print('::error::요청한 전체 회차가 완료·통과되지 않았습니다 (차단·0회 체결도 실패)')
+              bad += 1
+          def positive(value):
+              try:
+                  return not isinstance(value, bool) and math.isfinite(float(value)) and float(value) > 0
+              except (TypeError, ValueError):
+                  return False
+          for t in tests:
               steps = {s.get('id'): s.get('state') for s in (t.get('steps') or [])}
               e = t.get('entry') or {}
               ev = t.get('evidence') or {}
@@ -302,8 +324,15 @@ jobs:
                   print(f"::error::{t.get('attemptNo')}회차가 정산 뒤에도 {t.get('state')}입니다"
                         " — 닫히지 않았습니다")
                   bad += 1
-              elif t.get('verdict') not in ('PASS', 'BLOCKED'):
+              elif (t.get('verdict') or {}).get('code') != 'PASS':
                   print(f"::error::{t.get('attemptNo')}회차 판정이 {t.get('verdict')}입니다")
+                  bad += 1
+              if (not e.get('orderId') or not positive(e.get('qty'))
+                      or not positive(e.get('avgPrice'))
+                      or not e.get('slOrderId') or not e.get('tpOrderId')
+                      or any(steps.get(k) != 'PASS' for k in
+                             ('ENTRY', 'FILL', 'STOP', 'TAKE_PROFIT', 'CLOSE', 'RECONCILE'))):
+                  print(f"::error::{t.get('attemptNo')}회차 체결·보호주문·청산 증거가 부족합니다")
                   bad += 1
           sys.exit(1 if bad else 0)
           PY
