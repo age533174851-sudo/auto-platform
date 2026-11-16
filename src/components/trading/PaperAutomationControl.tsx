@@ -5,12 +5,19 @@ import {
   refreshStart, refreshOk, refreshFailed, refreshCleared, type RefreshState,
 } from '@/lib/ui/refreshState';
 import { assess } from '@/lib/engine/dataQuality';
+import type { PaperRunnerStatus } from '@/lib/engine/paperRunnerStatus';
 
 interface Status {
   settings: { enabled: boolean; symbol: string; interval_seconds: number; next_run_at: string; config: Record<string,number> } | null;
   account: { balance: number; total_pnl: number; total_fees: number; started_at: string | null } | null;
   runs: { id: string; state: string; result: { code: string; message: string } | null; created_at: string; finished_at: string | null }[];
   positions: { id: string; symbol: string; side: string; status: string; fill_price: number; exit_price: number | null; stop_loss: number; take_profit: number | null; liquidation_price: number | null; realized_pnl: number | null; exit_reason: string | null }[];
+  /**
+   * **누가 이 회차를 깨우고 있는가.** 서버가 판정해서 보낸다
+   * (`src/lib/engine/paperRunnerStatus.ts`). 화면이 다시 판정하지 않는다 —
+   * 두 벌이 되면 언젠가 서로 다른 답을 낸다.
+   */
+  runner?: PaperRunnerStatus | null;
 }
 const money = (v: unknown) => v == null || !Number.isFinite(Number(v)) ? '확인 불가' : Number(v).toLocaleString('en-US',{maximumFractionDigits:4});
 const time = (v: string | null | undefined) => v ? new Date(v).toLocaleString('ko-KR') : '아직 없음';
@@ -83,6 +90,17 @@ export function PaperAutomationControl() {
     {error && <p role="alert">{error}</p>}
     {actionError && <p role="alert">{actionError}</p>}
     <div data-testid="paper-automation-status">{!status ? '상태 확인 전' : enabled ? '반복 실행 요청 켜짐' : '반복 실행 정지'}</div>
+    {/* ── 켜진 것과 **도는 것**은 다르다 ──
+        위 줄은 "요청"이다. 봇을 켜 두어도 깨우는 Fly 워커가 꺼져 있으면
+        한 건도 돌지 않는다. 판정은 서버(`paperRunnerStatus`)가 하고
+        여기서는 그 문장을 그대로 적는다. */}
+    {status && (status.runner
+      ? <div data-testid="paper-automation-runner" role={status.runner.running ? undefined : 'status'}>
+          {status.runner.running ? '● ' : '▲ '}{status.runner.headline} — {status.runner.reason}
+        </div>
+      : <div data-testid="paper-automation-runner" role="status">
+          ▲ 실행기 상태 모름 — 서버가 가동 여부를 알려주지 않았습니다
+        </div>)}
     {/* 낡은 값을 **현재값처럼** 보여 주지 않는다. 판정과 나이 표기는
         `dataQuality.assess`가 한다 — 여기서 다시 만들면 두 벌이 된다. */}
     {status && freshness.freshness !== 'FRESH' && <p role="status" data-testid="paper-automation-freshness">
@@ -104,7 +122,10 @@ export function PaperAutomationControl() {
       배율 {status.settings.config.leverage}배 · 거래 위험 {status.settings.config.riskPctPerTrade}% · 최대 동시 1개 · 손절 {status.settings.config.stopPct}% · 익절 {status.settings.config.takeProfitPct}% · 최대 보유 {status.settings.config.maxHoldHours}시간
       <br/>다음 평가 예정: {enabled ? time(status.settings.next_run_at) : '정지'} · 최근 완료: {time(lastDone?.finished_at)}
     </div>}
-    {enabled && (!lastDone || Date.now()-new Date(lastDone.finished_at!).getTime()>Math.max(180000,interval*2000)) && <p role="status">최근 서버 평가 완료를 아직 확인하지 못했습니다.</p>}
+    {/* 여기 있던 "최근 서버 평가 완료를 아직 확인하지 못했습니다"는 지웠다.
+        같은 판단(회차가 밀렸는가)을 화면이 **화면의 간격 입력값**으로 다시
+        했었다 — 실제 봇 주기가 아니라서 서버와 답이 갈릴 수 있었다. 지금은
+        위 한 줄이 서버 판정으로 그 경우(OVERDUE·NEVER_RAN)를 덮는다. */}
     {status?.account && <div>잔고 {money(status.account.balance)} USDT · 실현 손익 {money(status.account.total_pnl)} USDT · 수수료 {money(status.account.total_fees)} USDT</div>}
     {last && <p style={{margin:0}}>최근 평가: {last.result?.message || (last.state==='CLAIMED' ? '서버 평가 중 또는 복구 대기' : '실행 취소됨')}</p>}
     <ul aria-label="서버 반복 평가 이력">{status?.runs.slice(0,5).map(r=><li key={r.id}>{time(r.created_at)} · {r.result?.message || (r.state==='CLAIMED' ? '평가 중 또는 복구 대기' : '실행 취소됨')}</li>)}</ul>
