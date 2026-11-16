@@ -7,7 +7,12 @@
 // ───────────────────
 //   1. 열린 모의 포지션을 지금 마크가로 점검 → 청산가/손절/익절/보유시간
 //   2. 오늘 손실 한도 확인 (닿았으면 진입만 잠근다. 청산은 위에서 이미 끝났다)
-//   3. 국면 판정 → 추세 방향으로만 진입
+//   3. 국면 판정 → 진입 전략이 방향을 정한다 (기본은 추세 추종)
+//
+// 전략은 `signal`로 고른다 (기본 `trend-follow` — 지금까지 돌던 그 규칙).
+// GET은 고르지 않아도 **전략 전부의 판정을 나란히** 돌려준다. 같은 국면
+// 데이터로 돌리므로, 어느 전략이 지금 무엇을 보고 있는지 비교할 수 있다.
+// 아무것도 실행하지 않으니 비교에 돈이 들지 않는다.
 //
 // **청산이 먼저다.** 진입부터 하면 자리가 없어 못 들어가고, 무엇보다
 // 손절은 미룰 수 없다.
@@ -26,9 +31,30 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { planExits, planEntry, readRunnerConfig, type OpenPaperPos } from '@/lib/engine/paperRunner';
+import {
+  ENTRY_SIGNAL_IDS, ENTRY_SIGNAL_LABEL, DEFAULT_ENTRY_SIGNAL,
+  parseEntrySignal, type EntrySignalId,
+} from '@/lib/engine/entrySignals';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
+
+/**
+ * 쓸 진입 전략. 없으면 기본값(추세 추종).
+ *
+ * 모르는 이름은 **기본값으로 대신하지 않는다.** 대신하면 오타 하나로
+ * 다른 전략이 돌면서 그 전략의 기록에 남는다.
+ */
+function signalFrom(body: any): { signal: EntrySignalId; bad: string | null } {
+  const raw = body?.signal ?? body?.strategy;
+  if (raw == null || String(raw).trim() === '') return { signal: DEFAULT_ENTRY_SIGNAL, bad: null };
+  const got = parseEntrySignal(raw);
+  return got
+    ? { signal: got, bad: null }
+    : { signal: DEFAULT_ENTRY_SIGNAL,
+        bad: `알 수 없는 진입 전략입니다: ${String(raw).slice(0, 40)} `
+           + `(가능: ${ENTRY_SIGNAL_IDS.join(' · ')})` };
+}
 
 /** 데모가 볼 종목. PAPER_SYMBOLS로 바꾼다 */
 function symbolsFrom(body: any): string[] {
@@ -160,6 +186,7 @@ async function cycle(req: NextRequest, uid: string, sb: any, body: any, dryRun: 
   const { collectRegime } = await import('@/lib/risk/regimeCheck');
   let entered: any = null;
   const tried: any[] = [];
+  const { signal, bad: badSignal } = signalFrom(body);
 
   for (const symbol of symbols) {
     if (stillOpen.length >= cfg.maxOpenPositions) {
@@ -180,16 +207,35 @@ async function cycle(req: NextRequest, uid: string, sb: any, body: any, dryRun: 
     const status: 'ok' | 'blocked' | 'unknown' =
       !dataOk ? 'unknown' : (rg.verdict.blockEntries ? 'blocked' : 'ok');
 
-    const plan = planEntry({
+    const common = {
       symbol, regimeStatus: status,
       regimeReason: rg.verdict.reason,
       trend: dataOk ? (rg.verdict.regime?.trend ?? null) : null,
+      // 국면이 이미 계산해 둔 관측값을 그대로 전략에 넘긴다. 전에는
+      // 여기까지 와 놓고 추세 세 값만 넘겨서, 역추세·돌파는 쓸 재료가
+      // 아예 도착하지 않았다.
+      view: dataOk ? (rg.verdict.regime?.view ?? null) : null,
       markPrice: marks[symbol] ?? null,
       availableUsd: available,
       openCount: stillOpen.length,
       cfg,
-    });
-    tried.push({ symbol, ...plan, regime: rg.verdict.regime?.label ?? null });
+    };
+    const plan = planEntry({ ...common, signal });
+
+    // 아무것도 실행하지 않는 조회에서는 **전략 전부**를 같은 데이터로
+    // 돌려 나란히 보여 준다. 어느 전략이 지금 무엇을 보고 있는지 비교하는
+    // 데 돈이 들지 않아야 한다.
+    const signals = dryRun
+      ? ENTRY_SIGNAL_IDS.map(id => {
+          const p = planEntry({ ...common, signal: id });
+          return { signal: id, label: ENTRY_SIGNAL_LABEL[id], kind: p.kind,
+            side: p.side ?? null, reason: p.reason };
+        })
+      : undefined;
+
+    tried.push({ symbol, ...plan, signal, regime: rg.verdict.regime?.label ?? null,
+      view: dryRun ? (rg.verdict.regime?.view ?? null) : undefined,
+      ...(signals ? { signals } : {}) });
     if (plan.kind !== 'OPEN') continue;
 
     if (dryRun) { entered = { symbol, ...plan, dryRun: true }; break; }
@@ -229,7 +275,12 @@ async function cycle(req: NextRequest, uid: string, sb: any, body: any, dryRun: 
             : `${entered.side} 진입 ${entered.symbol}`)
         : `진입 없음 — ${tried[0]?.reason ?? '조건 미충족'}`);
 
-  return { ok: true, dryRun, cfg, symbols, available, closed, entered, tried, message: msg, steps };
+  return { ok: true, dryRun, cfg, symbols, available, closed, entered, tried,
+    signal, signalLabel: ENTRY_SIGNAL_LABEL[signal],
+    // 오타를 조용히 삼키지 않는다 — 기본값으로 돌았음을 적어 둔다.
+    ...(badSignal ? { signalWarning: badSignal } : {}),
+    message: badSignal ? `${msg} · ${badSignal} — 기본 전략으로 판정했습니다` : msg,
+    steps };
 }
 
 async function handle(req: NextRequest, dryRun: boolean) {
@@ -237,7 +288,12 @@ async function handle(req: NextRequest, dryRun: boolean) {
   if (!dryRun) { try { body = await req.json(); } catch { body = {}; } }
   else {
     const sp = req.nextUrl.searchParams;
-    if (sp.get('symbols') || sp.get('symbol')) body = { symbols: sp.get('symbols') || sp.get('symbol') };
+    body = {
+      ...(sp.get('symbols') || sp.get('symbol')
+        ? { symbols: sp.get('symbols') || sp.get('symbol') } : {}),
+      ...(sp.get('signal') || sp.get('strategy')
+        ? { signal: sp.get('signal') || sp.get('strategy') } : {}),
+    };
   }
 
   const uid = await resolveUserId(

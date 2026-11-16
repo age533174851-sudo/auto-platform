@@ -27,6 +27,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { listOpenPulls } from './lib/pr-facts.mjs';
 
 const TOKEN = process.env.GITHUB_TOKEN;
 const REPO = process.env.GITHUB_REPOSITORY;
@@ -111,11 +112,45 @@ async function main() {
   if (!repoInfo.ok) { console.error('저장소 정보를 읽지 못했습니다'); process.exit(1); }
   const DEFAULT_BRANCH = repoInfo.body.default_branch;
 
-  const listed = await api(`/repos/${REPO}/pulls?state=open&per_page=100`);
+  // **재배치가 머지에 필요한지 먼저 묻는다.**
+  //
+  // base 규칙이 "최신 main 위에 있어야 한다"를 요구하지 않으면, 재배치는
+  // 초록인 검사를 버리기만 한다 — 그리고 bot이 만든 push의 런은 잡 0개로
+  // 끝나서 필수 체크가 아예 안 생긴다(판정 모듈 주석의 실측). 판단은
+  // `autoRebase.ts`에 있고, 여기서는 사실만 읽어 넘긴다.
+  //
+  // **못 읽으면 null을 넘긴다.** 모르는 것을 "요구하지 않는다"로 바꾸지
+  // 않는다 — 그렇게 바꾸면 진짜로 요구하는 저장소에서 PR이 영영 멈춘다.
+  const rules = await api(`/repos/${REPO}/rules/branches/${encodeURIComponent(DEFAULT_BRANCH)}`);
+  let baseRequiresUpToDate = null;
+  if (rules.ok && Array.isArray(rules.body)) {
+    const strictRules = rules.body.filter(r => r?.type === 'required_status_checks');
+    // 규칙이 여럿이면 **하나라도 요구하면 요구하는 것**이다.
+    // 규칙이 하나도 없으면 최신 상태를 요구하는 것이 없다 → false.
+    baseRequiresUpToDate = strictRules
+      .some(r => r?.parameters?.strict_required_status_checks_policy === true);
+    console.log(`${DEFAULT_BRANCH} 규칙: 최신 상태 요구 ${baseRequiresUpToDate ? '있음' : '없음'}`
+      + ` (required_status_checks 규칙 ${strictRules.length}개)`);
+  } else {
+    console.log(`⚠ ${DEFAULT_BRANCH} 보호 규칙을 읽지 못했습니다 (HTTP ${rules.status})`
+      + ' — 모르는 채로 재배치 여부를 바꾸지 않습니다');
+  }
+
+  // **30분 안전망은 열린 PR 전부를 훑어야 한다.** 예전에는 첫 장(100개)만
+  // 훑었다 — 열린 PR이 225개일 때 첫 장 밖의 PR은 main이 움직여도
+  // 재배치되지 않고, 왜 안 됐는지 아무 데도 안 남았다. `auto-merge.mjs`와
+  // `pr-backlog.mjs`가 같은 자리에서 같이 틀렸다. 목록은 한 함수로 모은다.
+  const listed = await listOpenPulls({ api, repo: REPO });
   if (!listed.ok) { console.error('PR 목록을 읽지 못했습니다:', listed.status); process.exit(1); }
+  // 다 못 읽었으면 **적어 둔다.** 훑지 못한 PR을 "재배치할 것 없음"으로 읽지 않는다.
+  if (!listed.complete) {
+    console.log(`⚠ PR 목록을 다 읽지 못했습니다 — ${listed.pages}장까지 ${listed.all.length}개`
+      + (listed.failedPage ? ` (${listed.failedPage}장에서 HTTP ${listed.status})` : ' (장 수 상한)')
+      + '. 이 회차는 열린 PR 전부를 보지 못했습니다.');
+  }
 
   const only = process.env.PR_NUMBER ? Number(process.env.PR_NUMBER) : null;
-  const prs = listed.body.filter(p => only == null || p.number === only);
+  const prs = listed.all.filter(p => only == null || p.number === only);
 
   // 원격 URL. **토큰이 로그에 남지 않게** 이 문자열은 절대 출력하지 않는다.
   const remote = `https://x-access-token:${TOKEN}@github.com/${REPO}.git`;
@@ -136,6 +171,7 @@ async function main() {
       number: brief.number, draft: !!brief.draft, labels, fromFork,
       headRef: brief.head?.ref ?? '', headSha: brief.head?.sha ?? '',
       baseRef: brief.base?.ref ?? '', behindBy: null, cleanRebase: null,
+      baseRequiresUpToDate,
     }, DEFAULT_BRANCH);
     if (pre.action === 'SKIP' && !pre.reason.includes('재배치를 시도해')
       && !pre.reason.includes('뒤처졌는지')) {
@@ -178,6 +214,7 @@ async function main() {
     const v = rebaseVerdict({
       number: brief.number, draft: !!brief.draft, labels, fromFork,
       headRef, headSha, baseRef: brief.base?.ref ?? '', behindBy, cleanRebase,
+      baseRequiresUpToDate,
     }, DEFAULT_BRANCH);
 
     console.log(`#${brief.number} ${v.action} — ${v.reason}`);
