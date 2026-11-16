@@ -95,18 +95,36 @@ jobs:
       - name: 의존성 설치
         run: npm ci
 
+      # GitHub 매매 fallback HTTP 200 오판 방지 — 단독 Node 테스트를 CI에 실제 배선한다.
+      - name: GitHub 자동매매 응답 계약 회귀
+        run: node --test scripts/check-autotrade-tick-response.test.mjs
+
       # 이 저장소의 하네스는 src를 node_modules 없이 컴파일해 돌린다.
       # 그래서 테스트 대상 모듈은 상대 경로 import만 쓴다 (scripts/run-tests.mjs 참조).
       - name: 유닛 테스트
         run: npm test
 
-      # Claude 무인 회차 진단기 — #533.
+      # ── `.mjs` 시험 — 이름을 적지 않고 전부 돌린다 ──
+      #
       # `npm test`는 TypeScript 러너라 `.mjs` 시험이 안 걸린다. 여기서
-      # 돌리지 않으면 **PR에서 한 번도 안 돈다** — 이 저장소가 이미 당한 모양이다.
-      - name: Claude 회차 진단기 회귀 (민감정보 유출 0 포함)
-        run: |
-          node --test scripts/test-claude-api-preflight.mjs
-          node --test scripts/test-claude-exec-category.mjs
+      # 돌리지 않으면 **PR에서 한 번도 안 돈다** — 이 저장소가 이미 당한
+      # 모양이다. 그 주석은 원래부터 여기 있었는데, 정작 이 단계는
+      # **파일 이름 두 개를 손으로 적어** 두고 있었다.
+      #
+      # 그 사이 `scripts/test-*.mjs`는 다섯 개가 됐고, 나머지 셋은
+      # 한 번도 돌지 않았다 — `test-pipeline.mjs`는 main에서 **죽어
+      # 있는데도** CI가 초록이었다(#593이 그 RED를 찾았다).
+      #
+      # 그래서 목록을 한 줄 늘리는 대신 **목록을 없앴다.** 다음에 생기는
+      # 시험은 아무것도 안 해도 돈다. 글롭이 아무것도 못 맞히면 `node`가
+      # 없는 경로로 실패하므로, 조용히 0건을 돌리는 일은 없다.
+      - name: .mjs 시험 전부 (손으로 적은 목록 없음)
+        run: node --test scripts/test-*.mjs
+
+      # 위 글롭이 다시 이름 목록으로 되돌아가지 못하게 못 박는다.
+      # "CI가 안 돌리는 검사기는 없는 검사기다" — 그 판정을 코드로 둔다.
+      - name: .mjs 시험 배선 검사 (디스크의 시험 = CI가 돌리는 시험)
+        run: node scripts/check-ci-script-tests.mjs
 
       # ── 워커 빌드 ──
       #
@@ -391,6 +409,15 @@ jobs:
       - name: 마이그레이션 배선 검사
         run: node scripts/check-migrations.mjs
 
+      # ── 필수 체크가 "생기지도 않는" 자리를 막는가 ──
+      #
+      # `auto-merge.yml` 이 만드는 `auto-merge-gate` 는 main ruleset 의
+      # 필수 검사다. 그 워크플로의 `concurrency.group` 이 상수면 서로
+      # 상관없는 PR 들이 한 줄에 서고, 대기 중인 run 이 서로 취소된다 —
+      # 체크가 빨갛지 않고 **아예 없어서** 아무 데도 이유가 안 남는다.
+      - name: 필수 체크 워크플로 검사 (트리거 · 겹침 제어)
+        run: node scripts/check-required-check-workflow.mjs
+
       # ── 마이그레이션 카탈로그 타입 검사 ──
       #
       # 050이 옛 유니크를 찾으려고 `array_agg(att.attname …) = ARRAY['symbol',
@@ -438,6 +465,16 @@ jobs:
       # 한다** — 실행이 연구 모듈을 import 하는 것 자체를 막는다.
       - name: 연구/실행 분리 검사
         run: node scripts/check-research-isolation.mjs
+      # ── 연구/실행 공통 커널 검사 ──
+      #
+      # 위 검사는 "실행이 연구를 읽지 않는다"를 본다. 그런데 연구가
+      # 실행을 **읽지도 못하게** 하면 수수료·수량 규격·청산 거리 계산이
+      # 두 벌이 되고, 그러면 백테스트가 통과시킨 수량이 거래소에서
+      # 거부되고 연구가 "50배도 버틴다"고 적은 자리에서 실행이 청산된다.
+      # 그래서 양쪽이 쓰는 순수 계산만 `src/lib/kernel/`에 두고, 그 바닥이
+      # 실행 경로도 I/O도 가정값도 끌고 오지 않는지 센다.
+      - name: 연구/실행 공통 커널 (바닥은 한 파일 · 양쪽 어디도 안 읽는다)
+        run: node scripts/check-research-kernel.mjs
       # ── 브라우저 주문 권한 검사 ──
       # `AutoTradeEngine.tsx`가 60초 타이머로 전략을 평가하고 실제 주문을
       # 냈다. 전략 목록은 localStorage에 있었고, 워커가 지키는 관문
@@ -964,6 +1001,18 @@ jobs:
       - name: 상태판 문장 검사
         run: node scripts/check-status-claims.mjs
 
+      # ── 내려받기가 깨진 것을 "검사 실패"처럼 보이게 두지 않는가 ──
+      #
+      # 아래 actionlint 단계가 바이너리를 내려받아 체크섬을 잰다. `--fail`
+      # 없는 `curl` 은 HTTP 오류에서도 0 으로 끝나고 오류 본문을 파일로
+      # 남기므로, **내려받기 실패가 체크섬 불일치로 둔갑한다.** 읽는 사람은
+      # 바꿔치기를 의심하게 된다.
+      #
+      # 체크섬을 빼는 대신 **그 둘을 구분**한다. 상태코드를 직접 보는 API
+      # 호출(`%{http_code}`)은 본문이 필요하므로 세지 않는다.
+      - name: CI 내려받기 검사
+        run: node scripts/check-ci-downloads.mjs
+
       # ── 워크플로 문법 검사 ──
       #
       # **유효한 YAML과 유효한 워크플로는 다르다.**
@@ -987,7 +1036,14 @@ jobs:
         run: |
           set -euo pipefail
           url="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
-          curl -sSL -o /tmp/actionlint.tgz "$url"
+          # `--fail` 이 없으면 HTTP 오류에서도 curl 이 0 으로 끝나고 **오류 본문이
+          # 파일이 된다.** 그러면 다음 줄의 체크섬이 틀려서, 내려받기가 깨진 것이
+          # "바이너리가 바꿔치기됐다"처럼 보인다 — 2026-11-08 PR #595 의
+          # `verify` 가 그렇게 빨개졌다. `--retry` 는 한 번 깜빡인 내려받기가
+          # 필수 검사를 빨갛게 만들지 않게 한다. **체크섬은 그대로 둔다.**
+          curl --fail --silent --show-error --location \
+            --retry 3 --retry-all-errors --retry-delay 2 --max-time 120 \
+            -o /tmp/actionlint.tgz "$url"
           echo "${ACTIONLINT_SHA256}  /tmp/actionlint.tgz" | sha256sum -c -
           tar xzf /tmp/actionlint.tgz -C /tmp actionlint
           /tmp/actionlint -color

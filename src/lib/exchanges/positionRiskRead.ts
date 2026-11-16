@@ -191,15 +191,47 @@ export async function readPositionRiskWithProvenance(
   };
   // 헤지 모드에서는 같은 심볼에 LONG/SHORT 두 줄이 온다. 열려 있는 쪽을
   // 고르고, 둘 다 0이면 첫 줄(설정값은 같다)을 쓴다.
+  // **거절한 이유를 들고 간다.** `pick`이 null을 주는 까닭이 둘이다 —
+  // 요청 심볼의 줄이 없는 것과, 전량 종료를 적으려는 자리에서 다리 하나를
+  // 못 읽은 것. 부르는 쪽이 그 둘을 같은 문장으로 적으면 **왜 미확인인지**
+  // 알 수 없고, 수량 때문임을 못박은 시험이 빨개진다.
+  let pickWhy = '';
   const pick = (data: any) => {
+    pickWhy = '';
     const rows = Array.isArray(data) ? data : [data];
-    // 열려 있는 쪽을 **읽을 수 있는 수량으로만** 고른다. 깨진 줄을
-    // `NaN !== 0`으로 "열려 있음"이라고 고르면, 멀쩡한 반대쪽 줄이
-    // 있어도 깨진 줄이 이긴다.
-    return rows.find((r: any) => {
+    // ── 두 수정이 같은 버그를 각자 고쳤다. 둘 다 남긴다 ──
+    //
+    // main: 깨진 줄을 `NaN !== 0`으로 "열려 있음"이라 고르면 멀쩡한
+    //       반대쪽 줄이 있어도 깨진 줄이 이긴다.
+    // #436: ① 심볼이 다른 0을 요청 심볼의 종료 증거로 쓰지 않는다.
+    //       ② 헤지 계좌에서 어느 한 다리라도 수량을 못 읽으면,
+    //          다른 다리의 0으로 전량 종료를 확정하지 않는다.
+    //
+    // ①②는 main에 없던 것이고 **더 닫는 쪽**이다. 못 읽은 것을
+    // 통과로 보지 않는 것이 이 파일의 규칙이다.
+    const mine = rows.filter((r: any) => String(r?.symbol ?? '').toUpperCase() === sym);
+    if (!mine.length) { pickWhy = '요청 심볼의 줄이 없습니다'; return null; }
+
+    // 열려 있는 쪽을 **읽을 수 있는 수량으로만** 고른다 (main).
+    const open = mine.find((r: any) => {
       const a = positionAmtOrNull(r?.positionAmt);
       return a !== null && a !== 0;
-    }) ?? rows[0];
+    });
+    if (open) return open;
+
+    // 여기 오면 "읽을 수 있는 0" 말고는 없다 — 즉 **전량 종료를 적으려는
+    // 자리**다. 그런데 어느 한 다리를 못 읽었다면 그 0은 전량 종료의
+    // 증거가 아니다. 못 읽은 것을 통과로 보지 않는다 (#436 ②).
+    //
+    // **거절은 이 자리에서만 한다.** 앞서 한 번은 다리 하나가 깨지면
+    // 무조건 거절했는데, 그러면 반대쪽에 읽을 수 있는 노출이 있어도
+    // 가려졌다 — main의 시험이 그것을 잡았다. 노출을 본 것은 참인
+    // 관측이므로 버리지 않는다.
+    if (mine.some((r: any) => positionAmtOrNull(r?.positionAmt) === null)) {
+      pickWhy = '수량 증거가 유효하지 않습니다';
+      return null;
+    }
+    return mine[0];
   };
 
   let v2Err = '';
@@ -233,6 +265,7 @@ export async function readPositionRiskWithProvenance(
         },
       };
     }
+    v2Err = row ? 'v2 마진 모드 누락' : 'v2 수량/심볼 누락 또는 비정상';
   } catch (e: any) { v2Err = String(e?.message || e); }
 
   // v3 + 계정 조회. v3에는 marginType·leverage가 없다.
@@ -248,7 +281,8 @@ export async function readPositionRiskWithProvenance(
     const v3T1 = monotonicMs();
     const row = pick(raw3);
     if (!row) {
-      return { risk: null, error: `포지션 정보가 비어 있습니다 (v2: ${v2Err || '없음'})`,
+      return { risk: null,
+        error: `포지션 ${pickWhy || '수량/심볼을 확인할 수 없습니다'} (v2: ${v2Err || '없음'})`,
         provenance: { ...prov } };
     }
     const p3: PositionRiskProvenance = {
