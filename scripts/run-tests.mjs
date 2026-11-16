@@ -173,6 +173,7 @@ import {
   runAdoptIntentIntegrationTests,
 } from './src/test/integration/orderPathIntegration.test';
 import { runTenSlotDispatchIntegrationTests } from './src/test/integration/tenSlotDispatchIntegration.test';
+import { runTenSlotLifecycleTests } from './src/test/integration/tenSlotLifecycleIntegration.test';
 import { runSmokeStartRouteTests } from './src/test/integration/smokeStartRouteIntegration.test';
 import { runHoldExtensionIntegrationTests } from './src/test/integration/holdExtensionIntegration.test';
 import { runFailureRecoveryTests } from './src/lib/engine/failureRecovery.test';
@@ -423,6 +424,7 @@ runMigrationStatusTests(); runWalletTruthTests(); runSmokePlanTests(); runSmokeR
   await runOrderPathIntegrationTests();
   await runAdoptIntentIntegrationTests();
   await runTenSlotDispatchIntegrationTests();
+  await runTenSlotLifecycleTests();
   await runReconcileIntegrationTests();
   await runSpotIntegrationTests();
   await runCloseIntegrationTests();
