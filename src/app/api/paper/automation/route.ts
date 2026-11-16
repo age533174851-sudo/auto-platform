@@ -1,6 +1,7 @@
 import { NextRequest,NextResponse } from 'next/server';
 import { getSupabaseAdmin,resolveUserId } from '@/lib/supabase/admin';
-import { parsePaperAutomationControl,readBotSignal,DEFAULT_PAPER_BOT } from '@/lib/engine/paperAutomation';
+import { parsePaperAutomationControl,readBotSignal,readBotTimeframe,DEFAULT_PAPER_BOT } from '@/lib/engine/paperAutomation';
+import { barIntervalLabel,DEFAULT_BAR_INTERVAL } from '@/lib/risk/bars';
 import { ENTRY_SIGNAL_LABEL,DEFAULT_ENTRY_SIGNAL } from '@/lib/engine/entrySignals';
 import { readRunnerConfig } from '@/lib/engine/paperRunner';
 import { paperRunnerStatus } from '@/lib/engine/paperRunnerStatus';
@@ -83,9 +84,14 @@ export async function GET(req: NextRequest) {
   // 추종이 도는" 상태가 된다.
   const botView = bots.data.map((b:any) => {
     const { signal,bad } = readBotSignal(b.config);
+    // 주기도 **판정하는 쪽과 같은 함수로** 읽는다. 화면이 따로 해석하면
+    // "화면에는 1분봉인데 일봉이 도는" 상태가 된다.
+    const tf = readBotTimeframe(b.config);
     const { config: _cfg,...rest } = b;
     return { ...rest,signal,signalLabel:ENTRY_SIGNAL_LABEL[signal],
-      ...(bad ? { signalWarning:bad } : {}) };
+      timeframe:tf.timeframe,timeframeLabel:barIntervalLabel(tf.timeframe),
+      ...(bad ? { signalWarning:bad } : {}),
+      ...(tf.bad ? { timeframeWarning:tf.bad } : {}) };
   });
   return json({ok:true,settings:settings.data,bots:botView,runs:runs.data,account:account.data ? accountView : null,positions:positions.data,runner});
 }
@@ -108,9 +114,20 @@ export async function POST(req: NextRequest) {
       message:'이 봇의 기존 전략을 확인하지 못해 설정을 바꾸지 않았습니다. 잠시 뒤 다시 시도하세요.'},503);
     signal = prev.data ? readBotSignal(prev.data.config).signal : DEFAULT_ENTRY_SIGNAL;
   }
+  // 주기도 같다. `config`를 통째로 교체하는 `ON CONFLICT` 때문에, 주기를
+  // 안 보내는 요청이 봇을 조용히 일봉으로 되돌리면 그 봇의 1분봉 기록과
+  // 일봉 기록이 한 `strategy_id`에 섞인다.
+  let timeframe = input.timeframe;
+  if (timeframe == null) {
+    const prev = await sb.from('paper_automation_settings').select('config')
+      .eq('user_id',uid).eq('bot_id',input.botId).maybeSingle();
+    if (prev.error) return json({ok:false,error:'control_failed',
+      message:'이 봇의 기존 봉 주기를 확인하지 못해 설정을 바꾸지 않았습니다. 잠시 뒤 다시 시도하세요.'},503);
+    timeframe = prev.data ? readBotTimeframe(prev.data.config).timeframe : DEFAULT_BAR_INTERVAL;
+  }
   const result = await sb.rpc('paper_auto_control',{ p_user_id:uid,p_bot_id:input.botId,p_enabled:input.enabled,
     p_symbol:input.symbol,p_interval:input.interval,
-    p_config:{...readRunnerConfig(k=>process.env[k]),maxOpenPositions:1,signal} });
+    p_config:{...readRunnerConfig(k=>process.env[k]),maxOpenPositions:1,signal,timeframe} });
   if (result.error) return json({ok:false,error:'control_failed',message:'설정을 저장하지 못했습니다. 기본 모의 계좌를 먼저 시작하고 다시 시도하세요.'},409);
   return json({ok:true,settings:result.data});
 }
