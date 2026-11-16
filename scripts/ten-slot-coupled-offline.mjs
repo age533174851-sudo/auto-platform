@@ -148,6 +148,9 @@ export async function killCoupledOffline(store, campaignId) {
   const read = await load(store, campaignId);
   if (!read.ok) return read;
   const s = read.snapshot;
+  // Repeated kill requests, including retries after an ambiguous commit,
+  // must not create extra ledger/envelope transitions.
+  if (s.ledger.killed) return { ok: true, code: 'KILL_ALREADY_PERSISTED', version: s.version };
   const planned = killOfflineLedger(s.ledger, s.ledger.version);
   if (!planned.ok) return planned;
   return save(store, s, { ...s, version: s.version + 1, ledger: planned.next }, 'KILL_PERSISTED');

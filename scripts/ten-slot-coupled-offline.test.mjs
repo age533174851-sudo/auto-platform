@@ -116,6 +116,32 @@ test('kill switch is durable and rejects claims without resetting journals', asy
   assert.equal((await claimAndIntentCoupledOffline(db, 'camp', clear, 'order-2', 10)).code, 'KILL_SWITCH');
 });
 
+test('repeated kill is idempotent and does not consume a second CAS version', async () => {
+  const db = new FakeDB(); await claim(db);
+  const first = await killCoupledOffline(db, 'camp');
+  const version = db.state.version, writes = db.writes;
+  const second = await killCoupledOffline(db, 'camp');
+  assert.equal(first.code, 'KILL_PERSISTED');
+  assert.deepEqual(second, { ok: true, code: 'KILL_ALREADY_PERSISTED', version });
+  assert.equal(db.state.version, version);
+  assert.equal(db.writes, writes);
+  assert.equal((await claimAndIntentCoupledOffline(db, 'camp', clear, 'order-2', 10)).code, 'KILL_SWITCH');
+});
+
+test('ambiguous committed kill retry acknowledges durable kill without rewriting', async () => {
+  const db = new FakeDB(); await claim(db);
+  db.commitThenThrow = true;
+  assert.equal((await killCoupledOffline(db, 'camp')).code, 'STORE_UNAVAILABLE');
+  assert.equal(db.state.ledger.killed, true);
+  const version = db.state.version, writes = db.writes;
+  db.commitThenThrow = false;
+  assert.deepEqual(await killCoupledOffline(db, 'camp'),
+    { ok: true, code: 'KILL_ALREADY_PERSISTED', version });
+  assert.equal(db.writes, writes);
+  assert.equal(db.state.version, version);
+  assert.equal(validCoupledOfflineSnapshot(db.state), true);
+});
+
 test('DB read failure and unsafe envelope version block writes', async () => {
   const db = new FakeDB(); db.failRead = true;
   assert.equal((await claim(db)).code, 'STORE_UNAVAILABLE');
