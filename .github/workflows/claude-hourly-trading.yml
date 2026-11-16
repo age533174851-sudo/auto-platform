@@ -63,15 +63,16 @@ jobs:
       - name: 인증 확인
         env:
           OAUTH: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          APIKEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           set -euo pipefail
-          if [ -z "${OAUTH:-}" ] && [ -z "${APIKEY:-}" ]; then
-            echo "::error::인증이 없습니다 — CLAUDE_CODE_OAUTH_TOKEN 또는 ANTHROPIC_API_KEY 시크릿을 넣으세요"
+          if [ -z "${OAUTH:-}" ]; then
+            echo "::error::CLAUDE_CODE_OAUTH_TOKEN 시크릿이 없습니다 — OAuth 전용 회차를 중단합니다"
             exit 1
           fi
-          if [ -n "${OAUTH:-}" ]; then echo "인증: CLAUDE_CODE_OAUTH_TOKEN"; else echo "인증: ANTHROPIC_API_KEY"; fi
+          echo "OAuth 전용 구성: 시크릿 존재 확인 (실제 모델 인증 성공 증거 아님)"
 
+      # OAuth 전용: API 키를 이 회차의 어느 단계에도 전달하지 않습니다.
+      # 실제 모델 인증은 Claude Code 실행 결과와 modelUsage로 검증합니다.
       # ── main 보호 규칙이 **확인되지 않으면 돌지 않는다** ──
       #
       # `contents: write`는 기술적으로 main push를 허용한다. 프롬프트의
@@ -144,10 +145,9 @@ jobs:
           echo "tsc_before=${n}" >> "$GITHUB_OUTPUT"
           echo "tsc 기준선: ${n}건"
 
-      # Metadata-only GET: no model generation and no provider response body logged.
-      - name: Claude API 모델 메타데이터 사전 점검 (읽기 전용)
+      # OAuth-only preflight: no API-key GET; secret presence is NOT proof of token validity.
+      - name: Claude OAuth 설정 사전 점검 (유효성 미확인)
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
         run: |
           node --test scripts/test-claude-api-preflight.mjs
@@ -160,7 +160,6 @@ jobs:
         id: claude
         uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           base_branch: main
           branch_prefix: 'claude/trading-'
@@ -342,6 +341,13 @@ jobs:
           node scripts/check-100x-mutations.mjs --self-test || fail=1
           exit $fail
 
+      # ── 원인을 여기서 **또** 정하지 않는다 ──
+      #
+      # "어느 단계에서 멈췄으면 무엇이다"가 네 줄 있었다. 어느 단계에서
+      # 멈췄는지는 이 단계가 모르고, 원인은 위 **진단** 항목이 이미 범주로
+      # 적는다. 두 곳이 같은 것을 정하면 갈린다(상습 고장 ②) — 실제로
+      # 회차 41264530329에서 갈렸다. 판단은
+      # `scripts/claude-exec-category.mjs` 한 곳에만 둔다.
       - name: 실패 원인 기록
         if: failure()
         run: |
@@ -351,10 +357,8 @@ jobs:
             echo "- 실행: ${{ github.run_id }} (시도 ${{ github.run_attempt }})"
             echo "- 트리거: ${{ github.event_name }}"
             echo "- tsc 기준선: ${{ steps.baseline.outputs.tsc_before }}건"
+            echo "- Claude 단계: ${{ steps.claude.outcome }}"
             echo ""
-            echo "**변경 안전 관문**에서 멈췄다면 그 회차가 안전 닻을 줄였거나"
-            echo "울타리를 넘은 것입니다. 브랜치를 병합하지 말고 내용을 먼저 보세요."
-            echo ""
-            echo "**검사기 전수**에서 멈췄다면 에이전트가 통과했다고 적었더라도"
-            echo "실제로는 통과하지 않은 것입니다."
+            echo "이 회차의 브랜치는 검증을 끝내지 못했습니다 — **병합하지 않습니다.**"
+            echo "에이전트가 통과했다고 적었더라도 통과한 것이 아닙니다."
           } >> "$GITHUB_STEP_SUMMARY"
