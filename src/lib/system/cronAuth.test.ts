@@ -15,7 +15,7 @@ const H = (o: Partial<{ authorization: string; adminHeader: string }> = {}) => (
   adminHeader: o.adminHeader ?? null,
 });
 
-export function runCronAuthTests() {
+export function runWakeAuthTests() {
   console.log('[깨우기 인증 — 빈 비밀로는 못 들어오고, 길은 둘이다]');
 
   test('Vercel Cron 경로 — Bearer CRON_SECRET', () => {
