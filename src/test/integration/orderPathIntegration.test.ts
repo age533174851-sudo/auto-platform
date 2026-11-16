@@ -25,6 +25,7 @@ import { executeOrder, reconcilePendingOrders } from '../../lib/engine/orderExec
 import { placeSpotOrder } from '../../lib/exchanges/spotOrderExecutor';
 import { RECONCILE_TARGET_STATUSES } from '../../lib/engine/pendingReconcile';
 import { isProvenFill } from '../../lib/engine/holdingEvidence';
+import { stopPositionQty } from '../../lib/engine/stopReattach';
 import { encryptSecret } from '../../lib/exchanges/crypto';
 
 const BN_ORDER = '/fapi/v1/order';
@@ -474,6 +475,72 @@ export async function runReconcileIntegrationTests() {
       eq(venue.orderSends().length, 0, 'NO_FIXED_SL인데 복구가 STOP_MARKET을 보냈다');
       assert((result as any).details.some((d: string) => d.includes('고정 손절을 쓰지 않는')),
         '정책에 따른 의도적 미부착 이유가 누락됐다');
+    });
+  }
+
+  // ══════════ ⑤-d 손절 복구 포지션 증거 — 못 읽음 ≠ 수량 0 ══════════
+  test('★★ 손절 복구 포지션 파서는 미확인과 진짜 0을 구분한다', () => {
+    for (const bad of [null, undefined, '', '  ', 'bad', 'Infinity', NaN, Infinity, true]) {
+      eq(stopPositionQty(bad), null, `깨진 포지션 증거를 수량 0으로 인정했다: ${String(bad)}`);
+    }
+    eq(stopPositionQty(0), 0);
+    eq(stopPositionQty('0'), 0);
+    eq(stopPositionQty('0.003'), 0.003);
+    eq(stopPositionQty('-0.003'), -0.003);
+  });
+
+  for (const shape of ['missing', 'malformed'] as const) {
+    const db = new FakeDb().seed('live_orders', [pendingRow({
+      status: 'UNKNOWN', stop_policy: 'FIXED_SL', stop_loss: 58920.9,
+      sl_order_id: null, reduce_only: false,
+    })]);
+    const positions = shape === 'missing' ? [] : [{
+      symbol: 'BTCUSDT', positionAmt: 'bad', entryPrice: '95000',
+      leverage: '100', marginType: 'isolated', liquidationPrice: '90000',
+    }];
+    const venue = new FakeVenue()
+      .on(BN_POS, { json: positions })
+      .on(BN_ORDER, { json: bnOrder({
+        status: 'FILLED', executedQty: '0.010', avgPrice: '95000',
+      }) }, 'GET');
+    const result = await scenario(venue, () => reconcile(db));
+    test(`★★ Binance ${shape}: 손절 복구 조회 미확인은 경고·attention이고 주문 0건`, () => {
+      assert(!(result instanceof Error), String((result as any)?.message));
+      eq((result as any).resolved, 1, '체결 주문의 대조 자체는 유지한다');
+      assert((result as any).needsAttention >= 1, '손절 복구 미확인이 경고 없이 사라졌다');
+      eq(db.row('live_orders', { id: 'ord-1' })?.needs_attention, true);
+      eq(venue.orderSends().length, 0, '수량을 모르는 상태에서 손절 주문을 보냈다');
+      assert((result as any).details.some((d: string) => d.includes('손절 복구 미확인')),
+        '미확인 원인이 결과에 없다');
+    });
+  }
+
+  for (const shape of ['http-error', 'malformed'] as const) {
+    const db = new FakeDb().seed('live_orders', [pendingRow({
+      exchange: 'gate', status: 'UNKNOWN', stop_policy: 'FIXED_SL',
+      stop_loss: 58920.9, sl_order_id: null, reduce_only: false,
+    })]);
+    const posReply = shape === 'http-error'
+      ? { status: 503, json: { label: 'SERVICE_UNAVAILABLE' } }
+      : { json: { contract: 'BTC_USDT', size: 'bad' } };
+    const venue = new FakeVenue()
+      // 단건 규칙을 전체 목록보다 먼저 둔다.
+      .on('/api/v4/futures/usdt/positions/BTC_USDT', posReply, 'GET')
+      .on('/api/v4/futures/usdt/positions', { json: [] }, 'GET')
+      .on('/api/v4/futures/usdt/orders', { json: (i: number) => i === 0 ? [] : [{
+        id: 9009, contract: 'BTC_USDT', size: 2, price: '0',
+        status: 'finished', finish_as: 'filled', text: 't-COID-R1',
+        left: 0, fill_price: '95000',
+      }] }, 'GET');
+    const result = await scenario(venue, () => reconcile(db, 'gate'));
+    test(`★★ Gate ${shape}: 손절 복구 조회 미확인은 경고·attention이고 주문 0건`, () => {
+      assert(!(result instanceof Error), String((result as any)?.message));
+      eq((result as any).resolved, 1, '체결 주문의 대조 자체는 유지한다');
+      assert((result as any).needsAttention >= 1, '손절 복구 미확인이 경고 없이 사라졌다');
+      eq(db.row('live_orders', { id: 'ord-1' })?.needs_attention, true);
+      eq(venue.orderSends().length, 0, '수량을 모르는 상태에서 손절 주문을 보냈다');
+      assert((result as any).details.some((d: string) => d.includes('손절 복구 미확인')),
+        '미확인 원인이 결과에 없다');
     });
   }
 
