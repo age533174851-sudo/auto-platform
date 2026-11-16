@@ -232,7 +232,7 @@ export function runStopVerifyTests() {
     // 실제로 났던 사고: Gate가 수량을 절대값으로 보내 숏이 롱으로 읽혔고,
     // 숏의 손절(BUY)을 롱의 손절(SELL)로 찾다가 못 찾았다. 화면에는
     // "손절 없음"이 떴다 — **조회 실패를 부재로 말한 것이다.**
-    const orders = [{ symbol: 'BTCUSDT', side: 'BUY', type: 'STOP_MARKET', stopPrice: 65352.5 }];
+    const orders = [{ symbol: 'BTCUSDT', side: 'BUY', type: 'STOP_MARKET', stopPrice: 65352.5, reduceOnly: true }];
     const r = findAnyStop(orders, { symbol: 'BTCUSDT', positionSide: 'LONG', sideKnown: false });
     eq(r.status, 'unknown');
     assert(r.reason.includes('방향'));
@@ -250,28 +250,62 @@ export function runStopVerifyTests() {
   });
 
   test('sideKnown을 안 주면 예전처럼 동작한다', () => {
-    const orders = [{ symbol: 'BTCUSDT', side: 'SELL', type: 'STOP_MARKET', stopPrice: 60000 }];
+    const orders = [{ symbol: 'BTCUSDT', side: 'SELL', type: 'STOP_MARKET', stopPrice: 60000, reduceOnly: true }];
     eq(findAnyStop(orders, { symbol: 'BTCUSDT', positionSide: 'LONG' }).status, 'attached');
+  });
+
+  // ── 비보호 STOP의 화면 false GREEN — #495는 복구 판정만 막았다 ──
+  test('★★ 카드: reduceOnly=false/closePosition=false STOP은 보호 완료가 아니다', () => {
+    const r = findAnyStop([stop({ orderId: 301, reduceOnly: false, closePosition: false })], LONG);
+    eq(r.status, 'unknown', '일반 STOP은 반대 포지션을 열 수도 있다');
+    eq(r.orderId, null, '비보호 STOP 번호를 정상 보호주문으로 노출하지 않는다');
+    eq(shouldUnwind(r), false, '확인 불가만으로 자동 청산하지 않는다');
+  });
+
+  test('★★ 카드: 보호 플래그 누락도 정상 손절로 표시하지 않는다', () => {
+    const r = findAnyStop([stop({ reduceOnly: null, closePosition: null })], LONG);
+    eq(r.status, 'unknown', '보호 여부를 모르면 화면도 확인 불가여야 한다');
+    eq(r.orderId, null);
+  });
+
+  test('★★ 카드: 정상·비보호 STOP 혼재는 목록 순서와 무관하게 unknown', () => {
+    const safe = stop({ orderId: 302, reduceOnly: true, closePosition: false });
+    const unsafe = stop({ orderId: 303, reduceOnly: false, closePosition: false });
+    for (const orders of [[safe, unsafe], [unsafe, safe]]) {
+      const r = findAnyStop(orders, LONG);
+      eq(r.status, 'unknown', '앞의 정상 STOP만 보고 위험한 STOP을 놓치면 안 된다');
+      eq(r.orderId, null, '위험한 목록에서 임의 ID를 보호 완료로 표시하지 않는다');
+    }
+  });
+
+  test('카드: 다른 종목·반대 청산 방향의 비보호 STOP은 정상 STOP을 막지 않는다', () => {
+    const r = findAnyStop([
+      stop({ symbol: 'ETHUSDT', reduceOnly: false, closePosition: false }),
+      stop({ side: 'BUY', reduceOnly: false, closePosition: false }),
+      stop({ orderId: 304, reduceOnly: false, closePosition: true }),
+    ], LONG);
+    eq(r.status, 'attached');
+    eq(r.orderId, '304');
   });
 
   console.log('[손절 조회 — 있음과 쓸모 있음은 다르다]');
 
   test('롱의 손절이 현재가 위면 통과시키되 적어 둔다', () => {
-    const orders = [{ symbol: 'BTCUSDT', side: 'SELL', type: 'STOP_MARKET', stopPrice: 70000 }];
+    const orders = [{ symbol: 'BTCUSDT', side: 'SELL', type: 'STOP_MARKET', stopPrice: 70000, reduceOnly: true }];
     const r = findAnyStop(orders, { symbol: 'BTCUSDT', positionSide: 'LONG', refPrice: 64000 });
     eq(r.status, 'attached', '주문은 실재한다 — 없음으로 보면 안 된다');
     assert(r.warning != null, '걸자마자 발동한다는 사실을 들고 나간다');
   });
 
   test('제자리에 걸린 손절은 경고하지 않는다', () => {
-    const orders = [{ symbol: 'BTCUSDT', side: 'BUY', type: 'STOP_MARKET', stopPrice: 65352.5 }];
+    const orders = [{ symbol: 'BTCUSDT', side: 'BUY', type: 'STOP_MARKET', stopPrice: 65352.5, reduceOnly: true }];
     const r = findAnyStop(orders, { symbol: 'BTCUSDT', positionSide: 'SHORT', refPrice: 64071 });
     eq(r.status, 'attached');
     eq(r.warning, null);
   });
 
   test('현재가를 모르면 방향 검증을 건너뛴다', () => {
-    const orders = [{ symbol: 'BTCUSDT', side: 'SELL', type: 'STOP_MARKET', stopPrice: 70000 }];
+    const orders = [{ symbol: 'BTCUSDT', side: 'SELL', type: 'STOP_MARKET', stopPrice: 70000, reduceOnly: true }];
     eq(findAnyStop(orders, { symbol: 'BTCUSDT', positionSide: 'LONG' }).warning, null);
   });
 }
