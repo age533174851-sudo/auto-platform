@@ -95,6 +95,10 @@ jobs:
       - name: 의존성 설치
         run: npm ci
 
+      # GitHub 매매 fallback HTTP 200 오판 방지 — 단독 Node 테스트를 CI에 실제 배선한다.
+      - name: GitHub 자동매매 응답 계약 회귀
+        run: node --test scripts/check-autotrade-tick-response.test.mjs
+
       # 이 저장소의 하네스는 src를 node_modules 없이 컴파일해 돌린다.
       # 그래서 테스트 대상 모듈은 상대 경로 import만 쓴다 (scripts/run-tests.mjs 참조).
       - name: 유닛 테스트
