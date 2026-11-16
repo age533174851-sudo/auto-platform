@@ -87,7 +87,7 @@ jobs:
         run: |
           npm install --prefix "$RUNNER_TEMP/paper-probe" --package-lock=false playwright@1.62.1
           "$RUNNER_TEMP/paper-probe/node_modules/.bin/playwright" install --with-deps chromium
-          curl -fsSL https://github.com/PostgREST/postgrest/releases/download/v13.0.7/postgrest-v13.0.7-linux-static-x86-64.tar.xz -o "$RUNNER_TEMP/postgrest.tar.xz"
+          curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 --max-time 120 https://github.com/PostgREST/postgrest/releases/download/v13.0.7/postgrest-v13.0.7-linux-static-x86-64.tar.xz -o "$RUNNER_TEMP/postgrest.tar.xz"
           echo "4153f81ccc40e7b735edc89cd84b49da25ba27eb37d57c7f6a82c9005a0b762b  $RUNNER_TEMP/postgrest.tar.xz" | sha256sum -c -
           tar -xJf "$RUNNER_TEMP/postgrest.tar.xz" -C "$RUNNER_TEMP"
       - name: Browser to API to durable ledger, with browser closed during ticks
