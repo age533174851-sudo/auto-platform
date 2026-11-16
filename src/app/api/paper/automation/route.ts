@@ -3,6 +3,7 @@ import { getSupabaseAdmin,resolveUserId } from '@/lib/supabase/admin';
 import { parsePaperAutomationControl,readBotSignal,DEFAULT_PAPER_BOT } from '@/lib/engine/paperAutomation';
 import { ENTRY_SIGNAL_LABEL,DEFAULT_ENTRY_SIGNAL } from '@/lib/engine/entrySignals';
 import { readRunnerConfig } from '@/lib/engine/paperRunner';
+import { paperRunnerStatus } from '@/lib/engine/paperRunnerStatus';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -48,6 +49,34 @@ export async function GET(req: NextRequest) {
     .in('strategy_id',bots.data.map((b:any)=>String(b.bot_id)).concat(DEFAULT_PAPER_BOT))
     .order('opened_at',{ascending:false}).limit(10) : { data:[],error:null };
   if (positions.error) return json({ok:false,error:'positions_unreadable',message:'모의 체결 이력을 읽지 못했습니다'},503);
+  // ── 누가 이 회차를 깨우는가 ──
+  //
+  // 모의 자동매매를 깨우는 것은 **Fly 워커 하나뿐**이다
+  // (`worker/src/index.ts` → `/api/paper/exit-monitor` → `runDuePaperAutomation`).
+  // `vercel.json`의 cron에도, GitHub Actions cron에도 이 경로를 부르는 것이
+  // 없다. 워커가 꺼져 있으면 봇을 켜 두어도 **한 건도 돌지 않는데**, 화면은
+  // "반복 실행 중"까지만 말했다.
+  //
+  // **이 조회가 실패해도 503으로 만들지 않는다.** 나머지 화면은 그대로
+  // 쓸모 있고, 못 읽은 사실은 판정기가 `RUNNER_UNKNOWN`으로 적는다.
+  let beat: any = null, heartbeatReadFailed = false;
+  try {
+    const hb = await sb.from('worker_heartbeat')
+      .select('worker_id,last_seen,status').order('last_seen',{ascending:false}).limit(1).maybeSingle();
+    if (hb.error) heartbeatReadFailed = true; else beat = hb.data ?? null;
+  } catch { heartbeatReadFailed = true; }
+  // **`enabled === true`만 켜진 것이다.** 문자열 'false'는 truthy다.
+  const enabledBotRows = bots.data.filter((b:any) => b.enabled === true);
+  const intervals = enabledBotRows.map((b:any) => Number(b.interval_seconds))
+    .filter((n:number) => Number.isFinite(n) && n > 0);
+  const runner = paperRunnerStatus({
+    nowMs: Date.now(),
+    enabledBots: enabledBotRows.length,
+    workerLastSeen: beat?.last_seen ?? null,
+    heartbeatReadFailed,
+    lastRunAt: runs.data[0]?.created_at ?? null,
+    shortestIntervalSec: intervals.length ? Math.min(...intervals) : null,
+  });
   const { id: _accountId,...accountView } = account.data ?? {};
   // 전략은 **판정하는 쪽과 같은 함수로** 읽는다. 화면이 따로 `config.signal`을
   // 해석하면 러너와 다른 답을 낼 수 있고, 그러면 "화면에는 돌파인데 추세
@@ -58,7 +87,7 @@ export async function GET(req: NextRequest) {
     return { ...rest,signal,signalLabel:ENTRY_SIGNAL_LABEL[signal],
       ...(bad ? { signalWarning:bad } : {}) };
   });
-  return json({ok:true,settings:settings.data,bots:botView,runs:runs.data,account:account.data ? accountView : null,positions:positions.data});
+  return json({ok:true,settings:settings.data,bots:botView,runs:runs.data,account:account.data ? accountView : null,positions:positions.data,runner});
 }
 export async function POST(req: NextRequest) {
   const { uid,sb } = await context(req);
