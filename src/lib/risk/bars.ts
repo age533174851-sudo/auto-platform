@@ -115,3 +115,65 @@ export function inZone(price: number, lo: number, hi: number): boolean {
   return Number.isFinite(price) && Number.isFinite(lo) && Number.isFinite(hi)
     && hi >= lo && price >= lo && price <= hi;
 }
+
+// ══════════════════════════════════════════════════════════════════
+//  봉 주기
+//
+//  전략 일곱 개가 **일봉 하나에 묶여** 있었다. 받아오는 주소에
+//  `interval=1d`가 글자로 박혀 있었기 때문이다
+//  (`regimeCheck.ts`). 스캘핑과 스윙은 같은 전략을 다른 주기로 보는 것인데,
+//  주기를 고를 수 없으면 둘 다 "일봉으로 보는 그것" 하나가 된다.
+//
+//  주기를 고를 수 있게 하면 전략 수가 **주기만큼 곱해진다** — 새 알고리즘을
+//  쓰지 않고도 7개가 7×N개가 된다. 같은 사이징·손절·익절을 공유하므로
+//  성적표는 여전히 비교 가능하다.
+// ══════════════════════════════════════════════════════════════════
+
+/** 바이낸스가 받는 주기 중 우리가 쓰는 것 */
+export type BarInterval =
+  | '1m' | '3m' | '5m' | '15m' | '30m'
+  | '1h' | '2h' | '4h' | '6h' | '8h' | '12h'
+  | '1d' | '3d' | '1w';
+
+export const BAR_INTERVALS: readonly BarInterval[] = [
+  '1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w',
+] as const;
+
+/**
+ * 기본값은 **지금까지 돌던 그것**이다.
+ *
+ * 기본값을 바꾸면 `paper-auto-v1`의 기존 기록이 조용히 다른 주기의 기록과
+ * 섞인다 — 그 기록이 앞으로 만드는 모든 봇의 비교 기준이다.
+ */
+export const DEFAULT_BAR_INTERVAL: BarInterval = '1d';
+
+/** 한 봉이 덮는 시간(ms). 신선도·나이 판정에 쓴다 */
+export const BAR_INTERVAL_MS: Record<BarInterval, number> = {
+  '1m': 60_000, '3m': 180_000, '5m': 300_000, '15m': 900_000, '30m': 1_800_000,
+  '1h': 3_600_000, '2h': 7_200_000, '4h': 14_400_000, '6h': 21_600_000,
+  '8h': 28_800_000, '12h': 43_200_000,
+  '1d': 86_400_000, '3d': 259_200_000, '1w': 604_800_000,
+};
+
+export const BAR_INTERVAL_LABEL: Record<BarInterval, string> = {
+  '1m': '1분봉', '3m': '3분봉', '5m': '5분봉', '15m': '15분봉', '30m': '30분봉',
+  '1h': '1시간봉', '2h': '2시간봉', '4h': '4시간봉', '6h': '6시간봉',
+  '8h': '8시간봉', '12h': '12시간봉',
+  '1d': '일봉', '3d': '3일봉', '1w': '주봉',
+};
+
+/**
+ * 바깥에서 온 주기. **아는 값만 통과시킨다.**
+ *
+ * 모르는 값을 기본값으로 떨어뜨리지 않는다 — 떨어뜨리면 오타 하나로 다른
+ * 주기가 돌면서 그 봇의 성적표에 기록된다. 거래소에 모르는 문자열을 그대로
+ * 보내는 것도 막는다.
+ */
+export function parseBarInterval(raw: unknown): BarInterval | null {
+  const v = String(raw ?? '').trim().toLowerCase();
+  return (BAR_INTERVALS as readonly string[]).includes(v) ? (v as BarInterval) : null;
+}
+
+export function barIntervalLabel(i: BarInterval): string {
+  return BAR_INTERVAL_LABEL[i] ?? String(i);
+}

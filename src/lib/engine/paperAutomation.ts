@@ -5,6 +5,7 @@ import { buildPaperPlan } from './paperPlan';
 import { dispatchPaperEntry } from './paperDispatch';
 import { closePaperPosition } from './paperStore';
 import { availableView } from './paperAvailable';
+import { parseBarInterval, DEFAULT_BAR_INTERVAL, BAR_INTERVALS, type BarInterval } from '../risk/bars';
 import { readPaperMarkPrice, paperPriceFailed } from './paperPriceSource';
 import { collectPaperDailyLoss } from '../risk/dailyLossCheck';
 import { collectRegime } from '../risk/regimeCheck';
@@ -31,10 +32,17 @@ export const PAPER_BOT_ID = /^[a-z0-9][a-z0-9-]{1,62}$/;
  * 모양이 DB 제약(`PAPER_BOT_ID`)에 안 맞으면 **null이다.** 억지로 자르거나
  * 이름을 지어내지 않는다 — 못 만든 것을 만든 것처럼 넘기면 409가 난다.
  */
-export function derivePaperBotId(symbol: unknown, signal: EntrySignalId): string | null {
+export function derivePaperBotId(
+  symbol: unknown, signal: EntrySignalId, timeframe: BarInterval = DEFAULT_BAR_INTERVAL,
+): string | null {
   const sym = String(symbol ?? '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
   if (!sym) return null;
-  const id = `${sym}-${signal}`;
+  // **주기도 이름에 들어간다.** 1분봉 돌파와 일봉 돌파는 다른 기계다 —
+  // 한 이름을 쓰면 두 기록이 한 `strategy_id` 아래 섞이고, 비교가 그때
+  // 망가진다.
+  const tf = String(timeframe ?? '').trim().toLowerCase();
+  if (!parseBarInterval(tf)) return null;
+  const id = `${sym}-${tf}-${signal}`;
   return PAPER_BOT_ID.test(id) ? id : null;
 }
 /** 안 적으면 이 봇. 099 시절부터 돌던 그 봇이다 */
@@ -54,7 +62,7 @@ export const DEFAULT_PAPER_BOT = 'paper-auto-v1';
  * `String([])`가 빈 문자열이라서, 느슨하게 보면 `signal: []`이 "안 적음"으로
  * 통과한다. `[]`는 미지정이 아니라 잘못된 값이고, 잘못된 값은 거절해야 한다.
  */
-function signalOmitted(raw: unknown): boolean {
+function fieldOmitted(raw: unknown): boolean {
   if (raw == null) return true;
   return typeof raw === 'string' && raw.trim() === '';
 }
@@ -64,7 +72,7 @@ export function readBotSignal(config: unknown): { signal: EntrySignalId; bad: st
     ? (config as Record<string, unknown>).signal : undefined;
   // 안 적혀 있으면 지금까지 돌던 전략이다. 그래야 `paper-auto-v1`의 기록이
   // 이어진다.
-  if (signalOmitted(raw)) return { signal: DEFAULT_ENTRY_SIGNAL, bad: null };
+  if (fieldOmitted(raw)) return { signal: DEFAULT_ENTRY_SIGNAL, bad: null };
   const got = parseEntrySignal(raw);
   // **적혀 있는데 모르는 값이면 기본값으로 돌리지 않는다.** 돌리면 오타 하나로
   // 추세 추종이 돌면서 그 봇의 성적표에 적히고, 그 전략을 평가할 방법이
@@ -73,6 +81,24 @@ export function readBotSignal(config: unknown): { signal: EntrySignalId; bad: st
     ? { signal: got, bad: null }
     : { signal: DEFAULT_ENTRY_SIGNAL,
         bad: `알 수 없는 진입 전략입니다: ${String(raw).slice(0, 40)} (가능: ${ENTRY_SIGNAL_IDS.join(' · ')})` };
+}
+
+/**
+ * 이 봇이 보는 **봉 주기**. 전략과 같은 규칙이다.
+ *
+ * 안 적혀 있으면 지금까지 돌던 일봉이다. **적혀 있는데 모르는 값이면
+ * 기본값으로 돌리지 않는다** — 돌리면 사용자는 1분봉 봇을 켰다고 생각하는데
+ * 일봉이 돌면서 그 봇의 성적표에 적힌다.
+ */
+export function readBotTimeframe(config: unknown): { timeframe: BarInterval; bad: string | null } {
+  const raw = config && typeof config === 'object' && !Array.isArray(config)
+    ? (config as Record<string, unknown>).timeframe : undefined;
+  if (fieldOmitted(raw)) return { timeframe: DEFAULT_BAR_INTERVAL, bad: null };
+  const got = parseBarInterval(raw);
+  return got
+    ? { timeframe: got, bad: null }
+    : { timeframe: DEFAULT_BAR_INTERVAL,
+        bad: `알 수 없는 봉 주기입니다: ${String(raw).slice(0, 40)} (가능: ${BAR_INTERVALS.join(' · ')})` };
 }
 
 export function parsePaperAutomationControl(body: unknown):
@@ -89,7 +115,9 @@ export function parsePaperAutomationControl(body: unknown):
      * 그래서 "안 적었다"를 그대로 올려 보내고, 저장하는 쪽이 **이미 저장된
      * 전략을 지킨다.**
      */
-    signal: EntrySignalId | null } | null {
+    signal: EntrySignalId | null;
+    /** 봉 주기. **`null`은 "안 적었다"** — 저장된 값을 지키게 한다 */
+    timeframe: BarInterval | null } | null {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
   const b = body as Record<string, unknown>;
   // **안 적으면 옛 봇이다.** 이 줄이 없으면 예전 화면이 보내던 요청이
@@ -97,15 +125,22 @@ export function parsePaperAutomationControl(body: unknown):
   const botId = b.botId == null || b.botId === '' ? DEFAULT_PAPER_BOT : String(b.botId);
   if (!PAPER_BOT_ID.test(botId)) return null;
   // 끄는 데는 전략이 필요하지 않다. null은 "안 적었다"다.
-  if (b.action === 'stop') return { enabled: false, symbol: 'BTCUSDT', interval: 60, botId, signal: null };
-  if (b.action !== 'start' || !['BTCUSDT','ETHUSDT'].includes(String(b.symbol))
+  if (b.action === 'stop') return { enabled: false, symbol: 'BTCUSDT', interval: 60, botId, signal: null, timeframe: null };
+  // **화면이 고를 수 있는 종목과 같아야 한다.** #658에서 화면 드롭다운에
+  // SOLUSDT를 넣었는데 이 목록에 없어서 400으로 거절됐다 — 고를 수 있는데
+  // 눌리지 않는 자리였다.
+  if (b.action !== 'start' || !['BTCUSDT','ETHUSDT','SOLUSDT'].includes(String(b.symbol))
       || ![60,300,900].includes(b.interval as number)) return null;
   // 모르는 전략 이름은 **400으로 거절한다.** 조용히 기본값으로 켜 주면
   // 사용자는 역추세 봇을 켰다고 생각하는데 추세 추종이 돈다.
-  const omitted = signalOmitted(b.signal);
+  const omitted = fieldOmitted(b.signal);
   const signal = omitted ? null : parseEntrySignal(b.signal);
   if (!omitted && !signal) return null;
-  return { enabled: true, symbol: b.symbol as string, interval: b.interval as number, botId, signal };
+  // 주기도 같다 — 모르는 값은 조용히 일봉으로 바꾸지 않고 400으로 거절한다.
+  const tfOmitted = fieldOmitted(b.timeframe);
+  const timeframe = tfOmitted ? null : parseBarInterval(b.timeframe);
+  if (!tfOmitted && !timeframe) return null;
+  return { enabled: true, symbol: b.symbol as string, interval: b.interval as number, botId, signal, timeframe };
 }
 
 const n = (v: unknown): number | null => v == null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v);
@@ -132,6 +167,9 @@ export async function evaluatePaperAutomation(sb: any, run: any,
   // 적혀 있는데 모르는 전략이면 **진입하지 않는다.** 이 회차를 기본 전략으로
   // 돌려 버리면 그 체결이 이 봇의 기록이 된다.
   if (bot.bad) return { code: 'SIGNAL_UNKNOWN', message: bot.bad };
+  // 주기도 모르면 멈춘다 — 모르는 주기로 "일단 일봉" 돌리지 않는다.
+  const tf = readBotTimeframe(run.config);
+  if (tf.bad) return { code: 'TIMEFRAME_UNKNOWN', message: tf.bad };
   const rows = async () => {
     const r = await sb.from('paper_positions').select('*').eq('user_id',run.user_id)
       .eq('paper_account_id',run.paper_account_id).eq('status','open');

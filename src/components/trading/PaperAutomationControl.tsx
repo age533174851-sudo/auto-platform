@@ -8,6 +8,7 @@ import { assess } from '@/lib/engine/dataQuality';
 import type { PaperRunnerStatus } from '@/lib/engine/paperRunnerStatus';
 import { ENTRY_SIGNAL_IDS, ENTRY_SIGNAL_LABEL, DEFAULT_ENTRY_SIGNAL, type EntrySignalId } from '@/lib/engine/entrySignals';
 import { derivePaperBotId, DEFAULT_PAPER_BOT } from '@/lib/engine/paperAutomation';
+import { BAR_INTERVALS, BAR_INTERVAL_LABEL, DEFAULT_BAR_INTERVAL, type BarInterval } from '@/lib/risk/bars';
 
 interface Status {
   settings: { enabled: boolean; symbol: string; interval_seconds: number; next_run_at: string; config: Record<string,number> } | null;
@@ -22,7 +23,8 @@ interface Status {
   runner?: PaperRunnerStatus | null;
   /** 봇 전부. 102번(다중 봇) 이후 계정 하나에 봇이 여럿일 수 있다. */
   bots?: { bot_id: string; enabled: boolean; symbol: string; interval_seconds: number;
-    next_run_at: string | null; signal: string; signalLabel: string; signalWarning?: string }[];
+    next_run_at: string | null; signal: string; signalLabel: string; signalWarning?: string;
+    timeframe?: string; timeframeLabel?: string; timeframeWarning?: string }[];
 }
 const money = (v: unknown) => v == null || !Number.isFinite(Number(v)) ? '확인 불가' : Number(v).toLocaleString('en-US',{maximumFractionDigits:4});
 const time = (v: string | null | undefined) => v ? new Date(v).toLocaleString('ko-KR') : '아직 없음';
@@ -50,6 +52,7 @@ export function PaperAutomationControl() {
    *  봇을 추가하는 순간 돌던 기본 봇의 설정이 바뀐다. */
   const [newSymbol,setNewSymbol] = useState('ETHUSDT');
   const [newSignal,setNewSignal] = useState<EntrySignalId>(DEFAULT_ENTRY_SIGNAL);
+  const [newTimeframe,setNewTimeframe] = useState<BarInterval>(DEFAULT_BAR_INTERVAL);
   const [newInterval,setNewInterval] = useState(60);
   const load = useCallback(async (signal?: AbortSignal) => {
     // 로그아웃은 "정말 없음"이 맞다 — 여기서만 비운다.
@@ -78,7 +81,8 @@ export function PaperAutomationControl() {
   // 같은 입력을 공유하면 봇을 추가하는 순간 돌던 봇의 설정이 바뀐다.
   async function controlBot(
     action: 'start' | 'stop',
-    bot: { botId: string; symbol: string; interval: number; signal?: EntrySignalId },
+    bot: { botId: string; symbol: string; interval: number; signal?: EntrySignalId;
+      timeframe?: BarInterval },
   ) {
     if (!auth || busy) return;
     setBusy(true); setActionError('');
@@ -86,7 +90,8 @@ export function PaperAutomationControl() {
       const res = await fetch('/api/paper/automation',{method:'POST',
         headers:{Authorization:auth,'Content-Type':'application/json'},
         body:JSON.stringify({ action, botId:bot.botId, symbol:bot.symbol, interval:bot.interval,
-          ...(bot.signal ? { signal:bot.signal } : {}) })});
+          ...(bot.signal ? { signal:bot.signal } : {}),
+          ...(bot.timeframe ? { timeframe:bot.timeframe } : {}) })});
       const data = await res.json().catch(()=>null);
       if (!res.ok || !data?.ok) throw new Error(data?.message || data?.error || `요청 실패 (${res.status})`);
       await load();
@@ -114,7 +119,7 @@ export function PaperAutomationControl() {
   const enabledBots = bots.filter(b => b.enabled === true).length;
   // 새 봇 이름은 종목·전략에서 만든다. 같은 조합이면 같은 이름이라
   // 같은 봇의 기록이 쪼개지지 않는다. 못 만들면 null이다.
-  const newBotId = derivePaperBotId(newSymbol, newSignal);
+  const newBotId = derivePaperBotId(newSymbol, newSignal, newTimeframe);
   const newBotExists = newBotId != null && bots.some(b => b.bot_id === newBotId);
   // 주기 수신(15초)으로 본다. 모의 장부라도 **조회 자체는 서버에서 당겨오는
   // 값**이므로 POLLED가 맞다. 성공한 적이 없으면 수신 없음이다.
@@ -178,9 +183,10 @@ export function PaperAutomationControl() {
       {bots.map(b => <div key={b.bot_id} data-testid={`paper-bot-${b.bot_id}`}
         style={{display:'flex',flexWrap:'wrap',gap:6,alignItems:'center'}}>
         <span>{b.bot_id}{b.bot_id === DEFAULT_PAPER_BOT ? ' (기본)' : ''}</span>
-        <span>· {b.symbol} · {b.signalLabel}</span>
+        <span>· {b.symbol} · {b.timeframeLabel ?? '주기 미확인'} · {b.signalLabel}</span>
         <span>· {b.enabled ? `다음 평가 ${time(b.next_run_at)}` : '정지'}</span>
         {b.signalWarning && <span role="alert">⚠ {b.signalWarning}</span>}
+        {b.timeframeWarning && <span role="alert">⚠ {b.timeframeWarning}</span>}
         <button type="button" disabled={!auth || busy}
           onClick={()=>void controlBot(b.enabled ? 'stop' : 'start',
             { botId:b.bot_id, symbol:b.symbol, interval:b.interval_seconds })}>
@@ -198,6 +204,10 @@ export function PaperAutomationControl() {
           onChange={e=>setNewSignal(e.target.value as EntrySignalId)}>
           {ENTRY_SIGNAL_IDS.map(id=><option key={id} value={id}>{ENTRY_SIGNAL_LABEL[id]}</option>)}
         </select>
+        <select aria-label="새 봇 봉 주기" value={newTimeframe} disabled={busy}
+          onChange={e=>setNewTimeframe(e.target.value as BarInterval)}>
+          {BAR_INTERVALS.map(tf=><option key={tf} value={tf}>{BAR_INTERVAL_LABEL[tf]}</option>)}
+        </select>
         <select aria-label="새 봇 간격" value={newInterval} disabled={busy}
           onChange={e=>setNewInterval(Number(e.target.value))}>
           <option value={60}>1분</option><option value={300}>5분</option><option value={900}>15분</option>
@@ -205,7 +215,8 @@ export function PaperAutomationControl() {
         <button type="button" data-testid="paper-bot-add-cta"
           disabled={!auth || busy || !status.account?.started_at || newBotId == null || newBotExists}
           onClick={()=>void controlBot('start',
-            { botId:newBotId!, symbol:newSymbol, interval:newInterval, signal:newSignal })}>
+            { botId:newBotId!, symbol:newSymbol, interval:newInterval, signal:newSignal,
+              timeframe:newTimeframe })}>
           봇 추가 시작
         </button>
         {newBotId == null && <span role="alert">이 조합으로는 봇 이름을 만들 수 없습니다</span>}

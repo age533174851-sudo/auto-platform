@@ -136,9 +136,55 @@ if (route && !/paper_automation_settings[\s\S]{0,200}?select\('config'\)/.test(r
     + ' — RPC가 config를 통째로 교체하므로 그 봇의 전략이 기본값으로 되돌아갑니다');
 }
 // `[]`는 미지정이 아니다. String([])가 빈 문자열이라 느슨하게 보면 통과한다.
-if (app && !/function signalOmitted/.test(app)) {
+//
+// 이름은 `signalOmitted`에서 `fieldOmitted`로 일반화됐다 — 전략과 **봉 주기**가
+// 같은 규칙을 쓰기 때문이다. 규칙의 요구는 그대로다: 그 판정이 **한 곳에**
+// 있어야 하고, 두 필드가 그 한 곳을 써야 한다.
+if (app && !/function (field|signal)Omitted/.test(app)) {
   fail(`${APP}: "안 적음" 판정이 한 곳에 없습니다`
     + " — String([])가 빈 문자열이라 signal:[] 같은 잘못된 값이 미지정으로 샙니다");
+}
+// 전략과 주기가 **각자 다른 판정**을 쓰면 한쪽만 느슨해진다. 둘 다 그 한
+// 함수를 거치는지 센다.
+if (app) {
+  const calls = (app.match(/\b(field|signal)Omitted\(/g) || []).length;
+  if (calls < 4) {
+    fail(`${APP}: "안 적음" 판정을 ${calls}곳에서만 씁니다`
+      + ' — 전략(읽기·파싱)과 봉 주기(읽기·파싱) 네 자리가 모두 그 한 함수를 거쳐야 합니다');
+  }
+}
+// ── ⑥-2 봉 주기도 안 적은 요청이 봇의 주기를 되돌리지 않는가 ──
+//
+// 전략과 **완전히 같은 위험**이다. config를 통째로 교체하므로, 주기를 안
+// 보내는 요청이 봇을 일봉으로 되돌리면 1분봉 기록과 일봉 기록이 한
+// strategy_id 아래 섞인다.
+if (app && !/timeframe:\s*BarInterval\s*\|\s*null/.test(app)) {
+  fail(`${APP}: 요청의 봉 주기가 "안 적음"과 "일봉"을 구분하지 않습니다`);
+}
+if (app && !/export function readBotTimeframe\(config/.test(app)) {
+  fail(`${APP}: 저장된 봉 주기를 읽는 판정이 없습니다`);
+}
+// **그 판정이 "안 적음"을 느슨하게 보면 안 된다.** `raw == null`만 보면
+// `timeframe: []`가 미지정으로 샌다. 함수 본문이 그 한 함수를 거치는지 센다.
+{
+  const m = app && app.match(/export function readBotTimeframe\(config[\s\S]{0,600}?\n\}/);
+  if (app && (!m || !/\bfieldOmitted\(/.test(m[0]))) {
+    fail(`${APP}: readBotTimeframe이 "안 적음" 판정을 공용 함수로 하지 않습니다`
+      + ' — raw == null만 보면 timeframe: [] 같은 잘못된 값이 미지정으로 샙니다');
+  }
+}
+if (route && !/readBotTimeframe\(prev\.data\.config\)/.test(route)) {
+  fail(`${ROUTE}: 주기를 안 적은 요청에서 이미 저장된 주기를 읽지 않습니다`
+    + ' — RPC가 config를 통째로 교체하므로 그 봇의 주기가 일봉으로 되돌아갑니다');
+}
+// 저장할 때 그 주기를 실제로 실어 보내는지. 읽고 버리면 같은 고장이다.
+if (route && !/p_config:\s*\{[^}]*\btimeframe\b/.test(route)) {
+  fail(`${ROUTE}: 저장하는 config에 봉 주기가 실리지 않습니다`);
+}
+// 봇 이름에 주기가 들어가야 1분봉 돌파와 일봉 돌파의 기록이 안 섞인다.
+if (app && !/\$\{sym\}-\$\{tf\}-\$\{signal\}/.test(app)) {
+  fail(`${APP}: 봇 이름에 봉 주기가 들어가지 않습니다`
+    + ' — 주기가 다른 두 봇이 같은 strategy_id를 쓰면 성적표가 섞입니다');
 }
 
 // ── ⑦ 봇 목록을 못 읽은 것을 "봇 없음"으로 적지 않는가 ──

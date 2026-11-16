@@ -12,7 +12,7 @@
 // 내주기는 하지만, '조회 실패'와 '데이터 없음'을 구분할 수 없어진다.
 
 import { judgeRegime, readRegimeFilter, type RegimeGateVerdict, type RegimeFilterMode } from './regimeGate';
-import { parseKlines, closesOf, type Bar } from './bars';
+import { parseKlines, closesOf, DEFAULT_BAR_INTERVAL, type Bar, type BarInterval } from './bars';
 
 /**
  * 공개 엔드포인트라 키가 없어도 읽는다. 못 받으면 null.
@@ -21,17 +21,31 @@ import { parseKlines, closesOf, type Bar } from './bars';
  * 고가·저가·거래량을 버렸다 — 같은 요청, 같은 바이트인데 버린 것이다.
  * 그래서 오더블록·FVG·유동성 사냥·거래량 확인 돌파를 쓸 수가 없었다.
  */
-export async function fetchDailyBars(
-  symbol: string, limit = 120,
+export async function fetchBars(
+  symbol: string, interval: BarInterval = DEFAULT_BAR_INTERVAL, limit = 120,
 ): Promise<Bar[] | null> {
   try {
     const r = await fetch(
-      `https://api.binance.com/api/v3/klines?symbol=${encodeURIComponent(symbol)}&interval=1d&limit=${limit}`,
+      `https://api.binance.com/api/v3/klines?symbol=${encodeURIComponent(symbol)}`
+      + `&interval=${encodeURIComponent(interval)}&limit=${limit}`,
       { signal: AbortSignal.timeout(10_000) },
     );
     if (!r.ok) return null;
     return parseKlines(await r.json());
   } catch { return null; }
+}
+
+/**
+ * 일봉만 쓰는 호출자를 위한 얇은 겉면.
+ *
+ * **주기는 호출자가 고른다.** 전에는 주소에 `interval=1d`가 글자로 박혀
+ * 있어서 전략 일곱 개가 전부 일봉 하나에 묶였다. 스캘핑과 스윙은 같은
+ * 전략을 다른 주기로 보는 것인데, 주기를 고를 수 없으면 둘이 같은 기계다.
+ */
+export async function fetchDailyBars(
+  symbol: string, limit = 120,
+): Promise<Bar[] | null> {
+  return fetchBars(symbol, '1d', limit);
 }
 
 /**
@@ -72,13 +86,23 @@ export async function collectRegime(args: {
   symbol: string;
   side: 'LONG' | 'SHORT';
   closes?: number[] | null;
+  /**
+   * 어느 주기의 봉으로 볼 것인가. **기본은 일봉** — 지금까지 돌던 그것이다.
+   *
+   * 국면 판정(EMA 20/60 · ATR · 박스)은 주기와 무관한 식이지만, 그 뜻은
+   * 주기에 달려 있다. 1분봉의 "상승 추세"와 일봉의 "상승 추세"는 다른
+   * 사실이다 — 그래서 봇 이름에 주기를 넣어 기록을 섞지 않는다.
+   */
+  interval?: BarInterval;
   env?: (k: string) => string | undefined;
 }): Promise<RegimeFacts> {
   const { mode, note } = readRegimeFilter(args.env ?? ((k) => process.env[k]));
 
   // 호출자가 종가를 이미 들고 있으면 그것을 쓴다(daily-ladder가 그렇다).
   // 그때는 봉이 없으므로 `bars`는 null이다 — 종가로 고가·저가를 지어내지 않는다.
-  const bars = args.closes !== undefined ? null : await fetchDailyBars(args.symbol);
+  const bars = args.closes !== undefined
+    ? null
+    : await fetchBars(args.symbol, args.interval ?? DEFAULT_BAR_INTERVAL);
   const closes = args.closes !== undefined ? args.closes : closesOf(bars);
 
   return {
