@@ -29,6 +29,7 @@ import {
   ATTEMPT_CHOICES, MAX_ATTEMPTS, DEFAULT_ATTEMPTS,
   type DirectionMode, type FailurePolicy, type StepMark,
 } from '@/lib/smoke/smokeRun';
+import { cancelReceiptOf } from '@/lib/engine/cancelReceipt';
 
 /** 단계 색. **PENDING은 회색이다** — 초록으로 그리면 안 한 것이 한 것처럼 보인다 */
 const STEP_TONE: Record<StepState, string> = {
@@ -412,13 +413,18 @@ export default function SmokeTestPanel({
                     ? '조건부 주문 목록을 읽지 못했습니다 (0건과 다릅니다)'
                     : `조건부 주문 ${(orphans?.orders ?? []).length}건`}
                 </div>
-                {(orphans?.orders ?? []).map((o: any) => (
-                  <div key={o.id} style={{
+                {(orphans?.orders ?? []).map((o: any, oi: number) => (
+                  // 번호를 못 읽은 줄은 id가 빈 문자열이다 — key가 겹치지 않게 순번을 쓴다.
+                  <div key={o.id || `unreadable-${oi}`} style={{
                     border: `1px solid ${T.border}`, borderRadius: 9, padding: 8,
                     display: 'grid', gap: 4, minWidth: 0,
                   }}>
                     <div style={{ fontSize: 10.5, color: T.txt, overflowWrap: 'anywhere' }}>
-                      <b>#{o.id}</b> · 트리거 {o.triggerPrice ?? '?'} · rule {o.rule ?? '?'}
+                      {/* **번호를 못 읽은 것을 `#`으로 그리지 않는다.** 그렇게 그려서
+                          사용자가 번호가 있는 줄로 읽고 취소를 눌렀고, 앱이 자기
+                          400을 돌려준 것이 거래소 거부로 보였다 (#552). */}
+                      <b>{o.idReadable === false ? '번호 읽지 못함' : `#${o.id}`}</b>
+                      {' · '}트리거 {o.triggerPrice ?? '?'} · rule {o.rule ?? '?'}
                       {o.autoSize ? ` · ${o.autoSize}` : ''}
                     </div>
                     <div style={{ fontSize: 10, color: T.muted, overflowWrap: 'anywhere' }}>
@@ -426,11 +432,19 @@ export default function SmokeTestPanel({
                         color: o.ownership === 'MINE' ? T.grn : o.ownership === 'FOREIGN' ? T.ylw : T.red,
                       }}>{o.ownership}</b>
                     </div>
+                    {/* **번호를 못 읽은 주문은 취소할 수 없다고 말한다.**
+                        보낼 수 없는 요청을 버튼으로 두면 앱이 자기 400을
+                        돌려주고, 그 400이 거래소 거부처럼 보인다 (#552). */}
+                    {o.idReadable === false && (
+                      <div style={{ fontSize: 10, color: T.ylw, overflowWrap: 'anywhere' }}>
+                        취소할 수 없습니다 — {o.idReason || '취소에 쓸 주문 번호를 읽지 못했습니다'}
+                      </div>
+                    )}
                     {/* **남의 전략 주문에는 취소 버튼을 만들지 않는다.** */}
-                    {o.ownership !== 'FOREIGN' && (
+                    {o.ownership !== 'FOREIGN' && o.idReadable !== false && (
                       <button
                         onClick={() => cancelOne(o.id)}
-                        disabled={busy}
+                        disabled={busy || !o.id}
                         style={{
                           minHeight: 30, borderRadius: 8, fontSize: 11, fontWeight: 700,
                           background: A(T.red, '14'), color: T.red,
@@ -452,9 +466,15 @@ export default function SmokeTestPanel({
                   <div style={{ borderTop: `1px dashed ${T.border}`, paddingTop: 6, display: 'grid', gap: 3 }}>
                     <div style={{ fontSize: 9.5, color: T.muted, fontWeight: 800 }}>DB에 적힌 주문 번호</div>
                     {(orphans.smoke.rows ?? []).slice(0, 5).map((r: any) => {
-                      const live = (orphans?.orders ?? []).map((o: any) => String(o.id));
+                      const rows = (orphans?.orders ?? []);
+                      const live = rows.filter((o: any) => o.idReadable !== false).map((o: any) => String(o.id));
+                      // **번호를 못 읽은 줄이 있으면 "거래소에 없음"이라고 말할 수 없다.**
+                      // 못 읽은 그 줄이 이 주문일 수 있다 (#552).
+                      const blind = rows.some((o: any) => o.idReadable === false);
                       const mark = (id: any) => !id ? '없음'
-                        : live.includes(String(id)) ? `${id} · 거래소에 남아 있음` : `${id} · 거래소에 없음`;
+                        : live.includes(String(id)) ? `${id} · 거래소에 남아 있음`
+                        : blind ? `${id} · 확인 불가 (번호 못 읽은 주문이 있습니다)`
+                        : `${id} · 거래소에 없음`;
                       return (
                         <div key={r.id} style={{ fontSize: 9.5, color: T.muted, lineHeight: 1.55, overflowWrap: 'anywhere' }}>
                           {String(r.id).slice(0, 8)} · {r.state}{r.verdict ? `/${r.verdict}` : ''} ·
@@ -474,8 +494,7 @@ export default function SmokeTestPanel({
                 {cancelRes && (
                   <div style={{ borderTop: `1px dashed ${T.border}`, paddingTop: 6, display: 'grid', gap: 3 }}>
                     <div style={{ fontSize: 9.5, color: T.muted, fontWeight: 800 }}>
-                      취소 응답 · HTTP {cancelRes.httpStatus} · {cancelRes.body?.rounds ?? 0}바퀴 ·
-                      {' '}재조회 {cancelRes.body?.leftoverReadable === false ? '실패(모름)' : '성공'}
+                      취소 응답 · {cancelReceiptOf({ httpStatus: cancelRes.httpStatus, body: cancelRes.body }).line}
                     </div>
                     {(cancelRes.body?.ledger?.entries ?? []).map((e: any) => {
                       const a = (cancelRes.body?.attempts ?? []).find((x: any) => String(x?.id) === String(e?.id));
@@ -570,8 +589,10 @@ function CleanupEvidence({ test }: { test: any }) {
               ? cancel.requested.join(', ')
               : '없음 — 취소를 시도하지 않았습니다'}
             {' · '}판정 <b style={{ color: cancel.code === 'CLEAR' ? T.grn : T.red }}>{cancel.code}</b>
-            {' · '}{cancel.rounds ?? 0}바퀴
-            {' · '}재조회 {cancel.leftoverReadable === false ? '실패(모름)' : '성공'}
+            {/* **여기도 같은 한 곳에서 문구를 받는다.** 두 곳에 두면
+                언젠가 한쪽만 고쳐지고, 그쪽이 또 "재조회 성공"이라고
+                적는다 (#552). */}
+            {' · '}{cancelReceiptOf({ body: cancel }).line}
           </div>
           {entries.map((e: any) => {
             const a = attempts.find((x: any) => String(x?.id) === String(e?.id));

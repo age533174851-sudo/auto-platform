@@ -306,8 +306,126 @@ if (evidenceGaps.length > 0) {
   bad = true;
 }
 
+
+// ── #552: 취소 영수증은 "모름"을 0·성공으로 적지 않는다 ──
+//
+// 2026-11-02 00:36(KST) 화면이 `HTTP 400 · 0바퀴 · 재조회 성공`이라고
+// 적었다. 재조회는 일어나지 않았다 — 응답에 없는 필드를 `?? 0`과
+// `=== false`로 읽은 결과다. 그 한 줄 때문에 "바이낸스가 400을 줬다"는
+// 추측이 생기고 회차 하나가 그 위에서 돌았다.
+//
+// 판단은 `cancelReceipt.ts` 한 곳에 있다. 이 규칙은 **그 한 곳을 실제로
+// 쓰고 있는가**를 본다 — 화면이 다시 자기 손으로 읽기 시작하면 같은
+// 거짓말이 돌아온다(상습 고장 ② 경로가 둘인데 한쪽만 고침).
+const RECEIPT = 'src/lib/engine/cancelReceipt.ts';
+const PANEL = 'src/components/SmokeTestPanel.tsx';
+const ORPHANS = 'src/app/api/autotrade/smoke-test/orphans/route.ts';
+const receiptGaps = [];
+{
+  const panel = stripComments(readFileSync(PANEL, 'utf8'));
+  const route = stripComments(readFileSync(ORPHANS, 'utf8'));
+
+  if (!/from\s+['"]@\/lib\/engine\/cancelReceipt['"]/.test(panel) || !/\bcancelReceiptOf\s*\(/.test(panel)) {
+    receiptGaps.push(`${PANEL} — 취소 응답 문구를 cancelReceiptOf로 만들지 않았습니다`);
+  }
+  // 화면이 응답 필드를 직접 읽어 "모름"을 0·성공으로 바꾸던 그 모양.
+  if (/rounds\s*\?\?\s*0/.test(panel)) {
+    receiptGaps.push(`${PANEL} — \`rounds ?? 0\`이 돌아왔습니다 (없는 필드를 0바퀴로 적습니다)`);
+  }
+  if (/leftoverReadable\s*===\s*false/.test(panel)) {
+    receiptGaps.push(`${PANEL} — \`leftoverReadable === false\`가 돌아왔습니다 (필드가 없으면 '성공'이 됩니다)`);
+  }
+  // 번호를 못 읽은 주문에 취소 버튼을 주지 않는가.
+  if (!/\bidReadable\b/.test(panel)) {
+    receiptGaps.push(`${PANEL} — idReadable을 보지 않습니다 (번호 못 읽은 주문에 취소 버튼이 달립니다)`);
+  }
+  // **라우트는 합성 판정 하나만 부른다.** 관문(#553)과 번호 증거(#554)를
+  // 각자 부르면 같은 판단이 두 곳에 생긴다 — 그것이 상습 고장 ②다.
+  if (!/from\s+['"]@\/lib\/engine\/cancelReceipt['"]/.test(route)
+      || !/\borphanCancelDecision\s*\(/.test(route) || !/\borderIdEvidence\s*\(/.test(route)) {
+    receiptGaps.push(`${ORPHANS} — 취소 대상·번호 판단을 cancelReceipt의 orphanCancelDecision으로 부르지 않았습니다`);
+  }
+  // 관문을 라우트가 직접 부르면 합성이 우회된다.
+  if (/\borphanCancelGate\s*\(/.test(route)) {
+    receiptGaps.push(`${ORPHANS} — orphanCancelGate를 라우트가 직접 부릅니다 (합성 판정을 우회합니다)`);
+  }
+  // **취소는 합성 판정이 허용한 뒤에만 나간다.** 호출 순서를 글자로 본다.
+  {
+    const dec = route.indexOf('orphanCancelDecision(');
+    const cx = route.indexOf('cancelExact(');
+    if (dec === -1 || cx === -1 || dec > cx) {
+      receiptGaps.push(`${ORPHANS} — cancelExact가 orphanCancelDecision보다 먼저 나옵니다`
+        + ' (포지션·소유권·번호를 확인하기 전에 거래소로 나갑니다)');
+    }
+  }
+  if (!/\bidReadable\b/.test(route)) {
+    receiptGaps.push(`${ORPHANS} — 응답에 idReadable을 싣지 않습니다 (화면이 못 읽은 번호를 구분할 수 없습니다)`);
+  }
+  // **소유 증거 장부는 연결과 환경으로 좁혀서 읽는다.**
+  // 같은 사용자라도 연결·환경이 다르면 다른 계좌다. 좁히지 않으면 다른
+  // 연결의 주문 번호가 소유 근거로 들어온다(#552 추가 감사). 이 질의는
+  // 라우트 안에 있어 유닛 시험이 닿지 않는다 — 실제로 이 범위를 지워 보니
+  // 시험 7295개가 전부 통과했다. 그래서 글자로 고정한다.
+  if (!/\.eq\(\s*['"]connection_id['"]/.test(route) || !/\.eq\(\s*['"]mode['"]/.test(route)) {
+    receiptGaps.push(`${ORPHANS} — smoke_tests 조회를 connection_id·mode로 좁히지 않았습니다`
+      + ' (다른 연결·다른 환경의 주문 번호가 소유 근거가 됩니다)');
+  }
+  // 좁혀 읽은 번호를 판정에 실제로 넘기는가. 넘기지 않으면 좁힌 의미가 없다.
+  if (!/\bownedIds\s*:/.test(route)) {
+    receiptGaps.push(`${ORPHANS} — 좁혀 읽은 장부 번호(ownedIds)를 판정에 넘기지 않았습니다`);
+  }
+  // **스모크 진단은 조회도 테스트넷에서만.** 실전 연결을 넘기면
+  // `readProtectiveOrders`가 이미 signed 요청이다 — 관문이 그 뒤에 있으면
+  // 늦다. `startAttempt.ts:77-81`에는 이 관문이 있었고 이 경로에는 없었다.
+  // 라우트 안의 호출 순서는 유닛 시험이 닿지 않으므로(실측: 연결 범위를
+  // 지워도 시험 7295개가 전부 통과했다) 글자로 고정한다.
+  {
+    const VENUE_CALL = /\bops\.(readOpenPosition|readProtectiveOrders|cancelExact)\s*\(/g;
+    // 두 처리기를 따로 본다. 한쪽에만 관문이 있으면 다른 쪽으로 새어 나간다.
+    const cut = route.indexOf('export async function POST');
+    const parts = cut === -1 ? [['GET+POST', route]] : [['GET', route.slice(0, cut)], ['POST', route.slice(cut)]];
+    for (const [who, text] of parts) {
+      const gate = text.indexOf('smokeTestnetVerdict(');
+      const calls = [...text.matchAll(VENUE_CALL)].map(m => m.index ?? -1);
+      if (calls.length === 0) continue;             // 거래소를 안 부르면 관문도 필요 없다
+      if (gate === -1) {
+        receiptGaps.push(`${ORPHANS} ${who} — 거래소를 부르는데 smokeTestnetVerdict가 없습니다`
+          + ' (실전 연결에 signed 조회가 나갑니다)');
+        continue;
+      }
+      const early = calls.filter(ix => ix < gate);
+      if (early.length > 0) {
+        receiptGaps.push(`${ORPHANS} ${who} — smokeTestnetVerdict보다 먼저 거래소를 부르는 자리가 ${early.length}개 있습니다`);
+      }
+    }
+    // **날것(`is_testnet`)을 잃지 않고 넘기는가.** 정규화된 `testnet`은
+    // null·undefined를 true로 올리므로, 그 값을 넘기면 미확인 환경이 통과한다.
+    if (!/\bisTestnetRaw\b/.test(route)) {
+      receiptGaps.push(`${ORPHANS} — isTestnetRaw를 venueOf가 싣고 판정에 넘기지 않았습니다`
+        + ' (정규화된 testnet은 미확인 환경을 TESTNET으로 올립니다)');
+    }
+    if (/\bsmokeEnvGate\b/.test(route)) {
+      receiptGaps.push(`${ORPHANS} — smokeEnvGate(복제된 약한 판정)를 아직 부릅니다`
+        + ' — 정본은 smokePlan.smokeTestnetVerdict입니다');
+    }
+  }
+
+  // 이 규칙이 헛돌지 않는지. 판정 정본이 사라졌으면 그것이 RED다.
+  if (!existsSync(RECEIPT)) {
+    receiptGaps.push(`${RECEIPT} — 판정 정본이 없습니다 (이 규칙이 헛돌고 있습니다)`);
+  }
+}
+
+if (receiptGaps.length > 0) {
+  console.error('\n❌ 취소 영수증 배선이 끊겼습니다:');
+  for (const g of receiptGaps) console.error(`   · ${g}`);
+  console.error('\n   못 읽은 것을 0바퀴·재조회 성공으로 적으면 앱의 거절이 거래소 거부로 읽힙니다.');
+  bad = true;
+}
+
 if (bad) process.exit(1);
 
 console.log(`✅ 판정 모듈 ${files.length}개 · 배선 안 된 것 0개`
   + (ALLOW.size > 0 ? ` (면제 ${ALLOW.size}개)` : ''));
 console.log(`✅ 청산 감시 200 응답 ${evidenceSeen.length}개 전부 워커 생존 증거를 싣는다`);
+console.log('✅ 취소 영수증 판정이 화면·경로 양쪽에 배선돼 있다 (#552)');
