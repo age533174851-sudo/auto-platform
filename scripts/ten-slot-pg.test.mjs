@@ -56,7 +56,7 @@ if (!target.ok) {
   const red = createScratchDb(target, 'tsred', migrationPaths(root, SCHEMA));
   const green = createScratchDb(target, 'tsgreen',
     migrationPaths(root, [...SCHEMA, '097_ten_slot_atomic_claim.sql',
-      '098_ten_slot_apply_event.sql', '099_ten_slot_role_acl_hardening.sql']));
+      '098_ten_slot_apply_event.sql', '105_ten_slot_role_acl_hardening.sql']));
   process.on('exit', () => {
     try { dropScratchDb(target, red); } catch { /* 정리 실패는 결과를 바꾸지 않는다 */ }
     try { dropScratchDb(target, green); } catch { /* 같음 */ }

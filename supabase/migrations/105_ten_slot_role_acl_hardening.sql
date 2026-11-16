@@ -1,4 +1,9 @@
--- 099_ten_slot_role_acl_hardening.sql
+-- 105_ten_slot_role_acl_hardening.sql
+--
+-- 번호를 099에서 105로 옮겼다. main에 이미 `099_paper_automation.sql`이
+-- 있어 번호가 겹쳤고, 겹친 번호는 적용 순서를 정할 수 없다
+-- (`check-migrations`가 "마이그레이션 번호 99가 겹칩니다"로 막았다).
+-- 이 파일은 097·098의 권한을 단단하게 하는 것이므로 뒤에 오는 것이 맞다.
 --
 -- **`REVOKE ... FROM PUBLIC`은 `anon`·`authenticated`를 막지 않는다.** (#537)
 --
