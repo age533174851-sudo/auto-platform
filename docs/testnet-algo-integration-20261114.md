@@ -47,14 +47,16 @@ installs the single-bot fix before 102/103 replace it. No deployed migration
 ## Evidence (offline unless explicitly stated)
 
 - RED: ordinary automatic and manual executor requests rejected by the smoke-only
-  scope (2 failures). GREEN: 7653 harness checks, zero failures, including actual
+  scope (2 failures). GREEN: 7654 harness checks, zero failures, including actual
   executor -> fake venue -> owned cleanup / position and both-book zero evidence.
 - RED: applying 101 after 103 changed the claim function fingerprint. GREEN:
   native PostgreSQL PAPER suite 13/13, including unchanged newer-function hash,
   30 eight-way claim rounds, crash/lease recovery, multi-bot isolation and RLS.
 - Native PostgreSQL + official PostgREST + supabase-js verifies concurrent Algo
   claims, commit-then-lost DB reply, no resend, historical attestation, 100 replay
-  and distinct persisted children for a 36-character parent. No actual venue.
+  and distinct persisted children for a 36-character parent. Partial-target
+  execution also verifies quantities, unique IDs, visible completion counts and
+  cleanup of every owned child. No actual venue.
 - Web and Worker builds pass. TypeScript: main 73 / head 73 existing diagnostics;
   normalized added/removed diagnostics 0/0. Full static checks and exact-head CI
   are reported separately in the PR conversation; prior-head results are not

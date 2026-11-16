@@ -1497,7 +1497,7 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
           settled: fill.status === 'FILLED' && Number(fill.filledQty) > 0 && Number(fill.avgPrice) > 0,
           slOrderId: slId, tpOrderId: tpId, protection,
           leverageConfirmed: true, positionModeConfirmed: true,
-          message: protection.reason || 'TESTNET Algo 보호주문 재조회 완료' };
+          message: (protection.reason || 'TESTNET Algo 보호주문 재조회 완료') + exitNote + stopCheckNote };
       }
 
       return {
