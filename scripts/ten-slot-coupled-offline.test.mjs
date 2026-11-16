@@ -217,3 +217,40 @@ test('combined envelope and ledger rollback cannot erase a second claim', async 
   assert.equal((await resumeCoupledOffline(db, 'camp')).code, 'COUPLING_CORRUPT');
   assert.equal(db.writes, writes);
 });
+
+
+test('EXIT_PENDING without the protected-entry event history fails closed', async () => {
+  const db = new FakeDB(); await claim(db);
+  await applyCoupledOfflineEvent(db, 'camp', protect);
+  await applyCoupledOfflineEvent(db, 'camp', event('exit', 'EXIT_INTENT', { exitIntentDurable: true }));
+  db.state.journals[0].version = 1;
+  db.state.journals[0].eventIds = ['exit'];
+  assert.equal(validCoupledOfflineSnapshot(db.state), false);
+  const writes = db.writes;
+  assert.equal((await applyCoupledOfflineEvent(db, 'camp', flat)).code, 'COUPLING_CORRUPT');
+  assert.equal(db.writes, writes);
+});
+
+test('CLOSED without its minimum durable event history cannot unlock another slot', async () => {
+  const db = new FakeDB(); await claim(db);
+  await applyCoupledOfflineEvent(db, 'camp', protect);
+  await applyCoupledOfflineEvent(db, 'camp', event('exit', 'EXIT_INTENT', { exitIntentDurable: true }));
+  await applyCoupledOfflineEvent(db, 'camp', flat);
+  db.state.journals[0].version = 1;
+  db.state.journals[0].eventIds = ['flat'];
+  assert.equal(validCoupledOfflineSnapshot(db.state), false);
+  const writes = db.writes;
+  assert.equal((await claimAndIntentCoupledOffline(db, 'camp', clear, 'order-2', 10)).code, 'COUPLING_CORRUPT');
+  assert.equal(db.writes, writes);
+});
+
+test('INTENT_PENDING with phantom event evidence cannot be restarted as valid', async () => {
+  const db = new FakeDB(); await claim(db);
+  db.state.version = 2;
+  db.state.journals[0].version = 1;
+  db.state.journals[0].eventIds = ['phantom'];
+  assert.equal(validCoupledOfflineSnapshot(db.state), false);
+  const writes = db.writes;
+  assert.equal((await resumeCoupledOffline(db, 'camp')).code, 'COUPLING_CORRUPT');
+  assert.equal(db.writes, writes);
+});

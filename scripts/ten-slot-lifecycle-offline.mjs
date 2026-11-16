@@ -5,9 +5,17 @@ const blocked = code => ({ ok: false, code });
 const PHASES = new Set(['INTENT_PENDING', 'ENTRY_PARTIAL', 'OPEN_PROTECTED', 'EXIT_PENDING', 'EXIT_PARTIAL', 'UNKNOWN', 'CLOSED']);
 const validId = x => typeof x === 'string' && x.trim().length > 0 && x.length <= 128;
 const validQty = x => Number.isSafeInteger(x) && x > 0; // integer lots, never floating exchange quantities
+// Every reachable lifecycle phase has a minimum durable event history.
+// A pending intent has not yet consumed any event. UNKNOWN can be reached
+// directly from pending, and a zero-fill UNKNOWN can close after EXIT_FLAT.
+const MIN_EVENTS_BY_PHASE = Object.freeze({
+  INTENT_PENDING: 0, ENTRY_PARTIAL: 1, OPEN_PROTECTED: 1,
+  EXIT_PENDING: 2, EXIT_PARTIAL: 3, UNKNOWN: 1, CLOSED: 2,
+});
 const validJournal = s => !!s && validId(s.campaignId) && Number.isSafeInteger(s.slotIndex) && s.slotIndex >= 0 && s.slotIndex < 10 &&
   validId(s.clientOrderId) && validQty(s.requestedLots) && Number.isSafeInteger(s.version) && s.version >= 0 && s.version < Number.MAX_SAFE_INTEGER &&
-  PHASES.has(s.phase) && Number.isSafeInteger(s.filledLots) && s.filledLots >= 0 && s.filledLots <= s.requestedLots &&
+  PHASES.has(s.phase) && s.version >= MIN_EVENTS_BY_PHASE[s.phase] &&
+  (s.phase !== 'INTENT_PENDING' || s.version === 0) && Number.isSafeInteger(s.filledLots) && s.filledLots >= 0 && s.filledLots <= s.requestedLots &&
   Number.isSafeInteger(s.exitedLots) && s.exitedLots >= 0 && s.exitedLots <= s.filledLots &&
   Array.isArray(s.eventIds) && s.eventIds.length <= 1000 && s.version === s.eventIds.length && s.eventIds.every(validId) && new Set(s.eventIds).size === s.eventIds.length &&
   (s.phase !== 'INTENT_PENDING' || (s.filledLots === 0 && s.exitedLots === 0)) &&
