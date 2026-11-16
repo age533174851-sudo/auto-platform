@@ -9,7 +9,7 @@ const validJournal = s => !!s && validId(s.campaignId) && Number.isSafeInteger(s
   validId(s.clientOrderId) && validQty(s.requestedLots) && Number.isSafeInteger(s.version) && s.version >= 0 && s.version < Number.MAX_SAFE_INTEGER &&
   PHASES.has(s.phase) && Number.isSafeInteger(s.filledLots) && s.filledLots >= 0 && s.filledLots <= s.requestedLots &&
   Number.isSafeInteger(s.exitedLots) && s.exitedLots >= 0 && s.exitedLots <= s.filledLots &&
-  Array.isArray(s.eventIds) && s.eventIds.length <= 1000 && s.eventIds.every(validId) && new Set(s.eventIds).size === s.eventIds.length &&
+  Array.isArray(s.eventIds) && s.eventIds.length <= 1000 && s.version === s.eventIds.length && s.eventIds.every(validId) && new Set(s.eventIds).size === s.eventIds.length &&
   (s.phase !== 'INTENT_PENDING' || (s.filledLots === 0 && s.exitedLots === 0)) &&
   (s.phase !== 'ENTRY_PARTIAL' || (s.filledLots > 0 && s.filledLots < s.requestedLots && s.exitedLots === 0)) &&
   (!['OPEN_PROTECTED','EXIT_PENDING','EXIT_PARTIAL'].includes(s.phase) || s.filledLots === s.requestedLots) &&

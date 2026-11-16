@@ -149,3 +149,23 @@ test('corrupt envelope version equal to journal version blocks all transitions',
   assert.equal((await applyCoupledOfflineEvent(db, 'camp', protect)).code, 'COUPLING_CORRUPT');
   assert.equal(db.writes, writes);
 });
+
+test('journal event ID without a matching version is corrupt; no further CAS', async () => {
+  const db = new FakeDB(); await claim(db);
+  db.state.journals[0].eventIds.push('phantom');
+  assert.equal(validCoupledOfflineSnapshot(db.state), false);
+  const writes = db.writes;
+  assert.equal((await applyCoupledOfflineEvent(db, 'camp', protect)).code, 'COUPLING_CORRUPT');
+  assert.equal(db.writes, writes);
+});
+
+test('journal version rolled back after durable partial fill is corrupt; no further CAS', async () => {
+  const db = new FakeDB(); await claim(db);
+  assert.equal((await applyCoupledOfflineEvent(db, 'camp',
+    event('partial', 'ENTRY_PARTIAL', { cumulativeLots: 3 }))).ok, true);
+  db.state.journals[0].version = 0;
+  assert.equal(validCoupledOfflineSnapshot(db.state), false);
+  const writes = db.writes;
+  assert.equal((await applyCoupledOfflineEvent(db, 'camp', protect)).code, 'COUPLING_CORRUPT');
+  assert.equal(db.writes, writes);
+});
