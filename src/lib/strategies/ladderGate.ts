@@ -277,6 +277,80 @@ export async function openLadderGate(
 }
 
 /**
+ * 주문 결과를 예약 행에 **어떻게** 옮길지. 판정은 여기 한 곳이다.
+ *
+ * 왜 `ok` 하나로는 모자라나
+ * ─────────────────────────
+ * `executeOrder`의 `ok: false`에는 서로 다른 셋이 섞여 있다.
+ *
+ *   `REJECTED`  거래소가 거부했다 — 주문은 **없다**
+ *   `FAILED`    보내지 못했다 — 주문은 **없다**
+ *   `UNKNOWN`   응답을 못 받았다 — **나갔는지 모른다**
+ *
+ * 앞의 둘은 하루를 돌려줘도 된다. 마지막은 아니다. 그런데 호출부는
+ * `exec.ok ? confirm : release` 두 갈래뿐이었고, `release`는 예약 행을
+ * **DELETE** 한다. 그 행이 `(user_id, strategy_id, trade_date)` unique를
+ * 쥐고 있으므로, 지우는 순간 **하루 1회 잠금이 열린다.** 다음 주기에
+ * 두 번째 주문이 나가고, 앞 주문이 실제로는 체결돼 있었다면 포지션이
+ * 두 배가 된다.
+ *
+ * **확인하지 못한 것은 통과가 아니다.** 모르면 돌려주지 않는다 —
+ * 하루를 손해 보는 쪽이 포지션이 두 배가 되는 쪽보다 싸다.
+ *
+ * 그래서 모르는 상태는 전부 `HOLD_UNKNOWN`으로 떨어진다. `status`가
+ * 비었거나 처음 보는 값일 때도 마찬가지다 — 새 상태가 생겼을 때
+ * 조용히 "안 나갔다"로 접히면 이 고장이 그대로 돌아온다.
+ */
+export type ReservationOutcome =
+  /** 나갔다 — 체결 정보를 채운다 */
+  | 'CONFIRM'
+  /** **확실히** 안 나갔다 — 행을 지우고 하루를 돌려준다 */
+  | 'RELEASE'
+  /** 나갔는지 모른다 — 지우지 않는다. 하루는 소진된 채로 둔다 */
+  | 'HOLD_UNKNOWN';
+
+export function reservationOutcome(
+  exec: { ok?: boolean; status?: string | null } | null | undefined,
+): ReservationOutcome {
+  if (exec?.ok === true) return 'CONFIRM';
+  const s = String(exec?.status ?? '').toUpperCase();
+  // 열거는 **돌려줘도 되는 쪽만** 한다. 나머지는 전부 모르는 것으로 둔다.
+  if (s === 'REJECTED' || s === 'FAILED') return 'RELEASE';
+  return 'HOLD_UNKNOWN';
+}
+
+/**
+ * 나갔는지 모르는 주문의 예약 행에 남기는 상태.
+ *
+ * `RESERVED`로 두면 안 된다 — `openLadderGate`의 묵은 예약 청소가
+ * `status='RESERVED' AND entry_price IS NULL`인 10분 지난 행을 지우고,
+ * 그러면 **잠금이 다시 열린다.** 그 청소의 조건에서 벗어나는 값이어야 한다.
+ *
+ * `017_ladder_cycles.sql`의 `status`는 `text not null default 'OPEN'`이고
+ * CHECK 제약이 없다 — 새 값을 쓰는 데 마이그레이션이 필요하지 않다.
+ */
+export const RECONCILE_STATUS = 'RECONCILE_REQUIRED';
+
+/**
+ * 나갔는지 모르는 주문 — **지우지 않고** 대조 대상으로 남긴다.
+ *
+ * 하루는 소진된 채로 둔다. 이 행이 unique를 계속 쥐고 있어야 같은 날
+ * 두 번째 주문이 못 나간다.
+ */
+export async function holdReservationForReconcile(
+  sb: any, reservationId: string | undefined, note: string,
+): Promise<void> {
+  if (!sb || !reservationId) return;
+  try {
+    await sb.from('ladder_daily_trades').update({
+      status: RECONCILE_STATUS,
+      // 왜 남았는지가 장부에 있어야 다음 사람이 처음부터 다시 조사하지 않는다.
+      exit_reason: note,
+    }).eq('id', reservationId);
+  } catch { /* 기록 실패가 주문을 되돌리지는 않는다 */ }
+}
+
+/**
  * 예약 취소 — 주문이 실패했을 때 호출한다.
  * 이걸 빼먹으면 주문이 안 나갔는데도 그 날 하루가 소진된다.
  */
@@ -285,13 +359,41 @@ export async function releaseReservation(sb: any, reservationId?: string): Promi
   try { await sb.from('ladder_daily_trades').delete().eq('id', reservationId); } catch { /* 무시 */ }
 }
 
-/** 주문이 나간 뒤 체결 정보를 예약 행에 채운다. */
+/**
+ * 주문이 나간 뒤 체결 정보를 예약 행에 채운다.
+ *
+ * **`stopLoss`는 선택이 아니다.**
+ *
+ * 왜 타입으로 강제하나
+ * ────────────────────
+ * 2026-11-16까지 이 자리의 유일한 호출자(`/api/autotrade/daily-ladder`)가
+ * `stopLoss`를 넘기지 않았다. 손절은 거래소에는 제대로 걸렸지만
+ * (`executeOrder`에 같은 값이 넘어간다) **장부에는 한 번도 안 적혔다.**
+ * 그래서 `ladder_daily_trades.stop_loss`가 모든 진입에서 NULL이었다.
+ *
+ * 그 한 칸이 비면 청산 감시가 통째로 멈춘다 — `exitMonitor.ts`는
+ *
+ *     const stop = Number(t.stop_loss);
+ *     if (!entry || !stop) continue;      // ← 시간청산보다 **앞**이다
+ *
+ * 로 줄을 버린다. 트레일링·본전 이동·5일 시간청산·청산가 근접 점검이
+ * 전부 0회가 되고, 응답에는 "확인함"만 남는다. 같은 파일의 다른 자리는
+ * 이 칸이 차 있다고 **가정하고** 주석까지 달아 두었다
+ * ("stop_loss를 덮어쓰지 않는다 — 그 칸은 진입 시점 값이고 1R을 정의한다").
+ * 채우는 쪽만 없었다.
+ *
+ * 인자를 빼먹는 것은 조용하다. 타입을 필수로 만들면 **컴파일이 막는다** —
+ * 빠뜨릴 수 있는 자리를 없앤다. 값을 확인하지 못한 경우에는 `null`을
+ * **명시해야** 하고, 그건 "모른다"를 적는 것이지 빼먹는 것이 아니다.
+ */
 export async function confirmReservation(
   sb: any,
   reservationId: string | undefined,
   fill: {
     leverage?: number; entryPrice?: number;
-    stopLoss?: number; takeProfit?: number; liquidationPrice?: number;
+    /** **필수.** 확인하지 못했으면 `null`을 명시한다 — 생략은 못 한다 */
+    stopLoss: number | null;
+    takeProfit?: number; liquidationPrice?: number;
   },
 ): Promise<void> {
   if (!sb || !reservationId) return;
