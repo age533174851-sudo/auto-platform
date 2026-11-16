@@ -97,6 +97,22 @@ export async function moveStopSafely(i: {
   }
 
   // ── ③ 옛 손절 정리 ──
+  //
+  // ★ **남길 번호를 모르면 "나머지 취소"를 부르지 않는다.**
+  //
+  //   거래소가 접수는 했는데 번호를 돌려주지 않으면, 무엇이 방금 건
+  //   손절인지 모른다. 그 상태로 "이것 말고 전부 취소"를 부르면 새 손절까지
+  //   지울 수 있다(실제 `cancelOtherStops`는 그래서 null이면 0건으로 돌아온다).
+  //   그 0건을 "지울 것이 없었다"로 읽어 MOVED · oldStopKept:false로 적으면
+  //   **옛 손절이 거래소에 남아 있는데 결과는 "치웠다"가 된다.**
+  const keepId = placed.orderId != null && String(placed.orderId) !== ''
+    ? String(placed.orderId) : null;
+  if (keepId == null) {
+    return { code: 'OLD_STOP_REMAINS', ok: true, newOrderId: null,
+      cancelledOld: 0, oldStopKept: true,
+      reason: '새 손절은 걸었지만 거래소가 주문 번호를 돌려주지 않아 '
+        + '옛 손절을 치우지 않았습니다 — 남길 번호를 모르고 지우면 새 손절까지 지울 수 있습니다' };
+  }
   try {
     const c = await i.cancelOthers(placed.orderId ?? null);
     // ★ **건너뛴 것을 "옮겼다"로 적지 않는다.**

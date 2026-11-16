@@ -13,7 +13,7 @@
 import { test, eq, assert } from '../../test/harness';
 import {
   selectDueSchedules, claimVerdict, isLiveMode, shouldPollNow, POLL_INTERVAL_MS,
-  lastEvaluationNote, lastEvaluationBrief,
+  lastEvaluationNote, lastEvaluationBrief, offSkipCount,
 } from './schedulePoll';
 import { runtimeStateOf, WORKER_STALE_MS } from './evaluationLoop';
 import { recordEvaluation } from './evaluationRunner';
@@ -469,5 +469,27 @@ export function runSchedulePollTests() {
   test('재배포로 잠깐 끊긴 것과 죽은 것을 가른다', () => {
     assert(WORKER_STALE_MS >= 120_000, '유예가 너무 짧으면 재배포마다 빨강이 된다');
     assert(WORKER_STALE_MS <= 600_000, '유예가 너무 길면 죽은 워커를 못 본다');
+  });
+
+  test('★★ offSkipCount: 꺼짐만 센다 — 다른 건너뜀과 섞지 않는다', () => {
+    // 섞으면 "앞으로도 0" 판정이 거짓으로 나간다. TOO_SOON·WAITING 은
+    // 때가 되면 쏘는 줄이다.
+    const sk = (code: string) => ({ id: 'i', symbol: 'S', code, reason: '', lastEval: null } as any);
+    eq(offSkipCount({ skipped: [sk('OFF'), sk('OFF'), sk('TOO_SOON')] }), 2);
+    eq(offSkipCount({ skipped: [sk('TOO_SOON'), sk('WAITING'), sk('NO_CONNECTION'), sk('NOT_TESTNET')] }), 0,
+      '꺼짐이 아닌 것을 꺼짐으로 셌다');
+    eq(offSkipCount({ skipped: [] }), 0);
+    eq(offSkipCount({ skipped: null as any }), 0, '모양이 아니어도 던지지 않는다');
+    eq(offSkipCount(null as any), 0);
+  });
+
+  test('★★ offSkipCount 가 selectDueSchedules 의 실제 출력과 맞는다', () => {
+    // 손으로 만든 모양이 아니라 **진짜 선택 결과**로 센다.
+    const sel = selectDueSchedules([
+      row({ enabled: false }), row({ enabled: false }), row({ enabled: false }),
+    ], NOW);
+    eq(sel.due.length, 0);
+    eq(sel.skipped.length, 3);
+    eq(offSkipCount(sel), 3, '전부 꺼진 입력인데 꺼짐 수가 3이 아니다');
   });
 }
