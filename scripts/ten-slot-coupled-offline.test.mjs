@@ -194,3 +194,26 @@ test('restart skips multiple occupied restart IDs without changing earlier event
   assert.deepEqual(db.state.journals[0].eventIds.slice(0, 2), before);
   assert.equal(db.state.ledger.slots[0].status, 'UNKNOWN');
 });
+
+test('rollback of ledger version below a durable RESERVED transition fails closed', async () => {
+  const db = new FakeDB(); await claim(db);
+  db.state.ledger.version = 0;
+  assert.equal(validCoupledOfflineSnapshot(db.state), false);
+  const writes = db.writes;
+  assert.equal((await applyCoupledOfflineEvent(db, 'camp', protect)).code, 'COUPLING_CORRUPT');
+  assert.equal(db.writes, writes);
+});
+
+test('combined envelope and ledger rollback cannot erase a second claim', async () => {
+  const db = new FakeDB(); await claim(db);
+  await applyCoupledOfflineEvent(db, 'camp', protect);
+  await applyCoupledOfflineEvent(db, 'camp', event('exit', 'EXIT_INTENT', { exitIntentDurable: true }));
+  await applyCoupledOfflineEvent(db, 'camp', flat);
+  await claimAndIntentCoupledOffline(db, 'camp', clear, 'order-2', 10);
+  assert.equal(validCoupledOfflineSnapshot(db.state), true);
+  db.state.version = 4; db.state.ledger.version = 4;
+  assert.equal(validCoupledOfflineSnapshot(db.state), false);
+  const writes = db.writes;
+  assert.equal((await resumeCoupledOffline(db, 'camp')).code, 'COUPLING_CORRUPT');
+  assert.equal(db.writes, writes);
+});
