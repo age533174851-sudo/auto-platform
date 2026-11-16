@@ -1,5 +1,5 @@
 import { test, eq } from '../../test/harness';
-import { mainLockGranted, MainLeaseKeeper } from './mainLockGate';
+import { mainLockGranted, MainLeaseKeeper, mainLeaseHolder } from './mainLockGate';
 
 export function runMainLockGateTests() {
   console.log('[워커 main 임차 — 획득 증거 없으면 standby]');
@@ -98,6 +98,38 @@ export function runMainLockGateTests() {
     release(true);
     eq(await pending, false);
     eq(await guard.allowed(), false);
+  });
+
+
+  test('같은 machine ID라도 실행 세대가 다르면 main 임차 holder는 다르다', () => {
+    const first = mainLeaseHolder('fly-machine-1', 'process-a');
+    const restarted = mainLeaseHolder('fly-machine-1', 'process-b');
+    eq(first === restarted, false);
+    eq(first === 'fly-machine-1', false);
+  });
+  test('FakeLease: 겹친 재시작은 TTL 전에 기존 main 임차를 승계하지 못한다', () => {
+    const oldHolder = mainLeaseHolder('fly-machine-1', 'process-a');
+    const newHolder = mainLeaseHolder('fly-machine-1', 'process-b');
+    let holder = oldHolder;
+    let expiresAt = 12;
+    const acquire = (candidate: string, now: number) => {
+      if (candidate !== holder && !(expiresAt < now)) return false;
+      holder = candidate;
+      expiresAt = now + 12;
+      return true;
+    };
+    eq(acquire(newHolder, 1), false);
+    eq(acquire(oldHolder, 1), true);
+    eq(acquire(newHolder, 14), true);
+    // A late shutdown of the old process cannot release B's lease:
+    eq(holder === oldHolder, false);
+  });
+  test('main 임차 holder에 빈 세대/worker ID를 허용하지 않는다', () => {
+    for (const [id, nonce] of [['', 'process'], ['fly-machine', ''], [' ', 'process'], ['fly-machine', ' ']]) {
+      let rejected = false;
+      try { mainLeaseHolder(id, nonce); } catch { rejected = true; }
+      eq(rejected, true);
+    }
   });
 
 }

@@ -81,3 +81,13 @@ export class MainLeaseKeeper {
     this.timer = null;
   }
 }
+
+/**
+ * The main lease belongs to one process incarnation, not a stable machine ID.
+ * Keep WORKER_ID stable for job recovery and heartbeat; give only the main
+ * lease a distinct holder so overlapping restarts cannot share authority.
+ */
+export function mainLeaseHolder(workerId: string, processNonce: string): string {
+  if (!workerId.trim() || !processNonce.trim()) throw new Error('Missing main lease holder identity');
+  return `${workerId}::${processNonce}`;
+}
