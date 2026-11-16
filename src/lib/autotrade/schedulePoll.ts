@@ -277,6 +277,21 @@ export function isLiveMode(mode: any): boolean {
  * **순수 함수다.** Worker 루프가 무엇을 고르는지는 값으로 확인할 수 있어야
  * 한다 — 여기가 틀리면 안 돌거나(그날을 잃거나) 너무 자주 돈다(중복 주문).
  */
+/**
+ * 건너뛴 줄 중 **꺼져 있어서** 건너뛴 수.
+ *
+ * 워커가 `noteScheduler({ lastOffCount })`로 적는 값이다. 한 줄이라도
+ * 워커 파일에 두면 아무 시험도 지나가지 않는다 — 판정은 여기 한 곳에 둔다.
+ *
+ * `due`가 0인데 이 수가 `skipped`와 같으면 **앞으로도 아무것도 쏘지 않는다**는
+ * 뜻이고, 그 판정은 `schedulerReport.ts`가 한다.
+ */
+export function offSkipCount(sel: Pick<PollSelection, 'skipped'>): number {
+  const rows = sel?.skipped;
+  if (!Array.isArray(rows)) return 0;
+  return rows.filter((x) => x?.code === 'OFF').length;
+}
+
 export function selectDueSchedules(rows: PollRow[], nowMs: number): PollSelection {
   const due: PollSelection['due'] = [];
   const skipped: PollSelection['skipped'] = [];

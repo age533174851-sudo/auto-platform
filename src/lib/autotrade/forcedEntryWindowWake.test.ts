@@ -34,7 +34,9 @@ import { selectDueSchedules } from './schedulePoll';
 import {
   FORCED_ENTRY_START_KST, FORCED_ENTRY_WINDOW_MIN,
   FORCED_ENTRY_PROFILE_ID, FORCED_ENTRY_PRESET_ID,
+  forcedEntryVerdict,
 } from '../strategies/dailyForcedEntry';
+import { WINDOW_END_KST, LATE_GRACE_MIN } from '../strategies/originalV1';
 
 /** FakeClock — 그 한국시각(2026-10-26)의 UTC epoch. KST=UTC+9, 서머타임 없음 */
 const kst = (hh: number, mm: number, ss = 0) => Date.UTC(2026, 9, 26, hh - 9, mm, ss);
@@ -63,7 +65,9 @@ export function runForcedEntryWindowWakeTests() {
     eq(w!.startMin, FORCED_ENTRY_START_KST.hh * 60 + FORCED_ENTRY_START_KST.mm);
     eq(w!.endMin, w!.startMin + FORCED_ENTRY_WINDOW_MIN);
     // #386의 창은 유예가 없다 — 09:30을 넘으면 AFTER_WINDOW다.
-    eq(w!.graceMin, 0);
+    // **그리고 09:30 자체가 이미 AFTER_WINDOW다** (`minute >= endMin`).
+    // 그래서 마지막으로 깨우는 분은 endMin이 아니라 그 한 분 전이다.
+    eq(w!.closeMin, w!.endMin - 1);
   });
 
   test('my-original-v1의 09:10 창은 그대로다 — 두 창이 섞이지 않는다', () => {
@@ -108,9 +112,19 @@ export function runForcedEntryWindowWakeTests() {
     eq(v.code, 'WAITING');
   });
 
-  test('★ 09:30(창 끝 경계)까지는 기회를 준다', () => {
+  // ── 이 단언은 #450에서 **고쳤다** (약화가 아니다) ──
+  //
+  // 원래 `eq(at(9, 30).code, 'WINDOW')`였다. 그런데 라우트
+  // (`forcedEntryVerdict`)는 `minute >= endMin`이라 **09:30을 거부한다.**
+  // 즉 이 단언이 지키고 있던 것은 "창이 09:30에도 깨운다"가 아니라
+  // **"창이 라우트보다 한 분 넓다"**였다 — 깨워 봐야 AFTER_WINDOW만
+  // 돌려받는 낭비이고, `entryWindowDue.ts` 자신이 하지 말라고 적어 둔 일이다.
+  //
+  // 주문이 나가는 시각은 바뀌지 않는다. 09:30에는 원래도 주문이 안 나갔다.
+  // 바뀐 것은 **그 분에 헛되이 깨우지 않는다**는 것뿐이다.
+  test('★ 창 안에서는 기회를 준다 — 09:29까지 (09:30은 라우트가 거부하는 분이다)', () => {
     eq(at(9, 15).code, 'WINDOW');
-    eq(at(9, 30).code, 'WINDOW');
+    eq(at(9, 29).code, 'WINDOW');
   });
 
   test('★★★ 09:31 — 창이 닫힌 뒤에는 뒤늦게 깨우지 않는다 (유예 없음)', () => {
@@ -176,13 +190,76 @@ export function runForcedEntryWindowWakeTests() {
   // ── 순수 창 판정 ─────────────────────────────────
   const W0900 = entryWindowOf('scalp', EXACT100X);
 
-  test('09:00 창 판정 경계 — 09:00 포함 · 09:30 포함 · 09:31 제외', () => {
+  // 여기도 같은 이유로 09:30 기대를 고쳤다 (위 주석 참고).
+  test('09:00 창 판정 경계 — 09:00 포함 · 09:29 포함 · 09:30부터 제외', () => {
     eq(windowDueVerdict({ nowMs: kst(9, 0), lastRunAtMs: LAST_RUN, window: W0900 }).code, 'WINDOW_OPEN');
-    eq(windowDueVerdict({ nowMs: kst(9, 30), lastRunAtMs: LAST_RUN, window: W0900 }).code, 'WINDOW_OPEN');
+    eq(windowDueVerdict({ nowMs: kst(9, 29), lastRunAtMs: LAST_RUN, window: W0900 }).code, 'WINDOW_OPEN');
+    eq(windowDueVerdict({ nowMs: kst(9, 30), lastRunAtMs: LAST_RUN, window: W0900 }).code, 'OUTSIDE');
     eq(windowDueVerdict({ nowMs: kst(9, 31), lastRunAtMs: LAST_RUN, window: W0900 }).code, 'OUTSIDE');
   });
 
   test('한국 시각을 못 읽으면 "창 밖"이 아니라 CLOCK_UNKNOWN이다', () => {
     eq(windowDueVerdict({ nowMs: NaN, lastRunAtMs: LAST_RUN, window: W0900 }).code, 'CLOCK_UNKNOWN');
+  });
+
+  // ── 깨우는 쪽과 라우트가 **같은 분**에 동의하는가 (#450) ──
+  //
+  // 이 파일 위의 ⑥번("창 값을 여기서 다시 적어 정본과 갈리는 것")은 창의
+  // **값**만 봤다. 그런데 같은 창이라도 **경계를 세는 방식**이 다르면 또
+  // 갈린다. 실제로 갈려 있었다:
+  //
+  //   entryWindowDue.windowDueVerdict  `nowMin > endMin + graceMin` → 09:30 **포함**
+  //   dailyForcedEntry.forcedEntryVerdict `minute >= endMin`        → 09:30 **제외**
+  //
+  // 그래서 09:30 한 분 동안 스케줄러는 창을 근거로 평가를 깨우는데
+  // 라우트는 AFTER_WINDOW로 거부한다. `entryWindowDue.ts`가 직접
+  // "깨우는 쪽이 더 늦게까지 깨우면 평가만 낭비된다"고 적어 둔 그 상태다.
+  //
+  // 값 비교로는 못 잡는다 — **판정끼리 대조해야** 잡힌다.
+
+  const routeAt = (ms: number) => forcedEntryVerdict({
+    nowMs: ms, mode: 'TESTNET',
+    profileId: FORCED_ENTRY_PROFILE_ID, presetId: FORCED_ENTRY_PRESET_ID,
+    ordersTodayInWindow: 0,
+  });
+
+  test('★★★ 깨우는 쪽은 라우트보다 넓지 않다 — 08:50~09:40 전 분 대조', () => {
+    const wider: string[] = [];
+    for (let m = 8 * 60 + 50; m <= 9 * 60 + 40; m++) {
+      const ms = kst(Math.floor(m / 60), m % 60);
+      const woke = windowDueVerdict({ nowMs: ms, lastRunAtMs: LAST_RUN, window: W0900 }).due;
+      const code = routeAt(ms).code;
+      const routeRefusesForTime = code === 'BEFORE_WINDOW' || code === 'AFTER_WINDOW';
+      if (woke && routeRefusesForTime) {
+        wider.push(`${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}=${code}`);
+      }
+    }
+    eq(wider.length, 0, `깨우는 쪽이 라우트보다 넓다: ${wider.join(' · ')}`);
+  });
+
+  test('★★★ 09:29:59는 깨우고, 09:30:00·09:30:59는 창을 근거로 깨우지 않는다', () => {
+    eq(windowDueVerdict({ nowMs: kst(9, 29, 59), lastRunAtMs: LAST_RUN, window: W0900 }).code, 'WINDOW_OPEN');
+    eq(windowDueVerdict({ nowMs: kst(9, 30, 0), lastRunAtMs: LAST_RUN, window: W0900 }).code, 'OUTSIDE');
+    eq(windowDueVerdict({ nowMs: kst(9, 30, 59), lastRunAtMs: LAST_RUN, window: W0900 }).code, 'OUTSIDE');
+  });
+
+  test('★★ 09:30에 평가하더라도 그것은 "창이 깨운 것"이 아니다 — 일반 주기와 구분한다', () => {
+    // 간격이 찬 예약은 09:30에도 평가된다. 그건 정상이고 막지 않는다.
+    // 다만 그 근거는 **창이 아니라 간격**이어야 한다 — 기록에 그렇게 남는다.
+    const due = at(9, 30, 0, { last_run_at: new Date(kst(8, 25)).toISOString() });
+    eq(due.code, 'DUE');
+    // 같은 시각, 간격이 안 찬 예약은 아무도 깨우지 않는다.
+    eq(at(9, 30, 0).code, 'WAITING');
+  });
+
+  test('★★ my-original-v1의 유예는 그대로다 — 이 수정이 다른 창을 좁히지 않는다', () => {
+    const w = entryWindowOf('my-original-v1');
+    const endMin = WINDOW_END_KST.hh * 60 + WINDOW_END_KST.mm;
+    const last = endMin + LATE_GRACE_MIN;
+    const atMin = (m: number) => windowDueVerdict({
+      nowMs: kst(Math.floor(m / 60), m % 60), lastRunAtMs: kst(0, 5), window: w,
+    }).code;
+    eq(atMin(last), 'WINDOW_OPEN', `유예 마지막 분(${last})이 닫혔다`);
+    eq(atMin(last + 1), 'OUTSIDE');
   });
 }
