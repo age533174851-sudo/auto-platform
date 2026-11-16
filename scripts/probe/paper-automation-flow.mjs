@@ -20,7 +20,7 @@ const root=resolve(import.meta.dirname,'../..');
 const tmp=mkdtempSync(join(tmpdir(),'paper-auto-flow-'));
 const out=process.env.PROBE_OUT || '/tmp/paper-automation-flow';mkdirSync(out,{recursive:true});
 const names=readdirSync(join(root,'supabase/migrations'));
-const ids=[10,25,33,71,72,74,75,81,82,83,84,85,86,87,88,99,101,102,103];
+const ids=[10,25,33,71,72,74,75,81,82,83,84,85,86,87,88,99,101,102,103,104];
 const db=createScratchDb(target,'paper_flow',ids.map(id=>join(root,'supabase/migrations',names.find(n=>n.startsWith(String(id).padStart(3,'0')+'_')))));
 const q=sql=>psql(target,db,sql);
 const session=probeSession(),uid=session.user.id;
@@ -52,7 +52,13 @@ globalThis.fetch=async(input,init)=>{const u=new URL(typeof input==='string'?inp
 if(u.hostname.endsWith('binance.com')){if((init?.method||'GET')!=='GET')throw Error('VENUE WRITE FORBIDDEN');
 const q=JSON.parse(fs.readFileSync(process.env.PAPER_FLOW_QUOTES,'utf8'));
 if(u.pathname.endsWith('/premiumIndex'))return q.mark===null?Response.json({error:'offline price unavailable'},{status:503}):Response.json({symbol:'BTCUSDT',markPrice:String(q.mark),time:Date.now()});
-if(u.pathname.endsWith('/klines'))return Response.json(Array.from({length:120},(_,i)=>[i*86400000,'1','1','1',String(q.trend==='up'?100+i:q.trend==='down'?220-i:100),'10']));
+if(u.pathname.endsWith('/klines'))return Response.json(Array.from({length:120},(_,i)=>{
+  // **말이 되는 봉을 준다.** 전에는 고가·저가를 '1'로 두고 종가만 100~220으로
+  // 줬다 — 고가 1에 종가 150인 봉은 거래소가 줄 수 없는 모양이다. 종가만
+  // 읽던 시절에는 아무도 몰랐고, 봉 전체를 읽기 시작하자 파서가 옳게 버렸다.
+  const c=q.trend==='up'?100+i:q.trend==='down'?220-i:100;
+  return [i*86400000,String(c),String(c+1),String(c-1),String(c),'10'];
+}));
 throw Error('Unexpected venue read '+u.pathname);}
 if(!['127.0.0.1','localhost','[::1]'].includes(u.hostname))throw Error('External network forbidden '+u.hostname);
 return original(input,init);};`);

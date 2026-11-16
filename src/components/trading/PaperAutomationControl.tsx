@@ -5,12 +5,26 @@ import {
   refreshStart, refreshOk, refreshFailed, refreshCleared, type RefreshState,
 } from '@/lib/ui/refreshState';
 import { assess } from '@/lib/engine/dataQuality';
+import type { PaperRunnerStatus } from '@/lib/engine/paperRunnerStatus';
+import { ENTRY_SIGNAL_IDS, ENTRY_SIGNAL_LABEL, DEFAULT_ENTRY_SIGNAL, type EntrySignalId } from '@/lib/engine/entrySignals';
+import { derivePaperBotId, DEFAULT_PAPER_BOT } from '@/lib/engine/paperAutomation';
+import { BAR_INTERVALS, BAR_INTERVAL_LABEL, DEFAULT_BAR_INTERVAL, type BarInterval } from '@/lib/risk/bars';
 
 interface Status {
   settings: { enabled: boolean; symbol: string; interval_seconds: number; next_run_at: string; config: Record<string,number> } | null;
   account: { balance: number; total_pnl: number; total_fees: number; started_at: string | null } | null;
   runs: { id: string; state: string; result: { code: string; message: string } | null; created_at: string; finished_at: string | null }[];
   positions: { id: string; symbol: string; side: string; status: string; fill_price: number; exit_price: number | null; stop_loss: number; take_profit: number | null; liquidation_price: number | null; realized_pnl: number | null; exit_reason: string | null }[];
+  /**
+   * **누가 이 회차를 깨우고 있는가.** 서버가 판정해서 보낸다
+   * (`src/lib/engine/paperRunnerStatus.ts`). 화면이 다시 판정하지 않는다 —
+   * 두 벌이 되면 언젠가 서로 다른 답을 낸다.
+   */
+  runner?: PaperRunnerStatus | null;
+  /** 봇 전부. 102번(다중 봇) 이후 계정 하나에 봇이 여럿일 수 있다. */
+  bots?: { bot_id: string; enabled: boolean; symbol: string; interval_seconds: number;
+    next_run_at: string | null; signal: string; signalLabel: string; signalWarning?: string;
+    timeframe?: string; timeframeLabel?: string; timeframeWarning?: string }[];
 }
 const money = (v: unknown) => v == null || !Number.isFinite(Number(v)) ? '확인 불가' : Number(v).toLocaleString('en-US',{maximumFractionDigits:4});
 const time = (v: string | null | undefined) => v ? new Date(v).toLocaleString('ko-KR') : '아직 없음';
@@ -34,6 +48,12 @@ export function PaperAutomationControl() {
   const [busy,setBusy] = useState(false);
   const [symbol,setSymbol] = useState('BTCUSDT');
   const [interval,setIntervalSeconds] = useState(60);
+  /** 새 봇 입력. 위의 `symbol`·`interval`과 **따로** 둔다 — 같이 쓰면
+   *  봇을 추가하는 순간 돌던 기본 봇의 설정이 바뀐다. */
+  const [newSymbol,setNewSymbol] = useState('ETHUSDT');
+  const [newSignal,setNewSignal] = useState<EntrySignalId>(DEFAULT_ENTRY_SIGNAL);
+  const [newTimeframe,setNewTimeframe] = useState<BarInterval>(DEFAULT_BAR_INTERVAL);
+  const [newInterval,setNewInterval] = useState(60);
   const load = useCallback(async (signal?: AbortSignal) => {
     // 로그아웃은 "정말 없음"이 맞다 — 여기서만 비운다.
     if (!auth) { setRefresh(refreshCleared<Status>()); return; }
@@ -57,6 +77,28 @@ export function PaperAutomationControl() {
     const timer = window.setInterval(()=>void load(controller.signal),15000);
     return ()=>{ controller.abort(); window.clearInterval(timer); };
   },[load]);
+  // 새 봇을 만들 때 고르는 값. 기본 봇의 종목/주기와 **따로** 둔다 —
+  // 같은 입력을 공유하면 봇을 추가하는 순간 돌던 봇의 설정이 바뀐다.
+  async function controlBot(
+    action: 'start' | 'stop',
+    bot: { botId: string; symbol: string; interval: number; signal?: EntrySignalId;
+      timeframe?: BarInterval },
+  ) {
+    if (!auth || busy) return;
+    setBusy(true); setActionError('');
+    try {
+      const res = await fetch('/api/paper/automation',{method:'POST',
+        headers:{Authorization:auth,'Content-Type':'application/json'},
+        body:JSON.stringify({ action, botId:bot.botId, symbol:bot.symbol, interval:bot.interval,
+          ...(bot.signal ? { signal:bot.signal } : {}),
+          ...(bot.timeframe ? { timeframe:bot.timeframe } : {}) })});
+      const data = await res.json().catch(()=>null);
+      if (!res.ok || !data?.ok) throw new Error(data?.message || data?.error || `요청 실패 (${res.status})`);
+      await load();
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : '봇 요청 실패');
+    } finally { setBusy(false); }
+  }
   async function control(action: 'start' | 'stop') {
     if (!auth || busy) return;
     setBusy(true); setActionError('');
@@ -72,6 +114,13 @@ export function PaperAutomationControl() {
   const last = status?.runs[0];
   const lastDone = status?.runs.find(r=>r.state==='DONE');
   const enabled = status?.settings?.enabled === true;
+  const bots = status?.bots ?? [];
+  // **`enabled === true`만 켜진 것이다.** 문자열 'false'는 truthy다.
+  const enabledBots = bots.filter(b => b.enabled === true).length;
+  // 새 봇 이름은 종목·전략에서 만든다. 같은 조합이면 같은 이름이라
+  // 같은 봇의 기록이 쪼개지지 않는다. 못 만들면 null이다.
+  const newBotId = derivePaperBotId(newSymbol, newSignal, newTimeframe);
+  const newBotExists = newBotId != null && bots.some(b => b.bot_id === newBotId);
   // 주기 수신(15초)으로 본다. 모의 장부라도 **조회 자체는 서버에서 당겨오는
   // 값**이므로 POLLED가 맞다. 성공한 적이 없으면 수신 없음이다.
   const freshness = assess({ kind: refresh.okAt == null ? 'UNAVAILABLE' : 'POLLED',
@@ -83,6 +132,17 @@ export function PaperAutomationControl() {
     {error && <p role="alert">{error}</p>}
     {actionError && <p role="alert">{actionError}</p>}
     <div data-testid="paper-automation-status">{!status ? '상태 확인 전' : enabled ? '반복 실행 요청 켜짐' : '반복 실행 정지'}</div>
+    {/* ── 켜진 것과 **도는 것**은 다르다 ──
+        위 줄은 "요청"이다. 봇을 켜 두어도 깨우는 Fly 워커가 꺼져 있으면
+        한 건도 돌지 않는다. 판정은 서버(`paperRunnerStatus`)가 하고
+        여기서는 그 문장을 그대로 적는다. */}
+    {status && (status.runner
+      ? <div data-testid="paper-automation-runner" role={status.runner.running ? undefined : 'status'}>
+          {status.runner.running ? '● ' : '▲ '}{status.runner.headline} — {status.runner.reason}
+        </div>
+      : <div data-testid="paper-automation-runner" role="status">
+          ▲ 실행기 상태 모름 — 서버가 가동 여부를 알려주지 않았습니다
+        </div>)}
     {/* 낡은 값을 **현재값처럼** 보여 주지 않는다. 판정과 나이 표기는
         `dataQuality.assess`가 한다 — 여기서 다시 만들면 두 벌이 된다. */}
     {status && freshness.freshness !== 'FRESH' && <p role="status" data-testid="paper-automation-freshness">
@@ -104,7 +164,65 @@ export function PaperAutomationControl() {
       배율 {status.settings.config.leverage}배 · 거래 위험 {status.settings.config.riskPctPerTrade}% · 최대 동시 1개 · 손절 {status.settings.config.stopPct}% · 익절 {status.settings.config.takeProfitPct}% · 최대 보유 {status.settings.config.maxHoldHours}시간
       <br/>다음 평가 예정: {enabled ? time(status.settings.next_run_at) : '정지'} · 최근 완료: {time(lastDone?.finished_at)}
     </div>}
-    {enabled && (!lastDone || Date.now()-new Date(lastDone.finished_at!).getTime()>Math.max(180000,interval*2000)) && <p role="status">최근 서버 평가 완료를 아직 확인하지 못했습니다.</p>}
+    {/* 여기 있던 "최근 서버 평가 완료를 아직 확인하지 못했습니다"는 지웠다.
+        같은 판단(회차가 밀렸는가)을 화면이 **화면의 간격 입력값**으로 다시
+        했었다 — 실제 봇 주기가 아니라서 서버와 답이 갈릴 수 있었다. 지금은
+        위 한 줄이 서버 판정으로 그 경우(OVERDUE·NEVER_RAN)를 덮는다. */}
+    {/* ── 봇 목록 — 켜진 봇 하나하나가 자기 종목·전략으로 돈다 ── */}
+    {status && <div data-testid="paper-bot-list" style={{display:'grid',gap:6,fontSize:12,
+      border:'1px solid var(--t-border)',borderRadius:8,padding:8}}>
+      <strong style={{fontSize:13}}>
+        봇 {bots.length}개 · 켜짐 {enabledBots}개 · 동시 보유 최대 {Math.max(1,enabledBots)}개
+      </strong>
+      {/* 봇을 늘리면 노출이 그만큼 는다. 숨기지 않는다. */}
+      {enabledBots > 1 && <p role="status" data-testid="paper-bot-exposure" style={{margin:0}}>
+        켜 둔 봇이 {enabledBots}개라 같은 모의 계좌에서 동시에 {enabledBots}개까지 듭니다 —
+        회차당 위험도 그만큼 커집니다.
+      </p>}
+      {bots.length === 0 && <span>아직 봇이 없습니다.</span>}
+      {bots.map(b => <div key={b.bot_id} data-testid={`paper-bot-${b.bot_id}`}
+        style={{display:'flex',flexWrap:'wrap',gap:6,alignItems:'center'}}>
+        <span>{b.bot_id}{b.bot_id === DEFAULT_PAPER_BOT ? ' (기본)' : ''}</span>
+        <span>· {b.symbol} · {b.timeframeLabel ?? '주기 미확인'} · {b.signalLabel}</span>
+        <span>· {b.enabled ? `다음 평가 ${time(b.next_run_at)}` : '정지'}</span>
+        {b.signalWarning && <span role="alert">⚠ {b.signalWarning}</span>}
+        {b.timeframeWarning && <span role="alert">⚠ {b.timeframeWarning}</span>}
+        <button type="button" disabled={!auth || busy}
+          onClick={()=>void controlBot(b.enabled ? 'stop' : 'start',
+            { botId:b.bot_id, symbol:b.symbol, interval:b.interval_seconds })}>
+          {b.enabled ? '정지' : '시작'}
+        </button>
+      </div>)}
+      {/* 새 봇 — 종목과 전략을 고르면 이름이 정해진다 */}
+      <div data-testid="paper-bot-add" style={{display:'flex',flexWrap:'wrap',gap:6,alignItems:'center'}}>
+        <select aria-label="새 봇 종목" value={newSymbol} onChange={e=>setNewSymbol(e.target.value)} disabled={busy}>
+          <option value="BTCUSDT">BTC / USDT</option>
+          <option value="ETHUSDT">ETH / USDT</option>
+          <option value="SOLUSDT">SOL / USDT</option>
+        </select>
+        <select aria-label="새 봇 전략" value={newSignal} disabled={busy}
+          onChange={e=>setNewSignal(e.target.value as EntrySignalId)}>
+          {ENTRY_SIGNAL_IDS.map(id=><option key={id} value={id}>{ENTRY_SIGNAL_LABEL[id]}</option>)}
+        </select>
+        <select aria-label="새 봇 봉 주기" value={newTimeframe} disabled={busy}
+          onChange={e=>setNewTimeframe(e.target.value as BarInterval)}>
+          {BAR_INTERVALS.map(tf=><option key={tf} value={tf}>{BAR_INTERVAL_LABEL[tf]}</option>)}
+        </select>
+        <select aria-label="새 봇 간격" value={newInterval} disabled={busy}
+          onChange={e=>setNewInterval(Number(e.target.value))}>
+          <option value={60}>1분</option><option value={300}>5분</option><option value={900}>15분</option>
+        </select>
+        <button type="button" data-testid="paper-bot-add-cta"
+          disabled={!auth || busy || !status.account?.started_at || newBotId == null || newBotExists}
+          onClick={()=>void controlBot('start',
+            { botId:newBotId!, symbol:newSymbol, interval:newInterval, signal:newSignal,
+              timeframe:newTimeframe })}>
+          봇 추가 시작
+        </button>
+        {newBotId == null && <span role="alert">이 조합으로는 봇 이름을 만들 수 없습니다</span>}
+        {newBotExists && <span>이미 있는 봇입니다 — 위 목록에서 시작하세요</span>}
+      </div>
+    </div>}
     {status?.account && <div>잔고 {money(status.account.balance)} USDT · 실현 손익 {money(status.account.total_pnl)} USDT · 수수료 {money(status.account.total_fees)} USDT</div>}
     {last && <p style={{margin:0}}>최근 평가: {last.result?.message || (last.state==='CLAIMED' ? '서버 평가 중 또는 복구 대기' : '실행 취소됨')}</p>}
     <ul aria-label="서버 반복 평가 이력">{status?.runs.slice(0,5).map(r=><li key={r.id}>{time(r.created_at)} · {r.result?.message || (r.state==='CLAIMED' ? '평가 중 또는 복구 대기' : '실행 취소됨')}</li>)}</ul>

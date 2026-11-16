@@ -5,6 +5,7 @@ import { buildPaperPlan } from './paperPlan';
 import { dispatchPaperEntry } from './paperDispatch';
 import { closePaperPosition } from './paperStore';
 import { availableView } from './paperAvailable';
+import { parseBarInterval, DEFAULT_BAR_INTERVAL, BAR_INTERVALS, type BarInterval } from '../risk/bars';
 import { readPaperMarkPrice, paperPriceFailed } from './paperPriceSource';
 import { collectPaperDailyLoss } from '../risk/dailyLossCheck';
 import { collectRegime } from '../risk/regimeCheck';
@@ -20,6 +21,30 @@ export interface PaperAutomationResult { code: string; message: string; position
  * 여기서 먼저 걸러야 사용자가 409 대신 400을 받는다.
  */
 export const PAPER_BOT_ID = /^[a-z0-9][a-z0-9-]{1,62}$/;
+
+/**
+ * 새 봇 이름을 **종목과 전략에서 만든다.**
+ *
+ * 같은 조합으로 다시 켜면 **같은 이름**이 나와야 한다. 켤 때마다 새 이름을
+ * 지으면 같은 전략의 기록이 여러 `strategy_id`로 쪼개지고, 봇을 나눈 이유인
+ * 비교가 그때 사라진다.
+ *
+ * 모양이 DB 제약(`PAPER_BOT_ID`)에 안 맞으면 **null이다.** 억지로 자르거나
+ * 이름을 지어내지 않는다 — 못 만든 것을 만든 것처럼 넘기면 409가 난다.
+ */
+export function derivePaperBotId(
+  symbol: unknown, signal: EntrySignalId, timeframe: BarInterval = DEFAULT_BAR_INTERVAL,
+): string | null {
+  const sym = String(symbol ?? '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (!sym) return null;
+  // **주기도 이름에 들어간다.** 1분봉 돌파와 일봉 돌파는 다른 기계다 —
+  // 한 이름을 쓰면 두 기록이 한 `strategy_id` 아래 섞이고, 비교가 그때
+  // 망가진다.
+  const tf = String(timeframe ?? '').trim().toLowerCase();
+  if (!parseBarInterval(tf)) return null;
+  const id = `${sym}-${tf}-${signal}`;
+  return PAPER_BOT_ID.test(id) ? id : null;
+}
 /** 안 적으면 이 봇. 099 시절부터 돌던 그 봇이다 */
 export const DEFAULT_PAPER_BOT = 'paper-auto-v1';
 
@@ -37,7 +62,7 @@ export const DEFAULT_PAPER_BOT = 'paper-auto-v1';
  * `String([])`가 빈 문자열이라서, 느슨하게 보면 `signal: []`이 "안 적음"으로
  * 통과한다. `[]`는 미지정이 아니라 잘못된 값이고, 잘못된 값은 거절해야 한다.
  */
-function signalOmitted(raw: unknown): boolean {
+function fieldOmitted(raw: unknown): boolean {
   if (raw == null) return true;
   return typeof raw === 'string' && raw.trim() === '';
 }
@@ -47,7 +72,7 @@ export function readBotSignal(config: unknown): { signal: EntrySignalId; bad: st
     ? (config as Record<string, unknown>).signal : undefined;
   // 안 적혀 있으면 지금까지 돌던 전략이다. 그래야 `paper-auto-v1`의 기록이
   // 이어진다.
-  if (signalOmitted(raw)) return { signal: DEFAULT_ENTRY_SIGNAL, bad: null };
+  if (fieldOmitted(raw)) return { signal: DEFAULT_ENTRY_SIGNAL, bad: null };
   const got = parseEntrySignal(raw);
   // **적혀 있는데 모르는 값이면 기본값으로 돌리지 않는다.** 돌리면 오타 하나로
   // 추세 추종이 돌면서 그 봇의 성적표에 적히고, 그 전략을 평가할 방법이
@@ -56,6 +81,24 @@ export function readBotSignal(config: unknown): { signal: EntrySignalId; bad: st
     ? { signal: got, bad: null }
     : { signal: DEFAULT_ENTRY_SIGNAL,
         bad: `알 수 없는 진입 전략입니다: ${String(raw).slice(0, 40)} (가능: ${ENTRY_SIGNAL_IDS.join(' · ')})` };
+}
+
+/**
+ * 이 봇이 보는 **봉 주기**. 전략과 같은 규칙이다.
+ *
+ * 안 적혀 있으면 지금까지 돌던 일봉이다. **적혀 있는데 모르는 값이면
+ * 기본값으로 돌리지 않는다** — 돌리면 사용자는 1분봉 봇을 켰다고 생각하는데
+ * 일봉이 돌면서 그 봇의 성적표에 적힌다.
+ */
+export function readBotTimeframe(config: unknown): { timeframe: BarInterval; bad: string | null } {
+  const raw = config && typeof config === 'object' && !Array.isArray(config)
+    ? (config as Record<string, unknown>).timeframe : undefined;
+  if (fieldOmitted(raw)) return { timeframe: DEFAULT_BAR_INTERVAL, bad: null };
+  const got = parseBarInterval(raw);
+  return got
+    ? { timeframe: got, bad: null }
+    : { timeframe: DEFAULT_BAR_INTERVAL,
+        bad: `알 수 없는 봉 주기입니다: ${String(raw).slice(0, 40)} (가능: ${BAR_INTERVALS.join(' · ')})` };
 }
 
 export function parsePaperAutomationControl(body: unknown):
@@ -72,7 +115,9 @@ export function parsePaperAutomationControl(body: unknown):
      * 그래서 "안 적었다"를 그대로 올려 보내고, 저장하는 쪽이 **이미 저장된
      * 전략을 지킨다.**
      */
-    signal: EntrySignalId | null } | null {
+    signal: EntrySignalId | null;
+    /** 봉 주기. **`null`은 "안 적었다"** — 저장된 값을 지키게 한다 */
+    timeframe: BarInterval | null } | null {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
   const b = body as Record<string, unknown>;
   // **안 적으면 옛 봇이다.** 이 줄이 없으면 예전 화면이 보내던 요청이
@@ -80,15 +125,22 @@ export function parsePaperAutomationControl(body: unknown):
   const botId = b.botId == null || b.botId === '' ? DEFAULT_PAPER_BOT : String(b.botId);
   if (!PAPER_BOT_ID.test(botId)) return null;
   // 끄는 데는 전략이 필요하지 않다. null은 "안 적었다"다.
-  if (b.action === 'stop') return { enabled: false, symbol: 'BTCUSDT', interval: 60, botId, signal: null };
-  if (b.action !== 'start' || !['BTCUSDT','ETHUSDT'].includes(String(b.symbol))
+  if (b.action === 'stop') return { enabled: false, symbol: 'BTCUSDT', interval: 60, botId, signal: null, timeframe: null };
+  // **화면이 고를 수 있는 종목과 같아야 한다.** #658에서 화면 드롭다운에
+  // SOLUSDT를 넣었는데 이 목록에 없어서 400으로 거절됐다 — 고를 수 있는데
+  // 눌리지 않는 자리였다.
+  if (b.action !== 'start' || !['BTCUSDT','ETHUSDT','SOLUSDT'].includes(String(b.symbol))
       || ![60,300,900].includes(b.interval as number)) return null;
   // 모르는 전략 이름은 **400으로 거절한다.** 조용히 기본값으로 켜 주면
   // 사용자는 역추세 봇을 켰다고 생각하는데 추세 추종이 돈다.
-  const omitted = signalOmitted(b.signal);
+  const omitted = fieldOmitted(b.signal);
   const signal = omitted ? null : parseEntrySignal(b.signal);
   if (!omitted && !signal) return null;
-  return { enabled: true, symbol: b.symbol as string, interval: b.interval as number, botId, signal };
+  // 주기도 같다 — 모르는 값은 조용히 일봉으로 바꾸지 않고 400으로 거절한다.
+  const tfOmitted = fieldOmitted(b.timeframe);
+  const timeframe = tfOmitted ? null : parseBarInterval(b.timeframe);
+  if (!tfOmitted && !timeframe) return null;
+  return { enabled: true, symbol: b.symbol as string, interval: b.interval as number, botId, signal, timeframe };
 }
 
 const n = (v: unknown): number | null => v == null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v);
@@ -115,6 +167,9 @@ export async function evaluatePaperAutomation(sb: any, run: any,
   // 적혀 있는데 모르는 전략이면 **진입하지 않는다.** 이 회차를 기본 전략으로
   // 돌려 버리면 그 체결이 이 봇의 기록이 된다.
   if (bot.bad) return { code: 'SIGNAL_UNKNOWN', message: bot.bad };
+  // 주기도 모르면 멈춘다 — 모르는 주기로 "일단 일봉" 돌리지 않는다.
+  const tf = readBotTimeframe(run.config);
+  if (tf.bad) return { code: 'TIMEFRAME_UNKNOWN', message: tf.bad };
   const rows = async () => {
     const r = await sb.from('paper_positions').select('*').eq('user_id',run.user_id)
       .eq('paper_account_id',run.paper_account_id).eq('status','open');
@@ -161,9 +216,20 @@ export async function evaluatePaperAutomation(sb: any, run: any,
     // 이것이 없으면 역추세·돌파는 방향을 내지 않는다 — 없는 값을 0으로 바꿔
     // 계산하는 대신 쉰다.
     view:verdict.regime?.dataOk ? (verdict.regime?.view ?? null) : null,
+    // 봉 전체도 그대로 넘긴다. 오더블록·FVG·유동성 사냥·거래량 확인 돌파는
+    // 고가·저가·거래량이 있어야 표현된다 — 없으면 그 전략들은 쉰다.
+    bars:verdict.regime?.dataOk ? (regime.bars ?? null) : null,
     signal:bot.signal,
     markPrice:quotes.get(run.symbol) ?? null,
-    availableUsd:available.available,openCount:positions.length,cfg });
+    // **이 봇이 들고 있는 것만 센다.** 계좌 전체 한도는 `paper_auto_open`
+    // (104번)이 "켜 둔 봇 수"로 지킨다. 여기서 계좌 전체를 세면 BTC 봇이
+    // 들고 있는 동안 ETH 봇이 영원히 못 들어간다 — 봇을 여러 개 만든 뜻이
+    // 사라진다. 두 관문은 **다른 것**을 막는다:
+    //   여기   전략 하나가 동시에 둘을 들지 않는다 (성적표 비교 가능성)
+    //   104    계좌 전체 자리 수 (노출 상한)
+    availableUsd:available.available,
+    openCount:positions.filter(p => p.strategy_id === run.bot_id && p.market === 'USDM').length,
+    cfg });
   if (entry.kind !== 'OPEN') return { code: 'WAIT', message: entry.reason };
   const plan = buildPaperPlan({ symbol:run.symbol,side:entry.side!,market:'USDM',
     quantity:entry.quantity!,leverage:cfg.leverage,markPrice:quotes.get(run.symbol)!,

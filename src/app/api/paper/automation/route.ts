@@ -1,8 +1,10 @@
 import { NextRequest,NextResponse } from 'next/server';
 import { getSupabaseAdmin,resolveUserId } from '@/lib/supabase/admin';
-import { parsePaperAutomationControl,readBotSignal,DEFAULT_PAPER_BOT } from '@/lib/engine/paperAutomation';
+import { parsePaperAutomationControl,readBotSignal,readBotTimeframe,DEFAULT_PAPER_BOT } from '@/lib/engine/paperAutomation';
+import { barIntervalLabel,DEFAULT_BAR_INTERVAL } from '@/lib/risk/bars';
 import { ENTRY_SIGNAL_LABEL,DEFAULT_ENTRY_SIGNAL } from '@/lib/engine/entrySignals';
 import { readRunnerConfig } from '@/lib/engine/paperRunner';
+import { paperRunnerStatus } from '@/lib/engine/paperRunnerStatus';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -48,17 +50,50 @@ export async function GET(req: NextRequest) {
     .in('strategy_id',bots.data.map((b:any)=>String(b.bot_id)).concat(DEFAULT_PAPER_BOT))
     .order('opened_at',{ascending:false}).limit(10) : { data:[],error:null };
   if (positions.error) return json({ok:false,error:'positions_unreadable',message:'모의 체결 이력을 읽지 못했습니다'},503);
+  // ── 누가 이 회차를 깨우는가 ──
+  //
+  // 모의 자동매매를 깨우는 것은 **Fly 워커 하나뿐**이다
+  // (`worker/src/index.ts` → `/api/paper/exit-monitor` → `runDuePaperAutomation`).
+  // `vercel.json`의 cron에도, GitHub Actions cron에도 이 경로를 부르는 것이
+  // 없다. 워커가 꺼져 있으면 봇을 켜 두어도 **한 건도 돌지 않는데**, 화면은
+  // "반복 실행 중"까지만 말했다.
+  //
+  // **이 조회가 실패해도 503으로 만들지 않는다.** 나머지 화면은 그대로
+  // 쓸모 있고, 못 읽은 사실은 판정기가 `RUNNER_UNKNOWN`으로 적는다.
+  let beat: any = null, heartbeatReadFailed = false;
+  try {
+    const hb = await sb.from('worker_heartbeat')
+      .select('worker_id,last_seen,status').order('last_seen',{ascending:false}).limit(1).maybeSingle();
+    if (hb.error) heartbeatReadFailed = true; else beat = hb.data ?? null;
+  } catch { heartbeatReadFailed = true; }
+  // **`enabled === true`만 켜진 것이다.** 문자열 'false'는 truthy다.
+  const enabledBotRows = bots.data.filter((b:any) => b.enabled === true);
+  const intervals = enabledBotRows.map((b:any) => Number(b.interval_seconds))
+    .filter((n:number) => Number.isFinite(n) && n > 0);
+  const runner = paperRunnerStatus({
+    nowMs: Date.now(),
+    enabledBots: enabledBotRows.length,
+    workerLastSeen: beat?.last_seen ?? null,
+    heartbeatReadFailed,
+    lastRunAt: runs.data[0]?.created_at ?? null,
+    shortestIntervalSec: intervals.length ? Math.min(...intervals) : null,
+  });
   const { id: _accountId,...accountView } = account.data ?? {};
   // 전략은 **판정하는 쪽과 같은 함수로** 읽는다. 화면이 따로 `config.signal`을
   // 해석하면 러너와 다른 답을 낼 수 있고, 그러면 "화면에는 돌파인데 추세
   // 추종이 도는" 상태가 된다.
   const botView = bots.data.map((b:any) => {
     const { signal,bad } = readBotSignal(b.config);
+    // 주기도 **판정하는 쪽과 같은 함수로** 읽는다. 화면이 따로 해석하면
+    // "화면에는 1분봉인데 일봉이 도는" 상태가 된다.
+    const tf = readBotTimeframe(b.config);
     const { config: _cfg,...rest } = b;
     return { ...rest,signal,signalLabel:ENTRY_SIGNAL_LABEL[signal],
-      ...(bad ? { signalWarning:bad } : {}) };
+      timeframe:tf.timeframe,timeframeLabel:barIntervalLabel(tf.timeframe),
+      ...(bad ? { signalWarning:bad } : {}),
+      ...(tf.bad ? { timeframeWarning:tf.bad } : {}) };
   });
-  return json({ok:true,settings:settings.data,bots:botView,runs:runs.data,account:account.data ? accountView : null,positions:positions.data});
+  return json({ok:true,settings:settings.data,bots:botView,runs:runs.data,account:account.data ? accountView : null,positions:positions.data,runner});
 }
 export async function POST(req: NextRequest) {
   const { uid,sb } = await context(req);
@@ -79,9 +114,20 @@ export async function POST(req: NextRequest) {
       message:'이 봇의 기존 전략을 확인하지 못해 설정을 바꾸지 않았습니다. 잠시 뒤 다시 시도하세요.'},503);
     signal = prev.data ? readBotSignal(prev.data.config).signal : DEFAULT_ENTRY_SIGNAL;
   }
+  // 주기도 같다. `config`를 통째로 교체하는 `ON CONFLICT` 때문에, 주기를
+  // 안 보내는 요청이 봇을 조용히 일봉으로 되돌리면 그 봇의 1분봉 기록과
+  // 일봉 기록이 한 `strategy_id`에 섞인다.
+  let timeframe = input.timeframe;
+  if (timeframe == null) {
+    const prev = await sb.from('paper_automation_settings').select('config')
+      .eq('user_id',uid).eq('bot_id',input.botId).maybeSingle();
+    if (prev.error) return json({ok:false,error:'control_failed',
+      message:'이 봇의 기존 봉 주기를 확인하지 못해 설정을 바꾸지 않았습니다. 잠시 뒤 다시 시도하세요.'},503);
+    timeframe = prev.data ? readBotTimeframe(prev.data.config).timeframe : DEFAULT_BAR_INTERVAL;
+  }
   const result = await sb.rpc('paper_auto_control',{ p_user_id:uid,p_bot_id:input.botId,p_enabled:input.enabled,
     p_symbol:input.symbol,p_interval:input.interval,
-    p_config:{...readRunnerConfig(k=>process.env[k]),maxOpenPositions:1,signal} });
+    p_config:{...readRunnerConfig(k=>process.env[k]),maxOpenPositions:1,signal,timeframe} });
   if (result.error) return json({ok:false,error:'control_failed',message:'설정을 저장하지 못했습니다. 기본 모의 계좌를 먼저 시작하고 다시 시도하세요.'},409);
   return json({ok:true,settings:result.data});
 }

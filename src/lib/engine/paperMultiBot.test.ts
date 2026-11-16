@@ -14,7 +14,10 @@
 import { test, assert, eq } from '../../test/harness';
 import {
   parsePaperAutomationControl, readBotSignal, PAPER_BOT_ID, DEFAULT_PAPER_BOT,
+  derivePaperBotId, readBotTimeframe,
 } from './paperAutomation';
+import { BAR_INTERVALS, BAR_INTERVAL_LABEL, BAR_INTERVAL_MS, DEFAULT_BAR_INTERVAL,
+  parseBarInterval } from '../risk/bars';
 import { ENTRY_SIGNAL_IDS, DEFAULT_ENTRY_SIGNAL } from './entrySignals';
 
 const start = (o: any = {}) => parsePaperAutomationControl({ action:'start', symbol:'BTCUSDT', interval:60, ...o });
@@ -125,5 +128,129 @@ export function runPaperMultiBotTests() {
     // 전략을 정하면 이름을 바꾸는 순간 전략이 바뀐다.
     eq(start({ botId: 'breakout-1' }).signal, null);
     eq(start({ botId: 'breakout-1', signal: 'mean-revert' }).signal, 'mean-revert');
+  });
+
+  // ── 봇 이름을 종목·전략에서 만든다 ──
+  //
+  // 같은 조합으로 다시 켜면 **같은 이름**이어야 한다. 켤 때마다 이름이
+  // 달라지면 같은 전략의 기록이 여러 `strategy_id`로 쪼개지고, 봇을 나눈
+  // 이유인 비교가 사라진다.
+  // 이름 모양이 바뀌었다: `<종목>-<주기>-<전략>`.
+  //
+  // 주기가 빠진 이름은 1분봉 돌파와 일봉 돌파를 **같은 봇**으로 만든다. 그
+  // 둘은 다른 기계이고, 한 `strategy_id`에 기록이 섞이면 비교가 망가진다.
+  // 이미 옛 이름으로 만들어진 봇은 그대로 돌고 목록에서 끄고 켤 수 있다 —
+  // 바뀌는 것은 **새로 만드는 이름**뿐이다.
+  test('같은 종목·주기·전략은 항상 같은 봇 이름이 된다', () => {
+    eq(derivePaperBotId('BTCUSDT', 'trend-follow', '1d'), 'btcusdt-1d-trend-follow');
+    eq(derivePaperBotId('BTCUSDT', 'trend-follow', '1d'),
+       derivePaperBotId('btcusdt', 'trend-follow', '1d'));
+    eq(derivePaperBotId('ETHUSDT', 'breakout', '5m'), 'ethusdt-5m-breakout');
+  });
+
+  test('종목이 다르면 봇도 다르다 — BTC와 ETH가 한 장부에 섞이지 않는다', () => {
+    assert(derivePaperBotId('BTCUSDT','trend-follow','1d') !== derivePaperBotId('ETHUSDT','trend-follow','1d'),
+      '두 종목이 같은 이름을 받았습니다');
+  });
+
+  test('전략이 다르면 봇도 다르다 — 성적표가 섞이지 않는다', () => {
+    const ids = ENTRY_SIGNAL_IDS.map(sig => derivePaperBotId('BTCUSDT', sig, '1d'));
+    eq(new Set(ids).size, ENTRY_SIGNAL_IDS.length);
+  });
+
+  // **못 만들면 null이다.** 억지로 자르거나 이름을 지어내지 않는다 —
+  // DB 제약과 갈리면 앱이 통과시킨 이름을 DB가 거부해 봇이 조용히 안 켜진다.
+  test('모양을 못 맞추면 이름을 지어내지 않는다', () => {
+    eq(derivePaperBotId('', 'trend-follow'), null);
+    eq(derivePaperBotId('   ', 'trend-follow'), null);
+    eq(derivePaperBotId(null, 'trend-follow'), null);
+    eq(derivePaperBotId('!!!', 'trend-follow'), null);
+    eq(derivePaperBotId('A'.repeat(70), 'trend-follow'), null);
+  });
+
+  test('만들어진 이름은 DB가 받는 모양이다', () => {
+    for (const sig of ENTRY_SIGNAL_IDS) {
+      for (const sym of ['BTCUSDT','ETHUSDT','SOLUSDT']) {
+        const id = derivePaperBotId(sym, sig, '1d')!;
+        assert(PAPER_BOT_ID.test(id), `${id}가 DB 모양에 안 맞습니다`);
+      }
+    }
+  });
+
+  // ── 봉 주기 ──
+  //
+  // 전략 일곱 개가 **일봉 하나에 묶여** 있었다 — 받아오는 주소에
+  // `interval=1d`가 글자로 박혀 있었다. 주기를 고를 수 있게 하면 새 알고리즘
+  // 없이도 전략 수가 주기만큼 곱해진다.
+  test('주기 표가 빠짐없이 채워져 있다', () => {
+    for (const tf of BAR_INTERVALS) {
+      assert(BAR_INTERVAL_MS[tf] > 0, `${tf}에 길이가 없습니다`);
+      assert(!!BAR_INTERVAL_LABEL[tf], `${tf}에 이름표가 없습니다`);
+    }
+    eq(new Set(Object.values(BAR_INTERVAL_LABEL)).size, BAR_INTERVALS.length);
+    // 길이가 단조 증가해야 '1분봉 < 일봉'이라는 뜻이 유지된다.
+    const ms = BAR_INTERVALS.map(tf => BAR_INTERVAL_MS[tf]);
+    eq(ms.slice().sort((a, b) => a - b).join(','), ms.join(','));
+  });
+
+  test('기본 주기는 지금까지 돌던 일봉이다', () => {
+    eq(DEFAULT_BAR_INTERVAL, '1d');
+    eq(readBotTimeframe(null).timeframe, '1d');
+    eq(readBotTimeframe({}).timeframe, '1d');
+    eq(readBotTimeframe({ timeframe: '   ' }).timeframe, '1d');
+    eq(readBotTimeframe(null).bad, null);
+  });
+
+  // ★ 모르는 주기를 조용히 일봉으로 돌리면, 사용자는 1분봉 봇을 켰다고
+  //   생각하는데 일봉이 돌면서 그 봇의 성적표에 적힌다.
+  test('★ 적혀 있는데 모르는 주기면 사유를 남긴다 — 조용히 일봉으로 돌리지 않는다', () => {
+    const r = readBotTimeframe({ timeframe: '7m' });
+    assert(!!r.bad, '모르는 주기가 통과했습니다');
+    assert(/알 수 없는 봉 주기/.test(r.bad!), r.bad!);
+  });
+
+  test('아는 주기만 통과시킨다', () => {
+    for (const tf of BAR_INTERVALS) eq(parseBarInterval(tf), tf);
+    eq(parseBarInterval('1D'), '1d');
+    for (const bad of ['7m', '1y', '', null, undefined, {}, [], 0, '1 d']) {
+      eq(parseBarInterval(bad), null, `${JSON.stringify(bad)}가 통과했습니다`);
+    }
+  });
+
+  // ★ 주기가 이름에 들어가야 1분봉 돌파와 일봉 돌파의 기록이 안 섞인다.
+  test('★ 같은 전략·종목이라도 주기가 다르면 다른 봇이다', () => {
+    eq(derivePaperBotId('BTCUSDT', 'breakout', '1m'), 'btcusdt-1m-breakout');
+    eq(derivePaperBotId('BTCUSDT', 'breakout', '1d'), 'btcusdt-1d-breakout');
+    assert(derivePaperBotId('BTCUSDT','breakout','1m') !== derivePaperBotId('BTCUSDT','breakout','1d'),
+      '두 주기가 같은 이름을 받았습니다');
+    for (const tf of BAR_INTERVALS) {
+      const id = derivePaperBotId('ETHUSDT', 'order-block', tf)!;
+      assert(PAPER_BOT_ID.test(id), `${id}가 DB 모양에 안 맞습니다`);
+    }
+  });
+
+  test('주기를 안 주면 일봉 이름이 나온다 — 전과 같은 기본값', () => {
+    eq(derivePaperBotId('BTCUSDT', 'trend-follow'), 'btcusdt-1d-trend-follow');
+    eq(derivePaperBotId('BTCUSDT', 'trend-follow', '7m' as any), null);
+  });
+
+  test('요청에 주기를 안 적으면 null이다 — 저장된 값을 지키게', () => {
+    eq(start().timeframe, null);
+    eq(start({ timeframe: '' }).timeframe, null);
+    eq(start({ timeframe: '5m' }).timeframe, '5m');
+  });
+
+  test('모르는 주기를 보내면 요청 자체를 거절한다', () => {
+    eq(start({ timeframe: '7m' }), null);
+    eq(start({ timeframe: 123 }), null);
+  });
+
+  // #658에서 화면 드롭다운에 SOLUSDT를 넣었는데 이 목록에 없어서 400이 났다 —
+  // 고를 수 있는데 눌리지 않는 자리였다.
+  test('화면이 고를 수 있는 종목은 요청도 받는다', () => {
+    for (const sym of ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']) {
+      assert(start({ symbol: sym }) !== null, `${sym}가 거절됐습니다`);
+    }
+    eq(start({ symbol: 'DOGEUSDT' }), null);
   });
 }
