@@ -71,7 +71,7 @@ export interface ExecuteArgs {
    * **안 넘기면 지금까지와 똑같다.** 기존 호출부의 바이트는 바뀌지 않는다.
    */
   adoptIntent?: boolean;
-  /** Staged TESTNET smoke transport only; never changes LIVE strategy policy. */
+  /** Server-selected Binance TESTNET fixed-stop transport. LIVE policy is unchanged. */
   testnetAlgoProtection?: boolean;
   /**
    * 이 주문을 낸 것이 누구인가.
