@@ -113,10 +113,34 @@ if (notImported.length > 0) {
 // 4. 파일은 있는데 등록이 안 된 것 — **써 놓고 배선을 안 한 테스트다**
 const files = ROOTS.flatMap(r => walk(r));
 const orphans = [];
+const runnerless = [];
 for (const f of files) {
   const src = readFileSync(f, 'utf8');
-  const exported = [...src.matchAll(/export\s+function\s+(run[A-Za-z0-9_]*Tests)\s*\(/g)].map(m => m[1]);
-  if (exported.length === 0) continue;
+  // **`async`를 빠뜨리면 검사가 그 파일을 통째로 건너뛴다.**
+  //
+  // 원래 이 정규식은 `export function`만 봤다. 그런데 통합시험은 전부
+  // `export async function run...Tests`다 — 주문 경로·강제 진입·보유
+  // 연장·킬 청산·스모크 시작·Exact100X, 여섯 파일이 조용히 검사 밖에
+  // 있었다. 그 중 orderPathIntegration.test.ts 하나에만 러너가 셋이다.
+  //
+  // 이 검사가 존재하는 이유가 "재배치가 등록 줄을 덮으면 테스트 뭉치가
+  // 조용히 사라진다"인데, **정작 가장 무거운 시험들이 그 보호 밖에
+  // 있었다.** 사라져도 초록이었을 것이다.
+  const exported = [...src.matchAll(/export\s+(?:async\s+)?function\s+(run[A-Za-z0-9_]*Tests)\s*\(/g)].map(m => m[1]);
+
+  // ── 러너를 아예 안 내보내는 시험 파일 ──
+  //
+  // 예전에는 `continue`로 넘겼다. "등록할 것이 없다"는 뜻으로 읽은
+  // 것인데, 실제로는 **그 파일의 test()들이 영영 실행되지 않는다**는
+  // 뜻이다. 러너는 export된 함수를 불러서 돌리므로, 내보내지 않으면
+  // 아무도 그 파일을 import하지 않는다.
+  //
+  // 그러고도 집계는 '미등록 0'이라고 적혔다 — 시험을 쓴 사람은 통과한
+  // 줄 안다. **이 검사가 막으려던 고장 그대로다.**
+  if (exported.length === 0) {
+    if (/^\s*(?:await\s+)?test\s*\(/m.test(src)) runnerless.push(f);
+    continue;
+  }
   // 러너의 import 경로는 './src/...' 꼴이고 파일 경로는 'src/...' 꼴이다.
   const rel = './' + f.replace(/\.ts$/, '');
   const missing = exported.filter(n =>
@@ -128,6 +152,15 @@ if (orphans.length > 0) {
     what: '파일은 있는데 러너에 등록되지 않은 테스트',
     detail: orphans,
     why: '이 저장소가 반복해서 겪은 고장입니다 — 만들어 놓고 배선을 안 함',
+  });
+}
+
+// 5. test()는 쓰는데 러너를 안 내보내는 파일 — **아무도 부를 수 없다**
+if (runnerless.length > 0) {
+  problems.push({
+    what: 'test()를 쓰는데 러너를 내보내지 않는 시험 파일',
+    detail: runnerless.map(f => `${f} → export function run...Tests() 로 감싸고 러너에 등록하세요`),
+    why: 'export가 없으면 러너가 그 파일을 import하지 않습니다 — 한 번도 실행되지 않고, 집계에는 안 잡힙니다',
   });
 }
 

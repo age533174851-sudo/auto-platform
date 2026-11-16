@@ -1,6 +1,6 @@
 // Gate.io API Adapter (server-side only)
 import { createHmac, createHash } from 'crypto';
-import { parseLossless } from './losslessJson';
+import { parseLossless, parseErrorBody } from './losslessJson';
 import type { TestResult, ExchangeBalance } from './types';
 
 // 호스트를 **연결의 testnet 여부로** 고른다.
@@ -63,7 +63,7 @@ async function gateFetch(path: string, key: string, secret: string, testnet = fa
     // 본문을 버리지 않는다. Gate는 여기에 실제 사유를 담아 보낸다
     // (`INVALID_KEY`, `INVALID_SIGNATURE`, `IP_FORBIDDEN` 등).
     // 바로 아래 gatePost는 원래 이렇게 하고 있었는데 GET 경로만 빠져 있었다.
-    const err = parseLossless(await r.text()).catch(() => ({}));
+    const err = parseErrorBody(await r.text());
     throw gateError(r.status, err, testnet);
   }
   return parseLossless(await r.text());
@@ -107,7 +107,7 @@ async function gatePost(path: string, key: string, secret: string, bodyObj: any,
     signal: AbortSignal.timeout(8000),
   });
   if (!r.ok) {
-    const err = parseLossless(await r.text()).catch(() => ({}));
+    const err = parseErrorBody(await r.text());
     throw gateError(r.status, err, testnet);
   }
   return parseLossless(await r.text());

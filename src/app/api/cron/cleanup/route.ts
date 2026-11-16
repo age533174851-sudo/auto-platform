@@ -20,6 +20,7 @@ import {
   planCleanup, checkDeleteSize, DEFAULT_RULES,
   MIN_RETENTION_DAYS, MAX_DELETE_PER_RUN,
 } from '@/lib/maintenance/retention';
+import { deleteBoundedCleanupRows } from '@/lib/maintenance/boundedDelete';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -32,7 +33,8 @@ interface TableResult {
   eligible: number | null;
   /** 표 전체 개수. 세지 못하면 null */
   total: number | null;
-  deleted: number;
+  /** null: DELETE가 일어났을 수 있지만 반환 건수를 확인하지 못함 */
+  deleted: number | null;
   skipped: string;
   reason: string;
 }
@@ -121,22 +123,20 @@ export async function GET(req: NextRequest) {
       continue;
     }
 
-    try {
-      const { error } = await ((sb as any).from(item.table) as any)
-        .delete()
-        .lt(item.column, item.cutoff);
-      if (error) base.skipped = `삭제 실패: ${error.message}`;
-      else base.deleted = eligible;
-    } catch (e: any) {
-      base.skipped = `삭제 중 오류: ${e?.message || e}`;
-    }
+    // 사전 COUNT는 삭제할 행의 신원을 고정하지 않는다. DELETE 전에
+    // 최대 eligible개의 PK를 선택하고 그 집합만 삭제해야 TOCTOU 상한이 유지된다.
+    const bounded = await deleteBoundedCleanupRows(sb as any, item, eligible, MAX_DELETE_PER_RUN);
+    base.deleted = bounded.deleted;
+    if (bounded.error) base.skipped = bounded.error;
     results.push(base);
   }
 
-  const totalDeleted = results.reduce((s, r) => s + r.deleted, 0);
+  const incompleteDelete = results.some(r => r.deleted === null);
+  const totalDeleted = incompleteDelete
+    ? null : results.reduce((s, r) => s + (r.deleted ?? 0), 0);
 
   return NextResponse.json({
-    ok: true,
+    ok: !incompleteDelete,
     applied: apply,
     totalDeleted,
     tables: results,
@@ -146,5 +146,6 @@ export async function GET(req: NextRequest) {
     note: apply
       ? '삭제는 되돌릴 수 없습니다.'
       : '미리보기입니다 — 아무것도 지우지 않았습니다. 실제 삭제는 apply=1.',
-  }, { headers: { 'Cache-Control': 'no-store' } });
+  }, { status: incompleteDelete ? 207 : 200,
+    headers: { 'Cache-Control': 'no-store' } });
 }

@@ -87,7 +87,7 @@ function fnBodyAt(src, decl) {
   return braceBodyAt(src, i);
 }
 
-const QZ = 'src/lib/exchanges/quantize.ts';
+const QZ = 'src/lib/kernel/quantize.ts';
 const BF = 'src/lib/exchanges/binanceFutures.ts';
 const GP = 'src/lib/exchanges/gatePlan.ts';
 const ROUTE = 'src/app/api/binance/futures/order/route.ts';
@@ -95,7 +95,7 @@ const EXEC = 'src/lib/exchanges/futuresExec.ts';
 const ADAPTER = 'src/lib/exchanges/futuresAdapter.ts';
 const PAGE = 'src/components/pages/TradingPage.tsx';
 const PLAN = 'src/lib/markets/orderCurrency.ts';
-const TEST = 'src/lib/exchanges/quantize.test.ts';
+const TEST = 'src/lib/kernel/quantize.test.ts';
 
 // ── 1. 판정 함수 ──
 if (!existsSync(QZ)) fail(`${QZ}이 없습니다`);
