@@ -24,6 +24,7 @@ import {
   type EntrySignalId,
 } from './entrySignals';
 import type { RegimeView } from '../risk/regime';
+import type { Bar } from '../risk/bars';
 
 export interface PaperBar {
   close: number;
@@ -138,6 +139,8 @@ export interface EntryInput {
    * "폭 0인 박스의 바닥"·"전고점 0 돌파"가 되어 무조건 진입이 된다.
    */
   view?: RegimeView | null;
+  /** 국면이 쓴 봉 전체. **없으면 null** — 봉이 필요한 전략은 쉰다 */
+  bars?: Bar[] | null;
   /**
    * 어느 진입 전략으로 판정할지. 없으면 지금까지 돌던 추세 추종이다.
    *
@@ -179,7 +182,7 @@ export function planEntry(i: EntryInput): RunnerAction {
   // 방향은 **전략이** 정한다. 수량·손절·익절은 아래에서 전략과 무관하게
   // 같은 식으로 정한다 — 그래야 전략들의 성적표를 비교할 수 있다.
   const signalId = i.signal ?? DEFAULT_ENTRY_SIGNAL;
-  const sig = entrySignal(signalId, { trend: i.trend, view: i.view, markPrice: i.markPrice });
+  const sig = entrySignal(signalId, { trend: i.trend, view: i.view, markPrice: i.markPrice, bars: i.bars });
   if (!sig.side) {
     return { kind: 'NONE',
       reason: signalId === DEFAULT_ENTRY_SIGNAL
