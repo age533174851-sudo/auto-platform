@@ -87,6 +87,36 @@ export function runProtectionLedgerTests() {
     eq(l.ok, true);
   });
 
+  // P0: 취소 후 조회된 행의 ID를 읽지 못하면 '없다'고 증명할 수 없다.
+  // 취소 전 목록에 있던 주문이 정밀도 손실/namespace 차이로 같은 ID를
+  // 드러내지 못해도 CLEAR를 적어서는 안 된다.
+  test('★★ 재조회 ID가 정밀도를 잃으면 CLEAR가 아니라 UNKNOWN', () => {
+    const l = cancelLedger({
+      ids: ['9007199254740993'], attempts: [A('9007199254740993')],
+      leftover: [{ id: 9007199254740993 }],
+    });
+    eq(l.ok, false); eq(l.code, 'UNKNOWN');
+    eq(l.unknown.join(','), '9007199254740993');
+  });
+
+  test('★★ 재조회가 Algo 식별자만 주면 일반 ID 소실을 CLEAR로 적지 않는다', () => {
+    const l = cancelLedger({
+      ids: ['77'], attempts: [A('77')],
+      leftover: [{ algoId: '999', clientAlgoId: 'smoke-999' }],
+    });
+    eq(l.ok, false); eq(l.code, 'UNKNOWN');
+    eq(l.entries[0].state, 'CANCEL_UNKNOWN');
+  });
+
+  test('★★ 다른 번호가 확인되고 미확인 행이 함께 있으면 요청 번호는 UNKNOWN', () => {
+    const l = cancelLedger({
+      ids: ['77'], attempts: [A('77')],
+      leftover: [O('999'), { orderId: Number.MAX_SAFE_INTEGER + 10 }],
+    });
+    eq(l.ok, false); eq(l.code, 'UNKNOWN');
+    eq(l.unknown.join(','), '77');
+  });
+
   console.log('[되돌리기 — 포지션만 닫고 보호주문을 남기지 않는다]');
 
   test('되돌릴 때 걸어 둔 SL·TP를 대상으로 잡는다', () => {
