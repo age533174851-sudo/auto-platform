@@ -542,7 +542,7 @@ export async function GET(req: NextRequest) {
   // 판정은 exitMonitorLease.ts에 있고 테스트가 붙어 있다.
   // 판정·획득 순서·울타리 확인은 모두 exitMonitorLease.ts에 있고, 두 실행을
   // 동시에 돌려 "둘 다 주인이 되는" 경합을 재현하는 시험이 붙어 있다.
-  const { acquireExitLease, fenceStillMine, LEASE_TTL_MS } = await import('@/lib/engine/exitMonitorLease');
+  const { acquireExitLease, exitLeaseWakeVerdict, fenceStillMine, LEASE_TTL_MS } = await import('@/lib/engine/exitMonitorLease');
   // ── 누가 깨웠는가 ──
   //
   // ⑤B-3A-1.1 — 예전에는 헤더가 없으면 `'manual'`로 적었다. 그런데 Vercel
@@ -595,9 +595,15 @@ export async function GET(req: NextRequest) {
   });
   if (!lease.granted) {
     // **기다리지 않는다.** 그쪽이 하면 되는 일이다. 거래소 쓰기는 0이다.
-    return NextResponse.json({ ok: true, skipped: true, code: lease.code, message: lease.reason,
+    // 둘을 합친다 — main 이 더한 `executor`(누가 돌고 있나)와, 이 PR 이
+    // 더한 판정(임차를 **못 읽은 것**을 성공한 SKIP 으로 적지 않기).
+    // 예전에는 여기가 언제나 `ok: true, skipped: true` 였다. 그래서 DB
+    // 조회가 실패해도 화면에는 "정상적으로 건너뛰었다"로 보였다.
+    const verdict = exitLeaseWakeVerdict(lease);
+    return NextResponse.json({ ok: verdict.ok, skipped: verdict.skipped,
+      code: lease.code, message: lease.reason,
       executor: await executorNow() },
-      { headers: { 'Cache-Control': 'no-store' } });
+      { status: verdict.status, headers: { 'Cache-Control': 'no-store' } });
   }
   const myFence = lease.myFence;
   const leaseTracked = lease.tracked;

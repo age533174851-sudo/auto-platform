@@ -32,7 +32,7 @@ on:
   status:
   # 라벨을 붙였을 때 · 새 커밋이 올라왔을 때 · 초안을 해제했을 때
   pull_request_target:
-    types: [labeled, unlabeled, synchronize, reopened, ready_for_review]
+    types: [opened, labeled, unlabeled, synchronize, reopened, ready_for_review]
   # 리뷰가 달렸을 때
   pull_request_review:
     types: [submitted, dismissed]
@@ -52,8 +52,46 @@ on:
 
 # 두 실행이 겹치면 같은 PR을 두 번 합치려 한다. GitHub이 409로 막지만
 # 그 로그가 '실패'로 남아 진짜 실패를 덮는다.
+# **그룹이 하나면 서로 상관없는 PR 들이 서로를 취소한다.**
+#
+# 2026-11-13 실측: PR #576 의 HEAD `cfe3efcb` 에 필수 체크
+# `auto-merge-gate` 가 **아예 생기지 않았다.** run 43380706304 은
+# `pull_request_target` / `cancelled` / **시작한 잡 0개**였다.
+# 시험이 깨진 것이 아니라 줄을 서다 밀려난 것이다.
+#
+# GitHub 은 한 그룹에 **대기(pending) 를 하나만** 둔다. 세 번째가 오면
+# 먼저 기다리던 것을 버린다. `cancel-in-progress: false` 는 *돌고 있는*
+# 것을 지키는 설정이지 *기다리는* 것을 지키지 않는다. 그래서 A 의 신호가
+# B 의 신호에 밀려 사라지고, A 에는 필수 체크가 영영 보고되지 않는다.
+# 체크가 **빨갛지 않고 아예 없어서** 아무 데도 이유가 안 남는다.
+#
+# 그래서 **head SHA 로 줄을 나눈다.** PR 번호가 아니라 SHA 인 이유는
+# `status` 이벤트에 PR 번호가 아예 없고 SHA 만 있기 때문이다:
+#
+#   pull_request_target · pull_request_review  event.pull_request.head.sha
+#   check_suite                                event.check_suite.head_sha
+#   workflow_run                               event.workflow_run.head_sha
+#   status                                     event.sha
+#   schedule · workflow_dispatch               **없음** → run_id
+#
+# SHA 를 못 찾는 이벤트는 `github.run_id` 로 떨어져 **매번 저만의 줄**에
+# 선다 — 30분 안전망이 다른 PR 의 신호에 밀려 사라지면 그물의 뜻이 없다.
+#
+# `github.sha` 는 일부러 쓰지 않는다. `schedule` 에서 그 값은 기본
+# 브랜치의 SHA 라서 모든 예약 실행이 다시 한 그룹이 된다 — 고치려던
+# 모양이 그대로 돌아온다.
+#
+# `cancel-in-progress` 는 `false` 그대로다. 참으로 바꾸면 돌고 있던
+# 병합 판정이 중간에 끊긴다.
+#
+# 이 요구는 `scripts/check-workflow-concurrency.mjs` 가 고정한다.
 concurrency:
-  group: auto-merge
+  group: >-
+    auto-merge-${{ github.event.pull_request.head.sha
+    || github.event.check_suite.head_sha
+    || github.event.workflow_run.head_sha
+    || github.event.sha
+    || github.run_id }}
   cancel-in-progress: false
 
 # **최소 권한만.**

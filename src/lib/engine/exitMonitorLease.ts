@@ -222,6 +222,10 @@ export type LeaseAcquireCode =
   | 'SKIP'
   /** 판정까지는 통과했지만 쓰는 순간 남이 먼저 가져갔다 */
   | 'RACE_LOST'
+  /** DB 조회 실패 — 다른 워커가 보유 중이라는 증거가 아니다 */
+  | 'UNREADABLE'
+  /** DB 쓰기 실패 — 경쟁에서 진 것과 구분한다 */
+  | 'WRITE_FAILED'
   /** 임차 표가 아직 없는 배포 — 예전처럼 돈다 */
   | 'UNTRACKED';
 
@@ -296,7 +300,8 @@ export async function acquireExitLease(i: {
   // 막는다 — 그 의미를 여기서 다시 쓰지 않는다.
   const d = leaseDecision({ current, me: i.me, nowMs: i.nowMs, ttlMs: ttl, preempt: i.preempt === true });
   if (!d.granted) {
-    return { code: 'SKIP', granted: false, myFence: null, tracked: true, reason: d.reason };
+    return { code: d.code === 'UNKNOWN' ? 'UNREADABLE' : 'SKIP',
+      granted: false, myFence: null, tracked: true, reason: d.reason };
   }
 
   const myFence = d.nextFence as number;
@@ -308,22 +313,51 @@ export async function acquireExitLease(i: {
 
   let ok = false;
   let err: string | null = null;
+  let writeFailed = false;
   try {
     if (prevFence == null) {
       // 줄이 없었다 → 만들면서 잡는다. 동시에 둘이 만들면 하나만 성공한다.
       const r = await i.store.insert(row);
       ok = r?.ok === true;
-      err = r?.error ? String(r.error) : (ok ? null : '다른 실행이 먼저 임차를 만들었습니다');
+      // 같은 PK를 두 실행이 동시에 만들면 한쪽은 정상적인 경쟁 패배다.
+      // 그 외 오류/무응답은 DB 쓰기 실패로 보고 경고를 남긴다.
+      const duplicate = /duplicate key|23505/i.test(String(r?.error || ''));
+      writeFailed = !ok && !duplicate;
+      err = r?.error ? String(r.error) : (ok ? null : '임차 생성 결과를 확인하지 못했습니다');
     } else {
       const r = await i.store.compareAndSet(row, prevFence);
       ok = !r?.error && Number(r?.updated) === 1;
+      writeFailed = !!r?.error;
       err = r?.error ? String(r.error) : (ok ? null : '다른 실행이 먼저 임차를 가져갔습니다');
     }
-  } catch (e: any) { ok = false; err = String(e?.message || e); }
+  } catch (e: any) { ok = false; writeFailed = true; err = String(e?.message || e); }
 
+  // ── 못 잡았으면 **권한을 내려놓는다** ──
+  //
+  // 두 갈래를 삼항으로 접어 두었더니 `check-exit-authority`가 "경합에서
+  // 졌을 때 실행 권한을 내려놓지 않습니다"로 막았다. 동작은 맞았지만
+  // **판정이 글자로 읽히지 않았다.** 검사기를 고치는 쪽이 아니라 코드를
+  // 읽히게 펴는 쪽이 맞다 — 거래소 쓰기는 되돌릴 수 없고, 그 앞의
+  // 권한 판정은 사람이 한눈에 확인할 수 있어야 한다.
+  //
+  // 두 갈래를 가르는 이유도 코드에 남는다:
+  //   · 경합 패배(RACE_LOST) — 다른 실행이 주인이다. **정상이다.**
+  //   · 쓰기 실패(WRITE_FAILED) — 누가 주인인지 **모른다.** 경고가 필요하다.
+  // 어느 쪽이든 `granted: false`다. 모르면 쓰지 않는다.
+  const skipReason = `임차를 잡지 못해 이번은 건너뜁니다: ${String(err || '').slice(0, 200)}`;
+  if (!ok && writeFailed) {
+    return { code: 'WRITE_FAILED', granted: false, myFence: null, tracked: true, reason: skipReason };
+  }
   if (!ok) {
-    return { code: 'RACE_LOST', granted: false, myFence: null, tracked: true,
-      reason: `임차를 잡지 못해 이번은 건너뜁니다: ${String(err || '').slice(0, 200)}` };
+    return { code: 'RACE_LOST', granted: false, myFence: null, tracked: true, reason: skipReason };
   }
   return { code: 'ACQUIRED', granted: true, myFence, tracked: true, reason: d.reason };
+}
+
+/** 백업 크론/워커에 '다른 실행이 맡음'과 'DB 장애'를 다르게 알린다. */
+export function exitLeaseWakeVerdict(lease: LeaseAcquireResult): {
+  status: 200 | 503; ok: boolean; skipped: true;
+} {
+  const failed = lease.code === 'UNREADABLE' || lease.code === 'WRITE_FAILED';
+  return { status: failed ? 503 : 200, ok: !failed, skipped: true };
 }
