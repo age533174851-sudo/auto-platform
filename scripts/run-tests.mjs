@@ -16,6 +16,10 @@ execFileSync(process.execPath, ['--test', 'scripts/ten-slot-reconcile-evidence-o
 // 실제 PostgreSQL 원자성 검증. `TEN_SLOT_PG_URL`이 없으면 **건너뛴다고 말한다** —
 // 돌지 않은 것을 통과로 적지 않는다. 설정 방법은 그 파일 머리말에 있다.
 execFileSync(process.execPath, ['--test', 'scripts/ten-slot-pg.test.mjs'], { cwd: root, stdio: 'inherit' });
+// 앱 모듈이 고른 사건이 **실제 098의 전이와 같은지** 본다. 모듈을 복제하지
+// 않고 같은 파일을 컴파일해서 쓴다 — 가짜 DB는 "우리가 보낸 것"만 보므로
+// 모듈과 전이표가 갈려도 통과한다.
+execFileSync(process.execPath, ['--test', 'scripts/ten-slot-lifecycle-pg.test.mjs'], { cwd: root, stdio: 'inherit' });
 const dir = mkdtempSync(join(tmpdir(), 'traigo-test-'));
 cpSync(join(root, 'src'), join(dir, 'src'), { recursive: true });
 
