@@ -170,6 +170,16 @@ export interface FakeDbOptions {
   failInsertCode?: { table: string; code: string };
   /** select를 실패시킨다 */
   failSelectsOn?: string;
+  /**
+   * UPDATE의 **결과**를 바꾼다.
+   *
+   * `error`는 DB가 오류를 돌려준 경우, `zero-rows`는 **오류 없이 0행**인
+   * 경우다. 뒤쪽이 더 조용해서 더 위험하다 — 조건에 걸린 줄이 없는데
+   * `error: null`이라 성공으로 읽힌다.
+   */
+  updateFailure?: { table: string; mode: 'error' | 'zero-rows' | 'missing-data' | 'wrong-id' };
+  /** Another writer changes the row between the initial read and UPDATE. */
+  beforeUpdate?: (table: string, rows: any[]) => void;
 }
 
 export class FakeDb {
@@ -198,22 +208,55 @@ export class FakeDb {
   from(table: string): any {
     const db = this;
     const filters: { col: string; vals: any[] }[] = [];
+    // 범위 조건(`gte`·`lte`). 창 단위로 센 줄을 읽는 질의가 쓴다 —
+    // 이것이 없으면 그런 질의가 **시험에서만** 터진다.
+    const ranges: { col: string; op: 'gte' | 'lte'; val: any }[] = [];
+    // `select('id', { count: 'exact', head: true })` 형태인가.
+    let headCount = false;
     let pending: { kind: 'insert' | 'update'; patch: any } | null = null;
+
+    /** 시각 문자열과 숫자를 같은 축에서 비교한다 */
+    const cmpVal = (v: any): number => {
+      if (typeof v === 'number') return v;
+      const t = Date.parse(String(v));
+      return Number.isFinite(t) ? t : Number(v);
+    };
 
     const apply = () => {
       let out = db.rows[table] ?? [];
-      for (const f of filters) out = out.filter((r) => f.vals.includes(r[f.col]));
+      for (const f of filters) out = out.filter((r) => f.vals.some((v) =>
+        r[f.col] === v || (f.col === 'steps' && typeof v === 'string'
+          && JSON.stringify(r[f.col]) === v)));
+      for (const g of ranges) {
+        const bound = cmpVal(g.val);
+        out = out.filter((r) => {
+          const v = cmpVal(r[g.col]);
+          if (!Number.isFinite(v) || !Number.isFinite(bound)) return false;
+          return g.op === 'gte' ? v >= bound : v <= bound;
+        });
+      }
       return out;
     };
 
     const flushUpdate = () => {
       if (!pending || pending.kind !== 'update') return { data: [], error: null };
+      db.opts.beforeUpdate?.(table, db.rows[table] ?? []);
       if (db.opts.failUpdatesOn === table) {
         return { data: [], error: { message: `DB 쓰기 실패 (${table})`, code: 'XX000' } };
       }
       if (pending.patch.status === 'ACKED' && db.opts.failAckUpdate) {
         if (db.opts.failAckUpdate === 'throw') throw new Error('DB ACK 연결 끊김');
         if (db.opts.failAckUpdate === 'error') return { data: [], error: { code: 'XX000', message: 'DB ACK 쓰기 실패' } };
+        return { data: [], error: null };
+      }
+      const uf = db.opts.updateFailure;
+      if (uf && uf.table === table) {
+        if (uf.mode === 'missing-data') return { data: null, error: null };
+        if (uf.mode === 'wrong-id') return { data: [{ id: 'wrong-row' }], error: null };
+        if (uf.mode === 'error') {
+          return { data: null, error: { message: `DB 쓰기 실패 (${table})`, code: 'XX000' } };
+        }
+        // **오류 없이 0행.** 조건에 걸린 줄이 없었다는 뜻이고 성공이 아니다.
         return { data: [], error: null };
       }
       const where: Record<string, any> = {};
@@ -225,7 +268,8 @@ export class FakeDb {
     };
 
     const builder: any = {
-      select(_cols?: string) {
+      select(_cols?: string, opts?: { count?: string; head?: boolean }) {
+        if (opts?.count != null || opts?.head === true) headCount = true;
         if (pending?.kind === 'insert') return builder;
         if (db.opts.failSelectsOn === table) {
           builder.__selectFails = true;
@@ -234,6 +278,8 @@ export class FakeDb {
       },
       eq(col: string, val: any) { filters.push({ col, vals: [val] }); return builder; },
       in(col: string, vals: any[]) { filters.push({ col, vals: [...vals] }); return builder; },
+      gte(col: string, val: any) { ranges.push({ col, op: 'gte', val }); return builder; },
+      lte(col: string, val: any) { ranges.push({ col, op: 'lte', val }); return builder; },
       order() { return builder; },
       limit() { return builder; },
       insert(row: any) { pending = { kind: 'insert', patch: row }; return builder; },
@@ -266,8 +312,33 @@ export class FakeDb {
         // await로 바로 끝나는 체인 (update().eq() · select().in() 등)
         const run = async () => {
           if (pending?.kind === 'update') return flushUpdate();
-          if (builder.__selectFails) return { data: null, error: { message: '조회 실패' } };
-          return { data: apply().map((r) => ({ ...r })), error: null };
+          // **`.select()` 없이 끝나는 insert 도 쓰기다.**
+          //
+          // 여기가 비어 있어서 `await from(t).insert(row)` 가 조용히
+          // 아무 일도 안 하고 `error: null` 로 끝났다. 그런 모양을 쓰는
+          // 운영 코드(`recordCronRun` 이 그렇다)는 통합 시험에서
+          // **쓰지 않았는데 성공으로 읽혔다.** 못 적은 것을 적었다고
+          // 읽는 것이 이 하네스에서 가장 나쁜 거짓말이다.
+          if (pending?.kind === 'insert') {
+            const f = db.opts.failInsertCode;
+            if (f && f.table === table) {
+              return { data: null, error: { code: f.code, message: `insert 실패 (${f.code})` } };
+            }
+            const row = { id: `row-${++db.seq}`, ...pending.patch };
+            db.rows[table] = (db.rows[table] ?? []).concat([row]);
+            db.writes.push({ table, kind: 'insert', patch: { ...pending.patch } });
+            return { data: [{ ...row }], error: null };
+          }
+          if (builder.__selectFails) {
+            // **개수 질의도 실패는 실패다.** 0건으로 돌려주면 호출부의
+            // fail-closed 분기가 시험에서 영영 안 돈다.
+            return headCount
+              ? { count: null, data: null, error: { message: '조회 실패' } }
+              : { data: null, error: { message: '조회 실패' } };
+          }
+          const rows = apply();
+          if (headCount) return { count: rows.length, data: null, error: null };
+          return { data: rows.map((r) => ({ ...r })), error: null };
         };
         return run().then(resolve, reject);
       },
