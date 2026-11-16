@@ -36,6 +36,7 @@ import { C, FS } from '@/components/terminal/theme';
 import { TradingScreenShell, InfoStat, LockedField,
   type ShellTab, type MarketScreenCommonProps } from './TradingScreenShell';
 import { fieldTestId, screenContract } from '@/lib/trading/marketScreenContract';
+import { stockBlockReason } from '@/lib/trading/capability';
 import { capability } from '@/lib/markets/marketType';
 import { marketPhase, marketOfSymbol } from '@/lib/markets/marketHours';
 
@@ -45,14 +46,23 @@ export interface StockScreenProps extends MarketScreenCommonProps {
   orderableCashUnknownReason?: string | null;
   heldQty: number | null;
   avgCost: number | null;
-  /** 증권사 연결이 되어 있는가. 안 되어 있으면 사유를 적는다 */
+  /**
+   * 증권사 연결이 **없다고 확인된** 경우에만 채운다.
+   *
+   * 비워 두면 "연결 없음"으로 읽지 않는다 — 예전에는 아무도 이 값을 주지
+   * 않는데도 화면이 늘 "증권사 연결이 없습니다"를 적었다.
+   */
   brokerReason?: string | null;
+  /**
+   * 이 화면에 주문 경로가 없는 이유. `paperOrderUiWiring`이 준 문장을
+   * 그대로 받는다 — 화면이 자기 문장을 지어내지 않는다.
+   */
+  orderPathReason?: string | null;
   /** 공휴일 목록. **없으면 null** — 그러면 화면이 "휴장일은 못 거릅니다"라고 적는다 */
   holidays?: string[] | null;
 }
 
 const CONTRACT = screenContract('STOCK');
-const NO_BROKER = '증권사(한국투자증권) 연결이 없습니다 — 바이낸스 연결로는 주식 주문이 나가지 않습니다';
 
 export function StockTradingScreen(p: StockScreenProps) {
   const [side, setSide] = React.useState<'BUY' | 'SELL'>('BUY');
@@ -63,7 +73,15 @@ export function StockTradingScreen(p: StockScreenProps) {
   const sym = p.instrument?.symbol ?? null;
   const venue = sym == null ? null : marketOfSymbol(sym);
   const session = venue ? marketPhase(venue, Date.now(), { holidays: p.holidays ?? null }) : null;
-  const blocked = p.instrumentReason || p.brokerReason || NO_BROKER;
+  // **이유를 지어내지 않는다.** 고르는 규칙은 `capability.stockBlockReason`
+  // 한 곳에 있고 시험이 붙어 있다. 예전에는 여기서 `|| NO_BROKER`로 끝나서
+  // blocked가 절대 falsy가 될 수 없었고, 그래서 막는 이유가 무엇이든 화면은
+  // 늘 "증권사 연결이 없습니다"라고 적었다.
+  const blocked = stockBlockReason({
+    instrumentReason: p.instrumentReason,
+    brokerReason: p.brokerReason,
+    orderPathReason: p.orderPathReason,
+  });
   // 종목이 없거나 증권사 연결이 없거나 장이 닫혀 있으면 **누를 수 없다.**
   // 세 사유를 한 값으로 접어야 버튼마다 빠뜨리지 않는다.
   const locked = sym == null || !!blocked || !session?.canOrder;

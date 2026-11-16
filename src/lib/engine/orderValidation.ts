@@ -113,8 +113,21 @@ export function validateOrder(input: OrderInput): ValidationResult {
     leverage = l;
   }
 
+  // ── 청산 전용 ──
+  //
+  // 이 칸이 진입/청산을 가른다 — 라우트는 이 값으로 진입 점검을 건너뛸지
+  // 정한다. `!!`로 읽으면 문자열 "false"·"0"이 true가 되어 신규 진입이
+  // 청산으로 분류된다. 불리언과 생략(=false)만 받고, 나머지는 막는다.
+  const ro = input.reduceOnly;
+  if (ro != null && typeof ro !== 'boolean') {
+    return {
+      ok: false, code: 'invalid_reduce_only',
+      error: `reduceOnly는 true 또는 false여야 합니다 (받은 값: ${JSON.stringify(ro)})`,
+    };
+  }
+
   return {
     ok: true,
-    value: { symbol, side, type, quantity, price, leverage, reduceOnly: !!input.reduceOnly },
+    value: { symbol, side, type, quantity, price, leverage, reduceOnly: ro === true },
   };
 }

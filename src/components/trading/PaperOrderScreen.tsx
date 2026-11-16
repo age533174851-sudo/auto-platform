@@ -306,8 +306,10 @@ export function PaperOrderScreen({
         ) : screen === 'COINM_SCREEN' ? (
           <CoinMFuturesTradingScreen {...common} markPrice={stream.markPrice}/>
         ) : (
+          // 막는 진짜 이유는 능력표가 이미 안다. 화면이 지어내지 않게 넘긴다.
           <StockTradingScreen {...common}
-            orderableCash={null} heldQty={null} avgCost={null}/>
+            orderableCash={null} heldQty={null} avgCost={null}
+            orderPathReason={wiring.canOrder ? null : wiring.reason}/>
         )}
         <InstrumentPicker
           open={pickerOpen} market={marketTab} catalog={catalog}
