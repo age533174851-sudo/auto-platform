@@ -262,3 +262,50 @@ export function dockTabSupport(tab: DockTab): Support {
       return no(`알 수 없는 탭입니다 (${String(tab)})`);
   }
 }
+
+/**
+ * 주식 화면이 **왜 못 누르는지** 한 문장으로 고른다.
+ *
+ * 무엇이 틀려 있었나
+ * ──────────────────
+ * `StockTradingScreen`은 이렇게 적고 있었다:
+ *
+ *   const blocked = instrumentReason || brokerReason || NO_BROKER;
+ *
+ * 마지막 `|| NO_BROKER` 때문에 **blocked가 절대 falsy가 될 수 없었다.**
+ * 게다가 `brokerReason`을 넘기는 곳이 저장소 전체에 **한 곳도 없었다.**
+ * 그래서 화면은 늘 "증권사(한국투자증권) 연결이 없습니다"를 적었다 —
+ * 증권사가 연결돼 있든 말든, 그게 막는 이유든 아니든.
+ *
+ * 진짜 이유는 이미 계산돼 있었다
+ * ──────────────────────────────
+ * `paperOrderUiWiring('STOCK')`이 "모의 장부가 다루지 않는 시장입니다"를
+ * 돌려주고 있었다. 화면이 그걸 받지 않고 자기 문장을 지어낸 것이다.
+ * 같은 판단을 두 곳에 두면 한쪽이 틀려도 아무도 모른다 — 여기서는 몇 달
+ * 동안 틀린 쪽만 화면에 떴다.
+ *
+ * 순서가 곧 규칙이다
+ * ──────────────────
+ *   1. 종목이 없으면 나머지는 볼 필요가 없다
+ *   2. 증권사 연결이 **확인된 문제**면 그것을 적는다
+ *   3. 주문 경로가 없으면 그것을 적는다 (지금 주식 탭이 여기다)
+ *   4. 아무 이유도 못 받았으면 **모른다고 적는다.** 모르는 것을
+ *      "증권사가 없다"로 바꾸지 않는다 — 그게 이 버그였다.
+ */
+export function stockBlockReason(i: {
+  /** 종목을 못 고른 이유 */
+  instrumentReason?: string | null;
+  /** 증권사 연결이 없다고 **확인된** 경우에만 채운다 */
+  brokerReason?: string | null;
+  /** 이 화면에 주문 경로가 없는 이유 (`paperOrderUiWiring`이 준다) */
+  orderPathReason?: string | null;
+}): string {
+  const pick = (v: unknown): string | null => {
+    const s = typeof v === 'string' ? v.trim() : '';
+    return s.length ? s : null;
+  };
+  return pick(i.instrumentReason)
+    ?? pick(i.brokerReason)
+    ?? pick(i.orderPathReason)
+    ?? '이 화면에서 주문을 낼 수 없습니다 — 이유를 확인하지 못했습니다';
+}

@@ -22,7 +22,7 @@
 // 거래 화면에서 사용자가 '매수'를 누르는 것은 그 사람이 보고 있고,
 // 한 번에 하나이고, 실패하면 바로 안다. **타이머는 아무도 안 볼 때
 // 반복해서 낸다.** 그래서 여기서 막는 것은 타이머가 도는 파일뿐이다.
-import { readFileSync, globSync } from 'node:fs';
+import { existsSync, readFileSync, globSync } from 'node:fs';
 
 /** 자동으로(사람 없이) 반복 실행되는 브라우저 코드 */
 const AUTO_ENGINES = [
@@ -46,12 +46,19 @@ const CONFIRM_TOKENS = ['LIVE_ORDER_CONFIRMED'];
 let bad = 0;
 const err = (m) => { console.error(`❌ ${m}`); bad += 1; };
 
+/** 실제로 읽은 자동 엔진. **목록 길이를 읽은 수로 적지 않는다.** */
+const enginesRead = [];
+const enginesMissing = [];
+
 for (const f of AUTO_ENGINES) {
   let src = '';
   try { src = readFileSync(f, 'utf8'); } catch {
     // 파일이 사라졌으면 그건 더 좋은 상태다 — 없는 것을 실패로 만들지 않는다.
+    // 다만 **읽지 못했다고 말한다.** 안 본 것을 본 것으로 세지 않는다.
+    enginesMissing.push(f);
     continue;
   }
+  enginesRead.push(f);
   const lines = src.split('\n');
   lines.forEach((line, i) => {
     const t = line.trim();
@@ -93,25 +100,63 @@ const MANUAL_ORDER_OK = {
     '시세·워커 타이머와 별개로, 청산은 사용자가 비율을 고른 순간에만 나간다',
 };
 
+/**
+ * **타이머가 돌고 + 주문 경로를 부르는가.** 주석 줄은 세지 않는다.
+ *
+ * 루프와 자기 점검이 **같은 함수**를 쓴다. 판단이 두 곳에 있으면 언젠가
+ * 갈린다 — 그때 갈리는 쪽은 늘 검사기다.
+ */
+export function rogueHits(src) {
+  if (!/setInterval\s*\(/.test(String(src))) return [];
+  const lines = String(src).split('\n').filter(l => {
+    const t = l.trim();
+    return !(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*') || t.startsWith('{/*'));
+  });
+  return ORDER_ENDPOINTS.filter(ep => lines.some(l => l.includes(ep)));
+}
+
+/**
+ * 훑는 범위. 예전에는 `src/components/**` 뿐이었다.
+ *
+ * 실측 RED (2026-11-10, main `220f8001`): `src/app/`에 60초 `setInterval`로
+ * `/api/binance/futures/order`를 부르고 `LIVE_ORDER_CONFIRMED`까지 붙이는
+ * 클라이언트 컴포넌트를 두고 이 검사기를 돌렸더니
+ * **`✅ 브라우저 주문 권한 0건` · exit 0** 이었다. 이 검사기가 막으려고
+ * 쓰여진 바로 그 사고가 글롭 밖이라 안 보였다.
+ *
+ * Next.js app 라우터에서는 화면이 `src/app/**`에도 산다. `src/components`만
+ * 보는 것은 범위를 절반만 보는 것이다.
+ */
+const SCAN_GLOB = 'src/**/*.tsx';
+let scanned = 0;
+
 // 새 자동 엔진이 목록 밖에서 생기는 것을 막는다.
 {
-  const all = globSync('src/components/**/*.tsx').map(f => f.replaceAll('\\', '/'));
+  const all = globSync(SCAN_GLOB)
+    .map(f => f.replaceAll('\\', '/'))
+    .filter(f => !/\.test\.tsx$/.test(f));
+
+  // ── 범위가 좁아지면 이 검사는 조용히 꺼진다 ──
+  // 글롭이 `src/components` 밖을 실제로 포함하는지 값으로 확인한다.
+  if (!all.some(f => !f.startsWith('src/components/'))) {
+    err(`훑는 범위가 src/components 안으로 좁아졌습니다 (${SCAN_GLOB} → ${all.length}개)`
+      + '\n     src/app 등에 생긴 자동 엔진은 이 검사로 안 보입니다');
+  }
+  // 규칙이 실제로 걸리는지. 통과만 하는 검사기는 없는 것보다 나쁘다.
+  if (rogueHits(`setInterval(() => { fetch('${ORDER_ENDPOINTS[0]}'); }, 1000);`).length !== 1
+      || rogueHits(`// setInterval(() => fetch('${ORDER_ENDPOINTS[0]}'))`).length !== 0
+      || rogueHits(`fetch('${ORDER_ENDPOINTS[0]}')`).length !== 0) {
+    err('자기 점검 실패 — 타이머+주문 판별이 깨졌습니다');
+  }
+
+  scanned = all.length;
   for (const f of all) {
     if (AUTO_ENGINES.includes(f)) continue;
     if (MANUAL_ORDER_OK[f]) continue;
     let src = '';
     try { src = readFileSync(f, 'utf8'); } catch { continue; }
     // 타이머가 있고 + 주문 경로를 부르는 파일 = 새 자동 실행 권한
-    const hasTimer = /setInterval\s*\(/.test(src);
-    if (!hasTimer) continue;
-    const hitsOrder = ORDER_ENDPOINTS.filter(ep => {
-      // 주석 줄은 뺀다
-      return src.split('\n').some(l => {
-        const t = l.trim();
-        if (t.startsWith('//') || t.startsWith('*') || t.startsWith('{/*')) return false;
-        return l.includes(ep);
-      });
-    });
+    const hitsOrder = rogueHits(src);
     if (hitsOrder.length > 0) {
       err(`${f}\n     타이머와 주문 경로(${hitsOrder.join(', ')})가 같은 파일에 있습니다`
         + '\n     아무도 안 볼 때 반복해서 주문이 나갈 수 있습니다'
@@ -120,9 +165,44 @@ const MANUAL_ORDER_OK = {
   }
 }
 
+// ── 면제는 만료돼야 한다 ──
+//
+// 이 파일은 `MANUAL_ORDER_OK`에 대해 이미 적어 두었다: "확인 없이 넣으면
+// 이 검사는 꺼진 것과 같다." 그런데 그 목록이 **낡었는지는 아무도 안
+// 봤다.** 면제한 파일이 사라져도, 면제가 더는 필요 없어져도 항목은
+// 영구히 남고, 그 경로에 나중에 무엇이 생기든 통과한다.
+//
+// 실측 RED (main `220f8001`): `TradingPage.tsx`의 주문 경로를 다른
+// 문자열로 바꿔 면제가 쓸모없어진 상태에서도 원본 검사기는
+// `✅ … 사람이 누르는 주문 2곳(사유 기록됨)` · exit 0 이었다.
+//
+// 그래서 **면제가 지금도 필요한지** 값으로 확인한다. 필요 없어진 면제는
+// 미리 뚫어 둔 구멍이다.
+for (const [f, why] of Object.entries(MANUAL_ORDER_OK)) {
+  if (!existsSync(f)) {
+    err(`${f}\n     면제 목록에 있는데 파일이 없습니다 — 낡은 면제입니다`
+      + '\n     그 경로에 나중에 무엇이 생기든 이 검사를 통과합니다'
+      + `\n     사유: ${why}`);
+    continue;
+  }
+  let src = '';
+  try { src = readFileSync(f, 'utf8'); } catch {
+    err(`${f}\n     면제 목록에 있는데 읽지 못했습니다 — 통과로 넘기지 않습니다`);
+    continue;
+  }
+  if (rogueHits(src).length === 0) {
+    err(`${f}\n     면제가 더는 필요하지 않습니다 (타이머+주문이 같이 없습니다)`
+      + '\n     필요 없어진 면제는 미리 뚫어 둔 구멍입니다 — 목록에서 지우세요'
+      + `\n     사유: ${why}`);
+  }
+}
+
 if (bad === 0) {
-  console.log(`✅ 자동 엔진 ${AUTO_ENGINES.length}개 · 브라우저 주문 권한 0건`
-    + ` · 사람이 누르는 주문 ${Object.keys(MANUAL_ORDER_OK).length}곳(사유 기록됨)`);
+  console.log(`✅ 자동 엔진 ${enginesRead.length}개 읽음`
+    + (enginesMissing.length ? ` · 없는 파일 ${enginesMissing.length}개(${enginesMissing.join(', ')})` : '')
+    + ` · 브라우저 주문 권한 0건`
+    + ` · 훑은 화면 파일 ${scanned}개(${SCAN_GLOB})`
+    + ` · 사람이 누르는 주문 ${Object.keys(MANUAL_ORDER_OK).length}곳(전부 지금도 필요함)`);
 } else {
   console.error('');
   console.error('   사람이 누르는 주문과 타이머가 내는 주문은 다릅니다.');

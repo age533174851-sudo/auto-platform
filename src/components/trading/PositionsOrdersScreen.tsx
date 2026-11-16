@@ -1,19 +1,19 @@
 'use client';
 // src/components/trading/PositionsOrdersScreen.tsx
 //
-// **하단 '거래' 탭 — 새 주문을 여는 곳이 아니라 들고 있는 것을 다루는 곳이다.**
+// 하단 거래 탭: 포지션·주문 현황과 공용 모의 주문 화면으로 가는 입구.
 //
 // 왜 이 탭이 Markets가 아닌가
 // ───────────────────────────
 // 시장 탐색은 이미 '시장' 탭이 한다. 거래 탭까지 Markets로 보내면 같은
 // 목적지가 둘이 되고, 사용자는 어느 쪽이 무엇인지 배워야 한다.
 //
-// 새 주문은 **종목에서 시작한다**:
+// 다른 종목의 새 주문은 종목에서 시작한다:
 //
 //     시장 / 왓치리스트 / 검색 → 종목 상세 → 주문 화면
 //
-// 그래서 이 탭이 맡는 것은 그 다음이다 — 열린 포지션, 미체결 주문,
-// 주문·체결 내역.
+// BTC·ETH 바로가기도 같은 PaperOrderScreen을 연다. 별도 주문 엔진이나
+// 장부를 만들지 않는다.
 //
 // ★ 칸을 만들려고 값을 지어내지 않는다
 // ────────────────────────────────────
@@ -35,9 +35,12 @@ import { scopeForTarget } from '@/lib/trading/paperTarget';
 import { useInert } from '@/lib/ui/useInert';
 import { usePaperTarget } from '@/lib/trading/usePaperTarget';
 import { usePaperLedger } from '@/lib/trading/usePaperLedger';
+import { PaperOrderEntry } from './PaperOrderEntry';
+import type { TradeContext } from '@/lib/trading/tradeContext';
 
 export interface PositionsOrdersScreenProps {
   auth?: string;
+  onPaperOrder: (ctx: TradeContext) => void;
 }
 
 /** 출처가 없는 칸. **비어 있다고 적지 않는다 — 없다고 적는다** */
@@ -53,7 +56,7 @@ function Locked({ title, reason }: { title: string; reason: string }) {
   );
 }
 
-export function PositionsOrdersScreen({ auth }: PositionsOrdersScreenProps) {
+export function PositionsOrdersScreen({ auth, onPaperOrder }: PositionsOrdersScreenProps) {
   const [target] = usePaperTarget();
   // 주문 화면이 쓰는 **바로 그 장부**다. 여기서 따로 읽으면 같은 포지션이
   // 두 화면에서 다르게 보인다.
@@ -84,9 +87,11 @@ export function PositionsOrdersScreen({ auth }: PositionsOrdersScreenProps) {
           포지션 · 주문
         </h1>
         <p style={{ margin: 0, fontSize: FS.small, color: C.faint, lineHeight: 1.6 }}>
-          새로 사고팔려면 <b>시장</b>이나 <b>왓치리스트</b>에서 종목을 고르세요.
+          아래에서 모의 주문을 시작하거나 <b>시장</b>·<b>왓치리스트</b>에서 종목을 고르세요.
         </p>
       </header>
+
+      <PaperOrderEntry onOrder={onPaperOrder}/>
 
       {/* ── 열린 포지션 — 출처가 있다 ── */}
       <section data-testid="open-positions" style={{ display: 'grid', gap: 8 }}>

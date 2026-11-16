@@ -12,6 +12,7 @@ import assert from 'node:assert/strict';
 import {
   normalizeReviewThreads, normalizeChangesRequested,
   reviewFacts, headContainsBase, buildFacts, prDetail, gatherFacts, baseTip,
+  listOpenPulls,
 } from './lib/pr-facts.mjs';
 
 const ok = body => ({ ok: true, status: 200, body });
@@ -359,4 +360,70 @@ test('base tip 을 못 읽으면 headContainsBase 는 null이다 (통과가 아�
   const f = await gatherFacts({ api, graphql: null, repo: 'o/r', owner: 'o', name: 'r',
     number: 9, sleep: async () => {} });
   assert.equal(f.headContainsBase, null, '못 읽은 것은 통과가 아니다');
+});
+
+// ══════════ 열린 PR 목록 — 100개에서 끊기지 않는다 ══════════
+//
+// 2026-11-07에 열린 PR이 225개인데 두 도구가 **100개만** 보고 있었다.
+// `?state=open&per_page=100` 한 번으로 끝냈기 때문이다. 보고서는
+// "읽은 PR 100개"라고 적었고, 나머지 125개가 빠졌다는 말은 어디에도
+// 없었다. `auto-merge.mjs`의 30분 안전망도 같은 자리를 공유해서,
+// 첫 장 밖의 라벨 붙은 PR은 **영원히 합쳐지지 않는다.**
+// 못 본 것을 "없음"으로 적지 않는다.
+
+const pulls = n => Array.from({ length: n }, (_, i) => ({ number: i + 1 }));
+
+test('열린 PR 목록 — 100개를 넘으면 다음 장을 읽는다', async () => {
+  const seen = [];
+  const api = async path => {
+    seen.push(path);
+    const m = /[?&]page=(\d+)/.exec(path);
+    const page = m ? Number(m[1]) : 1;
+    if (page === 1) return ok(pulls(100));
+    if (page === 2) return ok(pulls(100));
+    if (page === 3) return ok(pulls(25));
+    return ok([]);
+  };
+  const r = await listOpenPulls({ api, repo: 'o/r' });
+  assert.equal(r.ok, true);
+  assert.equal(r.complete, true, '다 읽었으면 complete');
+  assert.equal(r.all.length, 225, `225개를 모두 읽어야 한다 — 받은 것 ${r.all.length}`);
+  assert.equal(seen.length, 3, '짧은 장에서 멈춘다');
+});
+
+test('열린 PR 목록 — 꽉 찬 장에서 멈추지 않는다 (100의 배수 함정)', async () => {
+  const api = async path => {
+    const m = /[?&]page=(\d+)/.exec(path);
+    const page = m ? Number(m[1]) : 1;
+    return ok(page <= 2 ? pulls(100) : []);
+  };
+  const r = await listOpenPulls({ api, repo: 'o/r' });
+  assert.equal(r.all.length, 200);
+  assert.equal(r.complete, true, '빈 장을 받으면 다 읽은 것이다');
+});
+
+test('열린 PR 목록 — 한 장이라도 못 읽으면 complete가 아니다 (부분을 전체로 적지 않는다)', async () => {
+  const api = async path => {
+    const m = /[?&]page=(\d+)/.exec(path);
+    const page = m ? Number(m[1]) : 1;
+    return page === 1 ? ok(pulls(100)) : fail(502);
+  };
+  const r = await listOpenPulls({ api, repo: 'o/r' });
+  assert.equal(r.complete, false, '못 읽은 장이 있으면 complete=false');
+  assert.equal(r.all.length, 100, '읽은 것은 그대로 돌려준다');
+  assert.equal(r.failedPage, 2, '어느 장에서 멈췄는지 적는다');
+});
+
+test('열린 PR 목록 — 장 수 상한에 닿으면 complete가 아니다', async () => {
+  const api = async () => ok(pulls(100));   // 끝나지 않는 저장소
+  const r = await listOpenPulls({ api, repo: 'o/r', maxPages: 3 });
+  assert.equal(r.complete, false, '상한에 닿은 것은 다 읽은 것이 아니다');
+  assert.equal(r.all.length, 300);
+});
+
+test('열린 PR 목록 — 배열이 아닌 응답을 0개로 읽지 않는다', async () => {
+  const api = async () => ok({ message: 'not an array' });
+  const r = await listOpenPulls({ api, repo: 'o/r' });
+  assert.equal(r.complete, false);
+  assert.equal(r.all.length, 0);
 });

@@ -210,6 +210,76 @@ function ExecutionTruthHero({ rows, readError, health }: {
   );
 }
 
+/**
+ * **이 예약들이 손절을 거래소에 걸 수 있는가.**
+ *
+ * 왜 첫 줄 바로 밑인가
+ * ────────────────────
+ * 진입 주문은 성공한다. 그 다음 손절을 거는 데 실패하면
+ * `protectionPolicy`의 기본값 `REQUIRED`가 **방금 연 포지션을 즉시
+ * 되돌린다**(orderExecutor.ts:85) — 포지션 크기가 허용손실 ÷ 손절거리로
+ * 역산된 값이라, 손절이 없으면 그 크기를 정당화할 근거가 사라지기
+ * 때문이다. 되돌리는 것 자체는 옳다.
+ *
+ * 틀린 것은 **그걸 주문을 내 보고 나서야 안다**는 것이다. 사용자 눈에는
+ * "자동매매가 매수매도를 안 한다"로 보이고, 실제로는 진입 수수료 +
+ * 청산 수수료 + 슬리피지만 나간다.
+ *
+ * 답은 수수료 없이 미리 알 수 있다(공개 `exchangeInfo` 조회). 지금까지
+ * 그 답은 거래소 연결 화면의 진단 버튼 뒤에 있었고, 실계좌에서는 아예
+ * 볼 수 없었다.
+ *
+ * ★ 이 띠는 아무것도 막지 않는다. 사실만 적는다.
+ */
+function ProtectiveOrderBand({ state }: { state: ProtectiveState }) {
+  if (state.kind === 'IDLE') return null;
+
+  const c = state.kind === 'CHECKING' ? T.muted
+    : state.code === 'UNSUPPORTED' ? T.red
+      : state.code === 'UNKNOWN' ? T.ylw
+        : T.grn;
+
+  return (
+    <div data-region="protectiveOrderSupport" data-code={state.kind === 'CHECKING' ? 'CHECKING' : state.code}
+      role="status"
+      style={{
+        background: A(c, '12'), border: `1px solid ${A(c, '45')}`,
+        borderLeft: `4px solid ${c}`, borderRadius: 12,
+        padding: '10px 14px', marginBottom: 12,
+      }}>
+      <div style={{ color: c, fontSize: 12, fontWeight: 800, overflowWrap: 'anywhere' }}>
+        {state.kind === 'CHECKING' ? '손절을 걸 수 있는지 확인 중…' : state.headline}
+      </div>
+      {state.kind === 'DONE' && state.detail && (
+        <div style={{ color: T.sub, fontSize: 10.5, marginTop: 3, lineHeight: 1.5, overflowWrap: 'anywhere' }}>
+          {state.detail}
+        </div>
+      )}
+      {/* 어느 심볼을 보고 한 말인지 적는다 — 안 적으면 거래소 전체에
+          대한 답처럼 읽힌다. */}
+      {state.kind === 'DONE' && state.symbols.length > 0 && (
+        <div style={{ color: T.muted, fontSize: 10, marginTop: 3, overflowWrap: 'anywhere' }}>
+          확인한 종목 {state.symbols.join(' · ')}
+        </div>
+      )}
+      {state.kind === 'DONE' && state.nextAction && (
+        <div style={{ color: T.muted, fontSize: 10, marginTop: 4 }}>→ {state.nextAction}</div>
+      )}
+      {state.kind === 'DONE' && state.code !== 'SUPPORTED' && (
+        <div style={{ color: T.muted, fontSize: 9.5, marginTop: 4 }}>
+          공개 조회입니다 — 주문을 내지 않았고 수수료도 들지 않았습니다. 이 값으로 주문을 막지는 않습니다
+        </div>
+      )}
+    </div>
+  );
+}
+
+type ProtectiveState =
+  | { kind: 'IDLE' }
+  | { kind: 'CHECKING' }
+  | { kind: 'DONE'; code: 'SUPPORTED' | 'UNSUPPORTED' | 'UNKNOWN' | 'NONE';
+      headline: string; detail: string; nextAction: string | null; symbols: string[] };
+
 function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav?: (tab: string) => void; currency?: string; onOpenAsset?: (a: any, dest?: string) => void; requireAuth?: (reason: string, action: () => void) => void } = {}) {
   // ── 3단계 정보 구조 ──
   //
@@ -318,6 +388,64 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
   },[]);
   /* 다시 읽는 것도 소유자가 한다. 여기서 rows만 갈아끼우면 health가 옛
      스냅샷으로 남아 첫 줄과 아래 점검이 다시 갈린다. */
+  /* ── 손절을 거래소에 걸 수 있는가 ──
+     켜져 있는 예약의 **그 종목들로** 물어본다. BTCUSDT만 보고
+     "이 거래소는 된다"고 적으면 SOL 예약에 대해 거짓이 된다. */
+  const [protective,setProtective]=useState<ProtectiveState>({kind:'IDLE'});
+  const protectiveKeyRef = useRef('');
+  useEffect(()=>{
+    const rows = Array.isArray(snap.rows) ? snap.rows : null;
+    if (rows === null) { setProtective({kind:'IDLE'}); protectiveKeyRef.current=''; return; }
+    const syms = Array.from(new Set(
+      rows.filter((r:any)=>r?.enabled===true)
+        .map((r:any)=>String(r?.symbol||'').trim().toUpperCase())
+        .filter(Boolean))).slice(0,8);
+    // 켜진 예약이 없으면 물어볼 것이 없다. 띠를 띄우지 않는다.
+    if (syms.length === 0) { setProtective({kind:'IDLE'}); protectiveKeyRef.current=''; return; }
+    const key = syms.join(',');
+    if (key === protectiveKeyRef.current) return;
+    protectiveKeyRef.current = key;
+    let alive = true;
+    setProtective({kind:'CHECKING'});
+    (async()=>{
+      try{
+        const auth = await probeAuthToken();
+        if(!auth){
+          if(alive) setProtective({kind:'DONE',code:'UNKNOWN',
+            headline:'손절을 걸 수 있는지 확인하지 못했습니다',
+            detail:'로그인 상태를 확인하지 못했습니다 — 지원하지 않는다는 뜻이 아닙니다',
+            nextAction:null,symbols:syms});
+          return;
+        }
+        const r = await fetch(`/api/venue/protective-order-support?symbols=${encodeURIComponent(key)}`,
+          {headers:{Authorization:auth},cache:'no-store'});
+        const j = await r.json().catch(()=>null);
+        if(!alive) return;
+        if(!r.ok || !j?.ok || !j?.summary){
+          // **못 읽은 것을 '된다'로 적지 않는다.**
+          setProtective({kind:'DONE',code:'UNKNOWN',
+            headline:'손절을 걸 수 있는지 확인하지 못했습니다',
+            detail:String(j?.message||j?.error||`HTTP ${r.status}`)+' — 지원하지 않는다는 뜻이 아닙니다',
+            nextAction:null,symbols:syms});
+          return;
+        }
+        const sum = j.summary;
+        setProtective({kind:'DONE',
+          code: sum.code,
+          headline: String(sum.headline||''),
+          detail: String(sum.worst?.detail||''),
+          nextAction: sum.worst?.nextAction ?? null,
+          symbols: Array.isArray(j.symbols)?j.symbols.map(String):syms});
+      }catch(e:any){
+        if(alive) setProtective({kind:'DONE',code:'UNKNOWN',
+          headline:'손절을 걸 수 있는지 확인하지 못했습니다',
+          detail:String(e?.message||e)+' — 지원하지 않는다는 뜻이 아닙니다',
+          nextAction:null,symbols:syms});
+      }
+    })();
+    return ()=>{ alive=false; };
+  },[snap.rows]);
+
   const reloadRef = useRef<null | (() => Promise<void>)>(null);
   const onReload = useCallback((fn: () => Promise<void>) => { reloadRef.current = fn; }, []);
   const schedRows = snap.rows;
@@ -455,6 +583,8 @@ function AutoPage({ onNav, currency = 'KRW', onOpenAsset, requireAuth }: { onNav
           예약 줄(enabled·mode·connectionState·runtime)을 그대로 넘기고
           그리기만 한다 — 여기서 다시 판단하면 주인이 둘이 된다. */}
       <ExecutionTruthHero rows={schedRows} readError={schedErr} health={snap.health} />
+
+      <ProtectiveOrderBand state={protective} />
 
       {/* **실제로 도는 자동매매**를 여기서 켜고 끈다.
           지금까지는 Supabase SQL 편집기에서 INSERT를 쳐야 했고, 그동안
