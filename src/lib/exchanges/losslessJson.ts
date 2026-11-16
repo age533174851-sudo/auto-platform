@@ -70,6 +70,26 @@ export function parseLossless<T = any>(text: string): T {
 }
 
 /**
+ * **거래소 거절 본문을 읽는다.** 못 읽으면 빈 객체다.
+ *
+ * `parseLossless`는 동기 함수다. 예전 오류 경로는
+ * `parseLossless(await r.text()).catch(() => ({}))`였는데, 반환값에
+ * `.catch`가 없어 거절 사유 대신 TypeError가 던져졌다 — -4046(이미 그
+ * 마진 타입) · -2013(주문 없음)처럼 **사유를 보고 판단하는 분기가 전부
+ * 죽어 있었다.**
+ *
+ * 빈 객체로 떨어지는 것은 **오류 경로에서만** 안전하다: 호출자는 어차피
+ * 던지고, 사유가 없으면 `HTTP <status>`를 적는다. 성공 본문에는 쓰지 않는다
+ * (`parseLossless`가 던지는 것이 맞다).
+ */
+export function parseErrorBody(text: string): any {
+  try {
+    const v = parseLossless<any>(text);
+    return v && typeof v === 'object' ? v : {};
+  } catch { return {}; }
+}
+
+/**
  * JSON 본문에서 **문자열 밖에 있는** 큰 정수 리터럴만 따옴표로 감싼다.
  *
  * 문자열 안(`"..."`)은 건드리지 않는다 — 식별자 text에 숫자가 들어 있고,

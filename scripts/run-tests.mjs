@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const root = process.cwd();
+execFileSync(process.execPath, ['--test', 'scripts/smoke-workflow-evidence.test.mjs'], { cwd: root, stdio: 'inherit' });
 // Offline ten-slot model is deliberately separate from live order execution.
 execFileSync(process.execPath, ['--test', 'scripts/ten-slot-offline.test.mjs'], { cwd: root, stdio: 'inherit' });
 execFileSync(process.execPath, ['--test', 'scripts/ten-slot-persistence-offline.test.mjs'], { cwd: root, stdio: 'inherit' });
@@ -16,6 +17,9 @@ execFileSync(process.execPath, ['--test', 'scripts/ten-slot-reconcile-evidence-o
 // 실제 PostgreSQL 원자성 검증. `TEN_SLOT_PG_URL`이 없으면 **건너뛴다고 말한다** —
 // 돌지 않은 것을 통과로 적지 않는다. 설정 방법은 그 파일 머리말에 있다.
 execFileSync(process.execPath, ['--test', 'scripts/ten-slot-pg.test.mjs'], { cwd: root, stdio: 'inherit' });
+// `scripts/check-undefined.mjs`의 판정. 그 검사기는 `ci.yml`의 명시 목록에
+// 없어서 저장소의 어느 워크플로도 부르지 않는다 — 판정만이라도 여기서 돈다.
+execFileSync(process.execPath, ['--test', 'scripts/check-undefined.test.mjs'], { cwd: root, stdio: 'inherit' });
 const dir = mkdtempSync(join(tmpdir(), 'traigo-test-'));
 cpSync(join(root, 'src'), join(dir, 'src'), { recursive: true });
 
@@ -144,6 +148,7 @@ import { runMigrationStatusTests } from './src/lib/system/migrationStatus.test';
 import { runWalletTruthTests } from './src/lib/portfolio/walletTruth.test';
 import { runWalletTruthViewTests } from './src/lib/portfolio/walletTruthView.test';
 import { runSmokePlanTests } from './src/lib/smoke/smokePlan.test';
+import { runExposureAttestationTests } from './src/lib/smoke/exposureAttestation.test';
 import { runSmokeRunTests } from './src/lib/smoke/smokeRun.test';
 import { runCancelRunTests } from './src/lib/smoke/cancelRun.test';
 import { runExitPolicyTests } from './src/lib/strategies/exitPolicy.test';
@@ -189,6 +194,7 @@ import { runSpotStrategyTests } from './src/lib/strategies/spotStrategies.test';
 import { runSpotOrderPlanTests } from './src/lib/strategies/spotOrderPlan.test';
 import { runCombinedTests } from './src/lib/strategies/combined.test';
 import { runBinanceHostTests } from './src/lib/exchanges/binanceHosts.test';
+import { runBinanceTpSlFallbackTests } from './src/lib/exchanges/binanceTpSlFallback.test';
 import { runAuthErrorTests } from './src/lib/exchanges/authError.test';
 import { runErrorTextTests } from './src/lib/http/errorText.test';
 import { runAutotradeHealthTests } from './src/lib/engine/autotradeHealth.test';
@@ -211,6 +217,8 @@ import { runPreTradeChecklistTests } from './src/lib/engine/preTradeChecklist.te
 import { runReconcileEvidenceTests } from './src/lib/engine/reconcileEvidence.test';
 import { runAutoMergeGateTests } from './src/lib/ci/autoMergeGate.test';
 import { runAutoRebaseTests } from './src/lib/ci/autoRebase.test';
+import { runEntryBarSignalsTests } from './src/lib/engine/entryBarSignals.test';
+import { runPaperRunnerStatusTests } from './src/lib/engine/paperRunnerStatus.test';
 import { runDeployDispatchTests } from './src/lib/ci/deployDispatch.test';
 import { runExecutorHealthTests } from './src/lib/jobs/executorHealth.test';
 import { runManualPlanTests } from './src/lib/engine/manualPlan.test';
@@ -224,6 +232,8 @@ import { runRichTextTests } from './src/lib/ui/richText.test';
 import { runTokensTests } from './src/lib/ui/tokens.test';
 import { runTradingLayoutTests } from './src/lib/ui/tradingLayout.test';
 import { runAutoCockpitTests } from './src/lib/ui/autoCockpit.test';
+import { runPaperMultiBotTests } from './src/lib/engine/paperMultiBot.test';
+import { runProtectiveOrderSupportTests } from './src/lib/ui/protectiveOrderSupport.test';
 import { runExecutionProfileTests } from './src/lib/execution/profile.test';
 import { runDedicated100xTests } from './src/lib/execution/dedicated100x.test';
 import { runScalpSignalTests } from './src/lib/strategies/scalpSignal.test';
@@ -239,6 +249,8 @@ import { runAutotradeTimingTests } from './src/lib/autotrade/nextRun.test';
 import { runEntryWindowDueTests } from './src/lib/autotrade/entryWindowDue.test';
 import { runForcedEntryWindowWakeTests } from './src/lib/autotrade/forcedEntryWindowWake.test';
 import { runEvaluationLoopTests } from './src/lib/autotrade/evaluationLoop.test';
+import { runRunSummaryTests } from './src/lib/autotrade/runSummary.test';
+import { runRunnerStaleConnectionTests } from './src/test/integration/runnerStaleConnectionIntegration.test';
 import { runSchedulePollTests } from './src/lib/autotrade/schedulePoll.test';
 import { runRunOutcomeTests } from './src/lib/autotrade/runOutcome.test';
 import { runFirstEvalRaceTests } from './src/lib/autotrade/firstEvalRace.test';
@@ -351,6 +363,7 @@ import { runTradeModeTests } from './src/lib/markets/tradeMode.test';
 import { runPaperPlanTests } from './src/lib/engine/paperPlan.test';
 import { runDailyLossTests } from './src/lib/risk/dailyLoss.test';
 import { runRegimeGateTests } from './src/lib/risk/regimeGate.test';
+import { runRefreshStateTests } from './src/lib/ui/refreshState.test';
 import { runTrailPlanTests } from './src/lib/engine/trailPlan.test';
 import { runPaperRunnerTests } from './src/lib/engine/paperRunner.test';
 import { runExitRulesTests } from './src/lib/engine/exitRules.test';
@@ -384,6 +397,7 @@ import { runContractSpecTests } from './src/lib/markets/contractSpec.test';
 import { runQuantizeTests } from './src/lib/kernel/quantize.test';
 import { runDisplayScaleTests } from './src/lib/ui/displayScale.test';
 import { runStatusReportTests } from './src/lib/system/statusReport.test';
+import { runWorkerCoverageTests } from './src/lib/system/workerCoverage.test';
 import { runPositionParseTests } from './src/lib/signals/positionParse.test';
 import { runTraderScoreTests } from './src/lib/signals/traderScore.test';
 import { runConsensusSignalTests } from './src/lib/signals/consensus.test';
@@ -399,9 +413,9 @@ import { summary, flushAsync } from './src/test/harness';
 console.log('════════ TRAIGO 코어 유닛 테스트 ════════');
 runPnlTests(); runBacktestTests(); runRiskManagerTests(); runExitPlanTests(); runPaperDispatchTests(); runPaperOpenAtomicTests(); runPaperEventTimeTests(); runPaperChallengeSweepTests(); runPaperCapacityTests(); runPaperExitSweepTests(); runPaperExitSweepMoreTests(); runExcursionTests(); runPositionGuardTests(); runStateReconcileTests(); runOrderLifecycleTests(); runUnknownResolverTests(); runDataQualityTests(); runOperatingModeTests();
 runEntry100xTests(); runMaxOpenPositionsGateTests(); runOrderFillFactsTests(); runLedgerFillQtyTests(); runReconcileLedgerStatusTests(); runHoldingEvidenceTests(); runFoundOrderLedgerTests(); runProvenFillTests(); runOtherVenueLedgerTests(); runCoinMFillTests(); runFailureRecoveryTests(); runCredentialExposureTests(); runMarketTypeTests(); runWalletTests(); runCoinMTests(); runCostBasisTests(); runLedgerTests(); runSpotStrategyTests(); runSpotOrderPlanTests(); runCombinedTests(); runBinanceHostTests(); runAuthErrorTests(); runErrorTextTests(); runAutotradeHealthTests(); runOverlayStackTests(); runThemeTests(); runPositionViewTests(); runDisplayTests(); runStatusTests(); runPaperRunnerModeTests(); runDueDiagViewTests(); runInventoryTests(); runPracticeEnvTests();
-runOrderViewTests(); runNewsSchemaTests(); runAnalyzeOneTests(); runCollectTests(); runEnrichPlanTests(); runConsensusTests(); runPricingTests(); runCalendarTests(); runRetentionTests(); runAdminGateTests(); runCommandTests(); runKeymapTests(); runPreTradeChecklistTests(); runReconcileEvidenceTests(); runAutoMergeGateTests(); runAutoRebaseTests();
-runDeployDispatchTests(); runExecutorHealthTests(); runManualPlanTests(); runCloseQtyTests(); runLosslessJsonTests(); runGatePlanTests();
-runFuturesExecTests(); runPromotionMapTests(); runTradeModeTests(); runPaperPlanTests(); runDailyLossTests(); runRegimeGateTests(); runTrailPlanTests(); runPaperRunnerTests(); runAllocationTests(); runStatsTests(); runRoutingTests(); runGateSpotPlanTests(); runLossStreakTests(); runTradeVetoTests(); runCalibrationTests(); runRecordPredictionTests(); runSubAccountTests(); runExitRulesTests(); runSafetyLogTests(); runFredTests(); runEventGuardTests(); runStopVerifyTests();
+runOrderViewTests(); runNewsSchemaTests(); runAnalyzeOneTests(); runCollectTests(); runEnrichPlanTests(); runConsensusTests(); runPricingTests(); runCalendarTests(); runRetentionTests(); runAdminGateTests(); runCommandTests(); runKeymapTests(); runPreTradeChecklistTests(); runReconcileEvidenceTests(); runAutoMergeGateTests(); runAutoRebaseTests(); runEntryBarSignalsTests(); runPaperRunnerStatusTests();
+runDeployDispatchTests(); runExecutorHealthTests(); runManualPlanTests(); runCloseQtyTests(); runLosslessJsonTests(); runGatePlanTests(); runBinanceTpSlFallbackTests();
+runFuturesExecTests(); runPromotionMapTests(); runTradeModeTests(); runPaperPlanTests(); runDailyLossTests(); runRegimeGateTests(); runRefreshStateTests(); runTrailPlanTests(); runPaperRunnerTests(); runAllocationTests(); runStatsTests(); runRoutingTests(); runGateSpotPlanTests(); runLossStreakTests(); runTradeVetoTests(); runCalibrationTests(); runRecordPredictionTests(); runSubAccountTests(); runExitRulesTests(); runSafetyLogTests(); runFredTests(); runEventGuardTests(); runStopVerifyTests();
 runManualOverrideTests();
 runWebhookAuthTests();
 runShortGuardTests();
@@ -410,12 +424,15 @@ runTradingCapabilityTests(); runCheckOverrideTests(); runMarketHoursTests();
 runFuturesHoursTests();
 runProxyAssetTests();
 runTrendTests(); runKisCoreTests(); runSpreadGuardTests(); runInstrumentTests();
-runContractSpecTests(); runQuantizeTests(); runDisplayScaleTests(); runStatusReportTests(); runPositionParseTests(); runTraderScoreTests(); runConsensusSignalTests(); runWedomDisciplineTests(); runYoutubeLiveTests(); runCreatorEdgeTests();
+runContractSpecTests(); runQuantizeTests(); runDisplayScaleTests(); runStatusReportTests(); runWorkerCoverageTests(); runPositionParseTests(); runTraderScoreTests(); runConsensusSignalTests(); runWedomDisciplineTests(); runYoutubeLiveTests(); runCreatorEdgeTests();
 runCreatorLedgerTests();
 runCreatorIntakeTests();
 runSignalPathTests(); runVenueBarsTests(); runLoginDiagnosticTests(); runPairTests(); runTpslPlanTests(); runPreferencesTests(); runPanelPrefsTests(); runGlobalStopTests(); runNewsFeedTests(); runRichTextTests(); runTokensTests(); runTradingLayoutTests(); runAutoCockpitTests(); runExecutionProfileTests(); runDedicated100xTests(); runScalpSignalTests(); runRiskContextTests(); runConnectionTests(); runScalpRunTests(); runScheduleExitTests(); runOAuthProvidersTests(); runSignupOutcomeTests(); runProfileSimTests();
 runMonteCarloTests(); runRoundLedgerTests(); runIdempotencyTests(); runPendingReconcileTests(); runAutotradeTimingTests(); runEvaluationLoopTests(); runSchedulePollTests(); runScheduleToggleTests(); runPickConnectionTests(); runOrderCycleTests(); runLeverageSyncTests(); runMismatchRecoveryTests(); runTabGroupsTests(); runOrderSizingTests(); runOwnerBootstrapTests(); runConvictionTests(); runSleeveLedgerTests(); runOrderIntentTests(); runProtectionRepairTests(); runPriceBasisTests(); runContextSwitchTests(); runMobileSheetTests(); runSleeveStoreTests(); runTradingHistoryTests(); runFillPollTests(); runOrderProgressTests(); runQuantityInputTests(); runOrderCurrencyTests(); runOrderPreviewTests(); runOrderTypesTests(); runVenueQuoteTests(); runQuantityIntentTests(); runCostAnalysisTests(); runEdgeSweepTests(); runAutoOverviewTests(); runStrategyCardTests(); runPortfolioReturnsTests(); runAttributionTests(); runLeverageLadderTests(); runSchedulePlanTests(); runStrategyRegistryTests(); runCheckFlagTests(); runOriginalV1Tests(); runCloseEvidenceTests(); runPositionLifecycleTests(); runProtectionLedgerTests(); runFlatCleanupTests(); runTradeIdentityTests(); runLedgerEventTests(); runAutoRuntimeViewTests(); runFingerprintTests(); runServerFetchTests(); runMigrationPlanTests(); runPaperScopeTests(); runMigrationAdoptionTests(); runPaperChallengeTests(); runPaperChallengeScopeTests(); runPaperChallengeApiTests(); runPaperPriceSourceTests(); runPaperTargetTests(); runPaperCapabilityTests(); runLegacyLedgerTests(); runOrderBookTests(); runChallengeDisplayTests(); runPositionSizingTests(); runGameMoneyTests(); runCandleSeriesTests(); runIndicatorsTests(); runStreamEndpointTests(); runMarketStatsTests(); runPaperAvailableTests(); runStopPresetTests(); runChartLoadStateTests(); runSubmitGateTests(); runTradeIntentTests(); runPositionScopeTests(); runMarketDataContractTests(); runRankingTests(); runInstrumentFieldTests(); runInstrumentRouteTests(); runMarketInstrumentTests(); runSizeInputTests(); runCtaVerdictTests(); runPaperOrderReviewTests(); runPaperCloseReviewTests(); runPaperDepositTests(); runPaperSpotHoldingsTests(); runTradeContextTests(); runSellPlanTests(); runProductRegistryTests(); runVenueSpecTests(); runSpotPrecisionTests(); runMigrationStatusTests(); runWalletTruthTests(); runSmokePlanTests(); runSmokeRunTests(); runCancelRunTests();
 runExitPolicyTests(); runRunRequestTests(); runBacktestVerdictTests(); runAiResultSourceTests(); runReconcilePlanTests(); runPersistentRuntimeTests(); runWorkerPlanTests(); runWorkerIdentityTests(); runRuntimeHealthTests(); runSchedulerReportTests(); runDataLocationTests(); runWalletScreenTests(); runStrategySyncTests(); runKillSwitchGateTests(); runEquityCurveTests(); runWalletDetailTests(); runWalletOverviewTests(); runPerformanceTests(); runExitMonitorTests(); runExitMonitorScheduleTests(); runExitMonitorLeaseTests(); runOpsCommandTests(); runOpsQueueTests(); runOpsViewTests(); runSelfHealTests(); runAutoVerifyTests(); runSecretParityTests(); runIncomeIngestTests(); runStrategyConflictGateTests(); runLeverageMathTests(); runLiveTradingGateTests(); runLadderGateTests(); runEdgeTypesTests(); runWalletTruthViewTests(); runSnapshotBucketTests(); runFxRateTests(); runCoverageSetTests(); runExecutionRuntimeTests(); runRecoveryCenterTests(); runSecretSyncTests(); runWorkerAliveTests(); runHeartbeatVerifyTests(); runExecutorEvidenceTests(); runVercelEnvTests(); runKillSwitchTruthTests(); runKillTargetsTests(); runKillClosePlanTests(); runKillCloseRunTests(); runKillAlertTests(); runManagedPositionTests(); runLifecycleActionTests(); runMutationGuardTests(); runEntryExitSafetyTests(); runLifecycleRowsTests(); runPostEntryRiskTests(); runPositionRiskProvenanceTests(); runRiskObservationStoreTests(); runRiskObservationEligibilityTests(); runEscapeTelemetryTests(); runExitMonitorWakeTests(); runMigrationLineageTests(); runObservationAclTests(); runTestnetReadinessTests(); runTestnetDiagnoseVerdictTests(); runConnectionIdentityTests(); runOrderExecutorIdentityTests(); runBracketCacheTests(); runExecutionCostTests(); runMarketFreshnessTests(); runExitAuthorityTests(); runExitAuthorityRunTests(); runHoldExtensionTests(); runLiquidationDistanceTests(); runExitCoverageTests(); runExitRunOutcomeTests(); runExitLifecycleTests(); runStopMoveTests(); runScheduleCancelTests(); runDeploymentCheckTests(); runMigrationWaitTests(); runVercelRedeployTests(); runRunOutcomeTests(); runFirstEvalRaceTests(); runTradeVenueTests(); runHighWaterTests(); runOrphanSweepTests(); runPaperAccountTests(); runPaperWiringTests(); runPaperOrderTelemetryTests(); runPaperUnifyTests(); runIngestPipelineTests(); runScheduledExitRunnerTests(); runScalpSignalDiagnosisTests(); runRunStrategyDiagnosisTests(); runBarProvenanceTests(); runEntryWindowDueTests(); runForcedEntryWindowWakeTests(); runDailyForcedEntryTests();
+runSignalPathTests(); runVenueBarsTests(); runLoginDiagnosticTests(); runPairTests(); runTpslPlanTests(); runPreferencesTests(); runPanelPrefsTests(); runGlobalStopTests(); runNewsFeedTests(); runRichTextTests(); runTokensTests(); runTradingLayoutTests(); runAutoCockpitTests(); runPaperMultiBotTests(); runProtectiveOrderSupportTests(); runExecutionProfileTests(); runDedicated100xTests(); runScalpSignalTests(); runRiskContextTests(); runConnectionTests(); runScalpRunTests(); runScheduleExitTests(); runOAuthProvidersTests(); runSignupOutcomeTests(); runProfileSimTests();
+runMonteCarloTests(); runRoundLedgerTests(); runIdempotencyTests(); runPendingReconcileTests(); runAutotradeTimingTests(); runEvaluationLoopTests(); runRunSummaryTests(); runSchedulePollTests(); runScheduleToggleTests(); runPickConnectionTests(); runOrderCycleTests(); runLeverageSyncTests(); runMismatchRecoveryTests(); runTabGroupsTests(); runOrderSizingTests(); runOwnerBootstrapTests(); runConvictionTests(); runSleeveLedgerTests(); runOrderIntentTests(); runProtectionRepairTests(); runPriceBasisTests(); runContextSwitchTests(); runMobileSheetTests(); runSleeveStoreTests(); runTradingHistoryTests(); runFillPollTests(); runOrderProgressTests(); runQuantityInputTests(); runOrderCurrencyTests(); runOrderPreviewTests(); runOrderTypesTests(); runVenueQuoteTests(); runQuantityIntentTests(); runCostAnalysisTests(); runEdgeSweepTests(); runAutoOverviewTests(); runStrategyCardTests(); runPortfolioReturnsTests(); runAttributionTests(); runLeverageLadderTests(); runSchedulePlanTests(); runStrategyRegistryTests(); runCheckFlagTests(); runOriginalV1Tests(); runCloseEvidenceTests(); runPositionLifecycleTests(); runProtectionLedgerTests(); runFlatCleanupTests(); runTradeIdentityTests(); runLedgerEventTests(); runAutoRuntimeViewTests(); runFingerprintTests(); runServerFetchTests(); runMigrationPlanTests(); runPaperScopeTests(); runMigrationAdoptionTests(); runPaperChallengeTests(); runPaperChallengeScopeTests(); runPaperChallengeApiTests(); runPaperPriceSourceTests(); runPaperTargetTests(); runPaperCapabilityTests(); runLegacyLedgerTests(); runOrderBookTests(); runChallengeDisplayTests(); runPositionSizingTests(); runGameMoneyTests(); runCandleSeriesTests(); runIndicatorsTests(); runStreamEndpointTests(); runMarketStatsTests(); runPaperAvailableTests(); runStopPresetTests(); runChartLoadStateTests(); runSubmitGateTests(); runTradeIntentTests(); runPositionScopeTests(); runMarketDataContractTests(); runRankingTests(); runInstrumentFieldTests(); runInstrumentRouteTests(); runMarketInstrumentTests(); runSizeInputTests(); runCtaVerdictTests(); runPaperOrderReviewTests(); runPaperCloseReviewTests(); runPaperDepositTests(); runPaperSpotHoldingsTests(); runTradeContextTests(); runSellPlanTests(); runProductRegistryTests(); runVenueSpecTests(); runSpotPrecisionTests(); runMigrationStatusTests(); runWalletTruthTests(); runSmokePlanTests(); runExposureAttestationTests(); runSmokeRunTests(); runCancelRunTests();
+runExitPolicyTests(); runRunRequestTests(); runBacktestVerdictTests(); runAiResultSourceTests(); runReconcilePlanTests(); runPersistentRuntimeTests(); runWorkerPlanTests(); runWorkerIdentityTests(); runRuntimeHealthTests(); runSchedulerReportTests(); runDataLocationTests(); runWalletScreenTests(); runStrategySyncTests(); runKillSwitchGateTests(); runEquityCurveTests(); runWalletDetailTests(); runWalletOverviewTests(); runPerformanceTests(); runExitMonitorTests(); runExitMonitorScheduleTests(); runExitMonitorLeaseTests(); runOpsCommandTests(); runOpsQueueTests(); runOpsViewTests(); runSelfHealTests(); runAutoVerifyTests(); runSecretParityTests(); runIncomeIngestTests(); runStrategyConflictGateTests(); runLeverageMathTests(); runLiveTradingGateTests(); runLadderGateTests(); runEdgeTypesTests(); runWalletTruthViewTests(); runSnapshotBucketTests(); runFxRateTests(); runCoverageSetTests(); runExecutionRuntimeTests(); runRecoveryCenterTests(); runSecretSyncTests(); runWorkerAliveTests(); runHeartbeatVerifyTests(); runExecutorEvidenceTests(); runVercelEnvTests(); runKillSwitchTruthTests(); runKillTargetsTests(); runKillClosePlanTests(); runKillCloseRunTests(); runKillAlertTests(); runManagedPositionTests(); runLifecycleActionTests(); runMutationGuardTests(); runEntryExitSafetyTests(); runLifecycleRowsTests(); runPostEntryRiskTests(); runPositionRiskProvenanceTests(); runRiskObservationStoreTests(); runRiskObservationEligibilityTests(); runEscapeTelemetryTests(); runExitMonitorWakeTests(); runMigrationLineageTests(); runObservationAclTests(); runTestnetReadinessTests(); runTestnetDiagnoseVerdictTests(); runConnectionIdentityTests(); runOrderExecutorIdentityTests(); runBracketCacheTests(); runExecutionCostTests(); runMarketFreshnessTests(); runExitAuthorityTests(); runExitAuthorityRunTests(); runHoldExtensionTests(); runLiquidationDistanceTests(); runExitCoverageTests(); runExitRunOutcomeTests(); runExitLifecycleTests(); runStopMoveTests(); runScheduleCancelTests(); runDeploymentCheckTests(); runMigrationWaitTests(); runVercelRedeployTests(); runRunOutcomeTests(); runFirstEvalRaceTests(); runTradeVenueTests(); runHighWaterTests(); runOrphanSweepTests(); runPaperAccountTests(); runPaperWiringTests(); runPaperOrderTelemetryTests(); runPaperUnifyTests(); runIngestPipelineTests(); runScheduledExitRunnerTests(); runScalpSignalDiagnosisTests(); runRunStrategyDiagnosisTests(); runEntryWindowDueTests(); runForcedEntryWindowWakeTests(); runDailyForcedEntryTests();
 // 비동기 테스트가 끝나기 전에 집계하면 실패가 통과로 잡힌다.
 // CommonJS로 컴파일되므로 최상위 await을 못 쓴다 — 즉시 실행 함수로 감싼다.
 (async () => {
@@ -441,6 +458,7 @@ runExitPolicyTests(); runRunRequestTests(); runBacktestVerdictTests(); runAiResu
   await runPrecisionMatrixTests();
   await runSmokeStartRouteTests();
   await runForcedEntryRouteTests();
+  await runRunnerStaleConnectionTests();
   await runHoldExtensionIntegrationTests();
   await runKillCloseIntegrationTests();
   await flushAsync();
