@@ -48,7 +48,9 @@ import { A } from '@/lib/theme/colors';
 import { strategyRunRequest } from '@/lib/strategies/runRequest';
 import { LEGACY_STRATEGY_ID } from '@/lib/strategies/registry';
 import SmokeTestPanel from './SmokeTestPanel';
+import SmokeExposureRecovery from './SmokeExposureRecovery';
 import { MIN_CONTROL_TARGET } from '@/lib/ui/panelPrefs';
+import { dueDiagView } from '@/lib/ui/dueDiagView';
 
 /**
  * @param onSnapshot 이 화면이 읽은 **그 스냅샷**을 위로 올린다.
@@ -763,6 +765,46 @@ export default function AutotradeControl({ onSnapshot, onReload }: {
     finally { setBusy(false); }
   };
 
+  // ── 취소된 줄에 길을 준다 ──
+  //
+  // 사용자가 그대로 말했다: "취소됨 할거면 다시 킬수 있게 만들어 놓든가
+  // ... 내역 삭제할건 하고 내비두면 다시 킬수 있게 만들어놔".
+  // 안내만 하고 길을 안 주면 쌓이기만 한다.
+  const restoreCancelled = async (row: any) => {
+    setBusy(true); setMsg(null);
+    try {
+      const r = await fetch('/api/autotrade/schedule', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: auth },
+        body: JSON.stringify({ id: row.id, action: 'restore' }),
+      });
+      const j = await r.json().catch(() => null);
+      setMsg({ ok: !!j?.ok, text: j?.message || toggleFailureNote(r.status, j) });
+      if (j?.ok) await load();
+    } catch (e: any) { setMsg({ ok: false, text: `되살리기 실패 (${e?.message || e})` }); }
+    finally { setBusy(false); }
+  };
+
+  // **되돌릴 수 없다.** 그래서 묻는다 — 그리고 무엇을 지우는지 적는다.
+  const purgeCancelled = async (row: any) => {
+    const when = row?.cancelled_at
+      ? new Date(row.cancelled_at).toLocaleString('ko-KR')
+      : '취소 시각 미기록';
+    if (!window.confirm(
+      `${row.symbol} (${row.mode}) · ${when}\n\n`
+      + '이 취소 기록을 영구히 지웁니다. 되돌릴 수 없습니다.\n'
+      + '체결·장부 기록은 다른 곳에 있어 사라지지 않습니다.')) return;
+    setBusy(true); setMsg(null);
+    try {
+      const r = await fetch(`/api/autotrade/schedule?id=${encodeURIComponent(row.id)}&purge=1`,
+        { method: 'DELETE', headers: { Authorization: auth } });
+      const j = await r.json().catch(() => null);
+      setMsg({ ok: !!j?.ok, text: j?.message || toggleFailureNote(r.status, j) });
+      if (j?.ok) await load();
+    } catch (e: any) { setMsg({ ok: false, text: `삭제 실패 (${e?.message || e})` }); }
+    finally { setBusy(false); }
+  };
+
   // ── '첫 점검 중'은 이제 저장 요청 중이라는 뜻이다 ──
   //
   // 예전에는 별도 단계(`phase === 'FIRST_RUN'`)가 있었다. 화면이 저장
@@ -1200,6 +1242,35 @@ export default function AutotradeControl({ onSnapshot, onReload }: {
                     자동매매가 자기 돈을 지키고 있다고 믿는다.
                     판정은 서버(evaluationLoop)가 한다. 화면이 다시 판단하면
                     규칙이 두 곳이 되고, 그때 한쪽만 고쳐진다. */}
+                {/* ── 왜 지금 안 도는가 ──
+                    `runtime`(위)은 `dueCheck`를 보지 않는다. 그래서 여기에
+                    `WATCHING`이 떠 있는 동안 실행기의 틱은 매번 `WAITING`으로
+                    돌아설 수 있다 — 2026-11-02~05 틱 12회차가 전부 그랬고
+                    그 사실은 워크플로 로그에만 있었다.
+                    표시 규칙은 `lib/ui/dueDiagView`가 정한다. 여기서 삼항으로
+                    흩어 두면 시험할 수 없고, 시험할 수 없으면 "못 읽은 값을
+                    0으로 적는" 고장이 조용히 들어온다. */}
+                {(() => {
+                  const dv = dueDiagView((s as any).dueDiag);
+                  return (
+                    <div style={{ marginTop: 3, fontSize: 10, lineHeight: 1.6, color: T.muted }}>
+                      <div>
+                        간격{' '}
+                        <span style={{ color: dv.intervalDefaulted ? T.ylw : T.sub, fontWeight: dv.intervalDefaulted ? 800 : 400 }}>
+                          {dv.intervalText}
+                        </span>
+                      </div>
+                      <div>마지막 평가 <span style={{ color: T.sub }}>{dv.lastText}</span></div>
+                      <div>다음 평가 <span style={{ color: T.sub }}>{dv.nextText}</span></div>
+                      <div style={{ overflowWrap: 'anywhere' }}>
+                        판정{' '}
+                        {dv.code ? <span style={{ color: T.sub, fontWeight: 700 }}>{dv.code}</span> : null}
+                        {dv.code ? ' · ' : ''}
+                        <span style={{ color: T.sub }}>{dv.reasonText}</span>
+                      </div>
+                    </div>
+                  );
+                })()}
                 {s.runtime && (
                   <div style={{ marginTop: 3, fontSize: 10, lineHeight: 1.5 }}>
                     <span style={{
@@ -1373,15 +1444,38 @@ export default function AutotradeControl({ onSnapshot, onReload }: {
                         : '취소 시각을 기록하지 못했습니다'}
                     </div>
                   </div>
-                  <span style={{
-                    fontSize: 9, fontWeight: 800, color: T.muted,
-                    border: `1px solid ${T.border}`, borderRadius: 5, padding: '3px 7px',
-                  }}>취소됨</span>
+                  <div style={{ display: 'flex', gap: 5, alignItems: 'center', flexShrink: 0 }}>
+                    <button
+                      onClick={() => restoreCancelled(s)}
+                      disabled={busy}
+                      style={{
+                        minHeight: MIN_CONTROL_TARGET, fontSize: 9.5, fontWeight: 800,
+                        padding: '5px 8px', borderRadius: 6,
+                        border: `1px solid ${A(T.acl, '55')}`, background: 'transparent',
+                        color: T.acl, cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.5 : 1,
+                      }}
+                    >되살리기</button>
+                    <button
+                      onClick={() => purgeCancelled(s)}
+                      disabled={busy}
+                      style={{
+                        minHeight: MIN_CONTROL_TARGET, fontSize: 9.5, fontWeight: 800,
+                        padding: '5px 8px', borderRadius: 6,
+                        border: `1px solid ${T.border}`, background: 'transparent',
+                        color: T.muted, cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.5 : 1,
+                      }}
+                    >기록 삭제</button>
+                  </div>
                 </div>
               ))}
               {cancelOpen && (
                 <div style={{ color: T.muted, fontSize: 9, marginTop: 6, lineHeight: 1.5 }}>
-                  같은 종목으로 예약을 다시 만들면 이 줄이 되살아납니다.
+                  {/* **예전 문장은 조건부로만 참이었다.** `UNIQUE (user_id, symbol)`이
+                      실제로 걸려 있어야 같은 종목 재등록이 이 줄을 되살린다. 그렇지
+                      않은 DB에서는 새 줄만 생기고 이 줄은 영영 남는다. 그래서
+                      추측하지 않고 **버튼이 하는 일**만 적는다. */}
+                  되살리기는 <b>꺼진 상태</b>로 목록에 되돌립니다 — 켜는 것은 스위치로 따로 합니다.
+                  기록 삭제는 되돌릴 수 없습니다(체결·장부 기록은 다른 곳에 있어 사라지지 않습니다).
                 </div>
               )}
             </div>
@@ -1396,6 +1490,10 @@ export default function AutotradeControl({ onSnapshot, onReload }: {
 
           기능은 그대로 두고 **여는 방식만** 바꾼다. 서버로 나가는 값도,
           저장 의미도 건드리지 않는다. */}
+        {conns.some((c: any) => String(c.id) === String(connId)
+          && c.exchange_id === 'binance' && c.is_testnet === true)
+          && <SmokeExposureRecovery key={connId} auth={auth} connectionId={connId} />}
+
       <button onClick={() => setCreateOpen(v => !v)}
         aria-expanded={createOpen}
         style={{

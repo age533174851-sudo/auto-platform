@@ -12,6 +12,80 @@
 // 통과시킨 적이 세 번 있는데 전부 "글자가 남아 있어서"였다 — 조건을
 // `if (false)`로 바꿔도 문자열은 그대로였다.
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
+import ts from 'typescript';
+
+/**
+ * `<InstrumentDetail onOrder={…}>` 핸들러가 **그 자리에서** 문맥을 읽고,
+ * 못 읽었으면 빠져나가는가.
+ *
+ * 글자를 세지 않는다. 같은 이름의 호출이 파일 다른 곳에 있어도 여기서는
+ * 통과시키지 않는다 — MUT-63이 그 틈으로 빠져나갔다.
+ *
+ * 둘 다 본다:
+ *   ① `onOrder` 핸들러 안에 `readTradeContext(...)` 호출이 있다
+ *   ② 그 결과를 담은 이름을 **부정으로 검사**한다 (`if (!ctx)`)
+ *
+ * ②가 없으면 읽어 놓고 안 쓰는 것이라 ①만으로는 모자란다.
+ */
+function orderHandlerGuardsContext(src) {
+  let sf;
+  try {
+    sf = ts.createSourceFile('page.tsx', src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  } catch {
+    return false;                       // 못 읽은 것을 통과로 적지 않는다
+  }
+
+  /** 이 노드 아래에서 `readTradeContext(...)`의 결과가 담긴 이름들 */
+  const readNames = (node) => {
+    const names = [];
+    const walk = (n) => {
+      if (ts.isVariableDeclaration(n) && n.initializer
+          && ts.isCallExpression(n.initializer)
+          && ts.isIdentifier(n.initializer.expression)
+          && n.initializer.expression.text === 'readTradeContext'
+          && ts.isIdentifier(n.name)) {
+        names.push(n.name.text);
+      }
+      ts.forEachChild(n, walk);
+    };
+    walk(node);
+    return names;
+  };
+
+  /** 이 노드 아래에서 `name`을 부정으로 검사하는가 (`!name`) */
+  const negated = (node, name) => {
+    let hit = false;
+    const walk = (n) => {
+      if (hit) return;
+      if (ts.isPrefixUnaryExpression(n)
+          && n.operator === ts.SyntaxKind.ExclamationToken
+          && ts.isIdentifier(n.operand) && n.operand.text === name) {
+        hit = true;
+        return;
+      }
+      ts.forEachChild(n, walk);
+    };
+    walk(node);
+    return hit;
+  };
+
+  let ok = false;
+  const visit = (node) => {
+    if (ok) return;
+    if (ts.isJsxAttribute(node)
+        && node.name && ts.isIdentifier(node.name) && node.name.text === 'onOrder'
+        && node.initializer && ts.isJsxExpression(node.initializer)
+        && node.initializer.expression) {
+      const body = node.initializer.expression;
+      for (const n of readNames(body)) {
+        if (negated(body, n)) { ok = true; break; }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(sf, visit);
+  return ok;
+}
 
 const MIG   = 'supabase/migrations/088_paper_spot_holdings.sql';
 const STORE = 'src/lib/engine/paperStore.ts';
@@ -317,6 +391,12 @@ function body(name) {
   }
   if (!/status !== 'SOLD' && status !== 'REPLAYED'/.test(sellr)) {
     fail(`${SELLR}: 모르는 결과를 성공으로 흘려보냅니다`);
+  }
+  // 재시도는 처음 손익을 돌려준다 — 체결가도 처음 것이어야 한다.
+  // 방금 읽은 시세를 바로 실으면 "처음 손익 + 지금 시세"가 섞인다.
+  if (/exitPrice:\s*px\.price/.test(sellr) || !/sellReceiptPrice\(/.test(sellr)) {
+    fail(`${SELLR}: 응답 체결가를 sellReceiptPrice로 고르지 않습니다 — `
+       + 'REPLAYED에 지금 시세를 처음 체결가처럼 싣습니다');
   }
 }
 
@@ -871,8 +951,27 @@ function walkTsx(dir) {
   if (!/\{\s*id:'order'[\s\S]{0,80}close:/.test(page)) {
     fail(`${PAGE}: 주문 화면이 overlays에 등록되지 않았습니다 — 뒤로가기가 탭까지 바꿉니다`);
   }
-  if (!/readTradeContext\(/.test(page)) {
-    fail(`${PAGE}: 문맥을 읽지 않고 주문 화면을 엽니다`);
+  // ── 상세에서 주문 화면을 열 때 **그 자리에서** 문맥을 읽는다 ──
+  //
+  // 예전에는 `/readTradeContext\(/.test(page)` 한 줄이었다. 파일 어딘가에
+  // 그 글자가 있으면 통과했다.
+  //
+  // 그런데 `page.tsx`에는 그 호출이 **둘** 있다:
+  //
+  //   · `openPaperOrder()`      — 모의 주문 진입
+  //   · `<InstrumentDetail onOrder=…>` — 상세에서 주문 화면으로
+  //
+  // 그래서 뒤엣것을 통째로 지워도 앞엣것 때문에 초록이었다. 실제로
+  // `paper-spot-holdings-mutations.mjs`의 **MUT-63이 그렇게 살아남았다** —
+  // 문맥을 안 읽고 주문 화면을 열어도 아무도 안 잡았다.
+  //
+  // 이 파일 머리글이 적어 둔 그대로다: **낱말이 아니라 호출과 조건의 모양을
+  // 본다.** 글자를 세는 대신 `onOrder` 핸들러 **안에서** 읽고, 못 읽었을 때
+  // 빠져나가는지까지 본다.
+  if (!orderHandlerGuardsContext(page)) {
+    fail(`${PAGE}: 문맥을 읽지 않고 주문 화면을 엽니다`
+       + ' — <InstrumentDetail onOrder> 안에서 readTradeContext()를 부르고'
+       + ' 그 결과가 없을 때 빠져나가야 합니다');
   }
   // ── 버튼으로 닫을 때 겹이 둘 닫히지 않는다 ──
   //

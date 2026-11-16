@@ -25,6 +25,46 @@ export function runAutoRebaseTests() {
     eq(v.action, 'REBASE');
   });
 
+  // ── base 규칙이 최신 상태를 요구하지 않으면 재배치하지 않는다 ──
+  //
+  // 2026-11-15 실측: #654가 `115894c1 → 233f8366 → 0cab4d91`로 세 번
+  // 재배치됐고, 그때마다 `github-actions[bot]` push가 만든 런은 **잡 0개**로
+  // 끝나 필수 체크 `verify`가 생기지 않았다. 빨간 것이 아니라 없어서
+  // 못 합쳤다. 이 저장소의 `Protect main`은 strict=false이므로 그 재배치는
+  // 애초에 머지에 필요하지도 않았다.
+  test('base가 최신 상태를 요구하지 않으면 재배치하지 않는다', () => {
+    const v = rebaseVerdict({ ...base, baseRequiresUpToDate: false } as any, 'main');
+    eq(v.action, 'SKIP');
+    assert(/최신 상태를 요구하지 않습니다/.test(v.reason), v.reason);
+    // 아무 일도 안 했으므로 PR에 댓글을 쌓지 않는다.
+    eq(rebaseComment({ action: v.action, reason: v.reason, defaultBranch: 'main' }), null);
+  });
+
+  test('base가 최신 상태를 요구하면 전처럼 재배치한다', () => {
+    eq(rebaseVerdict({ ...base, baseRequiresUpToDate: true } as any, 'main').action, 'REBASE');
+  });
+
+  // **모르는 것을 "필요 없다"로 읽지 않는다.** 규칙을 못 읽었다고 재배치를
+  // 멈추면, 진짜로 최신 상태를 요구하는 저장소에서 PR이 영영 안 합쳐진다.
+  test('규칙을 읽지 못했으면(null·생략) 전처럼 재배치한다', () => {
+    eq(rebaseVerdict({ ...base, baseRequiresUpToDate: null } as any, 'main').action, 'REBASE');
+    eq(rebaseVerdict({ ...base } as any, 'main').action, 'REBASE');
+  });
+
+  // 순서: 이미 최신인 PR은 규칙과 무관하게 UP_TO_DATE다.
+  test('이미 최신이면 규칙을 보기 전에 UP_TO_DATE다', () => {
+    eq(rebaseVerdict({ ...base, behindBy: 0, baseRequiresUpToDate: false } as any, 'main').action,
+      'UP_TO_DATE');
+  });
+
+  // 라벨·초안·fork 같은 기존 관문은 이 규칙보다 앞선다 — 규칙이 요구하더라도
+  // 라벨 없는 PR의 이력을 고치지 않는다.
+  test('라벨이 없으면 규칙이 요구해도 손대지 않는다', () => {
+    const v = rebaseVerdict({ ...base, labels: [], baseRequiresUpToDate: true } as any, 'main');
+    eq(v.action, 'SKIP');
+    assert(/라벨이 없습니다/.test(v.reason), v.reason);
+  });
+
   test('충돌이면 손을 뗀다 — 기계가 고르지 않는다', () => {
     const v = rebaseVerdict({ ...base, cleanRebase: false } as any, 'main');
     eq(v.action, 'NEEDS_HUMAN');

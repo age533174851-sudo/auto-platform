@@ -13,7 +13,8 @@ import {
   nextRunPlan, nextRunLines, intervalMinOf, kstClock, fmtKst, fmtUtc,
   RUNNER_INTERVAL_MIN, DEFAULT_INTERVAL_MIN,
 } from './nextRun';
-import { classifyRun, blockCodeOf, savedButBlockedText, CONCURRENT_CODES } from './runOutcome';
+import { classifyRun, blockCodeOf, savedButBlockedText, CONCURRENT_CODES,
+  bodySaysBlocked, blockerNames } from './runOutcome';
 
 const NOW = Date.UTC(2026, 7, 6, 12, 0, 0);   // 2026-08-06 12:00 UTC = 한국 21:00
 const MIN = 60_000;
@@ -205,6 +206,33 @@ export function runAutotradeTimingTests() {
     eq(blockCodeOf({ blocked: 'state_mismatch' }), 'STATE_MISMATCH', '대소문자로 갈리면 안 된다');
     eq(blockCodeOf({}), '');
     eq(blockCodeOf(null), '');
+  });
+
+  console.log('[차단 판정 — ok를 전제로 삼지 않는다]');
+
+  test('관문이 남긴 증거만 본다', () => {
+    assert(bodySaysBlocked({ ok: true, blocked: 'CHECKLIST_BLOCKED' }), 'ok:true라도 차단은 차단이다');
+    assert(bodySaysBlocked({ ok: true, checklist: { allowed: false } }), '');
+    assert(bodySaysBlocked({ blockers: [{ id: 'X' }] }), '');
+    assert(bodySaysBlocked({ error: 'blocked' }), '예전 모양');
+    // 여기서 true가 되면 **진짜 실패가 차단으로 숨는다.**
+    assert(!bodySaysBlocked({ ok: false, error: 'boom' }), '전송 실패는 차단이 아니다');
+    assert(!bodySaysBlocked({ ok: false, code: 'ECONNREFUSED' }), 'code는 차단 증거가 아니다');
+    assert(!bodySaysBlocked({ ok: false, rejectCode: 'TIMEOUT' }), 'rejectCode도 아니다');
+    assert(!bodySaysBlocked({ ok: true, checklist: {} }), 'allowed undefined는 안 돈 것이다');
+    assert(!bodySaysBlocked({ blockers: [] }), '빈 목록은 막은 것이 아니다');
+    assert(!bodySaysBlocked({ blocked: '   ' }), '공백만 있는 값은 선언이 아니다');
+    assert(!bodySaysBlocked(null), '');
+    assert(!bodySaysBlocked('blocked'), '문자열 본문은 차단 증거가 아니다');
+  });
+
+  test('막은 항목 이름을 [object Object]로 적지 않는다', () => {
+    eq(blockerNames([{ id: 'A', label: '거래소와 앱 상태 일치' }, { id: 'B', label: '손절이 청산보다 먼저' }])
+      .join(' · '), '거래소와 앱 상태 일치 · 손절이 청산보다 먼저');
+    eq(blockerNames(['문자열도 그대로']).join(''), '문자열도 그대로');
+    eq(blockerNames([{ id: 'ONLY_ID' }]).join(''), 'ONLY_ID', 'label이 없으면 id라도 적는다');
+    eq(blockerNames([{}, { label: '  ' }]).length, 0, '이름이 없으면 빈 칸을 세지 않는다');
+    eq(blockerNames(undefined).length, 0);
   });
 
   console.log('[실행 결과 — 예약이 켜진 사실을 숨기지 않는다]');
