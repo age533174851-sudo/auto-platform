@@ -161,6 +161,16 @@ export async function POST(req: NextRequest) {
       realizedPnl: r.realizedPnl ?? null, error: r.ok ? null : r.error });
   }
 
+  // Existing PAPER-only worker wakeup, after protective exits. JWT polling never
+  // advances automation, and unknown/failed exits block new entries this tick.
+  let automation: { ok: boolean; code: string } | null = null;
+  if (admin && failed === 0 && plan.unknownMarks === 0) {
+    try {
+      const { runDuePaperAutomation } = await import('@/lib/engine/paperAutomation');
+      automation = await runDuePaperAutomation(sb);
+    } catch { automation = { ok: false, code: 'AUTOMATION_UNAVAILABLE' }; }
+  }
+
   return NextResponse.json({
     ok: failed === 0,
     scanned: plan.scanned,
@@ -175,6 +185,7 @@ export async function POST(req: NextRequest) {
     // 시간청산은 켜져 있지 않다. 그 사실을 값으로 남긴다.
     timeExit: 'DISABLED_NO_EXPLICIT_POLICY',
     results,
+    automation,
     checkedAt: nowMs,
   }, { status: failed === 0 ? 200 : 500, headers: { 'Cache-Control': 'no-store' } });
 }

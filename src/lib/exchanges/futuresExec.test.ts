@@ -12,6 +12,7 @@
 // 만들어 놓고 배선을 안 함.
 
 import { test, eq, assert } from '../../test/harness';
+import { netTest, withFetch } from '../../test/netStub';
 import {
   resolveExecExchange, jobExchangeCheck, leverageVerdict, unknownResultVerdict, futuresCountOpen,
   reconcileDecision, futuresPlaceOrder, futuresFindOrderByClientId,
@@ -407,44 +408,10 @@ export function runFuturesExecTests() {
 
   // ── 여기서부터는 fetch를 가로챈다 ──
   //
-  // 하네스는 async 테스트를 **동시에** 시작한다(fn()을 바로 부르고 프라미스만
-  // 모은다). 그래서 전역 fetch를 갈아 끼우는 테스트를 그냥 쓰면 서로의 스텁을
-  // 덮어쓴다 — 처음에 실제로 그렇게 깨졌다. 두 가지로 막는다:
-  //
-  //   1. `netTest`로 이 파일의 네트워크 테스트를 **한 줄로 세운다**
-  //   2. 스텁이 모르는 URL은 **원래 fetch로 넘긴다** — 같이 도는 다른 파일의
-  //      테스트를 이 스텁이 가로채지 않게
-  let chain: Promise<void> = Promise.resolve();
-  const netTest = (name: string, fn: () => Promise<void>) => {
-    test(name, () => {
-      const p = chain.then(fn, () => fn());
-      chain = p.then(() => undefined, () => undefined);
-      return p;
-    });
-  };
-
-  const withFetch = async (
-    handler: (url: string, init: any) => { status?: number; body?: any } | null,
-    fn: () => Promise<void>,
-  ): Promise<string[]> => {
-    const urls: string[] = [];
-    const real = (globalThis as any).fetch;
-    (globalThis as any).fetch = async (u: any, init: any) => {
-      const url = String(u);
-      const r = handler(url, init);
-      // 이 테스트가 모르는 주소는 원래 fetch가 처리한다.
-      if (!r) return real(u, init);
-      urls.push(url);
-      const text = JSON.stringify(r.body ?? {});
-      return {
-        ok: (r.status ?? 200) < 400, status: r.status ?? 200,
-        text: async () => text, json: async () => JSON.parse(text),
-      } as any;
-    };
-    try { await fn(); } finally { (globalThis as any).fetch = real; }
-    return urls;
-  };
-
+  // `netTest`/`withFetch`는 `src/test/netStub.ts`에 있다. 왜 한 줄로
+  // 세우는지, 왜 모르는 주소를 원래 fetch로 넘기는지는 거기 적혀 있다.
+  // 예전에는 이 설명과 구현이 이 파일 안에만 있었고, 다른 파일이 같은
+  // 함정을 처음부터 다시 밟았다.
   // ── 거래소 호스트로는 **실제 네트워크를 타지 않는다** ──
   //
   // 처음에는 "주문 경로"만 목록으로 골라 가로채고 나머지는 원래 fetch로
