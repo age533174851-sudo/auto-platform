@@ -1,4 +1,15 @@
 -- Preserve 099 history; fix the post-lock lease race observed in native CI.
+-- This pending migration can arrive AFTER 102/103 were already deployed.
+-- Those migrations replace the function with a multi-bot claim and a newer
+-- advisory fence. Never roll that function back to the single-bot variant.
+DO $migration$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns
+             WHERE table_schema='public' AND table_name='paper_automation_settings'
+               AND column_name='bot_id') THEN
+    RETURN;
+  END IF;
+  EXECUTE $definition$
 CREATE OR REPLACE FUNCTION public.paper_auto_claim()
 RETURNS SETOF jsonb LANGUAGE plpgsql SECURITY INVOKER SET search_path=public,pg_temp AS $$
 DECLARE s public.paper_automation_settings%ROWTYPE; r public.paper_automation_runs%ROWTYPE;
@@ -21,5 +32,8 @@ BEGIN
   END IF;
   RETURN NEXT to_jsonb(r)||jsonb_build_object('paper_account_id',s.paper_account_id,'symbol',s.symbol,'config',s.config);
 END $$;
+  $definition$;
+END
+$migration$;
 REVOKE ALL ON FUNCTION public.paper_auto_claim() FROM PUBLIC,anon,authenticated;
 GRANT EXECUTE ON FUNCTION public.paper_auto_claim() TO service_role;

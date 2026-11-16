@@ -1498,6 +1498,7 @@ export async function POST(req: NextRequest) {
   }
 
   const { executeOrder } = await import('@/lib/engine/orderExecutor');
+  const { requestsTestnetAlgoProtection } = await import('@/lib/exchanges/binanceAlgoContract');
   const exec = await executeOrder(sb, {
     userId,
     connectionId: body.connectionId,
@@ -1506,6 +1507,8 @@ export async function POST(req: NextRequest) {
     clientOrderId: `scalp-${symbol}-${interval}-${barBucket}`.slice(0, 36),
     exchange: conn.exchange as 'binance' | 'gate',
     mode: mode as 'TESTNET' | 'LIVE',
+    testnetAlgoProtection: requestsTestnetAlgoProtection({ exchange: conn.exchange, mode,
+      stopLoss: epStopPolicy === 'NO_FIXED_SL' ? undefined : scalp.signal.stop }),
     plan,
     // **계약이 실행 의미를 정한다.**
     //

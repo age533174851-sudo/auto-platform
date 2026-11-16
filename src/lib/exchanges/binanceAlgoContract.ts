@@ -16,6 +16,17 @@ export type ConditionalAlgoKind = 'STOP_MARKET' | 'TAKE_PROFIT_MARKET';
 export type AlgoClosingPosition = 'LONG' | 'SHORT';
 export type AlgoPositionMode = 'ONE_WAY' | 'HEDGE' | 'UNKNOWN';
 
+/** Transport selection only; this grants no order permission. All callers
+ * reuse the executor's owner, durable-intent and risk gates. A requested fixed
+ * stop on Binance TESTNET must never silently fall back to the -4120 endpoint.
+ * Unsupported order/position modes are rejected by the executor before entry. */
+export function requestsTestnetAlgoProtection(i: {
+  exchange: unknown; mode: unknown; stopLoss: unknown; reduceOnly?: boolean;
+}): boolean {
+  return i.exchange === 'binance' && i.mode === 'TESTNET' && i.reduceOnly !== true
+    && typeof i.stopLoss === 'number' && Number.isFinite(i.stopLoss) && i.stopLoss > 0;
+}
+
 export interface BinanceConditionalAlgoIntent {
   environment: 'TESTNET' | 'LIVE' | 'UNKNOWN';
   symbol: string;

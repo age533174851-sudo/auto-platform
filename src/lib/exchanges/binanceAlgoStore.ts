@@ -1,5 +1,16 @@
 import { attestationVerdict, planAttestation, type AttestationObservation } from '../smoke/exposureAttestation';
-import { protectiveClientOrderId } from '../engine/orderOwnership';
+import { protectiveClientOrderId, parseOwnedClientOrderId, type OrderPurpose } from '../engine/orderOwnership';
+import { createHash } from 'node:crypto';
+
+/** Ordinary manual/scalp IDs may already use all 36 characters. Appending
+ * SL/TP and truncating would give both children the SAME ID. Preserve existing
+ * owned IDs; otherwise hash the full parent/purpose/sequence, never its prefix.
+ * Ownership still comes from the exact persisted parent, not the hash text. */
+export function testnetAlgoClientId(parentId: string, purpose: OrderPurpose, sequence = 0): string {
+  const legacy = protectiveClientOrderId(parentId, purpose, sequence);
+  if (parseOwnedClientOrderId(parentId).ok && legacy.length <= 36) return legacy;
+  return 'ta-' + createHash('sha256').update(JSON.stringify([parentId, purpose, sequence])).digest('hex').slice(0, 32);
+}
 // Existing live_orders is the parent intent/ownership authority. No extra
 // position ledger, credentials, or direct venue capability is introduced.
 export interface AlgoStoreScope {
@@ -75,7 +86,7 @@ export async function claimTestnetAlgoIntent(sb: any, scope: AlgoStoreScope,
     const row = await parent(sb, scope);
     if (!Number.isSafeInteger(sequence) || sequence < 0 || sequence > 31
         || !['STOP_MARKET', 'TAKE_PROFIT_MARKET'].includes(payload.type)
-        || payload.clientAlgoId !== protectiveClientOrderId(row.client_order_id,
+        || payload.clientAlgoId !== testnetAlgoClientId(row.client_order_id,
           payload.type === 'STOP_MARKET' ? 'STOP_LOSS' : 'TAKE_PROFIT', sequence)) throw new Error('ALGO_IDENTITY_MISMATCH');
     if (row.symbol !== payload.symbol || !['BUY', 'SELL'].includes(row.side)
         || payload.side !== (row.side === 'BUY' ? 'SELL' : 'BUY')

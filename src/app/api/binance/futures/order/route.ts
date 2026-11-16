@@ -31,6 +31,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { validateOrder } from '@/lib/engine/orderValidation';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { killSwitchGate } from '@/lib/risk/killSwitch';
+import { requestsTestnetAlgoProtection } from '@/lib/exchanges/binanceAlgoContract';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -728,6 +729,9 @@ export async function POST(req: NextRequest) {
     // 여기는 truthy 검사라 이 칸이 비면 실전으로 떨어진다 — 모르는 값이
     // 실제 돈 쪽으로 기울면 안 된다. 위 quantize도 이미 `!== false`를 쓴다.
     mode: conn.is_testnet !== false ? 'TESTNET' : 'LIVE',
+    testnetAlgoProtection: requestsTestnetAlgoProtection({ exchange: ex,
+      mode: conn.is_testnet === true ? 'TESTNET' : 'UNKNOWN', reduceOnly,
+      stopLoss: built.noStop ? undefined : preflightStop }),
     // **사람이 누른 주문이다.** 손절 부착이 실패해도 방금 연 포지션을
     // 되돌리지 않는다 — 되돌리면 사용자가 의도한 포지션이 수수료만 남기고
     // 사라진다. 대신 '보호되지 않은 포지션'이라고 크게 알린다.

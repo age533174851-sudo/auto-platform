@@ -20,7 +20,10 @@ else test('atomic Algo intents survive concurrent send claims and a lost DB repl
   const uid='aa000000-0000-4000-8000-000000000001',conn='aa000000-0000-4000-8000-000000000002',parentId='aa000000-0000-4000-8000-000000000003';
   q(`CREATE TABLE auth.users(id uuid PRIMARY KEY); INSERT INTO auth.users VALUES('${uid}')`);
   psqlFile(target,db,join(root,'supabase/migrations/004_exchange_connections.sql'));
-  if(!process.env.ALGO_PG_RED)psqlFile(target,db,join(root,'supabase/migrations/100_testnet_algo_intents.sql'));
+  if(!process.env.ALGO_PG_RED){
+   psqlFile(target,db,join(root,'supabase/migrations/100_testnet_algo_intents.sql'));
+   psqlFile(target,db,join(root,'supabase/migrations/100_testnet_algo_intents.sql'));
+  }
   q(`GRANT ALL ON ALL TABLES IN SCHEMA public TO service_role; INSERT INTO exchange_connections(id,user_id,exchange_id,is_testnet,has_withdrawal) VALUES('${conn}','${uid}','binance',true,false);
    INSERT INTO live_orders(id,user_id,connection_id,client_order_id,exchange,mode,symbol,side,quantity,status)
    VALUES('${parentId}','${uid}','${conn}','smo-nativeBTCUSDE0','binance','TESTNET','BTCUSDT','BUY',1,'FILLED')`);
@@ -67,6 +70,17 @@ else test('atomic Algo intents survive concurrent send claims and a lost DB repl
   assert.equal(await store.testnetAlgoConnectionClear(sb,uid,conn),true);
   assert.equal((await store.claimTestnetAlgoIntent(client(),next,nextPayload)).send,false,'attestation cannot authorize resend');
   assert.equal(q(`SELECT testnet_algo_intents->'${nextPayload.clientAlgoId}'->>'state' FROM live_orders WHERE id='${nextId}'`)[0],'SENT','historical submission state must be preserved');
+  const longParent='MF1234567890123456789012345678901234',longId='aa000000-0000-4000-8000-000000000005';
+  q(`INSERT INTO live_orders(id,user_id,connection_id,client_order_id,exchange,mode,symbol,side,quantity,status)
+   VALUES('${longId}','${uid}','${conn}','${longParent}','binance','TESTNET','BTCUSDT','BUY',1,'FILLED')`);
+  const longScope={...scope,parentId:longId};
+  const stopPayload={...payload,clientAlgoId:store.testnetAlgoClientId(longParent,'STOP_LOSS')};
+  const tpPayload={...payload,type:'TAKE_PROFIT_MARKET',triggerPrice:'104',clientAlgoId:store.testnetAlgoClientId(longParent,'TAKE_PROFIT')};
+  assert.notEqual(stopPayload.clientAlgoId,tpPayload.clientAlgoId);
+  assert.equal((await store.claimTestnetAlgoIntent(sb,longScope,stopPayload)).send,true);
+  assert.equal((await store.claimTestnetAlgoIntent(sb,longScope,tpPayload)).send,true);
+  assert.equal((await store.claimTestnetAlgoIntent(client(),longScope,stopPayload)).send,false);
+  assert.equal(q(`SELECT count(*) FROM live_orders l CROSS JOIN LATERAL jsonb_object_keys(l.testnet_algo_intents) k WHERE l.id='${longId}'`)[0],'2');
   q(`UPDATE exchange_connections SET is_testnet=false WHERE id='${conn}'`);
   await assert.rejects(()=>store.claimTestnetAlgoIntent(sb,scope,payload),/VERIFIED_TESTNET_REQUIRED/);
   assert.equal(await store.testnetAlgoConnectionClear(sb,uid,conn),false);

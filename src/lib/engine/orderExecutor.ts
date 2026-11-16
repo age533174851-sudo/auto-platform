@@ -572,10 +572,10 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
   const useAlgo = args.testnetAlgoProtection === true;
   if (useAlgo) {
     if (exchange !== 'binance' || mode !== 'TESTNET' || args.reduceOnly === true
-        || !String(args.signalId || '').startsWith('smoke-test:')
         || (args.orderType ?? 'MARKET') !== 'MARKET'
-        || policy !== 'REQUIRED' || noFixedTp || !(Number(args.stopLoss) > 0)) {
-      return { ok: false, status: 'REJECTED', clientOrderId, message: 'TESTNET_SMOKE_ALGO_SCOPE_REQUIRED' };
+        || !['REQUIRED', 'OPTIONAL'].includes(policy) || !(Number(args.stopLoss) > 0)) {
+      return { ok: false, status: 'REJECTED', clientOrderId,
+        message: 'TESTNET_ALGO_SCOPE_REQUIRED — Binance Demo 시장가·고정 손절 주문만 지원합니다' };
     }
     try {
       const { testnetAlgoConnectionClear } = await import('../exchanges/binanceAlgoStore');
@@ -1148,8 +1148,8 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
       const tick = filters?.tickSize && filters.tickSize > 0 ? filters.tickSize : null;
       const placeProtection = async (opts: Parameters<typeof bf.placeFuturesTPSL>[2], sequence = 0) => {
         if (!useAlgo) return bf.placeFuturesTPSL(apiKey, apiSecret, opts, testnet);
-        const [{ executeTestnetAlgoProtection }, { protectiveClientOrderId }] = await Promise.all([
-          import('../exchanges/binanceAlgoExecution'), import('./orderOwnership'),
+        const [{ executeTestnetAlgoProtection }, { testnetAlgoClientId }] = await Promise.all([
+          import('../exchanges/binanceAlgoExecution'), import('../exchanges/binanceAlgoStore'),
         ]);
         const [positionMode, reference] = await Promise.all([
           bf.getFuturesPositionMode(apiKey, apiSecret, true), bf.freshTestnetAlgoReference(plan.symbol),
@@ -1161,7 +1161,7 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
           workingType: 'MARK_PRICE', referencePrice: reference.price, referenceObservedAtMs: reference.atMs,
           evaluatedAtMs: Date.now(), maxReferenceAgeMs: 5000, closeAll: opts.quantity == null,
           ...(opts.quantity != null ? { quantity: opts.quantity, quantityStep: filters?.limitQty?.stepSize, reduceOnly: true } : {}),
-          clientAlgoId: protectiveClientOrderId(clientOrderId, opts.type === 'STOP_MARKET' ? 'STOP_LOSS' : 'TAKE_PROFIT', sequence),
+          clientAlgoId: testnetAlgoClientId(clientOrderId, opts.type === 'STOP_MARKET' ? 'STOP_LOSS' : 'TAKE_PROFIT', sequence),
         }, { post: payload => bf.postTestnetAlgoOrder(apiKey, apiSecret, payload),
           readOpen: symbol => bf.getFuturesOpenAlgoOrders(apiKey, apiSecret, true, symbol) }, sequence);
       };
