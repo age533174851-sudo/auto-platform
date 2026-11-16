@@ -69,6 +69,8 @@ export const STATUS_LABEL: Record<RuntimeStatus, string> = {
   STOPPING: '멈추는 중…',
 };
 
+import { WORKER_STALE_MS } from './runtimeHealth';
+
 export type Tone = 'good' | 'warn' | 'bad' | 'muted';
 
 export const STATUS_TONE: Record<RuntimeStatus, Tone> = {
@@ -80,9 +82,24 @@ export const STATUS_TONE: Record<RuntimeStatus, Tone> = {
 /**
  * Worker 심장박동이 이보다 오래되면 살아 있다고 못 한다.
  *
- * 10초 간격으로 도는 실행기라면 30초는 세 번을 걸렀다는 뜻이다.
+ * **정정.** 여기에는 `30_000`이 적혀 있었고 근거는 "10초 간격으로 도는
+ * 실행기라면 30초는 세 번을 걸렀다"였다. **그 전제가 틀렸다** — 워커의
+ * 주기는 `WORKER_POLL_SEC || '3'`이고 1~15초로 조여진다
+ * (`worker/src/index.ts:86`). 10초라는 설정은 존재하지 않고, 최악의
+ * 설정(15초)에서 30초는 **두 번**이다.
+ *
+ * 더 중요한 것: 같은 판단이 `evaluationLoop`(180초)와
+ * `runtimeHealth`(180초)에도 있었고, `schedulePoll.test.ts:470`이
+ * **>= 120_000을 요구**하고 있었다. 30초는 그 하한을 깨는데도 시험을
+ * 통과했다 — 다른 상수여서 시험이 보지 못했다.
+ *
+ * 그래서 숫자를 여기서 정하지 않고 소유자에서 가져온다. 이 변경으로
+ * 이 파일의 판정 기준은 30초 → 180초로 **느슨해진다.** 지금 이
+ * 판정 함수를 부르는 제품 코드는 0곳이므로(제품에서 이 모듈에서
+ * 가져다 쓰는 것은 `MockAutoTrade.tsx`의 `DURABILITY_NOTE`뿐) 화면에
+ * 보이는 변화는 없다. 그래도 적어 둔다 — 배선할 때 알아야 한다.
  */
-export const HEARTBEAT_STALE_MS = 30_000;
+export const HEARTBEAT_STALE_MS = WORKER_STALE_MS;
 
 /** 예정된 실행 시각을 이만큼 넘기면 '안 돌고 있다' */
 export const TICK_LATE_FACTOR = 3;
