@@ -316,7 +316,9 @@ export function runPersistentRuntimeTests() {
     // "나는 분명 켰는데 왜 정지야?"를 없앤다.
     const v = runtimeView({
       desiredState: 'RUNNING', enabled: true, intervalSec: 10,
-      workerHeartbeatAt: iso(NOW - 42_000), lastTickAt: iso(NOW - 5000),
+      // **상수에 상대적으로 적는다.** 42_000은 기준이 30초였을 때만
+      // '죽었다'였다. 기준이 바뀌면 이 시험은 조용히 반대를 재게 된다.
+      workerHeartbeatAt: iso(NOW - HEARTBEAT_STALE_MS - 1_000), lastTickAt: iso(NOW - 5000),
     }, NOW);
     eq(v.desired, 'RUNNING');
     eq(v.observed, 'DEGRADED');

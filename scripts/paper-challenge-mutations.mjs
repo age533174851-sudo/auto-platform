@@ -114,8 +114,17 @@ function install(sql) {
  * 되돌릴 때마다 그 뒤 마이그레이션을 순서대로 다시 세운다.
  */
 function restoreCanonical() {
-  if (!install(canonical)) return false;
-  return reapplyAfter(MIG_DIR, MIG_NAME, install);
+  // **어디서 못 세웠는지 적는다.** 예전에는 호출부가 '정본을 세우지
+  // 못했습니다' 한 줄만 찍어서, 099가 재적용 불가라는 것을 알아내는 데
+  // 재적용 대상 14개를 손으로 좁혀야 했다.
+  if (!install(canonical)) {
+    console.error(`  ✗ 정본 ${MIG_NAME}을 세우지 못했습니다`);
+    return false;
+  }
+  return reapplyAfter(MIG_DIR, MIG_NAME, install, (p) => {
+    console.error(`  ✗ ${p}를 다시 세우지 못했습니다`
+      + ' — 이 파일이 재적용 가능한지 보세요 (CREATE … IF NOT EXISTS · DROP POLICY IF EXISTS)');
+  });
 }
 
 /**

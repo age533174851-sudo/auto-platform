@@ -31,18 +31,11 @@ const EXECUTION_GLOBS = [
   'worker/src/**/*.ts',
 ];
 
-/** 연구·시뮬레이션 전용. 실행이 읽으면 안 된다 */
-const RESEARCH_MODULES = [
-  'simModel', 'profileMonteCarlo', 'profileSim', 'monteCarlo', 'edgeSweep',
-];
-
-/** 가정값의 이름들 */
-const ASSUMPTION_NAMES = [
-  { needle: 'edgePp', why: '몬테카를로에서 승률을 임의로 올려 넣는 가정값입니다' },
-  { needle: 'assumedWinRate', why: '가정한 승률입니다 — 실제로 잰 값이 아닙니다' },
-  { needle: 'assumedEdge', why: '가정한 우위입니다 — 실행이 읽으면 안 됩니다' },
-  { needle: 'AssumedEdge', why: '가정 우위 타입입니다 — 실행 경로에 오면 안 됩니다' },
-];
+// 이름 목록은 `scripts/lib/research-assumptions.mjs` 한 곳에 있다.
+// `check-research-kernel.mjs`가 같은 목록으로 **커널**을 본다 — 두 곳에
+// 적어 두면 언젠가 한쪽에만 이름이 추가되고, 추가되지 않은 쪽은 막는
+// 것처럼 보이면서 아무것도 막지 않는다(`CLAUDE.md`).
+import { RESEARCH_MODULES, ASSUMPTION_NAMES } from './lib/research-assumptions.mjs';
 
 let bad = 0;
 const err = (m) => { console.error(`❌ ${m}`); bad += 1; };
