@@ -166,8 +166,8 @@ jobs:
           claude_args: |
             --max-turns 60
             --model claude-opus-5-5
-            --allowedTools "Bash(npm ci),Bash(npm ci --prefix worker),Bash(npm test),Bash(npm run build),Bash(npm run worker:build),Bash(npx tsc --noEmit),Bash(node scripts/check-:*),Bash(git status),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git fetch:*),Bash(gh pr list:*),Bash(gh pr view:*),Bash(gh issue list:*),Bash(gh api repos/:*)"
-            --disallowedTools "Bash(gh workflow run:*),Bash(gh pr merge:*),Bash(gh api --method POST:*),Bash(gh api -X POST:*),Bash(git push --force:*),Bash(git push origin main:*),Bash(curl:*),Bash(wget:*),Bash(psql:*),Bash(npx supabase:*),Bash(flyctl:*),Bash(vercel:*),Bash(nc:*),Bash(ssh:*)"
+            --allowedTools "Bash(npm ci),Bash(npm ci --prefix worker),Bash(npm test),Bash(npm run build),Bash(npm run worker:build),Bash(npx tsc --noEmit),Bash(node scripts/check-:*),Bash(git status),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git fetch:*),Bash(gh pr list:*),Bash(gh pr view:*),Bash(gh issue list:*),Bash(git switch -c:*),Bash(git add:*),Bash(git commit:*),Bash(node scripts/autodev-submit.mjs:*),Read(src/**),Read(scripts/**),Read(worker/**),Read(supabase/**),Read(docs/**),Read(public/**),Read(.github/**),Read(package.json),Read(package-lock.json),Read(tsconfig.json),Read(CLAUDE.md),Read(README.md),Glob,Grep,Edit(src/**),Edit(scripts/**),Edit(worker/**)"
+            --disallowedTools "Bash(gh workflow run:*),Bash(gh pr merge:*),Bash(gh api --method POST:*),Bash(gh api -X POST:*),Bash(git push --force:*),Bash(git push origin main:*),Bash(git push -u origin main:*),Bash(curl:*),Bash(wget:*),Bash(psql:*),Bash(npx supabase:*),Bash(flyctl:*),Bash(vercel:*),Bash(nc:*),Bash(ssh:*),Edit(.github/**),Write(.github/**),Edit(scripts/autodev-submit.mjs),Edit(scripts/lib/autodev-delivery.mjs),Edit(supabase/**),Edit(**/.env*),Read(**/.env*),Read(**/*.pem),Read(**/*.key),Read(**/id_rsa*)"
           prompt: |
             TRAIGO 무인 개발 — **거래 엔진 갈래** 1회차.
             저장소: ${{ github.repository }}
@@ -232,6 +232,27 @@ jobs:
             하나라도 실패하면 **PR을 열지 않습니다.** 무엇이 왜 실패했는지
             적고 끝냅니다. **실패를 숨기지 않습니다** — 통과한 것만
             통과했다고 적습니다.
+
+            ## 5a. 제출 — `scripts/autodev-submit.mjs` 하나로만 올립니다
+
+            `git push`와 `gh pr create`는 **허용되어 있지 않습니다.**
+            허용 목록의 접두어 규칙으로는 `HEAD:main` 같은 refspec과
+            뒤에 붙은 `--force`를 걸러낼 수 없기 때문입니다(공식 문서:
+            금지 목록은 "isn't a security boundary"). 그래서 올리는 일은
+            저장소가 가진 스크립트가 합니다 — refspec과 `--draft`가
+            그 안에 글자로 박혀 있습니다.
+
+            ```
+            git switch -c claude/trading-<짧은-설명>-<YYYYMMDD>
+            git add <바꾼 파일>
+            git commit -m "<한 줄 요약>"
+            node scripts/autodev-submit.mjs --mode trading \
+              --title "<PR 제목>" --body-file <본문을 적은 파일>
+            ```
+
+            브랜치 이름이 `claude/trading-` + 영숫자 모양이 아니면 스크립트가
+            **거부합니다.** 커밋이 없거나 담기지 않은 변경이 남아 있으면
+            올리지 않고 그 이유를 적습니다.
 
             ## 6. 금지 — 어기면 그 회차는 실패입니다
 
