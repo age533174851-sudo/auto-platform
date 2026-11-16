@@ -10,6 +10,7 @@ import { orderEndpointFor } from '../markets/tradeMode';
 import { test, eq, assert } from '../../test/harness';
 import {
   orderCapability, orderCapabilities, unsupported, PAPER_ORDER_FEATURES,
+  stockBlockReason,
   paperOrderUiWiring, dockTabSupport, DOCK_TABS, PAPER_ORDER_ENDPOINT,
   type OrderFeature,
 } from './capability';
@@ -176,5 +177,45 @@ export function runPaperCapabilityTests() {
   test('모르는 탭은 지원하지 않는다', () => {
     assert(unsupported(dockTabSupport('WAT' as any)), '모르는 탭이 통과했습니다');
     eq(DOCK_TABS.length, 4);
+  });
+
+  // ── 주식 탭이 막는 이유를 지어내지 않는다 ──
+  //
+  // 예전 화면: `instrumentReason || brokerReason || NO_BROKER`
+  // 마지막 항 때문에 **blocked가 절대 falsy가 될 수 없었고**, `brokerReason`을
+  // 넘기는 곳은 저장소에 한 곳도 없었다. 그래서 막는 이유가 무엇이든 화면은
+  // 늘 "증권사(한국투자증권) 연결이 없습니다"를 적었다 — 사실이 아닐 때도.
+  test('★ 아무 사유도 못 받으면 "모른다"고 적는다 — 증권사 탓으로 돌리지 않는다', () => {
+    const r = stockBlockReason({});
+    assert(/확인하지 못했습니다/.test(r), r);
+    assert(!/증권사/.test(r), `없는 사실을 지어냈습니다: ${r}`);
+  });
+
+  test('주문 경로가 없으면 능력표가 준 문장을 그대로 적는다', () => {
+    const wiring = paperOrderUiWiring('STOCK');
+    eq(wiring.canOrder, false);
+    eq(stockBlockReason({ orderPathReason: wiring.reason }), wiring.reason);
+  });
+
+  test('종목이 없으면 그것이 먼저다', () => {
+    eq(stockBlockReason({
+      instrumentReason: '종목을 고르지 않았습니다',
+      brokerReason: '증권사 연결 없음',
+      orderPathReason: '주문 경로 없음',
+    }), '종목을 고르지 않았습니다');
+  });
+
+  test('증권사 사유는 확인됐을 때만 쓰인다 — 주문 경로 사유보다 앞선다', () => {
+    eq(stockBlockReason({ brokerReason: '증권사 연결 없음', orderPathReason: '주문 경로 없음' }),
+      '증권사 연결 없음');
+    eq(stockBlockReason({ brokerReason: '', orderPathReason: '주문 경로 없음' }), '주문 경로 없음');
+    eq(stockBlockReason({ brokerReason: '   ', orderPathReason: '주문 경로 없음' }), '주문 경로 없음');
+  });
+
+  test('항상 사람이 읽을 문장이 나온다 — 빈 문자열이 아니다', () => {
+    for (const i of [{}, { instrumentReason: null }, { brokerReason: undefined },
+      { orderPathReason: '' }] as any[]) {
+      assert(stockBlockReason(i).trim().length > 0, '빈 사유가 나왔습니다');
+    }
   });
 }
