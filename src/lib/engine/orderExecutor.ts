@@ -1999,7 +1999,7 @@ async function attachStopIfMissing(
     const already = verifyStopAttached(openList,
       { symbol, side: closeSide, stopPrice: trigger.price });
     if (already.status === 'unknown') {
-      return `⚠ 손절 복구 미확인 — 미체결 주문을 읽지 못해 이미 걸린 손절이 있는지 확인하지 못했습니다 (${already.reason})`;
+      return `⚠ 손절 복구 미확인 — 기존 STOP의 보호 상태를 확정하지 못했습니다 (${already.reason})`;
     }
     if (already.status === 'attached') {
       // STOP은 찾았어도 번호를 못 읽으면 취소·추적 가능한 보호주문으로

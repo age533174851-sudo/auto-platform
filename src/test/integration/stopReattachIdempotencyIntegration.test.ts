@@ -218,4 +218,34 @@ export async function runStopReattachIdempotencyTests() {
     });
   }
 
+  // ══════════ ⑦ #494: STOP이라는 이름은 reduce-only 보증이 아니다 ══════════
+  {
+    const db = new FakeDb().seed('live_orders', [pendingRow()]);
+    const venue = baseVenue([existingStop({ orderId: 8877, reduceOnly: false, closePosition: false })]);
+    const r = await scenario(venue, () => reconcile(db));
+
+    test('★★ 비보호 STOP이 이미 있으면 중복 STOP POST 0건', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(stopSends(venue).length, 0, '위험한 STOP이 실재하므로 또 걸면 중복이다');
+    });
+    test('★★ 비보호 STOP은 장부에 연결하지 않고 attention으로 남긴다', () => {
+      const row = db.row('live_orders', { id: 'ord-1' });
+      eq(row?.needs_attention, true, '보호 기능 없는 STOP을 성공으로 기록했다');
+      assert(!row?.sl_order_id, '비보호 STOP의 주문 ID를 보호 주문으로 연결했다');
+      assert((r as any).details?.some((d: string) =>
+        /손절/.test(d) && /미확인|보호|확인/.test(d)),
+      `비보호 STOP의 위험 경고가 없다: ${JSON.stringify((r as any).details)}`);
+    });
+  }
+  {
+    const db = new FakeDb().seed('live_orders', [pendingRow()]);
+    const venue = baseVenue([existingStop({ orderId: 8878, reduceOnly: false, closePosition: true })]);
+    const r = await scenario(venue, () => reconcile(db));
+    test('closePosition=true STOP은 기존 번호를 재연결하고 POST 0건', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(stopSends(venue).length, 0);
+      eq(String(db.row('live_orders', { id: 'ord-1' })?.sl_order_id ?? ''), '8878');
+    });
+  }
+
 }
