@@ -49,6 +49,7 @@ import { strategyRunRequest } from '@/lib/strategies/runRequest';
 import { LEGACY_STRATEGY_ID } from '@/lib/strategies/registry';
 import SmokeTestPanel from './SmokeTestPanel';
 import { MIN_CONTROL_TARGET } from '@/lib/ui/panelPrefs';
+import { dueDiagView } from '@/lib/ui/dueDiagView';
 
 /**
  * @param onSnapshot 이 화면이 읽은 **그 스냅샷**을 위로 올린다.
@@ -1200,6 +1201,35 @@ export default function AutotradeControl({ onSnapshot, onReload }: {
                     자동매매가 자기 돈을 지키고 있다고 믿는다.
                     판정은 서버(evaluationLoop)가 한다. 화면이 다시 판단하면
                     규칙이 두 곳이 되고, 그때 한쪽만 고쳐진다. */}
+                {/* ── 왜 지금 안 도는가 ──
+                    `runtime`(위)은 `dueCheck`를 보지 않는다. 그래서 여기에
+                    `WATCHING`이 떠 있는 동안 실행기의 틱은 매번 `WAITING`으로
+                    돌아설 수 있다 — 2026-11-02~05 틱 12회차가 전부 그랬고
+                    그 사실은 워크플로 로그에만 있었다.
+                    표시 규칙은 `lib/ui/dueDiagView`가 정한다. 여기서 삼항으로
+                    흩어 두면 시험할 수 없고, 시험할 수 없으면 "못 읽은 값을
+                    0으로 적는" 고장이 조용히 들어온다. */}
+                {(() => {
+                  const dv = dueDiagView((s as any).dueDiag);
+                  return (
+                    <div style={{ marginTop: 3, fontSize: 10, lineHeight: 1.6, color: T.muted }}>
+                      <div>
+                        간격{' '}
+                        <span style={{ color: dv.intervalDefaulted ? T.ylw : T.sub, fontWeight: dv.intervalDefaulted ? 800 : 400 }}>
+                          {dv.intervalText}
+                        </span>
+                      </div>
+                      <div>마지막 평가 <span style={{ color: T.sub }}>{dv.lastText}</span></div>
+                      <div>다음 평가 <span style={{ color: T.sub }}>{dv.nextText}</span></div>
+                      <div style={{ overflowWrap: 'anywhere' }}>
+                        판정{' '}
+                        {dv.code ? <span style={{ color: T.sub, fontWeight: 700 }}>{dv.code}</span> : null}
+                        {dv.code ? ' · ' : ''}
+                        <span style={{ color: T.sub }}>{dv.reasonText}</span>
+                      </div>
+                    </div>
+                  );
+                })()}
                 {s.runtime && (
                   <div style={{ marginTop: 3, fontSize: 10, lineHeight: 1.5 }}>
                     <span style={{

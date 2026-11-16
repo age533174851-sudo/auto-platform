@@ -231,8 +231,58 @@ export async function POST(req: NextRequest) {
   }
 
   // ── 진입 자리인가 ──
-  const scalp = scalpSignal(bars, cfg);
+  let scalp = scalpSignal(bars, cfg);
   const timeframeInfo = { intervalMin, interval, ...verdict };
+
+  // ── 09:00 KST 강제 진입 (Exact100X TESTNET 전용) ──
+  //
+  // 신호가 나지 않는 날에도 **하루 한 번은 시도한다.** 지금까지는
+  // 돌파·거래량·비용 세 필터를 통과해야만 주문이 만들어졌고, 그래서
+  // 진입이 한 번도 나지 않았다.
+  //
+  // 여기서 건너뛰는 것은 **그 재량 필터 셋뿐**이다. 아래의 위험 관문
+  // (dormantGate · riskManager · 청산가 · 기존 포지션/미결 주문 ·
+  // 보호주문 · killSwitch · 수량 양자화)은 **전부 그대로 지난다.**
+  // 크기도 같은 ATR 수치로 계산한다 — 강제 진입만 다른 크기로 나가면
+  // 그 숫자의 뜻이 둘로 갈린다.
+  let forced: any = null;
+  if (!scalp.signal) {
+    const { forcedEntryVerdict, forcedEntrySignal, forcedWindowStartMs } =
+      await import('@/lib/strategies/dailyForcedEntry');
+    const forcedNowMs = Date.now();
+
+    // 오늘 창에서 이미 냈는가. **못 읽으면 null이다** — 0건으로 접으면
+    // 같은 창에서 두 번 진입한다. 판정기가 null을 받으면 막는다.
+    let ordersTodayInWindow: number | null = null;
+    const sinceMs = forcedWindowStartMs(forcedNowMs);
+    if (sinceMs != null && body.connectionId && userId) {
+      const { count, error } = await (sb as any).from('live_orders')
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', userId)
+        .eq('connection_id', body.connectionId)
+        .eq('symbol', symbol)
+        .eq('mode', 'TESTNET')
+        .eq('reduce_only', false)
+        .gte('created_at', new Date(sinceMs).toISOString());
+      ordersTodayInWindow = error || count == null ? null : count;
+    }
+
+    forced = forcedEntryVerdict({
+      nowMs: forcedNowMs,
+      mode: opMode,
+      profileId: epContract?.profileId,
+      presetId: epContract?.presetId,
+      ordersTodayInWindow,
+    });
+    if (forced.due) {
+      scalp = forcedEntrySignal(bars, cfg);
+      if (!scalp.signal) {
+        // ATR을 못 읽었다. **강제라고 해서 모르는 크기로 내지 않는다.**
+        forced = { ...forced, due: false, code: 'SIZING_UNKNOWN', reason: scalp.reason };
+      }
+    }
+  }
+
   if (!scalp.signal) {
     const { diagnoseScalpSignal } = await import('@/lib/strategies/scalpSignalDiagnosis');
     const diagnosis = diagnoseScalpSignal(scalp);
@@ -241,6 +291,10 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       ok: true, executed: false, symbol, mode: opMode,
       signal: null, reason: scalp.reason, reasonCode: diagnosis.code, timeframe: timeframeInfo,
+      // **왜 강제 진입도 안 했는지**가 여기 남아야 한다. 없으면
+      // "신호가 없었다"와 "창 밖이었다"와 "이미 냈다"가 구분되지 않는다.
+      forcedEntry: forced == null ? null
+        : { due: forced.due, code: forced.code, tradingDay: forced.tradingDay, reason: forced.reason },
     }, { headers: { 'Cache-Control': 'no-store' } });
   }
 
@@ -285,6 +339,10 @@ export async function POST(req: NextRequest) {
       stopPct: scalp.signal.stopPct, targetPct: scalp.signal.targetPct,
       notes: scalp.signal.notes,
     },
+    // **이 진입이 신호에서 왔는지 09:00 강제에서 왔는지**를 값으로 남긴다.
+    // 사람이 notes 문장을 읽어 되짚게 하면 문장이 바뀔 때 조용히 틀린다.
+    forcedEntry: forced == null ? null
+      : { due: forced.due, code: forced.code, tradingDay: forced.tradingDay, reason: forced.reason },
     // 계좌를 어디서 읽었는지와 못 읽은 것들. **이게 없으면 폴백 $10,000으로
     // 계산된 결과를 실계좌 결과로 읽게 된다.**
     account: { source: ctx.source, equity: ctx.config.accountEquity, warnings: ctx.warnings },
@@ -1084,6 +1142,64 @@ export async function POST(req: NextRequest) {
       ...base, executed: false, blocked: 'VETO_UNAVAILABLE',
       error: `거부권 검사를 돌리지 못해 진입하지 않았습니다 (${e?.message || e})`,
     }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+  }
+
+  // ── 이미 열려 있는 포지션의 **방향**을 본다 ──
+  //
+  // **여기까지 아무도 그것을 보지 않았다.**
+  //
+  // 위의 관문 여섯(정지 · 마이그레이션 · 전략겹침 · 증거금 · 패리티 ·
+  // 청산감시)은 전부 계좌·시스템 관문이다. 거래소에 지금 무엇이 어느
+  // 방향으로 열려 있는지는 그 여섯 중 아무것도 묻지 않는다.
+  //
+  // ONE_WAY 계좌에서 그게 무슨 뜻인가: SHORT가 열려 있는데 LONG 진입을
+  // 내면 거래소가 **그 숏을 상계해서 조용히 닫는다.** 반대도 같다.
+  // 사용자는 숏을 들고 있다고 믿는 채로 포지션이 사라지고, 걸어 둔
+  // 보호주문은 고아로 남는다. 그런데 응답에는 "진입 성공"이 적힌다.
+  //
+  // 판정은 **만들지 않는다.** `positionLifecycle.entryGate()`가 이미
+  // 있고 `my-original-v1`은 그것을 부르고 있었다 — 이 경로만 빠져 있었다
+  // (`CLAUDE.md` 상습 고장 ②: 경로가 둘인데 한쪽만 고침).
+  //
+  // **반전은 여기서 하지 않는다.** 반대 방향이면 막고 끝낸다. 반전은
+  // 닫고-확인하고-열는 절차이고 이 경로에는 그 절차가 없다. 절차 없이
+  // 시장가로 상계하면 그게 바로 위에 적은 사고다. 못 하는 것을
+  // 막는 쪽이 하는 척하는 쪽보다 낫다.
+  {
+    const { futuresExchangeOf } = await import('@/lib/exchanges/futuresAdapter');
+    const dirEx = futuresExchangeOf(conn.exchange);
+    if (!dirEx) {
+      return NextResponse.json({
+        ...base, executed: false, blocked: 'POSITION_UNKNOWN',
+        error: `선물 거래소를 알아보지 못했습니다 (${conn.exchange}) — `
+          + '열린 포지션의 방향을 모르는 채로 진입하지 않습니다',
+      }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+    }
+
+    const ops = await import('@/lib/engine/venuePositionOps');
+    const { entryGate } = await import('@/lib/engine/positionLifecycle');
+
+    // 조회가 **실패하면 `ok:false`로 온다.** 그것을 '포지션 없음'으로
+    // 읽지 않는다 — `entryGate`가 `POSITION_UNKNOWN`으로 막는다.
+    const before = await ops.readOpenPosition(
+      { exchange: dirEx, apiKey: conn.apiKey, apiSecret: conn.apiSecret, testnet: !connIsLive },
+      symbol,
+    );
+    const dirGate = entryGate({ read: before, desiredSide: plan.side });
+
+    // 무엇을 읽었고 무엇을 못 읽었는지 응답에 남긴다. 이게 없으면
+    // "방향을 확인했다"와 "확인하지 못했다"가 화면에서 같아 보인다.
+    (base as any).lifecycle = {
+      before: { ok: before.ok, found: before.found, side: before.side, qty: before.qty },
+      gate: { ok: dirGate.ok, code: dirGate.code, needsReversal: dirGate.needsReversal },
+    };
+
+    if (!dirGate.ok) {
+      return NextResponse.json({
+        ...base, executed: false, blocked: dirGate.code,
+        error: dirGate.reason,
+      }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+    }
   }
 
   // ── 숏은 롱의 부호 반전이 아니다 ──

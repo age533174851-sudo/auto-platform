@@ -164,6 +164,8 @@ export interface WriteLog {
 export interface FakeDbOptions {
   /** 이 테이블의 update를 실패시킨다 (DB 기록 실패 재현) */
   failUpdatesOn?: string;
+  /** Post-dispatch ACK write fault; the SENT CAS must still succeed. */
+  failAckUpdate?: 'error' | 'zero-rows' | 'throw';
   /** 이 테이블의 insert를 실패시킨다. '23505'면 유니크 충돌 */
   failInsertCode?: { table: string; code: string };
   /** select를 실패시킨다 */
@@ -196,29 +198,55 @@ export class FakeDb {
   from(table: string): any {
     const db = this;
     const filters: { col: string; vals: any[] }[] = [];
+    // 범위 조건(`gte`·`lte`). 창 단위로 센 줄을 읽는 질의가 쓴다 —
+    // 이것이 없으면 그런 질의가 **시험에서만** 터진다.
+    const ranges: { col: string; op: 'gte' | 'lte'; val: any }[] = [];
+    // `select('id', { count: 'exact', head: true })` 형태인가.
+    let headCount = false;
     let pending: { kind: 'insert' | 'update'; patch: any } | null = null;
+
+    /** 시각 문자열과 숫자를 같은 축에서 비교한다 */
+    const cmpVal = (v: any): number => {
+      if (typeof v === 'number') return v;
+      const t = Date.parse(String(v));
+      return Number.isFinite(t) ? t : Number(v);
+    };
 
     const apply = () => {
       let out = db.rows[table] ?? [];
       for (const f of filters) out = out.filter((r) => f.vals.includes(r[f.col]));
+      for (const g of ranges) {
+        const bound = cmpVal(g.val);
+        out = out.filter((r) => {
+          const v = cmpVal(r[g.col]);
+          if (!Number.isFinite(v) || !Number.isFinite(bound)) return false;
+          return g.op === 'gte' ? v >= bound : v <= bound;
+        });
+      }
       return out;
     };
 
     const flushUpdate = () => {
-      if (!pending || pending.kind !== 'update') return { error: null };
+      if (!pending || pending.kind !== 'update') return { data: [], error: null };
       if (db.opts.failUpdatesOn === table) {
-        // 거래소는 받았는데 장부에 못 적는 상황이다.
-        return { error: { message: `DB 쓰기 실패 (${table})`, code: 'XX000' } };
+        return { data: [], error: { message: `DB 쓰기 실패 (${table})`, code: 'XX000' } };
+      }
+      if (pending.patch.status === 'ACKED' && db.opts.failAckUpdate) {
+        if (db.opts.failAckUpdate === 'throw') throw new Error('DB ACK 연결 끊김');
+        if (db.opts.failAckUpdate === 'error') return { data: [], error: { code: 'XX000', message: 'DB ACK 쓰기 실패' } };
+        return { data: [], error: null };
       }
       const where: Record<string, any> = {};
       for (const f of filters) where[f.col] = f.vals.length === 1 ? f.vals[0] : f.vals;
-      for (const r of apply()) Object.assign(r, pending.patch);
-      db.writes.push({ table, kind: 'update', patch: { ...pending.patch }, where });
-      return { error: null };
+      const matched = apply();
+      for (const r of matched) Object.assign(r, pending.patch);
+      if (matched.length > 0) db.writes.push({ table, kind: 'update', patch: { ...pending.patch }, where });
+      return { data: matched.map((r) => ({ ...r })), error: null };
     };
 
     const builder: any = {
-      select(_cols?: string) {
+      select(_cols?: string, opts?: { count?: string; head?: boolean }) {
+        if (opts?.count != null || opts?.head === true) headCount = true;
         if (pending?.kind === 'insert') return builder;
         if (db.opts.failSelectsOn === table) {
           builder.__selectFails = true;
@@ -227,6 +255,8 @@ export class FakeDb {
       },
       eq(col: string, val: any) { filters.push({ col, vals: [val] }); return builder; },
       in(col: string, vals: any[]) { filters.push({ col, vals: [...vals] }); return builder; },
+      gte(col: string, val: any) { ranges.push({ col, op: 'gte', val }); return builder; },
+      lte(col: string, val: any) { ranges.push({ col, op: 'lte', val }); return builder; },
       order() { return builder; },
       limit() { return builder; },
       insert(row: any) { pending = { kind: 'insert', patch: row }; return builder; },
@@ -248,6 +278,10 @@ export class FakeDb {
       },
       async maybeSingle() {
         if (builder.__selectFails) return { data: null, error: { message: '조회 실패' } };
+        if (pending?.kind === 'update') {
+          const result = flushUpdate();
+          return { data: result.data?.[0] ?? null, error: result.error };
+        }
         const rows = apply();
         return { data: rows[0] ? { ...rows[0] } : null, error: null };
       },
@@ -255,8 +289,16 @@ export class FakeDb {
         // await로 바로 끝나는 체인 (update().eq() · select().in() 등)
         const run = async () => {
           if (pending?.kind === 'update') return flushUpdate();
-          if (builder.__selectFails) return { data: null, error: { message: '조회 실패' } };
-          return { data: apply().map((r) => ({ ...r })), error: null };
+          if (builder.__selectFails) {
+            // **개수 질의도 실패는 실패다.** 0건으로 돌려주면 호출부의
+            // fail-closed 분기가 시험에서 영영 안 돈다.
+            return headCount
+              ? { count: null, data: null, error: { message: '조회 실패' } }
+              : { data: null, error: { message: '조회 실패' } };
+          }
+          const rows = apply();
+          if (headCount) return { count: rows.length, data: null, error: null };
+          return { data: rows.map((r) => ({ ...r })), error: null };
         };
         return run().then(resolve, reject);
       },

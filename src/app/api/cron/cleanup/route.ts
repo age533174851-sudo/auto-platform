@@ -131,8 +131,28 @@ export async function GET(req: NextRequest) {
     results.push(base);
   }
 
-  const incompleteDelete = results.some(r => r.deleted === null);
-  const totalDeleted = incompleteDelete
+  // HTTP 200/ok:true는 표별 삭제 성공의 증거여야 한다.
+  // 조회 미확인·안전 관문 거부·일부만 삭제됨도 "완료"로 표시하면
+  // #466의 크론 판정기가 없는 다른 호출자는 실패를 성공으로 오인한다.
+  // 미리보기의 "실제 삭제하지 않음"과 정상 0건은 실패가 아니다.
+  const incompleteDelete = results.some(r =>
+    r.eligible === null || r.total === null || r.deleted === null ||
+    (apply && r.eligible > 0 &&
+      (r.skipped !== '' || r.deleted !== r.eligible))
+  );
+  // **'모름'과 '불완전'은 다른 값이다.**
+  //
+  // 삭제 건수를 못 읽은 표가 하나라도 있으면 합계는 null 이다 — 모르는 것을
+  // 0 으로 더하면 합계가 조용히 거짓이 된다.
+  //
+  // 그런데 전부 읽혔는데 대상보다 적게 지워진 것은 **아는 사실**이다.
+  // 4999 를 지우려다 4998 을 지웠으면 4998 은 확인된 숫자다. 그때까지
+  // 합계를 null 로 적으면 이번에는 거꾸로 **아는 것을 모른다고 적는** 것이고,
+  // 그러면 "얼마나 지워졌나"에 아무도 답할 수 없다.
+  //
+  // 완료 여부는 `ok`(그리고 207)가 말한다. 건수와 완료 여부는 다른 질문이다.
+  const anyUnknownDeleted = results.some(r => r.deleted === null);
+  const totalDeleted = anyUnknownDeleted
     ? null : results.reduce((s, r) => s + (r.deleted ?? 0), 0);
 
   return NextResponse.json({

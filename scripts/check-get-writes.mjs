@@ -36,8 +36,6 @@ const ALLOW = {
     '로그인 직후 프로필 행을 만든다 — 없으면 그 사용자는 아무것도 못 한다. 멱등 upsert다',
   'src/app/api/cron/calendar-sync/route.ts':
     'Vercel Cron이 GET으로 깨운다 — 사람이 여는 화면이 아니다',
-  'src/app/api/cron/cleanup/route.ts':
-    'Vercel Cron이 GET으로 깨운다 — 사람이 여는 화면이 아니다',
   'src/app/api/cron/ai-scoring/route.ts':
     'Vercel Cron이 GET으로 깨운다 — 사람이 여는 화면이 아니다',
   'src/app/api/autotrade/my-original-v1/route.ts':
