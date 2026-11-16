@@ -9,7 +9,8 @@
 // 지금은 아니다 — 화면이 자신 있게 틀린 말을 했다.
 
 import { test, eq, assert } from '../../test/harness';
-import { autoRuntimeView, runtimeContradictions, agoText } from './autoRuntimeView';
+import { autoRuntimeView, runtimeContradictions, agoText, deploymentFactsOf } from './autoRuntimeView';
+import { deploymentVerdict, runtimeSkew } from '../runtime/workerPlan';
 
 const alive = (over: any = {}) => ({
   provider: 'Fly', status: 'running', workerId: '784ed315f23358',
@@ -110,6 +111,76 @@ export function runAutoRuntimeViewTests() {
       worker: alive(), deployment: { code: 'MATCHED' },
     });
     eq(c.length, 0, JSON.stringify(c));
+  });
+
+  console.log('[자동 실행기 — 서버 응답에서 배포 사실을 고르는 한 곳]');
+
+  // ── 2026-11-01 ~ 11-13. 화면은 12일 동안 이 사고를 말하지 않았다 ──
+  //
+  // 워커가 96커밋 뒤처진 채 돌고 있었다. 서버는 그걸 알고 있었다 —
+  // `skew`가 MISMATCH라고 적고 있었다. 그런데 화면은 `verdict.code`를
+  // 먼저 읽고, 그 값이 `'UNKNOWN'`이었다. `??`는 null·undefined에서만
+  // 넘어가므로 **`skew`로 넘어가는 길은 죽어 있었다.**
+  //
+  // 즉 `DEPLOY_SKEW` 경고도, "웹과 워커가 다른 코드를 돌리고 있습니다"도
+  // 코드로는 있었지만 **켜질 수 없었다** — `CLAUDE.md`의 "만들어 놓고
+  // 배선을 안 함". 그래서 그 선택 규칙을 한 곳에 두고 여기서 지킨다.
+
+  test('★ 운영에서 난 그 응답이 화면까지 가면 경고가 켜진다 — 판정기부터 끝까지', () => {
+    // 서버가 실제로 만들어 내던 모양 그대로 만든다 (손으로 적지 않는다).
+    const dj = {
+      verdict: deploymentVerdict({ mainSha: null, vercelSha: '220f8001', flySha: '4f6ee8c6' }),
+      skew: runtimeSkew({ vercelSha: '220f8001', flySha: '4f6ee8c6' }),
+      vercel: { sha: '220f8001' }, fly: { sha: '4f6ee8c6' },
+    };
+    const facts = deploymentFactsOf(dj);
+    eq(facts.code, 'MISMATCH', JSON.stringify(dj.verdict));
+
+    const c = runtimeContradictions({ worker: alive(), deployment: facts });
+    assert(c.some(x => x.code === 'DEPLOY_SKEW'), JSON.stringify(c));
+
+    const v = autoRuntimeView({ worker: alive(), deployment: facts });
+    assert(v.sub === '웹과 워커가 다른 코드를 돌리고 있습니다', String(v.sub));
+  });
+
+  test('★ verdict가 모름이어도 skew가 아는 것을 덮지 않는다', () => {
+    // verdict가 어떤 이유로든 UNKNOWN이면, 아는 쪽(skew)을 쓴다.
+    const facts = deploymentFactsOf({
+      verdict: { code: 'UNKNOWN' }, skew: { code: 'MISMATCH' },
+      vercel: { sha: 'aaa1111' }, fly: { sha: 'bbb2222' },
+    });
+    eq(facts.code, 'MISMATCH');
+  });
+
+  test('★ skew는 판정을 내리기만 한다 — 모름을 "같다"로 풀어 주지 못한다', () => {
+    // skew는 SHA 둘만 본다. 그걸로 "배포 끝"이라고 적으면 마이그레이션이
+    // 안 됐어도 초록이 된다 — 모르는 것을 '같다'로 읽는 것이다.
+    const facts = deploymentFactsOf({
+      verdict: { code: 'UNKNOWN' }, skew: { code: 'MATCHED' },
+      vercel: { sha: 'aaa1111' }, fly: { sha: 'aaa1111' },
+    });
+    eq(facts.code, 'UNKNOWN');
+  });
+
+  test('verdict가 확정이면 verdict를 쓴다 — skew보다 많이 본다', () => {
+    // verdict는 마이그레이션까지 본다. skew는 SHA 둘만 본다.
+    const facts = deploymentFactsOf({
+      verdict: { code: 'MISMATCH' }, skew: { code: 'MATCHED' },
+      vercel: { sha: 'aaa1111' }, fly: { sha: 'aaa1111' },
+    });
+    eq(facts.code, 'MISMATCH');
+  });
+
+  test('둘 다 없으면 "같다"로 읽지 않는다 — null이다', () => {
+    eq(deploymentFactsOf({}).code, null);
+    eq(deploymentFactsOf(null).code, null);
+    eq(deploymentFactsOf({ verdict: {}, skew: {} }).code, null);
+  });
+
+  test('SHA도 같이 고른다 — 화면이 다시 응답 모양을 뒤지지 않게', () => {
+    const facts = deploymentFactsOf({ vercel: { sha: 'aaa1111' }, fly: { sha: 'bbb2222' } });
+    eq(facts.webSha, 'aaa1111');
+    eq(facts.workerSha, 'bbb2222');
   });
 
   console.log('[자동 실행기 — 시각 표시]');

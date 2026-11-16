@@ -142,14 +142,21 @@ export async function POST(req: NextRequest) {
       }, { status: 400, headers: { 'Cache-Control': 'no-store' } });
     }
 
-    // 지금 배율을 유지한 채 격리로만 돌린다. 못 읽으면 1배다 — 배율을
-    // 지어내 올리면 사용자가 정하지 않은 위험이 된다.
-    let lev = 1;
+    // 지금 배율을 유지한 채 격리로만 돌린다. 판정은 한 곳에 둔다 —
+    // `leverageSync.gateIsolateLeverage`. **못 읽었으면 아무것도 쓰지 않는다.**
+    let pos: any = null;
     try {
-      const pos = await gf.getPositionGateFutures(creds.key!, creds.secret!, contract, creds.testnet === true);
-      const n = Number(pos?.leverage);
-      if (Number.isFinite(n) && n >= 1) lev = Math.round(n);
-    } catch { /* 1배 */ }
+      pos = await gf.getPositionGateFutures(creds.key!, creds.secret!, contract, creds.testnet === true);
+    } catch { pos = null; }
+    const { gateIsolateLeverage } = await import('@/lib/engine/leverageSync');
+    const pick = gateIsolateLeverage(pos);
+    if (!pick.ok) {
+      return NextResponse.json({
+        error: 'leverage_unknown',
+        message: pick.reason,
+      }, { status: 502, headers: { 'Cache-Control': 'no-store' } });
+    }
+    const lev = pick.leverage;
 
     const g = await gf.setLeverageGateFutures(
       creds.key!, creds.secret!, contract, lev, creds.testnet === true);

@@ -248,6 +248,25 @@ for (const f of changed) {
   }
 }
 
+// **제출 통로도 울타리다.**
+//
+// 2026-11-04에 허용 목록에서 `git push`·`gh pr create`를 걷어내고
+// 올리는 일을 `scripts/autodev-submit.mjs` 하나로 좁혔다. 그 스크립트가
+// refspec과 `--draft`를 글자로 박고 있기 때문에 통로가 좁은 것인데,
+// **회차가 그 파일을 고칠 수 있으면 통로를 스스로 넓힐 수 있다** —
+// 한 줄만 바꿔 `refs/heads/main`을 적으면 된다. 그래서 워크플로와
+// 같은 취급을 한다: 통로 변경은 사람이 직접 연 PR에서만 한다.
+const SUBMIT_PATHS = [
+  'scripts/autodev-submit.mjs',
+  'scripts/lib/autodev-delivery.mjs',
+];
+for (const f of changed) {
+  if (SUBMIT_PATHS.includes(f.path)) {
+    err(`무인 회차가 제출 통로를 고쳤습니다: ${f.path} — `
+      + '올리는 모양(refspec · --draft · 브랜치 접두어)은 스스로 넓힐 수 없습니다');
+  }
+}
+
 // ── ④ 마이그레이션은 건드리지 않는다 ──
 for (const f of changed) {
   if (f.path.startsWith('supabase/migrations/')) {

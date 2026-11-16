@@ -108,8 +108,142 @@ async function exec(venue: FakeVenue, actionMode: string, over: any = {}) {
 /** 취소(DELETE) 호출 수 — 0이어야 하는 자리에서 0인지 센다 */
 const cancels = (v: FakeVenue) => v.countOf(ORDER, 'DELETE');
 
+// ══════════ 웹훅: 킬스위치가 켜져도 청산 신호는 통과한다 ══════════
+//
+// `/api/webhook/tradingview`는 같은 질문 — "이 신호가 청산인가" — 을
+// **두 곳에서 따로** 답하고 있었다.
+//
+//   · 킬스위치 판정:   `!body.reduceOnly`               (truthy)
+//   · 주문 분류(isExit): reduceOnly === true || orderType close* || action close*/exit*
+//
+// 그래서 `orderType: 'closeLong'` 신호(트레이딩뷰 청산 알림의 기본 모양,
+// reduceOnly 칸 없음)는 킬스위치가 켜진 계좌에서 **신규 진입으로 취급돼
+// 버려졌다** — 바로 그 순간이 포지션을 닫아야 하는 때인데.
+// 거꾸로 `reduceOnly: "false"`(문자열)는 킬스위치 판정에선 청산, 주문
+// 분류에선 진입이었다.
+//
+// 거래소는 부르지 않는다. 킬스위치 판정 **바로 다음** 단계(중복 차단)를
+// 가짜로 바꿔 "중복"을 돌려주게 해 두고, 응답이 킬스위치 거절인지
+// 중복 응답인지로 **킬스위치 문을 지났는지**만 본다.
+async function runWebhookKillSwitchExitTests() {
+  const WH_SECRET = 'wh-code-test-0123456789';
+  const USER_SECRET = 'tvw_user-secret-test-0123456789';
+  const routePath = require.resolve('../../app/api/webhook/tradingview/route');
+  const stubs: Record<string, any> = {
+    [require.resolve('../../lib/safety')]: {
+      validatePreOrder: async () => ({ allowed: true, blockers: [], warnings: [] }),
+      isDuplicateWebhook: () => false,
+      logAudit: () => {},
+      getKillSwitchState: () => ({ active: false, reason: null }),
+    },
+    [require.resolve('../../lib/risk/idempotency')]: {
+      signalKeySet: () => ['k'],
+      claimSignal: async () => ({ duplicate: true, reason: 'PAST_KILL_SWITCH' }),
+      cleanupDedup: async () => ({ ok: true }),
+    },
+    [require.resolve('../../lib/notify/telegram')]: {
+      sendTelegramAlert: async () => ({ ok: true }),
+      sendTelegram: async () => ({ ok: true }),
+      fmtError: (m: string) => m,
+    },
+  };
+  const { hashSecret } = require('../../lib/security/webhookAuth');
+
+  /** 테이블 세 개만 아는 가짜 Supabase. 킬스위치 표는 실제 판정기가 읽는다 */
+  function fakeSb(ks: { active?: boolean; readError?: string }) {
+    return {
+      from(table: string) {
+        const q: any = {
+          select: () => q, eq: () => q, limit: () => q, update: () => q,
+          single: async () => table === 'exchange_connections'
+            ? { data: { id: 'c-1', user_id: 'u-1', exchange_id: 'binance', is_testnet: true, has_withdrawal: false }, error: null }
+            : { data: null, error: null },
+          maybeSingle: async () => {
+            if (table === 'webhook_secrets') {
+              return { data: { user_id: 'u-1', secret_hash: hashSecret(USER_SECRET), revoked_at: null }, error: null };
+            }
+            if (table === 'kill_switch_state') {
+              return ks.readError
+                ? { data: null, error: { message: ks.readError } }
+                : { data: { active: !!ks.active, trigger_reason: 'test' }, error: null };
+            }
+            return { data: null, error: null };
+          },
+          then: (res: any) => res({ data: null, error: null }),
+        };
+        return q;
+      },
+    };
+  }
+
+  async function post(body: Record<string, any>, ks: { active?: boolean; readError?: string }) {
+    const adminPath = require.resolve('../../lib/supabase/admin');
+    const saved: Record<string, any> = {};
+    const all = { ...stubs, [adminPath]: { getSupabaseAdmin: () => fakeSb(ks) } };
+    for (const [k, exp] of Object.entries(all)) {
+      saved[k] = require.cache[k];
+      require.cache[k] = { id: k, filename: k, loaded: true, exports: exp } as any;
+    }
+    const prevEnv = process.env.TRADINGVIEW_WEBHOOK_SECRET;
+    process.env.TRADINGVIEW_WEBHOOK_SECRET = WH_SECRET;
+    delete require.cache[routePath];
+    try {
+      const { POST } = require(routePath);
+      const r = await POST({ json: async () => ({
+        code: WH_SECRET, secret: USER_SECRET, mode: 'testnet', userId: 'u-1',
+        connectionId: 'c-1', symbol: 'BTCUSDT', id: `t-${Math.random()}`, ...body,
+      }) } as any);
+      return await r.json();
+    } finally {
+      delete require.cache[routePath];
+      for (const [k, prev] of Object.entries(saved)) {
+        if (prev) require.cache[k] = prev; else delete require.cache[k];
+      }
+      if (prevEnv === undefined) delete process.env.TRADINGVIEW_WEBHOOK_SECRET;
+      else process.env.TRADINGVIEW_WEBHOOK_SECRET = prevEnv;
+    }
+  }
+
+  const passedKill = (j: any) => j?.duplicate === true && /PAST_KILL_SWITCH/.test(String(j?.message));
+  const blockedKill = (j: any) => j?.blocked === true && j?.dropped === true && /킬스위치/.test(String(j?.message));
+
+  // 대조군 — 시험 장치가 킬스위치를 실제로 켜고 있다는 증거
+  const openActive = await post({ orderType: 'openLong', side: 'buy' }, { active: true });
+  test('웹훅 대조: 킬스위치 켜짐 + openLong → 버린다', () => {
+    assert(blockedKill(openActive), `막지 않았다: ${JSON.stringify(openActive)}`);
+  });
+  const openOff = await post({ orderType: 'openLong', side: 'buy' }, { active: false });
+  test('웹훅 대조: 킬스위치 꺼짐 + openLong → 킬스위치 문을 지난다', () => {
+    assert(passedKill(openOff), `지나지 못했다: ${JSON.stringify(openOff)}`);
+  });
+
+  const closeActive = await post({ orderType: 'closeLong', side: 'sell' }, { active: true });
+  test('★ 웹훅: 킬스위치 켜짐 + closeLong(reduceOnly 칸 없음) → 청산은 버리지 않는다', () => {
+    assert(passedKill(closeActive), `청산 신호를 버렸다: ${JSON.stringify(closeActive)}`);
+  });
+  const exitAction = await post({ action: 'exit', side: 'sell' }, { active: true });
+  test('★ 웹훅: 킬스위치 켜짐 + action=exit → 청산은 버리지 않는다', () => {
+    assert(passedKill(exitAction), `청산 신호를 버렸다: ${JSON.stringify(exitAction)}`);
+  });
+  const closeUnknown = await post({ orderType: 'closeShort', side: 'buy' }, { readError: 'db down' });
+  test('★ 웹훅: 킬스위치 못 읽음 + closeShort → 청산은 막지 않는다', () => {
+    assert(passedKill(closeUnknown), `청산 신호를 막았다: ${JSON.stringify(closeUnknown)}`);
+  });
+  const openUnknown = await post({ orderType: 'openLong', side: 'buy' }, { readError: 'db down' });
+  test('웹훅: 킬스위치 못 읽음 + openLong → 진입은 막는다', () => {
+    assert(!passedKill(openUnknown) && /확인하지 못해/.test(String(openUnknown?.message)),
+      `진입이 지나갔다: ${JSON.stringify(openUnknown)}`);
+  });
+  const strFalse = await post({ orderType: 'openLong', side: 'buy', reduceOnly: 'false' }, { active: true });
+  test('★ 웹훅: 킬스위치 켜짐 + reduceOnly "false"(문자열) 진입 → 버린다', () => {
+    assert(blockedKill(strFalse), `문자열 "false"가 킬스위치를 지나갔다: ${JSON.stringify(strFalse)}`);
+  });
+}
+
 export async function runKillCloseIntegrationTests() {
   console.log('[통합 — 긴급 종료 안전성 (fetch·DB만 가짜)]');
+
+  await runWebhookKillSwitchExitTests();
 
   // ══════════ ① 단방향 정상 — 대상만 취소하고 닫는다 ══════════
   {
