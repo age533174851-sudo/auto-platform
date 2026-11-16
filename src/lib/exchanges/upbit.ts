@@ -1,7 +1,7 @@
 // Upbit API Adapter (server-side only)
 // Docs: https://docs.upbit.com/
 import { createHmac, createHash, randomUUID } from 'crypto';
-import { parseLossless } from './losslessJson';
+import { parseLossless, parseErrorBody } from './losslessJson';
 import type { TestResult, ExchangeBalance } from './types';
 
 const BASE = 'https://api.upbit.com';
@@ -24,7 +24,7 @@ async function upbitFetch(path: string, key: string, secret: string) {
     signal: AbortSignal.timeout(8000),
   });
   if (!r.ok) {
-    const err = parseLossless(await r.text()).catch(()=>({}));
+    const err = parseErrorBody(await r.text());
     throw new Error(err.error?.message || `HTTP ${r.status}`);
   }
   return parseLossless(await r.text());
