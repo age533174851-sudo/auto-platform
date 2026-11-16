@@ -45,6 +45,16 @@ export function runMarketStatsTests() {
     eq(fmtCompact(-2_000_000), '-2.00M');
   });
 
+  test('반올림이 1000에 닿으면 다음 단위로 올린다 — 1000.00K로 적지 않는다', () => {
+    eq(fmtCompact(999_999), '1.00M');
+    eq(fmtCompact(999_995), '1.00M');
+    eq(fmtCompact(999_994), '999.99K');
+    eq(fmtCompact(999_999_999), '1.00B');
+    eq(fmtCompact(999_999_999_999), '1.00T');
+    eq(fmtCompact(999.999), '1.00K');
+    eq(fmtCompact(-999_999), '-1.00M');
+  });
+
   test('축약을 되돌리는 함수는 없다 — 표시 전용이다', async () => {
     const mod: any = await import('./marketStats');
     const bad = Object.keys(mod).filter(k => /parse|toNumber|unformat|fromText/i.test(k));
