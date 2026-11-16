@@ -309,6 +309,8 @@ export default function App() {
     setThemeMode(order[(order.indexOf(themeMode)+1)%order.length]);
   },[themeMode,setThemeMode]);
   const [tab,setTab]=useState('home');
+  const isEasyScreen = tab === 'easy';
+  const screenSwitchLabel = isEasyScreen ? '기본 화면' : '쉬운 화면';
   const [paletteOpen,setPaletteOpen]=useState(false);
   const [helpOpen,setHelpOpen]=useState(false);
   // ── 딥링크 ──
@@ -1219,9 +1221,10 @@ export default function App() {
               <div style={{display:'flex',alignItems:'center',gap:3,background:priceStatus==='live'?'rgba(16,185,129,.12)':priceStatus==='mock'?'rgba(245,158,11,.12)':'rgba(239,68,68,.12)',border:`1px solid ${priceStatus==='live'?'rgba(16,185,129,.3)':priceStatus==='mock'?'rgba(245,158,11,.3)':'rgba(239,68,68,.3)'}`,borderRadius:20,padding:'2px 7px'}}>
                 <Dot c={priceStatus==='live'?T.grn:priceStatus==='mock'?T.ylw:T.red}/><span style={{color:priceStatus==='live'?T.grn:priceStatus==='mock'?T.ylw:T.red,fontSize:9,fontWeight:700}}>{priceStatus==='live'?'LIVE':priceStatus==='mock'?'MOCK':'ERR'}</span>
               </div>
-              <button onClick={()=>nav('easy')} aria-label="쉬운 화면" title="쉬운 화면"
+              <button type="button" onClick={()=>nav(isEasyScreen ? 'home' : 'easy')} aria-label={screenSwitchLabel} title={screenSwitchLabel}
                 style={{minHeight:34,background:T.acg,border:`1px solid ${A(T.acl,'45')}`,borderRadius:20,padding:'0 10px',cursor:'pointer',fontSize:10,color:T.acl,fontWeight:800,display:'flex',alignItems:'center',gap:4,whiteSpace:'nowrap',flexShrink:0}}>
-                <Sparkles size={12} strokeWidth={2.4}/> 쉬운 화면
+                {isEasyScreen ? <LayoutGrid size={12} strokeWidth={2.4} aria-hidden="true"/> : <Sparkles size={12} strokeWidth={2.4} aria-hidden="true"/>}
+                {screenSwitchLabel}
               </button>
               {/* 테마는 설정에도 있지만 여기에도 둔다. 밝기는 자주 바꾸는
                   것이고, 그때마다 설정까지 들어가게 하면 아무도 안 쓴다.
