@@ -11,6 +11,7 @@ const root = process.cwd();
 execFileSync(process.execPath, ['--test', 'scripts/ten-slot-offline.test.mjs'], { cwd: root, stdio: 'inherit' });
 execFileSync(process.execPath, ['--test', 'scripts/ten-slot-persistence-offline.test.mjs'], { cwd: root, stdio: 'inherit' });
 execFileSync(process.execPath, ['--test', 'scripts/ten-slot-lifecycle-offline.test.mjs'], { cwd: root, stdio: 'inherit' });
+execFileSync(process.execPath, ['--test', 'scripts/ten-slot-coupled-offline.test.mjs'], { cwd: root, stdio: 'inherit' });
 const dir = mkdtempSync(join(tmpdir(), 'traigo-test-'));
 cpSync(join(root, 'src'), join(dir, 'src'), { recursive: true });
 
