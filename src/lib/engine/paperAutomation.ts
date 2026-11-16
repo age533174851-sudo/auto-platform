@@ -161,6 +161,9 @@ export async function evaluatePaperAutomation(sb: any, run: any,
     // 이것이 없으면 역추세·돌파는 방향을 내지 않는다 — 없는 값을 0으로 바꿔
     // 계산하는 대신 쉰다.
     view:verdict.regime?.dataOk ? (verdict.regime?.view ?? null) : null,
+    // 봉 전체도 그대로 넘긴다. 오더블록·FVG·유동성 사냥·거래량 확인 돌파는
+    // 고가·저가·거래량이 있어야 표현된다 — 없으면 그 전략들은 쉰다.
+    bars:verdict.regime?.dataOk ? (regime.bars ?? null) : null,
     signal:bot.signal,
     markPrice:quotes.get(run.symbol) ?? null,
     availableUsd:available.available,openCount:positions.length,cfg });
