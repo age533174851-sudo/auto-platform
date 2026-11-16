@@ -122,6 +122,134 @@ export function cancelVerdict(i: {
  */
 export const REVIVE_PATCH = { cancelled_at: null, cancelled_by: null };
 
+// ── 취소된 줄에 길을 준다 ──────────────────────────────
+//
+// 2026-11-14 사용자가 쓴 말 그대로:
+//
+//   "저거 취소됨 할거면 다시 킬수 있게 만들어 놓든가 그냥 저거 방치하고
+//    계속 쌓이는게 마음에 안들어 / 내역 삭제할건 하고 내비두면 다시
+//    킬수 있게 만들어놔"
+//
+// 맞는 말이다. 취소된 줄에는 **버튼이 하나도 없었다.** 화면은 "같은
+// 종목으로 예약을 다시 만들면 이 줄이 되살아납니다"라고 적는데, 그건
+// `UNIQUE (user_id, symbol)`이 실제로 걸려 있을 때만 참이다. 그 제약이
+// 없는 DB에서는 새로 만들 때마다 **새 줄**이 생기고, 취소된 줄은
+// 되살아나지도 지워지지도 않고 영영 쌓인다.
+//
+// 그래서 두 가지를 준다. 둘 다 **판정은 여기 한 곳**에 둔다.
+
+export type RestoreCode =
+  /** 되살렸다 — 다만 꺼진 상태다 */
+  | 'RESTORED'
+  /** 취소된 줄이 아니다. 되살릴 것이 없다 */
+  | 'NOT_CANCELLED'
+  /** 그런 예약이 없다(또는 남의 것이다) */
+  | 'NOT_FOUND'
+  /** DB가 실패했거나 결과를 못 읽었다 */
+  | 'FAILED';
+
+export interface RestoreVerdict {
+  code: RestoreCode;
+  ok: boolean;
+  /** 되살린 뒤의 상태. **항상 꺼짐이다** */
+  enabledAfter: false;
+  reason: string;
+}
+
+/**
+ * 취소 표식을 지워 **꺼진 예약**으로 되돌린다.
+ *
+ * **켜진 채로 돌려주지 않는다.** 취소했다는 것은 돌리고 싶지 않았다는
+ * 뜻이고, 되살리기 한 번에 주문이 다시 나가기 시작하면 그건 사용자가
+ * 누른 적 없는 거래다. 목록에 다시 보이게만 하고, 켜는 것은 기존
+ * 스위치가 한다 — 그 스위치에는 이미 실행 프로필 검사가 붙어 있다.
+ */
+export function restoreVerdict(i: {
+  updated: number | null;
+  existed: boolean;
+  wasCancelled: boolean;
+  error?: string | null;
+}): RestoreVerdict {
+  const no = (code: RestoreCode, reason: string): RestoreVerdict =>
+    ({ code, ok: false, enabledAfter: false, reason });
+
+  if (i.error) {
+    return no('FAILED', `예약을 되살리지 못했습니다 — ${String(i.error).slice(0, 160)}`);
+  }
+  if (i.updated == null) {
+    return no('FAILED', '되살리기 결과를 읽지 못했습니다 — 되살렸다고 단정하지 않습니다');
+  }
+  if (!i.existed) return no('NOT_FOUND', '그 예약을 찾지 못했습니다');
+  if (!i.wasCancelled) {
+    return no('NOT_CANCELLED',
+      '취소된 예약이 아닙니다 — 되살릴 것이 없습니다. 꺼져 있을 뿐이라면 스위치로 켜세요');
+  }
+  if (i.updated <= 0) {
+    return no('FAILED', '취소된 예약인데 되살아나지 않았습니다 — 되살렸다고 적지 않습니다');
+  }
+  return {
+    code: 'RESTORED', ok: true, enabledAfter: false,
+    reason: '예약을 되살렸습니다 — **꺼진 상태**입니다. 목록에서 스위치로 켜세요',
+  };
+}
+
+export type PurgeCode =
+  /** 줄을 지웠다. 되돌릴 수 없다 */
+  | 'PURGED'
+  /** 취소된 줄이 아니다. **지우지 않았다** */
+  | 'NOT_CANCELLED'
+  | 'NOT_FOUND'
+  | 'FAILED';
+
+export interface PurgeVerdict {
+  code: PurgeCode;
+  ok: boolean;
+  reason: string;
+}
+
+/**
+ * 취소된 줄을 **영구 삭제**한다.
+ *
+ * 왜 취소된 줄만인가
+ * ──────────────────
+ * 살아 있거나 잠깐 꺼 둔 예약을 지우면, 사용자가 "껐다"고 생각한 것과
+ * "없앴다"가 같아진다. 그리고 실수로 지운 것을 되살릴 방법이 없다.
+ * **취소는 되돌릴 수 있고(위 `restoreVerdict`), 삭제는 되돌릴 수 없다.**
+ * 그래서 반드시 취소를 거친 줄만 지운다 — 삭제 앞에 되돌릴 수 있는
+ * 단계를 하나 세워 둔다.
+ *
+ * 체결·장부 기록은 다른 표에 있고 이 줄을 참조하지 않는다(외래키 없음).
+ * 그래서 이 삭제로 거래 이력이 사라지지는 않는다.
+ */
+export function purgeVerdict(i: {
+  deleted: number | null;
+  existed: boolean;
+  wasCancelled: boolean;
+  error?: string | null;
+}): PurgeVerdict {
+  if (i.error) {
+    return { code: 'FAILED', ok: false,
+      reason: `기록을 지우지 못했습니다 — ${String(i.error).slice(0, 160)}` };
+  }
+  // **취소 여부를 먼저 본다.** 못 읽은 결과보다 이 검사가 앞선다 —
+  // 살아 있는 예약을 지우는 것이 여기서 가장 나쁜 결과다.
+  if (!i.existed) return { code: 'NOT_FOUND', ok: false, reason: '그 예약을 찾지 못했습니다' };
+  if (!i.wasCancelled) {
+    return { code: 'NOT_CANCELLED', ok: false,
+      reason: '취소된 예약만 지웁니다 — 먼저 취소하세요. 켜져 있거나 잠깐 꺼 둔 예약은 지우지 않습니다' };
+  }
+  if (i.deleted == null) {
+    return { code: 'FAILED', ok: false,
+      reason: '삭제 결과를 읽지 못했습니다 — 지웠다고 단정하지 않습니다' };
+  }
+  if (i.deleted <= 0) {
+    return { code: 'FAILED', ok: false,
+      reason: '취소된 예약인데 지워지지 않았습니다 — 지웠다고 적지 않습니다' };
+  }
+  return { code: 'PURGED', ok: true,
+    reason: '취소된 예약 기록을 지웠습니다 — 되돌릴 수 없습니다' };
+}
+
 // ── 예약청산(scheduled_exits)의 선점 ────────────────────
 //
 // **예전에는 선점이 아예 없었다.** 실행기는 줄을 읽고 → 주문을 내고 →
