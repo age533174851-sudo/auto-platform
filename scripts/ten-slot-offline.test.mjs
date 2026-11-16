@@ -96,3 +96,25 @@ test('malformed persisted ledger fails closed, not silently rebuilt', () => {
     assert.equal(planOfflineClaim(corrupt, 0, clear).code, 'LEDGER_UNKNOWN');
   }
 });
+
+
+test('corrupt snapshots with two active slots fail closed on every mutation', () => {
+  const s = createOfflineLedger('a', 1000);
+  const corrupt = { ...s, slots: s.slots.map((slot, i) =>
+    i < 2 ? { ...slot, status: 'OPEN' } : slot) };
+  assert.equal(planOfflineClaim(corrupt, 0, clear).code, 'LEDGER_UNKNOWN');
+  assert.equal(advanceOfflineSlot(corrupt, 0, 0, 'CLOSING',
+    { exitIntentPersisted: true }).code, 'LEDGER_UNKNOWN');
+  assert.equal(killOfflineLedger(corrupt, 0).code, 'LEDGER_UNKNOWN');
+});
+
+test('non-prefix spent slots and exhausted version reject without mutation', () => {
+  const s = createOfflineLedger('a', 1000);
+  const gap = { ...s, slots: s.slots.map((slot, i) =>
+    i === 3 ? { ...slot, status: 'SPENT' } : slot) };
+  assert.equal(planOfflineClaim(gap, 0, clear).code, 'LEDGER_UNKNOWN');
+  assert.equal(killOfflineLedger(gap, 0).code, 'LEDGER_UNKNOWN');
+  const exhausted = { ...s, version: Number.MAX_SAFE_INTEGER };
+  assert.equal(planOfflineClaim(exhausted, exhausted.version, clear).code, 'LEDGER_UNKNOWN');
+  assert.equal(killOfflineLedger(exhausted, exhausted.version).code, 'LEDGER_UNKNOWN');
+});
