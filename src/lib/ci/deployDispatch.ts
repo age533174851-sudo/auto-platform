@@ -60,7 +60,16 @@ export type DispatchCode =
   /** 합친 것이 없다. 부를 이유가 없다 */
   | 'NOTHING_MERGED'
   /** 토큰이 없어 부를 수 없다. **조용히 넘기지 않는다** */
-  | 'NO_TOKEN';
+  | 'NO_TOKEN'
+  /**
+   * 승인 입력이 없던 평소 적용이다.
+   *
+   * 그 경로는 main의 push에서 오고, push는 이미 `fly-deploy`를 깨운다.
+   * 여기서 또 부르면 같은 배포가 두 번 큐에 들어간다.
+   */
+  | 'NO_APPROVAL'
+  /** 적용이 실패했다. 실패 위로 워커를 바꾸지 않는다 */
+  | 'APPLY_FAILED';
 
 export interface DispatchPlan {
   dispatch: boolean;
@@ -175,6 +184,60 @@ export const MIGRATE_WORKFLOW = 'migrate.yml';
  * 가장 자주 난 고장이다. 그리고 적용기는 이미 멱등이다: 적용된 것은
  * 건너뛰고, 파괴적인 것은 스스로 멈춘다.
  */
+/**
+ * **승인해서 위험 마이그레이션을 적용한 뒤 배포를 불러야 하는가.**
+ *
+ * 왜 이 함수가 필요한가
+ * ─────────────────────
+ * DESTRUCTIVE 마이그레이션은 `migrate`를 `workflow_dispatch`로 손수 돌려
+ * 승인한다. 그런데 그 적용은 **main에 push를 만들지 않는다.** 그래서
+ * `fly-deploy`의 `push` 트리거가 오지 않고, `workflow_run` 트리거는
+ * `head_branch == 'main'` 가드에 걸려 언제나 skipped다.
+ *
+ * 결과는 **승인했는데 배포가 안 되는 것**이다. 2026-11-01 ~ 11-06 사이에
+ * 실제로 그랬다: fly-deploy가 7회 연속 `마이그레이션이 끝나기를 기다린다`
+ * 단계에서 멈췄고, Worker는 11-01 빌드(`4f6ee8c6`)에 남아 main보다
+ * 89커밋 뒤처진 코드로 거래를 보고 있었다.
+ *
+ * 사람이 "승인한 뒤에 fly-deploy도 눌러야 한다"를 기억하는 구조는
+ * 언젠가 잊힌다. `CLAUDE.md`의 첫 규칙이 그것이다 — **사용자가 해야 할
+ * 것이 생기면 먼저 그것을 자동화한다.**
+ *
+ * 좁게 부른다
+ * ───────────
+ * **승인 입력이 있었고 · 적용이 성공했을 때만** 부른다. 평소의 자동 적용은
+ * main push에서 오고 그 push가 이미 배포를 깨우므로, 여기서 또 부르면
+ * 같은 배포가 두 번 들어간다. 적용이 실패했으면 더 부르지 않는다 —
+ * 새 코드가 없는 칸을 읽는 쪽이 더 나쁘다.
+ */
+export function approvedMigrationDeployPlan(i: {
+  /** `steps.approval.outputs.approve` — 승인한 파일명. 비어 있으면 평소 적용이다 */
+  approvedFile?: string | null;
+  /** 적용 단계가 성공했는가 */
+  applyOk?: boolean;
+  hasToken?: boolean;
+}): DispatchPlan {
+  const file = String(i?.approvedFile ?? '').trim();
+  if (!file) {
+    return { dispatch: false, code: 'NO_APPROVAL',
+      reason: '승인 입력이 없는 평소 적용입니다 — main push가 이미 배포를 깨웁니다' };
+  }
+  // **`applyOk`를 안 주면 성공으로 읽지 않는다.** 모르는 것을 성공으로
+  // 읽으면 실패한 적용 위로 워커가 바뀐다.
+  if (i?.applyOk !== true) {
+    return { dispatch: false, code: 'APPLY_FAILED',
+      reason: `${file} 적용이 성공으로 확인되지 않았습니다 — 배포를 부르지 않습니다` };
+  }
+  if (i?.hasToken === false) {
+    return { dispatch: false, code: 'NO_TOKEN',
+      reason: `${file}을 적용했지만 토큰이 없어 배포를 부르지 못했습니다 — `
+        + 'Fly Worker는 옛 코드로 계속 돕니다. 손으로 fly-deploy를 실행하세요' };
+  }
+  return { dispatch: true, code: 'DISPATCH',
+    reason: `${file}을 승인 적용했습니다 — main을 Fly에 배포합니다 `
+      + '(승인 적용은 push를 만들지 않아 workflow_run이 오지 않습니다)' };
+}
+
 export function migrateDispatchPlan(i: {
   merged: number;
   hasToken?: boolean;

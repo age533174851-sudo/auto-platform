@@ -63,6 +63,21 @@ on:
         required: false
         type: string
 
+# **최소 권한만.**
+#   contents: read   — 체크아웃에 필요
+#   actions: write   — 승인 적용이 끝난 뒤 fly-deploy를 부르는 데 필요
+#
+# **왜 actions: write가 필요한가.** 승인 적용(`workflow_dispatch`)은 main에
+# push를 만들지 않는다. 그래서 `fly-deploy`의 push 트리거가 오지 않고,
+# `workflow_run` 트리거는 `head_branch == 'main'` 가드에 걸려 skipped다.
+# 승인해서 DB를 바꿨는데 Worker는 옛 빌드로 계속 도는 상태가 그렇게
+# 만들어졌다(2026-11-01 ~ 11-06, 89커밋 뒤처짐). `workflow_dispatch`는
+# GITHUB_TOKEN 재귀 방지의 명시적 예외라 이쪽에서 배포를 직접 부를 수
+# 있다 — 그러려면 이 권한이 있어야 한다.
+permissions:
+  contents: read
+  actions: write
+
 # 두 배포가 같은 순간에 같은 파일을 적용하지 않게 한다.
 # (DB 쪽에도 잠금 표가 따로 있다 — 이건 한 겹 더 두는 것이다.)
 concurrency:
@@ -184,6 +199,32 @@ jobs:
           else
             node scripts/apply-migrations.mjs --apply
           fi
+
+      # ── 승인 적용이 끝났으면 배포까지 부른다 ──
+      #
+      # **사람이 기억해야 하는 단계를 없앤다** (CLAUDE.md 첫 규칙).
+      #
+      # 승인 적용은 main에 push를 만들지 않으므로 `fly-deploy`가 저절로
+      # 깨어나지 않는다. 그래서 지금까지는 "승인하고 → 적용되고 → 사람이
+      # fly-deploy를 또 눌러야" 했고, 그 마지막 한 번이 빠지면 DB는 새
+      # 모양인데 Worker는 옛 코드를 읽는 상태가 된다. 2026-11-01~11-06이
+      # 정확히 그랬다.
+      #
+      # **부를지 말지의 판정은 여기 적지 않는다.** `deployDispatch.ts`의
+      # `approvedMigrationDeployPlan`이 정하고 이 단계는 그것을 부른다 —
+      # 조건을 YAML에 묻어 두면 값으로 확인할 수가 없고, 이 저장소의 배포
+      # 자동화는 바로 그래서 두 번 조용히 죽었다(8/9 · 8/13).
+      #
+      # 아래 `if`는 **판정이 아니라 범위**다: 평소 push 적용에서는 아예
+      # 돌지 않게 한다(push는 이미 fly-deploy를 깨운다). 승인 여부와 적용
+      # 성공은 스크립트가 값으로 한 번 더 확인한다.
+      - name: 승인 적용 뒤 배포 호출
+        if: steps.approval.outputs.approve != '' && steps.apply.outcome == 'success'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPROVED_MIGRATION: ${{ steps.approval.outputs.approve }}
+          APPLY_OUTCOME: ${{ steps.apply.outcome }}
+        run: node scripts/dispatch-deploy-after-migrate.mjs
 
       # 실패했든 성공했든 무엇을 했는지 남긴다. 이 파일이 "배포는 됐는데
       # 마이그레이션은 어떻게 됐나"의 답이다.
