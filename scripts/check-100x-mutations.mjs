@@ -197,14 +197,51 @@ const CHECK1A = ['scripts/check-execution-profile.mjs'];
 //   하네스가 CI보다 좁게 보면 그 차이만큼 거짓 신호가 나온다.
 const CHECK_HX = ['scripts/check-hold-extension.mjs'];
 
+/**
+ * 게이트 출력을 담는 버퍼.
+ *
+ * `execFileSync`의 기본값은 **1 MiB**다. `npm test`의 출력은 시험 하나에
+ * 약 80바이트이므로 **시험이 1만 3천 개를 넘으면 그 한도를 넘는다** — 실제로
+ * 넘었다(14,227개 → 1,124,748바이트). 넘으면 Node가 자식을 죽이고 던진다.
+ */
+const GATE_MAX_BUFFER = 256 * 1024 * 1024;
+const GATE_TIMEOUT_MS = 900_000;
+
 /** 게이트 하나를 돌린다. 통과면 null, 실패면 {name, code, output}. */
 const runGate = (name, cmd, args) => {
   try {
-    execFileSync(cmd, args, { stdio: 'pipe', timeout: 900_000 });
+    execFileSync(cmd, args, { stdio: 'pipe', timeout: GATE_TIMEOUT_MS, maxBuffer: GATE_MAX_BUFFER });
     return null;
   } catch (e) {
+    // ★ **끝나지 못한 게이트는 빨간불이 아니다.**
+    //
+    // 버퍼 초과(ENOBUFS)·시간 초과·신호로 죽은 경우 종료 코드가 아예 없다
+    // (`e.status === null`). 예전 코드는 `e?.status ?? 1`로 그것을 **exit 1**,
+    // 즉 "게이트 실패"로 읽었다. 그 한 줄이 만든 거짓은 두 가지다:
+    //
+    //   · 기준선 검사가 "변이를 넣기 전부터 게이트가 실패합니다"로 멈춘다 —
+    //     실제로는 시험이 전부 통과했는데(14,227 통과 / 0 실패) 출력이
+    //     1 MiB를 넘었을 뿐이다. 출력도 잘려 있어서 사유가 비어 보인다.
+    //   · 변이 판정에서는 **모든 변이가 "검출됨"** 이 된다. 아무것도 바꾸지
+    //     않은 대조군(`OK-*` 주석 한 줄 추가)까지 빨개지므로 "과도 검출"로
+    //     찍힌다 — 그 대조군이 이 고장을 잡아 준 것이다.
+    //
+    // 측정하지 못한 것을 실패로 적지 않는다. 즉시 멈추고 사실을 적는다 —
+    // 이 파일이 트리 오염에서 이미 쓰는 방식이다("하네스가 스스로 틀리는
+    // 것이 가장 나쁘다").
+    if (e?.status == null) {
+      console.error(`\n❌ 게이트가 끝나지 못했습니다: ${name}`);
+      console.error(`   code=${e?.code ?? '없음'} · signal=${e?.signal ?? '없음'}`
+        + ` · killed=${e?.killed ?? '없음'} · 받은 출력 ${(e?.stdout?.length ?? 0)}바이트`);
+      if (e?.code === 'ENOBUFS') {
+        console.error(`   출력이 버퍼(${GATE_MAX_BUFFER}바이트)를 넘었습니다.`
+          + ' 이것은 시험 실패가 아닙니다 — GATE_MAX_BUFFER를 올리세요.');
+      }
+      console.error('   **이것을 실패로 세지 않습니다.** 측정하지 못한 것은 빨간불이 아닙니다.');
+      process.exit(5);
+    }
     const out = `${e?.stdout?.toString?.() || ''}${e?.stderr?.toString?.() || ''}`;
-    return { name, code: e?.status ?? 1, output: out.trim() };
+    return { name, code: e.status, output: out.trim() };
   }
 };
 // **CI가 보는 것을 그대로 본다.** 검사기 둘 + 유닛 시험.
