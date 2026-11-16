@@ -5,7 +5,7 @@ import { settleAttempt } from '../../lib/smoke/settleAttempt';
 import { startAttempt } from '../../lib/smoke/startAttempt';
 import { testnetAlgoConnectionClear, testnetAlgoClientId } from '../../lib/exchanges/binanceAlgoStore';
 import { requestsTestnetAlgoProtection } from '../../lib/exchanges/binanceAlgoContract';
-import { executeTestnetAlgoProtection } from '../../lib/exchanges/binanceAlgoExecution';
+import { executeTestnetAlgoProtection, cleanupTestnetAlgoParent } from '../../lib/exchanges/binanceAlgoExecution';
 import { executeOrder } from '../../lib/engine/orderExecutor';
 import { __clearFiltersCache } from '../../lib/exchanges/binanceFutures';
 
@@ -50,7 +50,7 @@ export async function runBinanceAlgoExecutionTests() {
 
   // Real executor reproduces the observed -4120; only venue HTTP is fake.
   async function executorCase(useAlgo: boolean, hedge = false, foreign = false, viaStart = false, failHolding = false,
-    ordinary?: { source: 'MANUAL' | 'AUTOTRADE'; policy?: 'REQUIRED' | 'OPTIONAL'; missingSchema?: boolean }) {
+    ordinary?: { source: 'MANUAL' | 'AUTOTRADE'; policy?: 'REQUIRED' | 'OPTIONAL'; missingSchema?: boolean; ladder?: boolean }) {
   const cid = ordinary ? 'MF' + '1234567890123456789012345678901234' : 'smo-abcBTCUSDE0';
   const db = new FakeDb({ algoSchema: !ordinary?.missingSchema, ...(failHolding ? { failUpdatesOn: 'smoke_tests' } : {}) }).seed('exchange_connections', [{ id: 'c1', user_id: 'u1',
     exchange_id: 'binance', is_testnet: true, has_withdrawal: false,
@@ -87,7 +87,8 @@ export async function runBinanceAlgoExecutionTests() {
     }, 'DELETE')
     .on('/fapi/v1/algoOrder', call => {
       const row = { ...call.params, algoId: String(100 + active.length), algoType: 'CONDITIONAL', orderType: call.params.type,
-        algoStatus: 'NEW', positionSide: 'BOTH', closePosition: true, reduceOnly: false };
+        algoStatus: 'NEW', positionSide: 'BOTH', closePosition: call.params.closePosition === 'true',
+        reduceOnly: call.params.reduceOnly === 'true' };
       active.push(row); return { json: row };
     }, 'POST');
   __clearFiltersCache(); const restore = venue.install();
@@ -102,12 +103,27 @@ export async function runBinanceAlgoExecutionTests() {
     result = await executeOrder(db, { userId: 'u1', connectionId: 'c1', signalId: ordinary ? 'strategy:scalp:round1' : 'smoke-test:round1',
     clientOrderId: cid, exchange: 'binance', mode: 'TESTNET', source: ordinary?.source ?? 'MANUAL',
     testnetAlgoProtection: ordinary ? requestsTestnetAlgoProtection({ exchange: 'binance', mode: 'TESTNET', stopLoss: 98 }) : useAlgo,
-    protectionPolicy: ordinary?.policy ?? 'REQUIRED', stopLoss: 98, takeProfit: 104,
+    protectionPolicy: ordinary?.policy ?? 'REQUIRED', stopLoss: 98,
+    ...(ordinary?.ladder ? { exitPlan: { trailingQty: 0, orders: [
+      { kind: 'PARTIAL_TP', price: 102, quantity: .4 },
+      { kind: 'PARTIAL_TP', price: 104, quantity: .6 },
+    ] } } : { takeProfit: 104 }),
     apiKey: 'K'.repeat(64), apiSecret: 'S'.repeat(64),
     plan: { approved: true, symbol: 'BTCUSDT', side: 'LONG', riskAmount: 2, riskAmountWithCosts: 2,
       stopDistancePct: 2, effectiveStopPct: 2, positionSize: 100, quantity: 1, requiredMargin: 10,
       leverage: 10, entryPrice: 100, liquidationPrice: 90, liquidationDistancePct: 10, notes: [] },
   } as any);
+    if (ordinary?.ladder && result.ok === true) {
+      const bf = await import('../../lib/exchanges/binanceFutures');
+      await bf.placeFuturesOrder('K'.repeat(64), 'S'.repeat(64), {
+        symbol: 'BTCUSDT', side: 'SELL', type: 'MARKET', quantity: 1, reduceOnly: true,
+      }, true);
+      const parent = db.table('live_orders').find(r => r.client_order_id === cid);
+      const cleaned = await cleanupTestnetAlgoParent(db,
+        { userId: 'u1', connectionId: 'c1', parentId: parent.id },
+        { apiKey: 'K'.repeat(64), apiSecret: 'S'.repeat(64), testnet: true }, 'BTCUSDT');
+      return { result, legacyProtectivePosts, active, venue, db, settled, fenced, cleaned };
+    }
     if (useAlgo && result.ok === true) {
       fenced = !await testnetAlgoConnectionClear(db, 'u1', 'c1');
       if (foreign) active.push({ ...active[0], algoId: '999', clientAlgoId: 'smo-otherBTCUSDS0' });
@@ -128,6 +144,7 @@ export async function runBinanceAlgoExecutionTests() {
   const automatic = await executorCase(true, false, false, false, false, { source: 'AUTOTRADE' });
   const manual = await executorCase(true, false, false, false, false, { source: 'MANUAL', policy: 'OPTIONAL' });
   const missingSchema = await executorCase(true, false, false, false, false, { source: 'AUTOTRADE', missingSchema: true });
+  const ladder = await executorCase(true, false, false, false, false, { source: 'AUTOTRADE', ladder: true });
   const { result, legacyProtectivePosts, active, venue, settled, fenced, db: roundDb } = await executorCase(true);
   test('legacy executor control reproduces observed -4120 before the new transport', () => {
     assert(legacy.legacyProtectivePosts > 0); eq(legacy.result.ok, false);
@@ -175,6 +192,20 @@ export async function runBinanceAlgoExecutionTests() {
     eq(requestsTestnetAlgoProtection({ exchange: 'gate', mode: 'TESTNET', stopLoss: 98 }), false);
     eq(requestsTestnetAlgoProtection({ exchange: 'binance', mode: 'TESTNET', stopLoss: 98, reduceOnly: true }), false);
     eq(requestsTestnetAlgoProtection({ exchange: 'binance', mode: 'TESTNET', stopLoss: undefined }), false);
+  });
+  test('ordinary TESTNET partial targets preserve quantity, unique IDs, counts and all-child cleanup', () => {
+    eq(ladder.result.ok, true, JSON.stringify(ladder.result));
+    eq(ladder.legacyProtectivePosts, 0);
+    const posts = ladder.venue.calls.filter(c => c.path === '/fapi/v1/algoOrder' && c.method === 'POST');
+    eq(posts.length, 3);
+    const targets = posts.filter(c => c.params.type === 'TAKE_PROFIT_MARKET');
+    eq(targets.map(c => Number(c.params.quantity)).join(','), '0.4,0.6');
+    assert(targets.every(c => c.params.reduceOnly === 'true' && c.params.closePosition == null));
+    eq(new Set(posts.map(c => c.params.clientAlgoId)).size, 3);
+    assert(ladder.result.message.includes('분할익절 2/2건'), ladder.result.message);
+    eq(ladder.cleaned, true);
+    eq(ladder.venue.countOf('/fapi/v1/algoOrder', 'DELETE'), 3);
+    assert(ladder.active.every(o => o.algoStatus === 'CANCELED'));
   });
   test('HEDGE is rejected before entry, not after creating an unprotectable position', () => {
     eq(hedge.result.ok, false); eq(hedge.venue.orderSends().length, 0);
