@@ -102,6 +102,67 @@ export function runStateReconcileTests() {
     assert(v.mismatches.some(x => x.code === 'BALANCE_DIFFERS'), '코드 누락');
   });
 
+  console.log('[상태 대조 — 못 읽은 수량은 일치가 아니다]');
+
+  // 실제 입력 모양: `binanceFutures.getFuturesPositions`는 읽을 수 없는
+  // positionAmt를 **버리지 않고 amount: NaN으로 남긴다** ("있다·모른다").
+  // `reconcileCheck`는 그것을 `qty: Math.abs(Number(p.amount))` = NaN으로,
+  // 방향은 'FLAT'을 'LONG'으로 접어 넘긴다.
+  // 그런데 `NaN > 허용오차`는 false다 — 비교가 조용히 "일치"가 된다.
+  test('거래소 수량이 NaN이면 "일치합니다"가 아니다 — 신규 주문을 막는다', () => {
+    const v = reconcileState({
+      appPositions: [pos({ qty: 0.5 })],
+      exchangePositions: [pos({ qty: NaN })],
+    });
+    eq(v.ok, false, '못 읽은 거래소 수량을 일치로 통과시켰다: ' + v.summary);
+    eq(v.blockNewOrders, true, '노출을 모르는데 신규 주문을 열어 뒀다');
+    const m = v.mismatches.find(x => x.code === 'POSITION_QTY_UNKNOWN');
+    assert(!!m, '코드 누락: ' + JSON.stringify(v.mismatches));
+    eq(m!.severity, 'critical');
+    eq(m!.exchange, null, 'NaN을 값처럼 싣지 않는다');
+    eq(m!.app, 0.5);
+  });
+
+  test('앱 수량이 깨져도 같다 (Infinity·NaN)', () => {
+    for (const bad of [NaN, Infinity, -Infinity]) {
+      const v = reconcileState({
+        appPositions: [pos({ qty: bad })],
+        exchangePositions: [pos({ qty: 0.5 })],
+      });
+      eq(v.blockNewOrders, true, `앱 수량 ${bad}를 통과시켰다`);
+      assert(v.mismatches.some(x => x.code === 'POSITION_QTY_UNKNOWN'), `코드 누락 (${bad})`);
+    }
+  });
+
+  test('수량을 모르면 방향도 비교하지 않는다 — 접힌 방향으로 지어낸 불일치를 만들지 않는다', () => {
+    // reconcileCheck는 'FLAT'(수량 모름)을 'LONG'으로 접는다. 그 방향과
+    // 앱의 SHORT를 비교해 "방향 불일치"를 적으면 관측이 아닌 것을 적는다.
+    const v = reconcileState({
+      appPositions: [pos({ side: 'SHORT', qty: 0.5 })],
+      exchangePositions: [pos({ side: 'LONG', qty: NaN })],
+    });
+    assert(!v.mismatches.some(x => x.code === 'POSITION_SIDE_DIFFERS'),
+      '수량을 모르는 행의 방향을 사실로 비교했다');
+    assert(!v.mismatches.some(x => x.code === 'POSITION_QTY_DIFFERS'),
+      '모르는 수량을 "다르다"로 적었다 — 복구 규칙이 그 값을 자동으로 들여온다');
+    eq(v.blockNewOrders, true);
+  });
+
+  test('수량을 몰라도 확인된 다른 사실(마진 모드·손절 소실)은 그대로 잡는다', () => {
+    const v = reconcileState({
+      appPositions: [pos({ qty: 0.5, marginType: 'isolated' })],
+      exchangePositions: [pos({ qty: NaN, marginType: 'cross', hasProtectiveStop: false })],
+    });
+    assert(v.mismatches.some(x => x.code === 'MARGIN_TYPE_DIFFERS'), '마진 모드 불일치를 놓쳤다');
+    assert(v.mismatches.some(x => x.code === 'PROTECTIVE_ORDER_MISSING'), '손절 소실을 놓쳤다');
+  });
+
+  test('정상 수량(0.5 vs 0.5)은 여전히 일치다 — 새 분기가 오탐을 만들지 않는다', () => {
+    const v = reconcileState({ appPositions: [pos({ qty: 0.5 })], exchangePositions: [pos({ qty: 0.5 })] });
+    eq(v.ok, true, v.summary);
+    assert(!v.mismatches.some(x => x.code === 'POSITION_QTY_UNKNOWN'), '정상 수량을 모름으로 적었다');
+  });
+
   console.log('[상태 대조 — 미체결 주문]');
 
   test('양쪽 주문 목록이 다르면 각각 잡아낸다', () => {
