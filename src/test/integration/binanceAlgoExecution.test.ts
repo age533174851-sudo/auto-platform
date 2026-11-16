@@ -50,7 +50,7 @@ export async function runBinanceAlgoExecutionTests() {
 
   // Real executor reproduces the observed -4120; only venue HTTP is fake.
   async function executorCase(useAlgo: boolean, hedge = false, foreign = false, viaStart = false, failHolding = false,
-    ordinary?: { source: 'MANUAL' | 'AUTOTRADE'; policy?: 'REQUIRED' | 'OPTIONAL'; missingSchema?: boolean; ladder?: boolean }) {
+    ordinary?: { source: 'MANUAL' | 'AUTOTRADE'; policy?: 'REQUIRED' | 'OPTIONAL'; missingSchema?: boolean; ladder?: boolean; side?: 'LONG' | 'SHORT' }) {
   const cid = ordinary ? 'MF' + '1234567890123456789012345678901234' : 'smo-abcBTCUSDE0';
   const db = new FakeDb({ algoSchema: !ordinary?.missingSchema, ...(failHolding ? { failUpdatesOn: 'smoke_tests' } : {}) }).seed('exchange_connections', [{ id: 'c1', user_id: 'u1',
     exchange_id: 'binance', is_testnet: true, has_withdrawal: false,
@@ -69,12 +69,12 @@ export async function runBinanceAlgoExecutionTests() {
     .on('/fapi/v1/premiumIndex', () => ({ json: { symbol: 'BTCUSDT', markPrice: '100', indexPrice: '100',
       lastFundingRate: '0', nextFundingTime: Date.now() + 3600000, time: Date.now() } }))
     .on('/fapi/v2/positionRisk', () => ({ json: [{ symbol: 'BTCUSDT', positionAmt: String(position), entryPrice: '100',
-      markPrice: '100', positionSide: 'BOTH', leverage: '10', marginType: 'isolated', liquidationPrice: '90', notional: String(position * 100), isolatedMargin: '10' }] }))
+      markPrice: '100', positionSide: 'BOTH', leverage: '10', marginType: 'isolated', liquidationPrice: ordinary?.side === 'SHORT' ? '110' : '90', notional: String(position * 100), isolatedMargin: '10' }] }))
     .on('/fapi/v1/order', { status: 400, json: { code: -2013, msg: 'Order does not exist' } }, 'GET')
     .on('/fapi/v1/order', call => {
       if (call.params.type !== 'MARKET') { legacyProtectivePosts++; return { status: 400, json: { code: -4120, msg: 'Please use Algo Order API endpoints' } }; }
       const quantity = Number(call.params.quantity);
-      position = call.params.reduceOnly === 'true' ? 0 : quantity;
+      position = call.params.reduceOnly === 'true' ? 0 : (call.params.side === 'SELL' ? -quantity : quantity);
       return { json: { orderId: 42, symbol: 'BTCUSDT', status: 'FILLED', executedQty: String(quantity), origQty: String(quantity), avgPrice: '100', cumQuote: String(quantity * 100) } };
     }, 'POST')
     .on('/fapi/v1/openOrders', { json: [] })
@@ -95,7 +95,7 @@ export async function runBinanceAlgoExecutionTests() {
   let result: any, settled: any = null, fenced = false;
   try {
     if (viaStart) {
-      result = await startAttempt(db, { userId: 'u1', connectionId: 'c1', symbol: 'BTCUSDT', side: 'LONG',
+      result = await startAttempt(db, { userId: 'u1', connectionId: 'c1', symbol: 'BTCUSDT', side: ordinary?.side ?? 'LONG',
         leverage: 10, marginUsd: 20, holdMin: 1, source: 'USER' });
       if (result.ok && result.row?.state === 'HOLDING') settled = await settleAttempt(db, result.row);
       return { result, legacyProtectivePosts, active, venue, db, settled, fenced };
@@ -145,6 +145,7 @@ export async function runBinanceAlgoExecutionTests() {
   const manual = await executorCase(true, false, false, false, false, { source: 'MANUAL', policy: 'OPTIONAL' });
   const missingSchema = await executorCase(true, false, false, false, false, { source: 'AUTOTRADE', missingSchema: true });
   const ladder = await executorCase(true, false, false, false, false, { source: 'AUTOTRADE', ladder: true });
+  const short = await executorCase(true, false, false, true, false, { source: 'AUTOTRADE', side: 'SHORT' });
   const { result, legacyProtectivePosts, active, venue, settled, fenced, db: roundDb } = await executorCase(true);
   test('legacy executor control reproduces observed -4120 before the new transport', () => {
     assert(legacy.legacyProtectivePosts > 0); eq(legacy.result.ok, false);
@@ -209,6 +210,18 @@ export async function runBinanceAlgoExecutionTests() {
   });
   test('HEDGE is rejected before entry, not after creating an unprotectable position', () => {
     eq(hedge.result.ok, false); eq(hedge.venue.orderSends().length, 0);
+  });
+  test('actual SHORT start attaches BUY Algo protection, closes BUY and proves both books empty', () => {
+    eq(short.result.ok, true, JSON.stringify(short.result));
+    eq(short.result.row?.side, 'SHORT');
+    eq(short.settled?.verdict, 'PASS', JSON.stringify(short.settled));
+    const entry = short.venue.calls.find(c => c.path === '/fapi/v1/order' && c.method === 'POST');
+    eq(entry?.params.side, 'SELL');
+    const protection = short.venue.calls.filter(c => c.path === '/fapi/v1/algoOrder' && c.method === 'POST');
+    eq(protection.length, 2);
+    assert(protection.every(c => c.params.side === 'BUY'));
+    eq(short.legacyProtectivePosts, 0);
+    assert(short.active.every(c => c.algoStatus === 'CANCELED'));
   });
   test('same-strategy text does not authorize canceling another parent Algo order', () => {
     eq(foreign.venue.calls.filter(call => call.method === 'DELETE' && call.params.algoId === '999').length, 0);
