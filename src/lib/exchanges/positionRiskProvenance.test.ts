@@ -181,6 +181,49 @@ export function runPositionRiskProvenanceTests() {
     }
   });
 
+  // ── 수량 증거를 0으로 바꾸지 않는다 ──
+  //
+  // `shape()`는 `positionAmt: parseFloat(row.positionAmt ?? '0') || 0`이었다.
+  // `'bad'`·`''`·없음이 **전부 숫자 0**이 되어 나갔다. 같은 함수가
+  // `leverage`에는 *"0은 값이 아니라 '못 받았음'이다"*라고 적어 두고도
+  // 수량만 그렇게 했다.
+  //
+  // 그래서 손절 복구 경로가 `stopPositionQty()`로 뒤늦게 걸러도 소용이
+  // 없었다 — 그 함수에 도착한 값은 이미 진짜 숫자 0이다. 못 읽은 것이
+  // **확인된 무포지션**으로 바뀌고, 보호 없는 포지션이 조용히 남는다
+  // (`CLAUDE.md`: UNKNOWN을 0으로 적지 않는다).
+  //
+  // 소비처들은 이미 `!rr.risk || rr.risk.positionAmt == null`을 검사하고
+  // 있었다 — 그 분기가 **도달 불가능한 죽은 코드**였던 것이다.
+  for (const bad of ['bad', '', '   ', 'Infinity', 'NaN', undefined, null, true]) {
+    test(`★★ 수량 증거가 ${JSON.stringify(bad)}이면 0이 아니라 조회 실패다`, async () => {
+      const r = await readPositionRiskWithProvenance('BTCUSDT',
+        async () => [{ ...ROW, positionAmt: bad }], clock());
+      eq(r.risk, null, '못 읽은 수량을 가진 행을 정상 응답으로 돌려줬다');
+      assert(!!r.error && r.error.includes('수량'), `이유에 수량이 없다: ${r.error}`);
+    });
+  }
+
+  test('★★ 진짜 0과 음수·소수는 그대로 통과한다', async () => {
+    for (const [raw, want] of [['0', 0], [0, 0], ['-0.003', -0.003], ['0.2', 0.2]] as const) {
+      const r = await readPositionRiskWithProvenance('BTCUSDT',
+        async () => [{ ...ROW, positionAmt: raw }], clock());
+      eq(r.error, null, `정상 수량을 실패로 읽었다: ${String(raw)}`);
+      eq(r.risk?.positionAmt, want);
+    }
+  });
+
+  test('★★ v3 경로도 같은 판정을 쓴다 — 경로가 둘인데 한쪽만 고치지 않는다', async () => {
+    const r = await readPositionRiskWithProvenance('BTCUSDT',
+      async (path) => {
+        if (path === '/fapi/v2/positionRisk') throw new Error('[-1102] v2 down');
+        if (path === '/fapi/v3/positionRisk') return [{ ...ROW3, positionAmt: 'bad' }];
+        return ACCT;
+      }, clock());
+    eq(r.risk, null, 'v3 경로가 깨진 수량을 0으로 통과시켰다');
+    assert(!!r.error && r.error.includes('수량'), `이유에 수량이 없다: ${r.error}`);
+  });
+
   test('★ 이 정본은 네트워크도 crypto도 모른다 — 검사기가 돌릴 수 있어야 한다', async () => {
     const src = await import('./positionRiskRead');
     eq(typeof src.readPositionRiskWithProvenance, 'function');
