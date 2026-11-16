@@ -468,8 +468,20 @@ export async function POST(req: NextRequest) {
   }
 
   // ── 주문 ──
-  const { releaseReservation, confirmReservation } = await import('@/lib/strategies/ladderGate');
+  const { releaseReservation, confirmReservation, reservationOutcome, holdReservationForReconcile } = await import('@/lib/strategies/ladderGate');
   const reservationId = result.ladder?.reservationId;
+
+  // **주문을 보내기 시작했는가.**
+  //
+  // 아래 catch는 예약을 지운다. 주문을 보내기 **전**에 막힌 것이라면
+  // 옳다 — 주문이 없으니 하루를 돌려주는 것이 맞다. 보낸 **뒤**라면
+  // 정반대다: 지우는 순간 하루 1회 잠금이 열리고, 앞 주문이 체결돼
+  // 있었다면 다음 주기에 포지션이 두 배가 된다.
+  //
+  // `executeOrder`는 응답을 못 받아도 던지지 않고 `UNKNOWN`을 돌려주지만,
+  // 그 **뒤의 코드**(장부 기록·응답 조립)가 던질 수 있다. 그때 주문은
+  // 이미 거래소에 있다.
+  let orderSent = false;
 
   try {
     if (!body.connectionId) throw new Error('connectionId가 없어 주문할 수 없습니다');
@@ -1021,6 +1033,9 @@ export async function POST(req: NextRequest) {
       }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
     }
 
+    // **보내기 직전에 표시한다.** 보낸 뒤에 표시하면 그 사이에 죽었을 때
+    // 주문은 나갔는데 표시는 안 된 상태가 된다 — 막으려던 바로 그 창이다.
+    orderSent = true;
     const exec = await executeOrder(sb, {
       userId,
       connectionId: body.connectionId,
@@ -1037,15 +1052,30 @@ export async function POST(req: NextRequest) {
       apiSecret: decryptSecret(conn.api_secret_enc ?? ''),
     });
 
-    if (exec.ok) {
+    // **판정은 ladderGate 한 곳에 있다.** `exec.ok` 하나로 가르면
+    // UNKNOWN(나갔는지 모름)이 "안 나갔다"로 접힌다.
+    const outcome = reservationOutcome(exec);
+    if (outcome === 'CONFIRM') {
       await confirmReservation(sb, reservationId, {
         leverage: result.plan!.leverage,
         entryPrice: exec.avgPrice,
+        // **장부에도 손절을 적는다.** 여기 없으면 `stop_loss`가 NULL로
+        // 남고, `exitMonitor`가 `if (!entry || !stop) continue`로 이 줄을
+        // 버린다 — 트레일링도 시간청산도 청산가 점검도 돌지 않는다.
+        // 거래소에 거는 값(`executeOrder`의 `stopLoss`)과 **같은 값**이다.
+        stopLoss,
         liquidationPrice: result.plan!.liquidationPrice,
       });
-    } else {
-      // 주문이 나가지 않았으면 오늘 하루를 돌려준다
+    } else if (outcome === 'RELEASE') {
+      // 거래소가 거부했거나 보내지 못했다 — 주문이 **없으므로** 하루를 돌려준다
       await releaseReservation(sb, reservationId);
+    } else {
+      // **나갔는지 모른다.** 지우면 하루 1회 잠금이 열리고 다음 주기에
+      // 두 번째 주문이 나간다 — 앞 주문이 체결돼 있었으면 포지션이 두 배다.
+      // 하루를 손해 보는 쪽이 싸다.
+      await holdReservationForReconcile(sb, reservationId,
+        `주문 응답을 확인하지 못했습니다(status=${exec.status ?? '없음'}) — `
+        + '나갔는지 확인될 때까지 하루를 돌려주지 않습니다');
     }
 
     return NextResponse.json({
@@ -1081,9 +1111,20 @@ export async function POST(req: NextRequest) {
       },
     }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (e: any) {
-    await releaseReservation(sb, reservationId);
+    if (orderSent) {
+      // 주문은 이미 나갔을 수 있다. **지우지 않는다.**
+      await holdReservationForReconcile(sb, reservationId,
+        `주문을 보낸 뒤 처리 중 오류(${String(e?.message || e).slice(0, 160)}) — `
+        + '나갔는지 확인될 때까지 하루를 돌려주지 않습니다');
+    } else {
+      // 보내기 전에 막혔다 — 주문이 없으므로 하루를 돌려준다
+      await releaseReservation(sb, reservationId);
+    }
     return NextResponse.json({
       ...base, executed: false, error: e?.message || '주문 실패',
+      // **하루를 돌려줬는지**를 응답에 남긴다. 이게 없으면 사용자는
+      // 오늘 다시 시도할 수 있는지 알 수 없다.
+      dayReturned: !orderSent,
     }, { status: 502, headers: { 'Cache-Control': 'no-store' } });
   }
 }
