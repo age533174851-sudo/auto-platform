@@ -170,12 +170,52 @@ export interface FakeDbOptions {
   failInsertCode?: { table: string; code: string };
   /** select를 실패시킨다 */
   failSelectsOn?: string;
+  /**
+   * `sb.rpc(name, args)`의 대답.
+   *
+   * 함수로 주면 **인자를 보고** 대답할 수 있다 — 같은 RPC를 두 번 부르면
+   * 두 번째는 다르게 답하는 경우(예: 같은 예약 재호출)를 그려야 한다.
+   * 등록하지 않은 이름을 부르면 **오류로 답한다.** 조용히 `null`을 주면
+   * "부르지 않았는데 통과"가 된다.
+   */
+  rpc?: Record<string, RpcReply | ((args: any) => RpcReply)>;
+}
+
+export interface RpcReply {
+  data?: any;
+  error?: any;
+  /** 던지게 한다 — 응답 유실을 그린다 */
+  throws?: string;
+}
+
+export interface RpcCall {
+  name: string;
+  args: any;
 }
 
 export class FakeDb {
   readonly rows: Record<string, any[]> = {};
   readonly writes: WriteLog[] = [];
+  /** 불린 RPC들. **인자까지 남긴다** — 무엇을 들고 갔는지 셀 수 있어야 한다 */
+  readonly rpcCalls: RpcCall[] = [];
   private seq = 0;
+
+  /**
+   * Supabase의 `sb.rpc(name, args)`.
+   *
+   * 등록되지 않은 이름은 **오류**다. 빈 대답을 주면 호출부가 "결과가
+   * 없었다"와 "부르지 않았다"를 구별할 수 없다.
+   */
+  async rpc(name: string, args: any = {}): Promise<{ data: any; error: any }> {
+    this.rpcCalls.push({ name, args: { ...args } });
+    const spec = this.opts.rpc?.[name];
+    if (spec === undefined) {
+      return { data: null, error: { message: `등록되지 않은 RPC: ${name}` } };
+    }
+    const reply = typeof spec === 'function' ? spec(args) : spec;
+    if (reply.throws) throw new Error(reply.throws);
+    return { data: reply.data ?? null, error: reply.error ?? null };
+  }
 
   constructor(private opts: FakeDbOptions = {}) {}
 
