@@ -248,6 +248,37 @@ export function runExitMonitorLeaseTests() {
     eq(exitLeaseWakeVerdict(r).status, 503);
   });
 
+  test('★ CAS 0행은 정상 경합 패배 — 권한과 fence가 모두 없다', async () => {
+    const st = store({ row: { holder: 'old', fence: 7, expiresAtMs: NOW - 1 } });
+    st.api.compareAndSet = async () => ({ updated: 0, error: null });
+    const r = await acquireExitLease({ store: st.api as any, me: 'w1', nowMs: NOW });
+    eq(r.code, 'RACE_LOST');
+    eq(r.granted, false);
+    eq(r.myFence, null);
+    eq(exitLeaseWakeVerdict(r).status, 200);
+  });
+
+  test('★ CAS 예외는 경합이 아닌 DB 실패 — 503, 권한 없음', async () => {
+    const st = store({ row: { holder: 'old', fence: 7, expiresAtMs: NOW - 1 } });
+    st.api.compareAndSet = async () => { throw new Error('exceed_egress_quota'); };
+    const r = await acquireExitLease({ store: st.api as any, me: 'w1', nowMs: NOW });
+    eq(r.code, 'WRITE_FAILED');
+    eq(r.granted, false);
+    eq(r.myFence, null);
+    eq(exitLeaseWakeVerdict(r).status, 503);
+    eq(exitLeaseWakeVerdict(r).ok, false);
+  });
+
+  test('★ INSERT 미확정 결과는 경쟁 패배로 오인하지 않는다', async () => {
+    const st = store({ row: null });
+    st.api.insert = async () => ({ ok: false, error: null });
+    const r = await acquireExitLease({ store: st.api as any, me: 'w1', nowMs: NOW });
+    eq(r.code, 'WRITE_FAILED');
+    eq(r.granted, false);
+    eq(r.myFence, null);
+    eq(exitLeaseWakeVerdict(r).status, 503);
+  });
+
   test('임차 표가 없는 배포에서는 임차 없이 돈다 — 기존 안전 의미 유지', async () => {
     const st = store({ missingTable: true });
     const r = await acquireExitLease({ store: st.api as any, me: 'w1', nowMs: NOW });
