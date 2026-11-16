@@ -183,6 +183,33 @@ export async function getOpenOrdersGateFutures(
   return Array.isArray(rows) ? rows : [];
 }
 
+/** Read all three Gate TESTNET books for a recovery observation, preserving unknowns. */
+export async function readGateTestnetExposure(key: string, secret: string, contract: string) {
+  const credentials = { key, secret, testnet: true };
+  const [positions, regularOrders, conditionalOrders] = await Promise.all([
+    gateReq<unknown>('GET', '/api/v4/futures/usdt/positions', { ...credentials, qs: 'holding=true' }).catch(() => null),
+    gateReq<unknown>('GET', '/api/v4/futures/usdt/orders', {
+      ...credentials, qs: new URLSearchParams({ status: 'open', contract }).toString(),
+    }).catch(() => null),
+    getPriceOrdersGateFutures(key, secret, contract, true),
+  ]);
+
+  // Gate returns all held positions when no limit is supplied, including both hedge legs.
+  const positionsReadable = Array.isArray(positions) && positions.every(row => (
+    typeof row?.contract === 'string' && row.contract.length > 0
+    && (typeof row.size === 'number' || (typeof row.size === 'string' && /^-?\d+(\.\d+)?$/.test(row.size)))
+    && Number.isFinite(Number(row.size))
+  ));
+  const openPositions = positionsReadable
+    ? positions.filter(row => row.contract === contract && Number(row.size) !== 0).length
+    : null;
+  return {
+    openPositions,
+    regularOrders: Array.isArray(regularOrders) ? regularOrders.length : null,
+    conditionalOrders: conditionalOrders?.length ?? null,
+  };
+}
+
 /** 걸려 있는 조건부 주문(손절·익절). 못 읽으면 null — 빈 배열과 구분한다 */
 export async function getPriceOrdersGateFutures(
   key: string, secret: string, contract: string, testnet = true,

@@ -89,6 +89,13 @@ export function usePaperLedger(target: PaperTarget, enabled = true): PaperLedger
 
   const reload = useCallback(() => setTick(n => n + 1), []);
 
+  // 주문 화면이 보낸 변경 알림을 같은 장부를 보는 목록도 받는다.
+  // 성공 뒤 이전 잔고로 다음 주문을 계산하지 않게 즉시 다시 읽는다.
+  useEffect(() => {
+    window.addEventListener('paper-ledger-changed', reload);
+    return () => window.removeEventListener('paper-ledger-changed', reload);
+  }, [reload]);
+
   // 장부가 바뀌면 이전 장부의 숫자를 남겨 두지 않는다 —
   // 챌린지를 고른 순간 기본 계좌 잔고가 잠깐 보이면 그걸로 수량을 정한다.
   const query = targetQuery(target);
