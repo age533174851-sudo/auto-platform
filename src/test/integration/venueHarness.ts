@@ -168,11 +168,40 @@ export interface FakeDbOptions {
   failInsertCode?: { table: string; code: string };
   /** select를 실패시킨다 */
   failSelectsOn?: string;
+  /**
+   * SELECT 응답을 회차별로 가로챈다.
+   *
+   * 왜 필요한가 — **페이지 2에서만** 503이 나거나, 정상 코드로
+   * `{ data: null, error: null }`을 돌려주는 상황은 표 단위 플래그로는
+   * 만들 수 없다. 조회 완전성 결함은 전부 그 모양이다.
+   *
+   * `undefined`를 돌려주면 평소대로 동작한다. 예외를 던져도 된다.
+   * `db.rows`를 직접 건드려 **페이지 사이 행 삽입·삭제**도 만들 수 있다.
+   */
+  selectHook?: (ctx: FakeSelectCtx) => { data?: any; error?: any } | null | undefined;
+  /** INSERT 응답을 회차별로 가로챈다. 동시 유니크 충돌(23505) 재현용 */
+  insertHook?: (ctx: { table: string; nth: number; row: any })
+    => { error?: any } | null | undefined;
+}
+
+export interface FakeSelectCtx {
+  table: string;
+  /** 이 표에 들어온 SELECT 회차 (1부터) */
+  nth: number;
+  filters: { col: string; op: 'eq' | 'in' | 'gt'; vals: any[] }[];
+  limit: number | null;
+  order: { col: string; asc: boolean } | null;
+  /** 평소 동작의 결과. 가공해서 돌려줄 수 있다 */
+  rows: any[];
 }
 
 export class FakeDb {
   readonly rows: Record<string, any[]> = {};
   readonly writes: WriteLog[] = [];
+  /** 표별 SELECT 회차. selectHook의 `nth`가 이 값이다 */
+  readonly selects: Record<string, number> = {};
+  /** 표별 INSERT 회차 */
+  readonly inserts: Record<string, number> = {};
   private seq = 0;
 
   constructor(private opts: FakeDbOptions = {}) {}
@@ -195,13 +224,67 @@ export class FakeDb {
 
   from(table: string): any {
     const db = this;
-    const filters: { col: string; vals: any[] }[] = [];
+    const filters: { col: string; op: 'eq' | 'in' | 'gt'; vals: any[] }[] = [];
     let pending: { kind: 'insert' | 'update'; patch: any } | null = null;
+    let order: { col: string; asc: boolean } | null = null;
+    let take: number | null = null;
 
     const apply = () => {
       let out = db.rows[table] ?? [];
-      for (const f of filters) out = out.filter((r) => f.vals.includes(r[f.col]));
+      for (const f of filters) {
+        // `gt`는 keyset 페이지네이션의 커서다. 문자열 비교는 Postgres의
+        // text 정렬과 같은 방향으로 둔다 — 여기서 어긋나면 시험이
+        // 실제 DB와 다른 것을 증명한다.
+        if (f.op === 'gt') out = out.filter((r) => String(r[f.col]) > String(f.vals[0]));
+        else out = out.filter((r) => f.vals.includes(r[f.col]));
+      }
+      if (order) {
+        const { col, asc } = order;
+        out = out.slice().sort((a, b) => {
+          const x = String(a[col]);
+          const y = String(b[col]);
+          return (x < y ? -1 : x > y ? 1 : 0) * (asc ? 1 : -1);
+        });
+      }
+      // **limit은 진짜로 자른다.** 자르지 않으면 조회 잘림 결함을
+      // 시험으로 재현할 수 없다.
+      if (take != null) out = out.slice(0, take);
       return out;
+    };
+
+    const readRows = () => {
+      const rows = apply().map((r) => ({ ...r }));
+      if (!db.opts.selectHook) return { data: rows, error: null } as any;
+      db.selects[table] = (db.selects[table] ?? 0) + 1;
+      const hooked = db.opts.selectHook({
+        table, nth: db.selects[table],
+        filters: filters.map((f) => ({ ...f, vals: [...f.vals] })),
+        limit: take, order, rows,
+      });
+      // 훅이 `undefined`면 **훅이 돌기 전에 읽은 그 페이지**를 돌려준다.
+      // 훅이 `db.rows`를 건드렸더라도 이 페이지는 이미 DB를 떠난 것이다 —
+      // "응답을 받은 뒤 행이 바뀌었다"가 재현하려는 상황이다.
+      if (hooked === undefined || hooked === null) {
+        return { data: rows, error: null } as any;
+      }
+      return hooked as any;
+    };
+
+    const runInsert = () => {
+      if (!pending || pending.kind !== 'insert') return { error: null };
+      db.inserts[table] = (db.inserts[table] ?? 0) + 1;
+      const hooked = db.opts.insertHook?.({
+        table, nth: db.inserts[table], row: { ...pending.patch },
+      });
+      if (hooked && hooked.error) return { error: hooked.error };
+      const f = db.opts.failInsertCode;
+      if (f && f.table === table) {
+        return { error: { code: f.code, message: `insert 실패 (${f.code})` } };
+      }
+      const row = { id: `row-${++db.seq}`, ...pending.patch };
+      db.rows[table] = (db.rows[table] ?? []).concat([row]);
+      db.writes.push({ table, kind: 'insert', patch: { ...pending.patch } });
+      return { error: null, data: { id: row.id, status: row.status } };
     };
 
     const flushUpdate = () => {
@@ -225,23 +308,21 @@ export class FakeDb {
         }
         return builder;
       },
-      eq(col: string, val: any) { filters.push({ col, vals: [val] }); return builder; },
-      in(col: string, vals: any[]) { filters.push({ col, vals: [...vals] }); return builder; },
-      order() { return builder; },
-      limit() { return builder; },
+      eq(col: string, val: any) { filters.push({ col, op: 'eq', vals: [val] }); return builder; },
+      in(col: string, vals: any[]) { filters.push({ col, op: 'in', vals: [...vals] }); return builder; },
+      gt(col: string, val: any) { filters.push({ col, op: 'gt', vals: [val] }); return builder; },
+      order(col: string, o?: { ascending?: boolean }) {
+        order = { col, asc: o?.ascending !== false };
+        return builder;
+      },
+      limit(n: number) { take = n; return builder; },
       insert(row: any) { pending = { kind: 'insert', patch: row }; return builder; },
       update(patch: any) { pending = { kind: 'update', patch }; return builder; },
 
       async single() {
         if (pending?.kind === 'insert') {
-          const f = db.opts.failInsertCode;
-          if (f && f.table === table) {
-            return { data: null, error: { code: f.code, message: `insert 실패 (${f.code})` } };
-          }
-          const row = { id: `row-${++db.seq}`, ...pending.patch };
-          db.rows[table] = (db.rows[table] ?? []).concat([row]);
-          db.writes.push({ table, kind: 'insert', patch: { ...pending.patch } });
-          return { data: { id: row.id, status: row.status }, error: null };
+          const r: any = runInsert();
+          return r.error ? { data: null, error: r.error } : { data: r.data, error: null };
         }
         const rows = apply();
         return { data: rows[0] ?? null, error: null };
@@ -255,8 +336,12 @@ export class FakeDb {
         // await로 바로 끝나는 체인 (update().eq() · select().in() 등)
         const run = async () => {
           if (pending?.kind === 'update') return flushUpdate();
+          // `await sb().from(t).insert(row)` — `.single()` 없이 바로 기다리는
+          // 모양도 실제 코드에 있다. 예전에는 이게 **조용히 아무것도
+          // 넣지 않고** select 결과를 돌려줬다.
+          if (pending?.kind === 'insert') return runInsert();
           if (builder.__selectFails) return { data: null, error: { message: '조회 실패' } };
-          return { data: apply().map((r) => ({ ...r })), error: null };
+          return readRows();
         };
         return run().then(resolve, reject);
       },

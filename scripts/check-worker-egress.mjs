@@ -289,6 +289,28 @@ if (!src.includes("EXCHANGE_CONNECTION_COLUMNS")) {
     if (!src.includes("from '../../src/lib/engine/killSwitchRecovery'")) {
       err('자가복구 판정을 공유 정본에서 가져오지 않습니다 — 사본을 두면 한쪽만 고쳐집니다');
     }
+    // ── Issue #514: 조회 완전성 ──
+    //
+    // 본문은 `killSwitchRecoveryRun.ts`로 옮겼다. 여기서 확인하는 것은
+    // **그 정본을 쓰는지**다. 워커 안에 `.limit(50)`짜리 사본이 다시
+    // 생기면 51번째 연결이 또 조용히 빠진다.
+    if (!ks.includes('runKillSwitchRecovery(')) {
+      err('자가복구가 조회 완전성 정본(runKillSwitchRecovery)을 쓰지 않습니다 — '
+        + '잘린 목록을 "없음"으로 읽으면 보호가 빠지거나 중복 청산이 나갑니다');
+    }
+    if (/from\('kill_switch_state'\)|from\('jobs'\)/.test(ks)) {
+      err('자가복구가 워커 안에서 직접 kill_switch_state/jobs를 읽습니다 — '
+        + '페이지 순회 사본이 생기면 한쪽만 고쳐집니다');
+    }
+    if (!src.includes("from '../../src/lib/engine/killSwitchRecoveryRun'")) {
+      err('자가복구 본문을 공유 정본에서 가져오지 않습니다');
+    }
+  }
+  // 자가복구는 main 임차 뒤에서만 돈다. 두 워커가 같이 돌면 중복 잡이
+  // DB 제약(#404)에만 걸리게 된다 — 그건 최후 방어선이고 1차 방어선은 이것이다.
+  if (!/allowed\(\)\)\s*await pollKillSwitchRecovery\(\)/.test(src)) {
+    err('pollKillSwitchRecovery가 main 임차 관문 뒤에 없습니다 — '
+      + '워커 둘이 동시에 자가복구를 돌립니다');
   }
   if (!src.includes('pollKillSwitchRecovery()')) {
     err('pollKillSwitchRecovery를 틱에서 부르지 않습니다 — 만들어 놓고 배선을 안 한 모양입니다');

@@ -41,6 +41,7 @@ import {
   connectionReadRetryPlan,
 } from '../../src/lib/supabase/exchangeConnectionRead';
 import { killSwitchRecoveryVerdict } from '../../src/lib/engine/killSwitchRecovery';
+import { runKillSwitchRecovery } from '../../src/lib/engine/killSwitchRecoveryRun';
 import { claimableFilter, claimOutcome } from '../../src/lib/supabase/jobClaimWindow';
 import { persistOwnedJob } from '../../src/lib/supabase/jobOwnedWrite';
 import { staleRecoveryPlan } from '../../src/lib/engine/staleJobRecovery';
@@ -771,86 +772,16 @@ async function pollKillSwitchRecovery() {
   if (Date.now() - lastKsScanMs < KILL_SWITCH_SCAN_MS) return;
   lastKsScanMs = Date.now();
 
-  // **켜진 것만** 읽는다. 평소에는 0줄이다.
-  const ksRes = await sb().from('kill_switch_state')
-    .select('connection_id, active, action_mode').eq('active', true).limit(50);
-  noteDb({ error: (ksRes as any).error });
-  if ((ksRes as any).error) {
-    // 못 읽은 것을 "꺼져 있다"로 넘기지 않는다.
-    await alert('system', 'warning', '킬스위치 상태를 읽지 못해 자가복구를 건너뜁니다',
-      { 사유: String((ksRes as any).error?.message ?? (ksRes as any).error) }, 'ks_state_read');
-    return;
-  }
-  const actives = Array.isArray((ksRes as any).data) ? (ksRes as any).data as any[] : [];
-  if (actives.length === 0) return;
-
-  const ids = actives.map((r) => String(r.connection_id)).filter(Boolean);
-  if (ids.length === 0) return;
-
-  // 살아 있는 KILL_SWITCH_EXECUTE 잡 (한 번에)
-  const jobsRes = await sb().from('jobs').select('id, connection_id')
-    .in('connection_id', ids).eq('action', 'KILL_SWITCH_EXECUTE')
-    .in('status', ['PENDING', 'PROCESSING']).limit(200);
-  noteDb({ error: (jobsRes as any).error });
-
-  // 잡을 만들려면 연결의 user_id·exchange_id·is_testnet이 필요하다.
-  const connRes = await sb().from('exchange_connections')
-    .select(EXCHANGE_CONNECTION_COLUMNS).in('id', ids);
-  noteDb({ error: (connRes as any).error });
-  const connById = new Map<string, any>();
-  if (Array.isArray((connRes as any).data)) {
-    for (const c of (connRes as any).data as any[]) connById.set(String(c.id), c);
-  }
-
-  for (const row of actives) {
-    const cid = String(row.connection_id);
-    const mine = Array.isArray((jobsRes as any).data)
-      ? ((jobsRes as any).data as any[]).filter((j) => String(j.connection_id) === cid)
-      : null;
-    const verdict = killSwitchRecoveryVerdict({
-      state: { data: row, error: null },
-      // 목록 조회가 실패했으면 **그 오류를 그대로 넘긴다** — 여기서
-      // 빈 배열로 바꾸면 중복 잡이 생긴다.
-      existing: (jobsRes as any).error
-        ? { data: null, error: (jobsRes as any).error }
-        : { data: mine, error: null },
-    });
-
-    if (!verdict.create) {
-      if (verdict.code === 'JOBS_UNREADABLE' || verdict.code === 'STATE_UNREADABLE') {
-        await alert('system', 'warning', '킬스위치 자가복구를 건너뛰었습니다',
-          { Connection: cid.slice(0, 8), 사유: verdict.reason }, `ks_skip:${cid}`);
-      }
-      continue;
-    }
-
-    const conn = connById.get(cid);
-    if (!conn) {
-      // 연결을 못 읽었으면 거래소·모드를 모른다. 추측해서 적지 않는다.
-      await alert('system', 'warning', '킬스위치가 켜졌는데 연결을 읽지 못했습니다',
-        { Connection: cid.slice(0, 8), 사유: String((connRes as any).error?.message ?? '연결 행 없음') },
-        `ks_conn:${cid}`);
-      continue;
-    }
-
-    const { error: insErr } = await sb().from('jobs').insert({
-      user_id: conn.user_id, connection_id: cid,
-      // **연결의 거래소를 그대로 적는다.** 예전에는 'binance'가 박혀
-      // 있었다. Gate 연결에 그 잡이 붙으면 jobExchangeCheck가 막는다 —
-      // 즉 킬스위치가 영원히 실행되지 않는다.
-      exchange: String(conn.exchange_id),
-      mode: conn.is_testnet === true ? 'TESTNET' : 'LIVE',
-      action: 'KILL_SWITCH_EXECUTE',
-      payload: { actionMode: verdict.actionMode || 'BC' },
-      status: 'PENDING', priority: 0, max_attempts: 10,
-      created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
-    });
-    noteDb({ error: insErr });
-    if (insErr) {
-      await alert('system', 'critical', '킬스위치 자가복구 잡을 만들지 못했습니다',
-        { Connection: cid.slice(0, 8), 사유: String(insErr.message ?? insErr) }, `ks_insert:${cid}`);
-    }
-  }
+  // 본문은 `src/lib/engine/killSwitchRecoveryRun.ts`에 있다. 여기서는
+  // **배선만** 한다 — 판정 정본(`killSwitchRecoveryVerdict`)과 DB·알림을
+  // 넘긴다. 사본을 두지 않는다: 워커와 시험이 그 파일을 같이 컴파일한다.
+  await runKillSwitchRecovery({
+    db: sb(),
+    verdict: killSwitchRecoveryVerdict,
+    alert,
+    noteDb,
+    connectionColumns: EXCHANGE_CONNECTION_COLUMNS,
+  });
 }
 
 // ── 예약 평가 (TESTNET 전용) ─────────────────────────
