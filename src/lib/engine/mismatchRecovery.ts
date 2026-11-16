@@ -127,6 +127,14 @@ const RULES: Record<MismatchCode, Rule> = {
     why: '부분 체결이나 부분 청산이 앱에 반영되지 않았습니다 — 거래소 수량이 사실입니다',
     safeToAutomate: true, destructive: false,
   },
+  // 한쪽 수량을 읽지 못했다. **들여올 값이 없다** — QTY_DIFFERS처럼
+  // 거래소 값을 자동으로 쓰면 NaN이 장부에 들어간다. 기준도 정할 수 없다.
+  POSITION_QTY_UNKNOWN: {
+    authority: 'UNKNOWN', action: 'MANUAL_ONLY',
+    label: '거래소에서 확인',
+    why: '포지션 수량을 읽지 못했습니다 — 노출을 모르는 채로 맞추거나 들여오지 않습니다',
+    safeToAutomate: false, destructive: false,
+  },
   LEVERAGE_DIFFERS: {
     authority: 'EXCHANGE', action: 'SYNC_LEVERAGE',
     label: '배율 맞추기',
