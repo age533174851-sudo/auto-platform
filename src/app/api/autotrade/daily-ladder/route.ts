@@ -1021,6 +1021,7 @@ export async function POST(req: NextRequest) {
       }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
     }
 
+    const { requestsTestnetAlgoProtection } = await import('@/lib/exchanges/binanceAlgoContract');
     const exec = await executeOrder(sb, {
       userId,
       connectionId: body.connectionId,
@@ -1030,6 +1031,7 @@ export async function POST(req: NextRequest) {
       clientOrderId,
       exchange,
       mode: mode as 'TESTNET' | 'LIVE',
+      testnetAlgoProtection: requestsTestnetAlgoProtection({ exchange, mode, stopLoss }),
       plan: result.plan!,
       stopLoss,
       exitPlan,
