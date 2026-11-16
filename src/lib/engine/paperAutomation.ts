@@ -20,6 +20,23 @@ export interface PaperAutomationResult { code: string; message: string; position
  * 여기서 먼저 걸러야 사용자가 409 대신 400을 받는다.
  */
 export const PAPER_BOT_ID = /^[a-z0-9][a-z0-9-]{1,62}$/;
+
+/**
+ * 새 봇 이름을 **종목과 전략에서 만든다.**
+ *
+ * 같은 조합으로 다시 켜면 **같은 이름**이 나와야 한다. 켤 때마다 새 이름을
+ * 지으면 같은 전략의 기록이 여러 `strategy_id`로 쪼개지고, 봇을 나눈 이유인
+ * 비교가 그때 사라진다.
+ *
+ * 모양이 DB 제약(`PAPER_BOT_ID`)에 안 맞으면 **null이다.** 억지로 자르거나
+ * 이름을 지어내지 않는다 — 못 만든 것을 만든 것처럼 넘기면 409가 난다.
+ */
+export function derivePaperBotId(symbol: unknown, signal: EntrySignalId): string | null {
+  const sym = String(symbol ?? '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (!sym) return null;
+  const id = `${sym}-${signal}`;
+  return PAPER_BOT_ID.test(id) ? id : null;
+}
 /** 안 적으면 이 봇. 099 시절부터 돌던 그 봇이다 */
 export const DEFAULT_PAPER_BOT = 'paper-auto-v1';
 
@@ -163,7 +180,15 @@ export async function evaluatePaperAutomation(sb: any, run: any,
     view:verdict.regime?.dataOk ? (verdict.regime?.view ?? null) : null,
     signal:bot.signal,
     markPrice:quotes.get(run.symbol) ?? null,
-    availableUsd:available.available,openCount:positions.length,cfg });
+    // **이 봇이 들고 있는 것만 센다.** 계좌 전체 한도는 `paper_auto_open`
+    // (104번)이 "켜 둔 봇 수"로 지킨다. 여기서 계좌 전체를 세면 BTC 봇이
+    // 들고 있는 동안 ETH 봇이 영원히 못 들어간다 — 봇을 여러 개 만든 뜻이
+    // 사라진다. 두 관문은 **다른 것**을 막는다:
+    //   여기   전략 하나가 동시에 둘을 들지 않는다 (성적표 비교 가능성)
+    //   104    계좌 전체 자리 수 (노출 상한)
+    availableUsd:available.available,
+    openCount:positions.filter(p => p.strategy_id === run.bot_id && p.market === 'USDM').length,
+    cfg });
   if (entry.kind !== 'OPEN') return { code: 'WAIT', message: entry.reason };
   const plan = buildPaperPlan({ symbol:run.symbol,side:entry.side!,market:'USDM',
     quantity:entry.quantity!,leverage:cfg.leverage,markPrice:quotes.get(run.symbol)!,

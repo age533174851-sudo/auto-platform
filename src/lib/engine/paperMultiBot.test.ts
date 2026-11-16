@@ -14,6 +14,7 @@
 import { test, assert, eq } from '../../test/harness';
 import {
   parsePaperAutomationControl, readBotSignal, PAPER_BOT_ID, DEFAULT_PAPER_BOT,
+  derivePaperBotId,
 } from './paperAutomation';
 import { ENTRY_SIGNAL_IDS, DEFAULT_ENTRY_SIGNAL } from './entrySignals';
 
@@ -125,5 +126,45 @@ export function runPaperMultiBotTests() {
     // 전략을 정하면 이름을 바꾸는 순간 전략이 바뀐다.
     eq(start({ botId: 'breakout-1' }).signal, null);
     eq(start({ botId: 'breakout-1', signal: 'mean-revert' }).signal, 'mean-revert');
+  });
+
+  // ── 봇 이름을 종목·전략에서 만든다 ──
+  //
+  // 같은 조합으로 다시 켜면 **같은 이름**이어야 한다. 켤 때마다 이름이
+  // 달라지면 같은 전략의 기록이 여러 `strategy_id`로 쪼개지고, 봇을 나눈
+  // 이유인 비교가 사라진다.
+  test('같은 종목·전략은 항상 같은 봇 이름이 된다', () => {
+    eq(derivePaperBotId('BTCUSDT', 'trend-follow'), 'btcusdt-trend-follow');
+    eq(derivePaperBotId('BTCUSDT', 'trend-follow'), derivePaperBotId('btcusdt', 'trend-follow'));
+    eq(derivePaperBotId('ETHUSDT', 'breakout'), 'ethusdt-breakout');
+  });
+
+  test('종목이 다르면 봇도 다르다 — BTC와 ETH가 한 장부에 섞이지 않는다', () => {
+    assert(derivePaperBotId('BTCUSDT','trend-follow') !== derivePaperBotId('ETHUSDT','trend-follow'),
+      '두 종목이 같은 이름을 받았습니다');
+  });
+
+  test('전략이 다르면 봇도 다르다 — 성적표가 섞이지 않는다', () => {
+    const ids = ENTRY_SIGNAL_IDS.map(sig => derivePaperBotId('BTCUSDT', sig));
+    eq(new Set(ids).size, ENTRY_SIGNAL_IDS.length);
+  });
+
+  // **못 만들면 null이다.** 억지로 자르거나 이름을 지어내지 않는다 —
+  // DB 제약과 갈리면 앱이 통과시킨 이름을 DB가 거부해 봇이 조용히 안 켜진다.
+  test('모양을 못 맞추면 이름을 지어내지 않는다', () => {
+    eq(derivePaperBotId('', 'trend-follow'), null);
+    eq(derivePaperBotId('   ', 'trend-follow'), null);
+    eq(derivePaperBotId(null, 'trend-follow'), null);
+    eq(derivePaperBotId('!!!', 'trend-follow'), null);
+    eq(derivePaperBotId('A'.repeat(70), 'trend-follow'), null);
+  });
+
+  test('만들어진 이름은 DB가 받는 모양이다', () => {
+    for (const sig of ENTRY_SIGNAL_IDS) {
+      for (const sym of ['BTCUSDT','ETHUSDT','SOLUSDT']) {
+        const id = derivePaperBotId(sym, sig)!;
+        assert(PAPER_BOT_ID.test(id), `${id}가 DB 모양에 안 맞습니다`);
+      }
+    }
   });
 }

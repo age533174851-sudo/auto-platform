@@ -22,7 +22,8 @@ else {
   // 목록을 손으로 적는 것이 바로 그 드리프트의 원인이므로,
   // `scripts/check-paper-automation-migrations.mjs`가 이 목록이 저장소의
   // `09*`/`1??_paper*` 마이그레이션을 전부 담고 있는지 CI에서 센다.
-  const LATE = ['099_paper_automation.sql','102_paper_multi_bot.sql','103_paper_auto_claim_lock.sql'];
+  const LATE = ['099_paper_automation.sql','102_paper_multi_bot.sql','103_paper_auto_claim_lock.sql',
+    '104_paper_bot_slots.sql'];
   for (const name of LATE) {
     const migration = resolve(root, 'supabase/migrations', name);
     if (existsSync(migration) && !process.env.PAPER_AUTOMATION_RED) psqlFile(target, db, migration);
@@ -143,6 +144,60 @@ else {
     assert.match(psql(target,db,`SET ROLE authenticated; UPDATE paper_automation_settings SET enabled=true`,{expectError:true}).error,/permission denied/);
     assert.equal(q('SELECT count(*) FROM paper_automation_settings WHERE enabled')[0],'1');
   });
+  // ── 봇마다 한 자리 · 계좌 한도는 켜 둔 봇 수 (104) ──
+  //
+  // 102까지는 "계좌 하나에 포지션 하나"였다. 그래서 BTC 봇과 ETH 봇을 둘 다
+  // 켜도 먼저 들어간 쪽이 닫히기 전에는 다른 쪽이 한 건도 못 열었다 — 봇을
+  // 여러 개 만들 수 있게 해 놓고 **동시에 돌지는 못하는** 상태였다.
+  const ethOrder = { ...order, p_symbol:'ETHUSDT' };
+  const twoBots = () => {
+    start();                                   // 기본 봇(BTCUSDT) 켜고 장부 비움
+    q(`SELECT paper_auto_control('${uid}','bot-eth',true,'ETHUSDT',60)`);
+  };
+  const cleanupEth = () => q(`DELETE FROM paper_automation_runs WHERE bot_id='bot-eth';
+                              DELETE FROM paper_automation_settings WHERE bot_id='bot-eth'`);
+  test('두 봇이 같은 계좌에서 각자 한 자리를 든다', () => {
+    twoBots();
+    const a1 = claim(); const b1 = claim();
+    assert.notEqual(a1.bot_id, b1.bot_id);
+    const byBot = { [a1.bot_id]: a1, [b1.bot_id]: b1 };
+    assert.equal(q(fill(byBot['paper-auto-v1']))[0], 'OPENED');
+    assert.equal(q(fill(byBot['bot-eth'], ethOrder))[0], 'OPENED');
+    assert.equal(q('SELECT count(*) FROM paper_positions')[0], '2');
+    assert.equal(q("SELECT count(DISTINCT strategy_id) FROM paper_positions")[0], '2');
+    cleanupEth();
+  });
+
+  // ②만 두고 ①을 빼면 한 봇이 자리 둘을 가져간다 — 그러면 전략별 성적표가
+  // 깨진다. 같은 전략이 동시에 둘을 들면 다른 전략과 비교가 안 된다.
+  test('같은 봇은 두 자리를 가져가지 않는다', () => {
+    twoBots();
+    const first = claim();
+    assert.equal(first.bot_id, 'paper-auto-v1');
+    assert.equal(q(fill(first))[0], 'OPENED');
+    // 같은 봇의 다음 회차: 리스를 만료시켜 다시 잡게 한 뒤 또 열어 본다.
+    q(`UPDATE paper_automation_runs SET lease_until=now()-interval '1 second',entry_position_id=NULL
+       WHERE bot_id='paper-auto-v1'`);
+    q(`UPDATE paper_automation_settings SET next_run_at=now()-interval '1 second' WHERE bot_id='paper-auto-v1'`);
+    const again = claim();
+    assert.equal(again.bot_id, 'paper-auto-v1');
+    assert.equal(q(fill(again))[0], 'SLOT_BUSY');
+    assert.equal(q('SELECT count(*) FROM paper_positions')[0], '1');
+    cleanupEth();
+  });
+
+  // 손으로 연 포지션도 자리를 먹는다. 빼면 사람이 연 자리 위에 봇이 또 들어간다.
+  test('계좌 한도는 켜 둔 봇 수다 — 수동 포지션이 한 자리를 먹으면 하나만 들어간다', () => {
+    twoBots();
+    q(`SELECT * FROM paper_open_position('${uid}','manual',NULL,NULL,'SOLUSDT','USDM','LONG',100,100,1,100,5,20,98,104,80,0.05,'ISOLATED',now(),NULL)`);
+    const a1 = claim(); const b1 = claim();
+    const byBot = { [a1.bot_id]: a1, [b1.bot_id]: b1 };
+    assert.equal(q(fill(byBot['paper-auto-v1']))[0], 'OPENED');      // 수동 1 + 봇 1 = 한도 2
+    assert.equal(q(fill(byBot['bot-eth'], ethOrder))[0], 'SLOT_BUSY'); // 세 번째 자리는 없다
+    assert.equal(q('SELECT count(*) FROM paper_positions')[0], '2');
+    cleanupEth();
+  });
+
   // 103이 경합을 막으면서 생긴 성질. 봇마다 권고 잠금을 잡고 **못 잡으면
   // 건너뛰므로**, 한 봇이 도는 동안 다른 봇이 막히지 않아야 한다.
   //
