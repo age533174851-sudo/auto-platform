@@ -9,7 +9,7 @@
 import { test, eq, assert } from '../../test/harness';
 import {
   holdingFor, sellRequestOf, sellGate, sellSubmitLabel,
-  approxSellQuantity, newClientSellId,
+  approxSellQuantity, newClientSellId, sellReceiptPrice,
   type SellHolding,
 } from './sellPlan';
 import { orderCapability } from './capability';
@@ -199,5 +199,37 @@ export function runSellPlanTests() {
 
   test('숫자가 아니면 빈 문자열 — 서버가 missing_params로 막는다', () => {
     eq(newClientSellId(NaN, 0.5), '');
+  });
+
+  // ══════════ 매도 결과의 체결가 ══════════
+  //
+  // 재시도(REPLAYED)는 **처음 매도의 답**을 돌려준다 — 손익·수량이 그때
+  // 것이다. 체결가만 "지금 시세"로 바꿔 끼우면 한 응답 안에서
+  // 체결가 × 수량과 손익이 맞지 않는다.
+
+  const NOW_PX = { price: 120, source: 'binance-spot' };
+
+  test('새 매도(SOLD)는 이번에 서버가 읽은 가격으로 체결됐다', () => {
+    const r = sellReceiptPrice('SOLD', NOW_PX, null);
+    eq(r.exitPrice, 120);
+    eq(r.priceSource, 'binance-spot');
+    eq(r.priceBasis, 'FILLED_NOW');
+  });
+
+  test('★ 재시도(REPLAYED)는 지금 시세가 아니라 처음 체결가를 돌려준다', () => {
+    const r = sellReceiptPrice('REPLAYED', NOW_PX, { exit_price: '100.5' });
+    eq(r.exitPrice, 100.5);
+    eq(r.priceBasis, 'ORIGINAL_FILL');
+    assert(r.priceSource !== 'binance-spot', '처음 체결의 출처를 지금 시세 출처로 적습니다');
+  });
+
+  test('★ 처음 체결가를 못 읽었으면 null — 지금 시세로 메우지 않는다', () => {
+    for (const stored of [null, undefined, {}, { exit_price: null }, { exit_price: 0 },
+                          { exit_price: 'abc' }, { exit_price: -1 }]) {
+      const r = sellReceiptPrice('REPLAYED', NOW_PX, stored as any);
+      eq(r.exitPrice, null);
+      eq(r.priceSource, null);
+      eq(r.priceBasis, 'ORIGINAL_FILL_UNREADABLE');
+    }
   });
 }

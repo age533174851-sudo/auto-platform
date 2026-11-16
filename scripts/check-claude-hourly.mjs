@@ -8,18 +8,21 @@
 // 바뀌어도 울타리가 사라진다 — 그런데 **사라진 것을 아무도 못 본다.**
 // 사람이 보고 있지 않은 시간에 도는 작업이기 때문이다.
 //
-// 그래서 다섯 가지를 센다:
+// 그래서 여섯 가지를 센다:
 //
 //   ① 다른 워크플로를 깨울 수 없는가       (`actions: read`)
 //   ② 거래소·DB 시크릿을 안 받는가
 //   ③ 겹쳐 돌지 않는가                      (`concurrency`)
 //   ④ 끝나지 않는 회차를 끊는가             (`timeout-minutes`)
 //   ⑤ 금지 문구가 프롬프트에 남아 있는가
+//   ⑥ 체크아웃된 프로젝트 설정이 인증을 바꿔치지 않는가
 //
 // **금지를 프롬프트에만 적는 것으로는 부족하다.** ①②가 진짜 관문이고
 // ⑤는 그 위에 한 겹 더 두는 것이다. 그래서 ①②가 깨지면 더 큰 소리로
 // 실패한다.
 import { readFileSync, existsSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { findOverrideKeys, selfTest, OAUTH_OVERRIDE_NAMES } from './lib/oauth-override-names.mjs';
 
 // 갈래가 둘이다. **둘 다** 같은 울타리를 가져야 한다 — 한쪽만 검사하면
 // 느슨한 쪽으로 작업이 흘러간다.
@@ -32,6 +35,22 @@ const LANES = [
 
 let bad = 0;
 const err = (m) => { console.error(`❌ ${m}`); console.error(`::error::${m}`); bad += 1; };
+
+// ── ⓞ 이 검사기의 판단이 아직 살아 있는가 ──
+//
+// **음성 시험을 `scripts/test-*.mjs`에만 두면 CI에서 한 번도 돌지 않는다.**
+// `ci.yml`의 `.mjs` 시험 단계는 파일 이름을 두 개 적어 부르고, `npm test`는
+// TypeScript 하네스라 `.mjs`가 안 걸린다 — `ci.yml` 자신이 그 자리에
+// "여기서 돌리지 않으면 PR에서 한 번도 안 돈다"고 적어 두었다.
+//
+// 그래서 목록에 파일 이름을 더하는 대신 **판단이 매 회차 자기를 증명한다.**
+// 이 검사기는 CI의 `무인 회차 울타리` 단계에서 이미 돌기 때문에, 유지해야
+// 할 목록이 없다. 판단이 깨졌으면 그 뒤의 초록은 아무 뜻이 없으므로
+// **갈래 검사보다 먼저** 돌린다.
+const SELF = selfTest();
+for (const f of SELF.failed) {
+  err(`판단 자기 점검 실패 — ${f}`);
+}
 
 for (const lane of LANES) {
 const WF = lane.wf;
@@ -87,14 +106,57 @@ const src = stripComments(raw);
       err(`${WF}: \`secrets.${s}\`을 넘깁니다 — 무인 회차는 거래소·운영 DB에 닿으면 안 됩니다`);
     }
   }
-  // 인증은 있어야 한다. 둘 중 하나는 반드시.
-  const hasAuth = /secrets\.ANTHROPIC_API_KEY\b/.test(src)
-    || /secrets\.CLAUDE_CODE_OAUTH_TOKEN\b/.test(src);
-  if (!hasAuth) {
-    err(`${WF}: Claude 인증 시크릿을 쓰지 않습니다 — 돌 수 없는 워크플로입니다`);
+  // 인증은 있어야 한다. **OAuth 토큰 하나뿐이다** — ②a가 나머지 경로를
+  // 전부 거부하므로 "둘 중 하나"로 세면 두 판단이 서로 어긋난다.
+  if (!/secrets\.CLAUDE_CODE_OAUTH_TOKEN\b/.test(src)) {
+    err(`${WF}: Claude OAuth 시크릿을 쓰지 않습니다 — 돌 수 없는 워크플로입니다`);
   }
 }
 
+// ── ②a OAuth 전용: OAuth보다 먼저 선택되는 인증 경로가 없는가 ──
+//
+// 공식 인증 우선순위(code.claude.com/docs/en/authentication)는
+//   ① 클라우드 공급자(Bedrock/Vertex) → ② ANTHROPIC_AUTH_TOKEN
+//   → ③ ANTHROPIC_API_KEY → ④ apiKeyHelper → ⑤ CLAUDE_CODE_OAUTH_TOKEN
+// 이다. 즉 **①~④ 중 하나라도 회차에 들어오면 ⑤는 쓰이지 않는다.**
+//
+// 처음 이 블록은 ③(API 키) **하나만** 셌다. 통합 트리에서 실측하니 나머지
+// 다섯은 그대로 통과했다(`ANTHROPIC_AUTH_TOKEN` · `ANTHROPIC_BASE_URL` ·
+// `CLAUDE_CODE_USE_BEDROCK` · `CLAUDE_CODE_USE_VERTEX` · `apiKeyHelper`
+// → 전부 exit 0). 이름이 여섯인데 하나만 센 자리였다.
+//
+// 이름 목록은 `scripts/lib/oauth-override-names.mjs` **한 곳**에 있다.
+// 설정 파일을 보는 관문 ⑮도 같은 목록을 쓴다 — 들어올 자리가 둘인데
+// 목록이 둘이면 언젠가 한쪽만 늘어난다.
+//
+// 인증 확인 로그의 `인증: ...OAUTH_TOKEN`은 **시크릿이 비어 있지 않다는
+// 것만** 뜻한다. 무엇으로 인증했는지의 증거가 아니다.
+{
+  // 한 이름이 들어오는 모양이 여럿이다 — `secrets.X` · `vars.X` ·
+  // env/`with` 리터럴 · 소문자 액션 입력 · 셸 `X=` · settings JSON.
+  // 모양을 하나씩 세면 세지 않은 모양으로 들어오므로 **이름이 본문에
+  // 나오는지**를 센다. 설명이 필요하면 `#` 주석에 적는다.
+  const lines = src.split('\n');
+  for (const [name, why] of OAUTH_OVERRIDE_NAMES) {
+    const needle = name.toLowerCase();
+    const hits = [];
+    for (let i = 0; i < lines.length; i += 1) {
+      if (lines[i].toLowerCase().includes(needle)) hits.push(i + 1);
+    }
+    if (hits.length) {
+      err(`${WF}: OAuth 전용 회차에 \`${name}\` 이름이 나옵니다 (줄 ${hits.slice(0, 5).join(', ')})`
+        + ` — ${why} · 설명이라면 \`#\` 주석으로 옮기세요`);
+    }
+  }
+  // settings 입력은 **이 검사기가 읽지 않는 파일**로 인증 설정을 옮긴다.
+  if (/^\s*settings\s*:/m.test(src) || /--settings\b/.test(src)) {
+    err(`${WF}: Claude Action에 settings 입력을 줍니다 — 인증 설정이 `
+      + '이 검사기가 읽지 않는 파일로 옮겨가 OAuth 전용인지 셀 수 없습니다');
+  }
+  if (!/claude_code_oauth_token:\s*\$\{\{\s*secrets\.CLAUDE_CODE_OAUTH_TOKEN\s*\}\}/.test(src)) {
+    err(`${WF}: Claude Action의 OAuth 입력이 없습니다 — 시크릿 존재 로그만으로는 인증할 수 없습니다`);
+  }
+}
 // ── ③ 겹쳐 돌지 않는가 ──
 //
 // 두 회차가 동시에 깨면 같은 문제를 각자 고치고 Draft PR을 둘 연다.
@@ -268,13 +330,19 @@ if (lane.mode === 'trading') {
     err(`${WF}: 보호 규칙에서 PR 필수 여부를 보지 않습니다 — `
       + '보호가 켜져 있어도 PR 없이 밀 수 있으면 관문이 아닙니다');
   }
-  // 읽지 못한 경우를 통과로 보면 관문이 없는 것과 같다.
-  if (!/UNKNOWN/.test(src)) {
-    err(`${WF}: 보호 규칙을 **읽지 못한 경우**를 따로 다루지 않습니다 — `
-      + '모르는 것은 통과가 아닙니다');
+  // 기존 보호 API만으로는 Ruleset 기반 보호를 검출할 수 없다.
+  // 두 API 중 하나에서 PR 필수 조건을 증명해야 하며, 읽기 실패는 거부한다.
+  if (!/rules\/branches\/main/.test(src)) {
+    err(`${WF}: main에 적용되는 Ruleset을 확인하지 않습니다`);
   }
-  if (!/workflow_dispatch["']?\s*\]?\s*;?\s*then[\s\S]{0,200}exit 1|GITHUB_EVENT_NAME..\s*!=\s*"workflow_dispatch"/.test(src)) {
-    err(`${WF}: 보호가 확인되지 않았을 때 **예약 실행**을 멈추지 않습니다`);
+  if (!/get\('type'\)\s*==\s*'pull_request'/.test(src)) {
+    err(`${WF}: 유효한 Ruleset에서 PR 필수 규칙을 검증하지 않습니다`);
+  }
+  if (!/status\s*!=\s*200/.test(src) || !/sys\.exit\(1\)/.test(src)) {
+    err(`${WF}: 보호 규칙 조회 실패를 fail-closed로 처리하지 않습니다`);
+  }
+  if (!/No effective pull-request requirement/.test(src) || !/sys\.exit\(1\)/.test(src)) {
+    err(`${WF}: PR 필수 규칙이 없을 때 실행을 차단하지 않습니다`);
   }
 }
 
@@ -335,10 +403,78 @@ if (lane.mode === 'trading') {
   }
 }
 
+// ── ⑮ 체크아웃된 프로젝트 설정이 인증을 바꿔치지 않는가 ──
+//
+// **울타리가 워크플로 파일만 보던 자리다.**
+//
+// Claude Code는 작업 디렉터리의 `.claude/settings.json`과
+// `.claude/settings.local.json`을 설정으로 읽는다. 공식 설정 색인은
+// `apiKeyHelper`와 `env`의 적용 범위를 둘 다 **"Any file"** 로 적으므로,
+// 저장소에 **커밋된** 그 파일에서도 적용된다. 그리고 프로젝트 로컬 설정은
+// 우선순위에서 사용자 설정보다 위다.
+//
+// 무인 회차는 이 저장소를 체크아웃한 뒤 그 안에서 돈다. 그래서 커밋된
+// 설정 파일에 `apiKeyHelper`나 `env.ANTHROPIC_API_KEY`가 들어가면
+// **워크플로 YAML은 그대로인데 인증 경로가 바뀐다** — YAML만 읽는 검사는
+// 그것을 구조적으로 볼 수 없다. 실제로 이 저장소는
+// `.claude/settings.local.json`을 **git으로 추적하고 있다**(공식 문서는
+// 이 파일을 커밋하지 말라고 적는다).
+//
+// 값은 읽지 않는다. **키 이름만** 센다 — 값이 토큰일 수 있고, 키·시크릿
+// 값은 로그·응답·커밋 어디에도 남기지 않는다.
+{
+  const SETTINGS_FILES = ['.claude/settings.json', '.claude/settings.local.json'];
+
+  // **추적되는 파일만** 본다. 개발자 각자의 추적되지 않는 개인 설정은
+  // 체크아웃에 들어가지 않으므로 무인 회차와 무관하고, 그것까지 빨갛게
+  // 만들면 사람이 이 검사기를 무시하게 된다.
+  let tracked = null;
+  try {
+    const out = execFileSync('git', ['ls-files', '-z', '--', ...SETTINGS_FILES],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    tracked = new Set(out.split('\0').filter(Boolean));
+  } catch {
+    tracked = null;
+  }
+
+  if (tracked == null) {
+    // 못 읽은 것을 "없음"으로 적지 않는다.
+    err('추적되는 프로젝트 설정 파일 목록을 읽지 못했습니다 — '
+      + 'git에게 물을 수 없으면 커밋된 설정이 인증을 바꿔치는지 셀 수 없습니다');
+  } else {
+    for (const f of SETTINGS_FILES) {
+      if (!tracked.has(f)) continue;        // 체크아웃에 없다 — 볼 것이 없다
+      if (!existsSync(f)) {
+        err(`${f}이 추적되는데 작업 트리에 없습니다 — 체크아웃에서 무엇이 적용될지 셀 수 없습니다`);
+        continue;
+      }
+      let parsed;
+      try {
+        parsed = JSON.parse(readFileSync(f, 'utf8'));
+      } catch {
+        // 깨진 JSON을 통과로 보지 않는다. (내용·오류 본문은 적지 않는다)
+        err(`${f}을 JSON으로 읽지 못했습니다 — 무엇이 적용되는지 셀 수 없습니다`);
+        continue;
+      }
+      const { hits, truncated } = findOverrideKeys(parsed);
+      for (const h of hits) {
+        err(`${f}: \`${h.path}\` 키가 있습니다 — ${h.why}`
+          + ' · 무인 회차는 체크아웃된 이 파일을 설정으로 읽습니다 (값은 보지 않았습니다)');
+      }
+      if (truncated) {
+        err(`${f}: 중첩이 너무 깊어 끝까지 보지 못했습니다 — 못 본 것을 "없음"으로 적지 않습니다`);
+      }
+    }
+  }
+}
+
 if (bad === 0) {
+  console.log(`✅ 판단 자기 점검 ${SELF.total}/${SELF.total} — `
+    + '인증 바꿔치기 이름을 키로 찾고, 품은 이름은 찾지 않고, 못 본 깊이를 '
+    + '"없음"으로 적지 않고, 결과에 값을 섞지 않는다');
   console.log(`✅ 무인 회차 울타리 ${LANES.length}갈래 — 다른 워크플로 실행 불가 · `
     + '거래소/DB 시크릿 없음 · 도구 차단 · 겹침 방지 · 시간 상한 · '
-    + '변경 안전 관문 · 금지 지시 보존');
+    + '변경 안전 관문 · 금지 지시 보존 · 체크아웃 설정의 인증 바꿔치기 없음');
 } else {
   console.error('');
   console.error('   이 회차는 사람이 보고 있지 않은 시간에 돕니다.');

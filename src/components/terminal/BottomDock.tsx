@@ -359,7 +359,7 @@ function BottomDockInner({ onBalance, flow, stickyTop }: {
         {tab === '로그인' && <LoginDiagnosticPanel/>}
         {tab === '데모' && (
           <div style={{ padding: 12 }}>
-            <DemoRunner symbol={symbol.id} onChanged={paper.reload}/>
+            <DemoRunner auth={auth || null} symbol={symbol.id} onChanged={paper.reload}/>
           </div>
         )}
 
