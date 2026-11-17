@@ -20,7 +20,9 @@
 // 그래서 이 검사는 "붙였는가"를 CI에서 센다. 새 주문 경로를 만들면
 // 여기 목록에 넣어야 하고, 안 넣으면 빌드가 깨진다.
 
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+import { stripJsComments } from './lib/strip-comments.mjs';
 
 // **실제 돈이 나갈 수 있는 경로만 넣는다.**
 // 조회·모의 라우트를 섞으면 목록이 길어지고, 길어지면 아무도 안 본다.
@@ -481,9 +483,85 @@ if (zeroErrors.length > 0) {
   }
 }
 
+// ── 큐에 주문을 적재하려면 실행자 확인을 거쳐야 한다 ──────────────
+//
+// 왜 이 규칙이 생겼나
+// ───────────────────
+// `src/app/api/binance/futures/order/route.ts`에 이런 주석이 있었다:
+//
+//   "큐는 남겨 둔다 — 웹훅(signal·tradingview)이 아직 쓴다. 다만 그쪽도
+//    실행자가 없으면 적재하지 않는다(queueGuard)."
+//
+// 세어 보니 **웹훅 라우트 셋 다 `queueGuard`를 부르지 않는다.** 다만
+// 그 셋은 적재 자체를 하지 않아서 **지금 새고 있는 것은 아니다.** 즉
+// 주석은 거짓이 아니라 **낡았다** — 적재 경로가 사라졌는데 문장은 남았다.
+//
+// 그래서 주석을 고치는 대신 **그 약속을 여기로 옮긴다.** 주석은 또 낡지만
+// 이 규칙은 낡지 않는다: 누가 다시 적재를 붙이는 순간 실행자 확인을
+// 요구한다. `queueGuard.ts`의 머리말이 이미 그 이유를 적어 두었다 —
+// "적재하는 곳이 셋이라 조회 코드를 복사하면 한 곳만 고쳐졌을 때
+//  **그 경로만 조용히 다시 새게 된다**."
+//
+// 면제 둘
+// ────────
+// ① `src/lib/jobs.ts`의 `enqueueJob` — 범용 적재 헬퍼 자신이다.
+//    요구 대상은 **그것을 부르는 쪽**이다.
+// ② `worker/src/index.ts` — 소비자 자신의 자가복구(킬스위치)다.
+//    워커의 만료 검사도 킬스위치를 일부러 면제한다("킬스위치·전량청산은
+//    늦게라도 실행되는 것이 맞다"). 위험을 **줄이는** 방향이라 막지 않는다.
+{
+  const GUARD_NAMES = /checkExecutorBeforeQueue|executorUnavailableBody|withExpiry/;
+  const ENQUEUE = /from\(\s*['"]jobs['"]\s*\)\s*\.\s*insert|\benqueueJob\s*\(/;
+  // **면제를 전체 경로 문자열로 적지 않는다.**
+  //
+  // 처음에는 면제를 **전체 경로 문자열**로 적었다(src/lib/jobs 아래의 두
+  // 파일을 그대로 인용). 그랬더니
+  // `check-wiring.mjs`가 그 문자열을 **import 경로로 읽어** queueGuard를
+  // "이미 배선됨"으로 뒤집었다 — 진짜로 끊긴 모듈이 제 설정 한 줄 때문에
+  // 조용히 살아난 것이다. 그 검사기의 머리말이 똑같은 함정을 적어 두었다:
+  // "검사기가 자기 설정을 근거로 통과시키면, 진짜로 끊긴 모듈이 조용히
+  // 살아난다."
+  //
+  // 그래서 파일 이름으로 가린다. 설정이 다른 검사기의 입력이 되지 않는다.
+  const EXEMPT_NAMES = new Set(['jobs.ts', 'queueGuard.ts']);
+  const bad = [];
+  const walk = (dir) => {
+    for (const name of readdirSync(dir)) {
+      const p = join(dir, name);
+      if (statSync(p).isDirectory()) { walk(p); continue; }
+      if (!/\.(ts|tsx)$/.test(name) || /\.test\.(ts|tsx)$/.test(name)) continue;
+      if (EXEMPT_NAMES.has(name)) continue;
+      const raw = readFileSync(p, 'utf8');
+      // **주석을 지우고 본다.** 이 규칙이 생긴 이유가 주석이므로, 주석을
+      // 그대로 읽으면 설명하는 문장을 적재로 세거나 가드로 센다.
+      const code = stripJsComments(raw);
+      if (!ENQUEUE.test(code)) continue;
+      // 정의가 아니라 **호출**만 센다 (`export async function enqueueJob(`)
+      const calls = [...code.matchAll(/\benqueueJob\s*\(/g)]
+        .filter((m) => !/function\s+$/.test(code.slice(Math.max(0, m.index - 40), m.index)));
+      const inserts = [...code.matchAll(/from\(\s*['"]jobs['"]\s*\)\s*\.\s*insert/g)];
+      if (calls.length === 0 && inserts.length === 0) continue;
+      if (!GUARD_NAMES.test(code)) {
+        bad.push(`${p}: 큐에 적재하면서 실행자 확인(queueGuard)을 거치지 않습니다`);
+      }
+    }
+  };
+  if (existsSync('src')) walk('src');
+  if (bad.length) {
+    console.error('❌ 실행자 확인 없이 큐에 적재하는 경로:');
+    for (const b of bad) console.error(`   · ${b}`);
+    console.error('');
+    console.error('   실행자가 없는데 적재하면, 사용자는 주문을 냈다고 믿고');
+    console.error('   그 주문은 아무도 집어 가지 않은 채 큐에 남습니다.');
+    console.error('   src/lib/jobs/queueGuard.ts의 checkExecutorBeforeQueue를 쓰세요.');
+    process.exit(1);
+  }
+}
+
 console.log(`✅ 실주문 경로 ${ORDER_ROUTES.length}개 · 안전장치 빠진 것 0개`
   + ' · 조회 실패를 0으로 만드는 길 0개'
   + ' · 진입 미확정 노출 방치 경로 0개'
   + ' · 스모크 주문 관문 구멍 0개'
   + ' · 보호주문 교체가 취소 결과를 무시하는 길 0개 (Binance·Gate 둘 다)'
-  + ' · Gate 계약 단위 일괄 취소 0개');
+  + ' · Gate 계약 단위 일괄 취소 0개'
+  + ' · 실행자 확인 없이 큐에 적재하는 경로 0개');
