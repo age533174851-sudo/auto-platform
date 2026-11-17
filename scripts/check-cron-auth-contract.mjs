@@ -71,10 +71,14 @@ const DECLARED_DEBT = {
       + '바꾸는 것은 인증 동작 변경이라 승인 사항이다',
   },
   handSetSecrets: {
-    names: ['CRON_SECRET', 'NEWS_CRON_SECRET'],
-    why: 'sync-secrets가 관리하지 않는다 — 사람이 두 곳에 다른 이름으로 '
-      + '같은 값을 손으로 넣어야 한다. #582가 그래서 성공 0회다. '
-      + '정본 이름 하나로 모으는 것은 워크플로/인증 변경이라 승인 사항이다',
+    names: ['CRON_SECRET'],
+    why: 'sync-secrets가 관리하지 않는다 — GitHub Secrets와 Vercel 환경변수에 '
+      + '사람이 같은 값을 손으로 넣어야 하고, 한쪽만 바꾸면 401이 된다. '
+      + 'sync-secrets 관리 대상에 넣는 것은 비밀 취급 변경이라 승인 사항이다. '
+      + '다만 **이름이 갈려 있던 부분은 없앴다** — `news-pipeline`은 '
+      + '`NEWS_CRON_SECRET`을 보냈는데 그 비밀은 저장소에 없었고(실행 로그의 '
+      + '`SECRET:`이 비어 있다), 그래서 #582는 성공이 0회였다. 같은 서버를 '
+      + '부르는 `scheduled-exit`이 쓰는 `CRON_SECRET`으로 모았다',
   },
 };
 
@@ -195,6 +199,20 @@ async function main() {
     ok(`손으로 맞추는 비밀 ${handSet.length}곳 — 전부 선언돼 있습니다`);
   } else {
     ok('모든 워크플로가 동기화되는 이름만 씁니다');
+  }
+
+  // ── ②' 선언이 썩지 않게 **반대 방향도** 본다 ──
+  //
+  // 위 검사는 "보내는데 선언에 없는 것"만 잡는다. 그래서 선언에 남은
+  // 이름은 아무도 지우지 않는다 — 이 목록이 고무도장이 되는 길이다.
+  // (`NEWS_CRON_SECRET`이 워크플로에서 사라진 뒤에도 선언에 남아 있었고,
+  //  한쪽만 보는 검사는 그것을 통과시켰다.)
+  const sentNames = new Set(sending.map((x) => x.secret));
+  for (const n of declaredNames) {
+    if (!sentNames.has(n)) {
+      err(`DECLARED_DEBT에 \`${n}\`이 남아 있는데 그 이름을 보내는 워크플로가 없습니다 — `
+        + '목록에서 지우세요. 선언은 **지금 있는 부채**만 적는 자리입니다');
+    }
   }
 
   // ── 남은 구멍 ──
