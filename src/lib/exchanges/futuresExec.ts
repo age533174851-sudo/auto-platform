@@ -1215,16 +1215,35 @@ export async function futuresSetTpsl(t: ExecTarget, input: TpslInput): Promise<T
   let tp: TpslOutcome['tp'] = null;
   let sl: TpslOutcome['sl'] = null;
 
+  // ── 트리거 가격을 호가 단위에 올린다 ──
+  //
+  // 이 함수는 트레일링·본전 이동(`placeStop`)과 워커 SET_TPSL이 같이 쓴다.
+  // `planTrail`의 새 손절은 `진입가 ± 1R × R배수`라 생 부동소수다
+  // (예: 3.477979). Gate 갈래는 `gateStopSpec`이 호가에 올리고 진입 경로는
+  // `roundTrigger`를 지나는데, **이 갈래만 그대로 보냈다** — 거래소는
+  // 호가 단위 밖의 stopPrice를 거절하고(-4014 · -1111) 손절은 안 옮겨진다.
+  //
+  // 정본은 진입 경로와 같은 `roundTrigger`다(방향: 손절·익절 모두 진입에서
+  // 멀어지는 쪽). 규격을 못 읽으면 tick이 null이라 값을 지어내지 않고
+  // 그대로 보낸다 — 진입 경로와 같은 계약이고, 손절 자체를 막지 않는다.
+  const { roundTrigger } = await import('../engine/fillBasedExit');
+  const filters = await bf.getSymbolFilters(input.symbol, t.testnet).catch(() => null);
+  const tick = filters?.tickSize && filters.tickSize > 0 ? filters.tickSize : null;
+  const trig = (price: unknown, kind: 'STOP' | 'TAKE_PROFIT'): number => {
+    const r = roundTrigger(Number(price), input.positionSide, kind, tick);
+    return r.price ?? Number(price);
+  };
+
   if (hasTp) {
     const r = await bf.placeFuturesTPSL(t.key, t.secret, {
-      symbol: input.symbol, side: closeSide, stopPrice: Number(input.tpPrice),
+      symbol: input.symbol, side: closeSide, stopPrice: trig(input.tpPrice, 'TAKE_PROFIT'),
       type: 'TAKE_PROFIT_MARKET', fallbackQuantity: input.quantity ?? null,
     }, t.testnet);
     tp = { ok: !!r.success, orderId: r.orderId != null ? String(r.orderId) : null, message: r.message };
   }
   if (hasSl) {
     const r = await bf.placeFuturesTPSL(t.key, t.secret, {
-      symbol: input.symbol, side: closeSide, stopPrice: Number(input.slPrice),
+      symbol: input.symbol, side: closeSide, stopPrice: trig(input.slPrice, 'STOP'),
       type: 'STOP_MARKET', fallbackQuantity: input.quantity ?? null,
     }, t.testnet);
     sl = { ok: !!r.success, orderId: r.orderId != null ? String(r.orderId) : null, message: r.message };

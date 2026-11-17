@@ -23,7 +23,7 @@
 //       Authorization: Bearer <CRON_SECRET> 을 붙여 호출한다.
 //       워커·수동 점검용으로 x-admin-secret도 허용한다.
 import { NextRequest, NextResponse } from 'next/server';
-import { timingSafeEqual } from 'crypto';
+import { wakeAuthFromEnv } from '@/lib/system/cronAuth';
 import { checkPositionGuard, type GuardVerdict } from '@/lib/engine/positionGuard';
 import { makeCredsReader } from '@/lib/engine/connectionCreds';
 import {
@@ -39,14 +39,6 @@ export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 export const maxDuration = 60;
 
-function safeEqual(provided: string | null, expected: string): boolean {
-  if (!expected || !provided) return false;
-  const a = Buffer.from(provided, 'utf8');
-  const b = Buffer.from(expected, 'utf8');
-  if (a.length !== b.length) return false;
-  try { return timingSafeEqual(a, b); } catch { return false; }
-}
-
 /**
  * 인증 결과를 **boolean으로 버리지 않는다.**
  *
@@ -59,17 +51,13 @@ function safeEqual(provided: string | null, expected: string): boolean {
  *   인증 근거로 쓰지 않는다 — 그건 누구나 흉내 낼 수 있다.
  */
 function authorized(req: NextRequest): WakeAuth {
-  const cronSecret = process.env.CRON_SECRET || '';
-  const adminSecret = process.env.ADMIN_SECRET || '';
-
-  const auth = req.headers.get('authorization') || '';
-  if (cronSecret && auth.startsWith('Bearer ') && safeEqual(auth.slice(7), cronSecret)) {
-    return { ok: true, kind: 'CRON_BEARER' };
-  }
-  if (safeEqual(req.headers.get('x-admin-secret'), adminSecret)) {
-    return { ok: true, kind: 'ADMIN_HEADER' };
-  }
-  return { ok: false, kind: 'NONE' };
+  // **판정은 `system/cronAuth` 한 곳에 있다.** 전에는 이 함수와 모의
+  // 라우트에 각자 적혀 있었고, 받는 경로가 서로 달랐다 — 모의는 Vercel
+  // Cron을 못 받아 깨우는 길이 하나뿐이었다.
+  return wakeAuthFromEnv({
+    authorization: req.headers.get('authorization'),
+    adminHeader: req.headers.get('x-admin-secret'),
+  });
 }
 
 /**

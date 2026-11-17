@@ -16,7 +16,7 @@
 
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { concurrencyOf, concurrencyFindings, triggerFindings, selfTest }
+import { concurrencyOf, concurrencyFindings, triggerFindings, aggregatorFindings, selfTest }
   from './lib/workflow-concurrency.mjs';
 
 const WF_DIR = '.github/workflows';
@@ -28,6 +28,16 @@ const WF_DIR = '.github/workflows';
  * 곧 무시당한다. `main` ruleset 의 필수 검사를 만드는 것만 센다.
  */
 const REQUIRED_CHECK_WORKFLOWS = ['auto-merge.yml'];
+
+/**
+ * **샤드를 합산하는 워크플로.**
+ *
+ * 합산 job 이 `if: always()` 면 실행이 취소됐을 때도 돌아서 "증거 없음"을
+ * 실패로 적는다. 취소는 실패가 아니라 교체된 SHA 의 결과다 — 그걸
+ * 빨간불로 남기면 커밋을 올릴 때마다 정체를 다시 읽어야 하는 빨간불이
+ * 하나씩 쌓인다.
+ */
+const SHARDED_WORKFLOWS = ['mutation-100x-pr313.yml'];
 
 if (process.argv.includes('--self-test')) {
   const r = selfTest();
@@ -73,12 +83,26 @@ for (const name of REQUIRED_CHECK_WORKFLOWS) {
   for (const f of concurrencyFindings({ ...c, where: `${WF_DIR}/${name}` })) err(f);
 }
 
+let shardChecked = 0;
+for (const name of SHARDED_WORKFLOWS) {
+  if (!present.includes(name)) {
+    err(`${WF_DIR}/${name} 이 없습니다 — 샤드 합산 워크플로가 사라졌거나 이름이 바뀌었습니다`);
+    continue;
+  }
+  shardChecked += 1;
+  const src = readFileSync(join(WF_DIR, name), 'utf8');
+  for (const f of aggregatorFindings(src, `${WF_DIR}/${name}`)) err(f);
+}
+if (bad === 0 && shardChecked === 0) {
+  err('샤드 합산 워크플로를 한 건도 보지 못했습니다 — 0건을 통과로 적지 않습니다');
+}
+
 if (bad === 0 && checked === 0) {
   err('필수 체크 워크플로를 한 건도 보지 못했습니다 — 0건을 통과로 적지 않습니다');
 }
 
 if (bad === 0) {
-  console.log(`✅ 필수 체크 워크플로 ${checked}개 — 모든 PR HEAD 에서 깨어나고`
+  console.log(`✅ 필수 체크 워크플로 ${checked}개 · 샤드 합산 ${shardChecked}개 — 모든 PR HEAD 에서 깨어나고`
     + '(opened · synchronize · reopened · ready_for_review · labeled), '
     + '같은 PR 의 이벤트는 한 줄, 다른 PR 은 서로 다른 줄, 예약 안전망은 저만의 줄 · '
     + `돌고 있는 판정을 끊지 않음 (자기 점검 ${SELF.total}/${SELF.total})`);
