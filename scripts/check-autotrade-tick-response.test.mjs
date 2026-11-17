@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { tickResponseVerdict, tickReasons, safeCode } from './check-autotrade-tick-response.mjs';
+import { tickResponseVerdict, tickReasons, safeCode, tickFreshness, evalAgeBucket } from './check-autotrade-tick-response.mjs';
 
 const ok = (results) => ({ ok: true, error: null, scheduledUnknown: false, scheduled: results.length, results });
 
@@ -163,4 +163,97 @@ test('응답을 못 읽은 회차는 UNKNOWN이지 none이 아니다', () => {
   assert.match(run.stdout, /TRAIGO_TICK_REASONS UNKNOWN/);
   assert.doesNotMatch(run.stdout, /TRAIGO_TICK_REASONS none/);
   assert.equal(run.status, 1);
+});
+
+// ── 마지막 평가의 나이 ────────────────────────────────────
+
+const NOW = Date.UTC(2026, 10, 17, 18, 49, 0);
+const agoISO = (ms) => new Date(NOW - ms).toISOString();
+const H = 3_600_000;
+const done = (ms) => ({ completed: true, completedAt: agoISO(ms), reasonCode: 'NO_BREAKOUT' });
+
+test('나이를 굵은 구간으로만 센다 — 경계는 아래쪽 구간에 들어간다', () => {
+  assert.equal(evalAgeBucket(done(0), NOW), 'LT_1H');
+  assert.equal(evalAgeBucket(done(H - 1), NOW), 'LT_1H');
+  assert.equal(evalAgeBucket(done(H), NOW), 'LT_6H');
+  assert.equal(evalAgeBucket(done(6 * H - 1), NOW), 'LT_6H');
+  assert.equal(evalAgeBucket(done(6 * H), NOW), 'LT_24H');
+  assert.equal(evalAgeBucket(done(24 * H), NOW), 'LT_7D');
+  assert.equal(evalAgeBucket(done(7 * 24 * H - 1), NOW), 'LT_7D');
+  assert.equal(evalAgeBucket(done(7 * 24 * H), NOW), 'GTE_7D');
+  assert.equal(evalAgeBucket(done(90 * 24 * H), NOW), 'GTE_7D');
+});
+
+test('선점만 하고 판단을 못 마친 회차는 나이를 재지 않는다', () => {
+  // `last_run_at`은 평가 **전에** 적힌다. 그걸로 나이를 재면 선점 직후
+  // 죽은 워커가 방금 평가한 것처럼 보인다.
+  assert.equal(evalAgeBucket({ completed: false, completedAt: agoISO(0) }, NOW), 'NOT_COMPLETED');
+  assert.equal(evalAgeBucket({ completedAt: agoISO(0) }, NOW), 'NOT_COMPLETED');
+});
+
+test('읽지 못한 나이는 UNKNOWN이다 — 0도 LT_1H도 아니다', () => {
+  assert.equal(evalAgeBucket({ completed: true, completedAt: null }, NOW), 'UNKNOWN');
+  assert.equal(evalAgeBucket({ completed: true, completedAt: '어제쯤' }, NOW), 'UNKNOWN');
+  assert.equal(evalAgeBucket({ completed: true, completedAt: 1763405340000 }, NOW), 'UNKNOWN');
+  // 시계 차이를 넘는 미래 시각을 '방금'으로 읽지 않는다.
+  assert.equal(evalAgeBucket({ completed: true, completedAt: agoISO(-60 * 60_000) }, NOW), 'UNKNOWN');
+  // 그 안쪽의 작은 미래는 시계 차이로 보고 0으로 둔다.
+  assert.equal(evalAgeBucket({ completed: true, completedAt: agoISO(-60_000) }, NOW), 'LT_1H');
+  // lastEval 자체가 없으면 나이 판정 대상이 아니다.
+  assert.equal(evalAgeBucket(undefined, NOW), null);
+});
+
+test('모든 행이 정확히 한 구간에 들어간다 — 합이 checked와 같다', () => {
+  const body = ok([
+    { ok: true, skipped: true, code: 'WAITING', lastEval: done(10 * 60_000) },
+    { ok: true, skipped: true, code: 'WAITING', lastEval: done(30 * 24 * H) },
+    { ok: true, executed: false, outcome: 'NO_SIGNAL' },
+    { ok: false, blocked: true, code: 'NO_CONNECTION' },
+  ]);
+  const f = tickFreshness(body, NOW);
+  assert.deepEqual(f, [
+    { code: 'GTE_7D', count: 1 },
+    { code: 'JUST_NOW', count: 1 },
+    { code: 'LT_1H', count: 1 },
+    { code: 'NO_RECORD', count: 1 },
+  ]);
+  assert.equal(f.reduce((n, x) => n + x.count, 0), body.results.length);
+});
+
+test('같은 NO_BREAKOUT이라도 살아 있는 워커와 죽은 워커가 구분된다', () => {
+  // 이 시험이 이 기능의 존재 이유다. 두 몸통의 REASONS·LASTEVAL은 글자까지
+  // 같고, 다른 것은 나이 한 줄뿐이다.
+  const live = ok([{ ok: true, skipped: true, code: 'WAITING', lastEval: done(5 * 60_000) }]);
+  const dead = ok([{ ok: true, skipped: true, code: 'WAITING', lastEval: done(30 * 24 * H) }]);
+  assert.deepEqual(tickReasons(live), tickReasons(dead));
+  assert.deepEqual(tickFreshness(live, NOW), [{ code: 'LT_1H', count: 1 }]);
+  assert.deepEqual(tickFreshness(dead, NOW), [{ code: 'GTE_7D', count: 1 }]);
+});
+
+test('CLI가 나이를 찍어도 시각 문자열은 새지 않는다', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tickage-'));
+  try {
+    const file = join(dir, 'body.json');
+    const stamp = new Date(Date.now() - 90 * 60_000).toISOString();
+    writeFileSync(file, JSON.stringify(ok([
+      { ok: true, skipped: true, code: 'WAITING',
+        lastEval: { completed: true, completedAt: stamp, reasonCode: 'NO_BREAKOUT',
+          line: 'DO_NOT_LEAK_SECRET', at: stamp } },
+    ])));
+    const run = spawnSync(process.execPath, ['scripts/check-autotrade-tick-response.mjs', file],
+      { encoding: 'utf8' });
+    assert.match(run.stdout, /TRAIGO_TICK_EVALAGE LT_6H=1/);
+    // 시각은 구간 이름으로만 나간다 — 원문도, 그 일부도 적지 않는다.
+    assert.doesNotMatch(run.stdout + run.stderr, /DO_NOT_LEAK_SECRET/);
+    assert.doesNotMatch(run.stdout + run.stderr, new RegExp(stamp.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.doesNotMatch(run.stdout + run.stderr, /\d{4}-\d{2}-\d{2}T/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('응답을 못 읽은 회차의 나이는 UNKNOWN이지 none이 아니다', () => {
+  const run = spawnSync(process.execPath,
+    ['scripts/check-autotrade-tick-response.mjs', join(tmpdir(), 'no-such-tick-body.json')],
+    { encoding: 'utf8' });
+  assert.match(run.stdout, /TRAIGO_TICK_EVALAGE UNKNOWN/);
+  assert.doesNotMatch(run.stdout, /TRAIGO_TICK_EVALAGE none/);
 });
