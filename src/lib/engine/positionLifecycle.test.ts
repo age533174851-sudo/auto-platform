@@ -21,7 +21,7 @@ import {
 } from './orderOwnership';
 import { fillBasis, exitFromFill, roundTrigger } from './fillBasedExit';
 import { readbackProtective, triggerMatches } from './protectiveReadback';
-import { enteredVerdict, outcomeOf } from './entryEvidence';
+import { enteredVerdict, outcomeOf, safeReason } from './entryEvidence';
 import { closeVerdict } from './closeEvidence';
 
 /** Gate 포지션 조회 응답 모양 */
@@ -691,5 +691,77 @@ export function runPositionLifecycleTests() {
       after: { ok: true, found: false, amount: 0 },
     });
     eq(cv.closed, true, '진입이 막혔다고 청산까지 막혔다');
+  });
+
+  console.log('[진입 거절 — 왜 거절됐는지 적는다]');
+
+  // 사용자가 받은 화면은 이것뿐이었다:
+  //
+  //   "진입 주문이 거절됐고 거래소에도 포지션이 없습니다 — 들어가지 않았습니다"
+  //
+  // **무엇을 고쳐야 할지 알 수 없다.** 최소 주문금액이 모자란 것인지,
+  // 배율이 안 맞는 것인지, 잔고가 없는 것인지. 사유는 실행기가 이미
+  // 들고 있었는데(`ExecuteResult.message`) 판정이 받지 않았을 뿐이다.
+
+  const REJECTED = {
+    ...FULL, rejected: true, settled: false, filledQty: 0,
+    position: { ok: true, found: false, qty: null, side: null, error: null },
+    stop: NOT_FOUND, takeProfit: NOT_FOUND,
+  };
+
+  test('★★ 거절 사유를 받으면 그대로 적는다 — 이게 없어서 아무도 원인을 몰랐다', () => {
+    const v = enteredVerdict({ ...REJECTED,
+      rejectedReason: "[-4164] Order's notional must be no smaller than 5 (unless you choose reduce only)" });
+    eq(v.code, 'NOT_ENTERED');
+    eq(v.entered, false);
+    assert(v.reason.includes('-4164'), `거래소 코드를 적어야 한다: ${v.reason}`);
+    assert(v.reason.includes('notional'), `사유 본문을 적어야 한다: ${v.reason}`);
+    assert(v.have.some(h => h.includes('거절 사유')), v.have.join(' / '));
+  });
+
+  test('★★ 사유를 못 받으면 "미확인"이라고 적는다 — 빈칸은 "사유 없음"으로 읽힌다', () => {
+    for (const r of [null, undefined, '', '   ']) {
+      const v = enteredVerdict({ ...REJECTED, rejectedReason: r as string | null });
+      eq(v.code, 'NOT_ENTERED');
+      assert(v.reason.includes('사유를 주지 않았습니다'), `${JSON.stringify(r)}: ${v.reason}`);
+      assert(v.have.some(h => h.includes('미확인')), v.have.join(' / '));
+    }
+  });
+
+  test('거절이 아닌 NOT_ENTERED(체결 수량 0)는 문구가 그대로다', () => {
+    // 거절과 "체결 0"은 다른 사건이다. 한쪽 문구를 바꾸면서 다른 쪽을
+    // 건드리면 사용자는 무엇이 일어났는지 구분할 수 없다.
+    const v = enteredVerdict({ ...REJECTED, rejected: false, settled: true, filledQty: 0 });
+    eq(v.code, 'NOT_ENTERED');
+    assert(v.reason.includes('체결이 확정됐고 수량이 0'), v.reason);
+    assert(!v.reason.includes('거래소 사유'), `거절이 아닌데 거절 사유를 적었다: ${v.reason}`);
+  });
+
+  test('★★ 사유를 보여 주려다 토큰을 남기지 않는다', () => {
+    // 바이낸스 어댑터는 `[code] msg`만 던지지만, 다른 거래소가 무엇을
+    // 넣을지 모른다. 사유 한 줄이 키를 흘리는 통로가 되면 안 된다.
+    const token = 'A'.repeat(40) + '9zXq';
+    const v = enteredVerdict({ ...REJECTED, rejectedReason: `rejected key=${token} bad` });
+    assert(!v.reason.includes(token), `토큰이 그대로 남았다: ${v.reason}`);
+    assert(v.reason.includes('[가림]'), v.reason);
+    assert(v.reason.includes('rejected'), `가리느라 사유를 다 지웠다: ${v.reason}`);
+  });
+
+  test('긴 사유는 자르고, 줄바꿈은 한 줄로 만든다', () => {
+    const long = 'x'.repeat(500);
+    const v = enteredVerdict({ ...REJECTED, rejectedReason: `line1\nline2 ${long}` });
+    assert(!v.reason.includes('\n'), '줄바꿈이 남았다');
+    const shown = v.reason.split('거래소 사유: ')[1] ?? '';
+    assert(shown.length <= 161, `길이를 안 잘랐다: ${shown.length}`);
+    assert(shown.includes('line1 line2'), shown.slice(0, 40));
+  });
+
+  test('safeReason 자체 — 못 쓰는 입력에서 터지지 않는다', () => {
+    eq(safeReason(null), '');
+    eq(safeReason(undefined), '');
+    eq(safeReason('  '), '');
+    eq(safeReason('a\n\nb'), 'a b');
+    eq(safeReason(123), '123');
+    eq(safeReason({} as unknown), '[object Object]');
   });
 }

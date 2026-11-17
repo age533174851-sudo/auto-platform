@@ -26,7 +26,11 @@ export interface PaperAccount {
   initialBalance: number;
   totalPnl: number;
   tradeCount: number;
+  /** 거래로 번 돈 = 실현 + 미실현. 충전·출금에 면역. 못 구했으면 null */
+  netPnl?: number | null;
   returnPct: number | null;
+  /** 수익률을 적지 못한 이유. 적었으면 빈 문자열 */
+  returnPctReason?: string | null;
 }
 
 /** 모의 계좌를 읽어 오는 훅. 주문판과 지갑판이 같은 값을 보게 한다 */
@@ -142,16 +146,33 @@ export function PaperWallet({ dense, acct, err, onChanged }: {
         </div>
       </div>
 
+      {/* ── 수익률을 못 적을 때 '—'만 보여 주지 않는다 (#592) ──
+          총자산 61,258.32가 전부 수익처럼 보인 자리다. 충전했으면
+          수익률은 **계산 불가**이고, 그때 정직한 숫자는 **거래로 번 돈**
+          이다. 그 금액은 충전에 면역이라 언제나 정확하다. */}
       {acct && !dense && (
-        <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4, fontSize: FS.micro }}>
-          <span style={{ color: C.faint }}>
-            잔고 {fmtPrice(acct.balance)} · 증거금 {fmtPrice(acct.usedMargin)}
-          </span>
-          <span style={{ ...NUM, color: pnlColor(acct.returnPct) }}>
-            {acct.returnPct == null ? '—'
-              : `${acct.returnPct >= 0 ? '+' : ''}${acct.returnPct.toFixed(2)}%`}
-          </span>
-        </div>
+        <>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4, fontSize: FS.micro }}>
+            <span style={{ color: C.faint }}>
+              잔고 {fmtPrice(acct.balance)} · 증거금 {fmtPrice(acct.usedMargin)}
+            </span>
+            {acct.returnPct != null ? (
+              <span style={{ ...NUM, color: pnlColor(acct.returnPct) }}>
+                {`${acct.returnPct >= 0 ? '+' : ''}${acct.returnPct.toFixed(2)}%`}
+              </span>
+            ) : (
+              <span style={{ ...NUM, color: pnlColor(acct.netPnl ?? null) }}>
+                {acct.netPnl == null ? '수익률 계산 불가'
+                  : `거래 손익 ${acct.netPnl >= 0 ? '+' : ''}${acct.netPnl.toFixed(2)}`}
+              </span>
+            )}
+          </div>
+          {acct.returnPct == null && !!acct.returnPctReason && (
+            <div style={{ marginTop: 3, color: C.warn, fontSize: FS.micro, lineHeight: 1.5 }}>
+              {acct.returnPctReason}
+            </div>
+          )}
+        </>
       )}
 
       {/* 오류는 접지 않는다. '확인 불가'만 보이고 이유가 안 보이면
@@ -171,8 +192,11 @@ export function PaperWallet({ dense, acct, err, onChanged }: {
               flex: 1.4, display: 'flex', alignItems: 'center', justifyContent: 'flex-end',
               ...NUM, fontSize: FS.micro, color: pnlColor(acct.returnPct),
             }}>
-              누적 {acct.returnPct == null ? '—'
-                : `${acct.returnPct >= 0 ? '+' : ''}${acct.returnPct.toFixed(2)}%`}
+              {acct.returnPct != null
+                ? `누적 ${acct.returnPct >= 0 ? '+' : ''}${acct.returnPct.toFixed(2)}%`
+                : acct.netPnl != null
+                  ? `거래 손익 ${acct.netPnl >= 0 ? '+' : ''}${acct.netPnl.toFixed(2)}`
+                  : '수익률 계산 불가'}
             </span>
           )}
         </div>
