@@ -8,7 +8,7 @@ import type {
 } from './types';
 import { DEFAULT_RISK_LIMITS } from './types';
 import { calcTradePnL } from '../pnl';
-import { getDefaultConfig, calcFeeAmount } from '../fees';
+import { getDefaultConfig, calcFeeAmount } from '../fees/index';
 import { getDefaultFundingRate } from '../funding';
 import type { ExchangeId } from '../exchanges/types';
 
