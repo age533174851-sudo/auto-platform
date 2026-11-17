@@ -62,9 +62,27 @@ noteScheduler({
 });
 
 // ── 부팅 즉시 출력 (파일이 로드되는 순간 찍힘 — Railway "빈 로그" 진단용) ──
+//
+// **점검 모드에서는 안 할 일을 적지 않는다.**
+//
+// 이 세 줄은 모듈이 로드되는 순간 찍히고, `main()`의 점검 모드 분기보다
+// 먼저다. 그래서 `WORKER_BOOT_CHECK=1`로 돌려 보면 이렇게 나왔다:
+//
+//     📡 Connecting to Supabase...
+//     🔁 Polling jobs...
+//     [worker] 부팅 점검 모드 — tick 에 들어가지 않고 끝냅니다
+//
+// 점검 모드는 **연결도 폴링도 하지 않는다** — 그게 그 모드의 정의다.
+// 첫 두 줄이 거짓이면 "이 모드가 무엇을 안 했는가"를 로그로 셀 수 없고,
+// 로그로 셀 수 없으면 그 모드를 증거로 쓸 수 없다.
+const BOOT_CHECK_ONLY = bootCheckRequested(process.env as any);
 console.log('🚀 TRAIGO Worker started');
-console.log('📡 Connecting to Supabase...');
-console.log('🔁 Polling jobs...');
+console.log(BOOT_CHECK_ONLY
+  ? '🔎 부팅 점검 모드 — Supabase 에 연결하지 않습니다'
+  : '📡 Connecting to Supabase...');
+console.log(BOOT_CHECK_ONLY
+  ? '🔎 부팅 점검 모드 — 잡을 폴링하지 않습니다'
+  : '🔁 Polling jobs...');
 
 // ── Worker id ──
 //
@@ -341,7 +359,15 @@ async function processPendingJobs() {
       // 잊은 주문이 완전히 다른 시세에서 체결된다.
       //
       // 만료 시각은 적재하는 쪽이 payload.expiresAt에 새긴다
-      // (src/lib/jobs/queueGuard.ts). 시각이 없는 주문 — 이 보호가 들어가기
+      // (src/lib/jobs/queueGuard.ts의 withExpiry). **다만 2026-11-08 현재
+      // 그 적재 경로는 제품 코드에 없다** — `enqueueJob` 호출 0건, 웹훅 셋
+      // 모두 적재하지 않는다. 즉 이 검사는 지금 들어오는 주문이 없어서
+      // 조용한 것이지, 통과시키고 있는 것이 아니다. 그래서 **그대로 둔다**:
+      // 누가 다시 적재를 붙였을 때 시각 없는 주문을 막는 것이 이 줄의
+      // 일이고, 적재 쪽에 가드를 요구하는 것은
+      // `scripts/check-order-guards.mjs`가 한다.
+      //
+      // 시각이 없는 주문 — 이 보호가 들어가기
       // 전에 쌓인 것 — 도 실행하지 않는다. 언제 만든 것인지 알 수 없는 주문을
       // 내보내는 쪽이 더 위험하다.
       //
