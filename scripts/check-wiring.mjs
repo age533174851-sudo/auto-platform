@@ -281,35 +281,6 @@ const ALLOW = new Map([
     + '입력을 KRW로 가정). 그래서 이것을 붙이는 일은 "환율이 없으면 원화로 '
     + '바꾸지 않는다"는 기존 규칙과 충돌하지 않는지 먼저 봐야 한다 — '
     + '고정 fallback은 **환율을 모르는데 아는 척하는 값**이다'],
-
-  // ── 그림자 배럴: 쌍둥이에 가려 아무도 닿지 못하는 모듈 ──
-  ['src/lib/fees/index.ts',
-    '**형제 파일에 가려져 아무도 닿지 못한다.** `src/lib/fees.ts`와 '
-    + '`src/lib/fees/index.ts`가 함께 있고, 파일이 디렉터리보다 먼저 '
-    + '해석된다. `tsc --traceResolution`으로 확인했다 — '
-    + '`src/lib/backtest/index.ts:10`의 `from \'../fees\'`는 '
-    + '`src/lib/fees.ts`로 간다. `fees/index`를 명시한 경로는 저장소에 '
-    + '0곳이다. 즉 이 158줄은 **죽은 코드이면서 살아 있는 것처럼 보인다.** '
-    + '지우지 않는 이유: 두 파일이 같은 질문에 다른 답을 하고, 어느 쪽이 '
-    + '정본인지는 **수수료 숫자를 고르는 결정**이다. '
-    + '`fees.ts`는 거래소별 단일 요율이고 Binance를 maker 0.001 / '
-    + 'taker 0.001로 적는다(현물 VIP0). `fees/index.ts`는 **현물과 선물을 '
-    + '나누고** VIP 구간을 담아 Binance 선물 VIP0을 maker 0.0002 / '
-    + 'taker 0.0005로 적는다. 이 플랫폼은 선물을 거래한다. '
-    + '그리고 **부르는 쪽은 죽은 모듈에 맞춰 쓰여 있다** — '
-    + '`backtest/index.ts:81`과 `safety/index.ts:271`이 '
-    + '`getDefaultConfig(exchange, \'futures\')`로 인자를 둘 넘기는데, '
-    + '실제로 닿는 `fees.ts`의 그 함수는 인자가 하나다. tsc가 **이미 '
-    + '그것을 적고 있다** — 기준선 73건 안에 '
-    + '`backtest/index.ts(81,49) TS2554: Expected 0-1 arguments, but got 2`와 '
-    + '`safety/index.ts(271,68)` 같은 오류로 들어 있다. 기준선을 **개수로만** '
-    + '보면 이 두 줄이 보이지 않는다. '
-    + '실제 체결 수수료는 다른 곳에서 온다(`paperExecution.ts`의 '
-    + '`paperFeeRate` · `paper/engine.ts`의 `FEE_RATE`) — 즉 **실주문 손익이 '
-    + '틀어지는 문제는 아니다.** 영향은 백테스트 수수료와 '
-    + '`validatePreOrder`의 왕복 수수료 추정이고, 둘 다 수수료를 '
-    + '**과대**하게 잡는 방향(보수적)이다. 어느 표를 정본으로 할지는 '
-    + '사이징·백테스트 숫자를 바꾸는 결정이라 사람 승인 사항이다'],
   // ── 배선이 **아직 승인되지 않은** 판정 ──
   ['src/lib/risk/killRetry.ts',
     '킬스위치 자동 재시도 판정(killRetryVerdict). 부르는 곳이 0곳인 것이 '
@@ -382,7 +353,10 @@ for (const d of SEARCH_DIRS) walk(d);
 //
 // 아는 짝만 통과시킨다. 새로 생기면 막는다 — 고친 뒤에 발견하는 것보다
 // 만들 때 막는 것이 싸다.
-const KNOWN_SHADOWS = new Set(['src/lib/fees/index.ts']);
+// 비어 있는 것이 정상이다. `fees` 짝은 2026-11-17에 **없앴다** —
+// `src/lib/fees.ts`를 지우고 `src/lib/fees/index.ts` 하나로 모았다.
+// 면제로 덮지 않고 원인을 없앤 경우다. 새 그림자가 생기면 아래가 막는다.
+const KNOWN_SHADOWS = new Set([]);
 {
   const found = [];
   for (const f of files) {
@@ -604,10 +578,6 @@ const TWIN_ALLOW = new Map([
     '연속손실 쿨다운. 산 쪽은 src/lib/safety/index.ts'],
   ['getUsdKrw@src/lib/fx/rate.ts',
     '환율. 산 쪽은 src/lib/currency.ts. 이 저장소에는 환율로 1,000배가 틀어진 기록이 있다'],
-  ['getDefaultConfig@src/lib/fees/index.ts',
-    '수수료 설정. 산 쪽은 src/lib/fees.ts — 그림자 배럴이라 아무도 닿지 못한다(KNOWN_SHADOWS 참고)'],
-  ['calcFeeAmount@src/lib/fees/index.ts',
-    '수수료 계산. 위와 같은 짝'],
 
   // ── 돈 경로가 아닌 것. 지워도 되지만 **이 PR의 일이 아니다** ──
   ['toggleFavorite@src/lib/assetCache.ts', '산 쪽은 src/lib/favorites.ts'],
