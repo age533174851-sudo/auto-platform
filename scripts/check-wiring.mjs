@@ -178,6 +178,26 @@ const ALLOW = new Map([
   // 챌린지 도메인 모듈의 면제는 **지웠다.** PR3의 스윕(paperChallengeSweep.ts)이
   // transitionAllowed·terminalStatusFor를 실제로 부르면서 배선됐다 —
   // 면제 목록이 낡으면 다음에 진짜로 끊긴 것을 덮는다.
+  // ── 10슬롯 엔진 (#531 · #537) ──
+  //
+  // 둘 다 **실제 PostgreSQL에서 증명된 상태로** 들어온다
+  // (`ten-slot-pg.test.mjs` 76/76 · `ten-slot-lifecycle-pg.test.mjs` 7/7,
+  //  클러스터를 진짜로 재시작해서 건너뜀 0). 그런데 제품 경로에서
+  // 부르는 곳은 아직 없다 — 그래서 여기 적는다.
+  //
+  // **이것은 '언젠가'가 아니다.** 배선은 #548이 기본 꺼짐으로 들고 오고,
+  // 그 PR이 머지되는 순간 위의 '이미 배선됨' 검사가 이 두 줄을 지우라고
+  // 실패시킨다. 목록은 스스로 청소된다.
+  ['src/lib/engine/tenSlotDispatch.ts',
+    '막는 것: 예약을 거래소까지 들고 가는 호출부가 없다. 그 배선(#548)은 '
+    + '매매 전송 경로를 여는 변경이라 기본 꺼짐 + 승인이 필요하다. '
+    + '판정 자체는 실제 PG에서 증명돼 있다 — 끊긴 것은 호출부뿐이다'],
+  ['src/lib/engine/tenSlotLifecycle.ts',
+    '막는 것: 전송 결과를 098(ten_slot_apply_event)로 넘기는 호출부가 없다. '
+    + 'tenSlotDispatch와 같은 #548에서 함께 붙는다. 모듈이 고른 사건이 '
+    + '실제 098 전이와 같은지는 ten-slot-lifecycle-pg.test.mjs가 '
+    + '모듈을 복제하지 않고 같은 파일을 컴파일해서 대조한다'],
+
   ['src/lib/markets/proxyAsset.ts',
     '막는 것: 해외주식 주문 경로(stock/order)가 이 판정을 받을 자리가 없다. '
     + '금·원유 ETF처럼 24시간 거래되지만 기초자산 시장은 닫혀 있는 종목의 '
