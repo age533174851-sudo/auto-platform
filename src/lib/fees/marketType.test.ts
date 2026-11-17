@@ -4,9 +4,9 @@
 //
 // 무슨 일이 있었나
 // ────────────────
-// `src/lib/fees.ts`(파일)와 `src/lib/fees/index.ts`(폴더)가 **둘 다**
-// `getDefaultConfig`를 내보낸다. 그리고 `'../fees'`는 Node·TS 해석에서
-// **파일 쪽을 먼저** 고른다.
+// 한때 `src/lib/fees.ts`(파일)와 `src/lib/fees/index.ts`(폴더)가 **둘 다**
+// `getDefaultConfig`를 내보냈다. 그리고 `'../fees'`는 Node·TS 해석에서
+// **파일 쪽을 먼저** 골랐다. (그 파일은 지금 없다 — 아래 참고)
 //
 // 파일 쪽 서명은 인자가 하나다:
 //
@@ -54,12 +54,14 @@ export function runFeeMarketTypeTests() {
     eq(getDefaultConfig('binance').marketType, 'spot');
   });
 
-  test('이 모듈의 getDefaultConfig는 두 번째 인자를 받는다', () => {
-    // `src/lib/fees.ts`(파일) 쪽은 인자가 하나뿐이다. 이 시험이 깨지면
-    // import가 다시 파일 쪽으로 돌아갔다는 뜻이다.
+  test('getDefaultConfig는 두 번째 인자를 실제로 쓴다', () => {
+    // 쌍둥이 파일은 없앴다. 그래도 이 시험은 남긴다 — 누가 다시
+    // 인자 하나짜리 서명으로 되돌리면(또는 marketType 을 무시하면)
+    // 여기서 걸린다. 타입만으로는 못 막는다: CI 관문이
+    // `COUNT -gt BASELINE` 이라 **개수가 줄어드는 쪽은 통과**한다.
     assert(getDefaultConfig.length >= 1, 'getDefaultConfig의 모양이 바뀌었다');
     eq(getDefaultConfig('binance', 'futures').marketType, 'futures',
-      "두 번째 인자가 버려졌다 — '../fees'가 아니라 '../fees/index'를 써야 한다");
+      '두 번째 인자가 버려졌다 — marketType 을 읽지 않는 서명으로 돌아갔다');
   });
 
   test('모르는 거래소도 0원으로 적지 않는다', () => {
