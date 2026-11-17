@@ -106,6 +106,27 @@ export function runLosslessJsonTests() {
     eq(quoteUnsafeIntegers('{"a":123}'), '{"a":123}');
   });
 
+  // ★ **끝이 0으로 끝나는 큰 번호도 문자열이어야 한다.**
+  //
+  //   예전 판정은 `String(Number(t)) !== t`였다. 그런데 `String`은 그
+  //   double을 가리키는 **가장 짧은** 십진 표기를 돌려준다 — 정확한 값이
+  //   아니다. `2089209928026685400`은 Number로 담으면 실제로는
+  //   …685440이 되지만 `String`은 다시 "…685400"을 돌려줘 왕복이 된 것처럼
+  //   보였다. 그래서 따옴표 없이 number로 읽혔고, 바로 아래
+  //   `venueIdOf`가 안전 범위 밖 number를 null로 버렸다 — **거래소가 준
+  //   번호가 사라진다.** 무작위 Gate 크기 번호의 약 0.4%가 이 모양이다.
+  test('안전 범위 밖 정수는 왕복처럼 보여도 문자열로 읽는다 — 번호가 null이 되지 않는다', () => {
+    for (const t of ['2089209928026685400', '12345678901234568', '9007199254740992', '-9007199254740992']) {
+      eq(isUnsafeIntegerLiteral(t), true, `${t}가 안전 범위 안으로 판정됐다`);
+      const id = parseLossless<any>(`{"id":${t}}`).id;
+      eq(typeof id, 'string', `${t}가 number로 읽혔다`);
+      eq(venueIdOf(id), t, `${t}의 번호를 잃었다`);
+    }
+    // 경계: 최대 안전 정수(±)는 그대로 숫자다
+    eq(isUnsafeIntegerLiteral('-9007199254740991'), false);
+    eq(parseLossless<any>('{"id":9007199254740991}').id, 9007199254740991);
+  });
+
   console.log('[int64 주문번호 — 이미 망가진 값을 복구했다고 하지 않는다]');
 
   test('안전 범위를 벗어난 number 식별자는 null이다 — String()으로 되살리지 않는다', () => {
