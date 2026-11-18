@@ -1254,9 +1254,23 @@ export default function AutotradeControl({ onSnapshot, onReload }: {
                   const dv = dueDiagView((s as any).dueDiag);
                   return (
                     <div style={{ marginTop: 3, fontSize: 10, lineHeight: 1.6, color: T.muted }}>
+                      {/* **경고색의 근거가 둘이다.**
+
+                          `intervalDefaulted`(표에 값이 없거나 쓸 수 없음)는
+                          `interval_min`이 NOT NULL DEFAULT 1440 + CHECK(>=1)
+                          이라 운영 줄에서 한 번도 참이 되지 않는다 — 즉 그
+                          경고만 두면 아무 줄도 노랗게 되지 않는다.
+
+                          실제로 사람을 헷갈리게 하는 쪽은 `intervalIsDbDefault`
+                          다: 아무도 설정하지 않은 예약이 "설정 1440분"으로,
+                          하루 1회를 일부러 고른 것과 똑같이 보인다. 그래서
+                          둘 중 하나라도 참이면 눈에 띄게 한다. */}
                       <div>
                         간격{' '}
-                        <span style={{ color: dv.intervalDefaulted ? T.ylw : T.sub, fontWeight: dv.intervalDefaulted ? 800 : 400 }}>
+                        <span style={{
+                          color: (dv.intervalDefaulted || dv.intervalIsDbDefault) ? T.ylw : T.sub,
+                          fontWeight: (dv.intervalDefaulted || dv.intervalIsDbDefault) ? 800 : 400,
+                        }}>
                           {dv.intervalText}
                         </span>
                       </div>

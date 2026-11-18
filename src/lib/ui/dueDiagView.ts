@@ -34,11 +34,36 @@ import { fmtKst } from '../autotrade/nextRun';
 /** 못 읽은 값에 쓰는 한 문구. 추측하지 않는다 */
 export const UNKNOWN_TEXT = '확인 불가';
 
+/**
+ * `autotrade_schedules.interval_min`의 **DB 기본값**(035 마이그레이션).
+ *
+ * `nextRun.DEFAULT_INTERVAL_MIN`과 같은 수이지만 **다른 사실**이다 —
+ * 저쪽은 "값을 못 읽었을 때 코드가 쓰는 값", 이쪽은 "표가 비어 있을 때
+ * DB가 채워 넣는 값"이다. 둘이 갈라질 수 있으므로 여기서 따로 적고,
+ * 시험이 둘이 같은지 본다.
+ */
+export const DB_DEFAULT_INTERVAL_MIN = 1440;
+
 export interface DueDiagView {
   /** "설정 60분" · "설정 없음 → 기본값 1440분 적용" */
   intervalText: string;
   /** 기본값이 끼어들었는가. 화면이 경고색을 쓸 근거 */
   intervalDefaulted: boolean;
+  /**
+   * 적용 간격이 **기본값과 같은가**(1440 = 하루 1회).
+   *
+   * `intervalDefaulted`와 다른 것을 말한다. 그쪽은 "표에 값이 없거나
+   * 쓸 수 없어서 기본값이 끼어들었다"인데, `interval_min`은
+   * `NOT NULL DEFAULT 1440`이고 `CHECK (interval_min >= 1)`이라
+   * **운영에서는 null도 0도 될 수 없다.** 즉 그 경고는 실제 줄에서
+   * 한 번도 뜨지 않는다 — 아무도 설정하지 않은 예약이 "설정 1440분"으로,
+   * 일부러 하루 1회를 고른 것과 똑같이 보인다.
+   *
+   * 값만으로 "사용자가 골랐는가"는 알 수 없다. 그래서 **추측하지 않고**
+   * 아는 것만 적는다: 지금 적용되는 간격이 DB 기본값과 같다는 사실.
+   * 60분으로 해 뒀다고 믿는 사람이 이 줄을 보면 바로 알아챈다.
+   */
+  intervalIsDbDefault: boolean;
   /** 마지막 평가 (KST) 또는 '확인 불가' */
   lastText: string;
   /** 다음 평가 예정 (KST) 또는 '확인 불가' */
@@ -79,6 +104,8 @@ export function dueDiagView(diag: any): DueDiagView {
   if (diag == null || typeof diag !== 'object') {
     return {
       intervalText: UNKNOWN_TEXT, intervalDefaulted: false,
+      // 모르는 것을 '기본값과 같다'로 적지 않는다
+      intervalIsDbDefault: false,
       lastText: UNKNOWN_TEXT, nextText: UNKNOWN_TEXT,
       reasonText: UNKNOWN_TEXT, code: '',
     };
@@ -92,7 +119,12 @@ export function dueDiagView(diag: any): DueDiagView {
   if (used == null) {
     intervalText = UNKNOWN_TEXT;
   } else if (!defaulted) {
-    intervalText = `설정 ${used}분`;
+    // **기본값과 같으면 그 사실을 적는다.** `interval_min`은 NOT NULL
+    // DEFAULT 1440이라 아무도 설정하지 않은 줄도 여기로 온다 — 그냥
+    // "설정 1440분"이라고만 적으면 고른 것과 구분되지 않는다.
+    intervalText = used === DB_DEFAULT_INTERVAL_MIN
+      ? `설정 ${used}분(하루 1회) — DB 기본값과 같습니다`
+      : `설정 ${used}분`;
   } else if (raw == null) {
     // 표에 아무것도 안 적혀 있다
     intervalText = `설정 없음 → 기본값 ${used}분 적용`;
@@ -107,6 +139,7 @@ export function dueDiagView(diag: any): DueDiagView {
   return {
     intervalText,
     intervalDefaulted: used == null ? false : defaulted,
+    intervalIsDbDefault: used === DB_DEFAULT_INTERVAL_MIN,
     lastText: kstOrUnknown(diag.lastEvaluationAtMs),
     nextText: kstOrUnknown(diag.nextEvaluationAtMs),
     // 코드만으로 문장을 지어내지 않는다 — 비어 있으면 모르는 것이다
