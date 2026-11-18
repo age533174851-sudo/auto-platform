@@ -20,6 +20,12 @@ export interface RetroResult {
   winRate: number;
   avgWin: number;
   avgLoss: number;
+  /**
+   * 전체 거래의 평균 실현손익(순). **거래가 0건이면 null** — 0이 아니다.
+   * 화면의 '평균 손익' 칸은 이것만 읽는다. avgWin(이긴 거래의 평균)을
+   * 그 칸에 쓰면 순손실인 사용자에게 양수가 보인다.
+   */
+  avgPnl: number | null;
   warnings: RetroWarning[];
   strengths: string[];
 }
@@ -44,12 +50,13 @@ export function analyzeTrades(closed: ClosedTrade[]): RetroResult {
   const winRate = trades.length ? (wins.length / trades.length) * 100 : 0;
   const avgWin = wins.length ? wins.reduce((s, t) => s + t.realized, 0) / wins.length : 0;
   const avgLoss = losses.length ? losses.reduce((s, t) => s + t.realized, 0) / losses.length : 0;
+  const avgPnl = trades.length ? trades.reduce((s, t) => s + t.realized, 0) / trades.length : null;
 
   const warnings: RetroWarning[] = [];
   const strengths: string[] = [];
 
   if (trades.length < 5) {
-    return { totalTrades: trades.length, wins: wins.length, winRate, avgWin, avgLoss,
+    return { totalTrades: trades.length, wins: wins.length, winRate, avgWin, avgLoss, avgPnl,
       warnings: [], strengths: trades.length ? ['아직 표본이 적어요. 매매가 쌓이면 패턴을 분석해드려요.'] : ['매매 기록이 없어요.'] };
   }
 
@@ -105,7 +112,7 @@ export function analyzeTrades(closed: ClosedTrade[]): RetroResult {
 
   if (winRate >= 55) strengths.push(`전체 승률 ${winRate.toFixed(0)}% — 안정적입니다`);
 
-  return { totalTrades: trades.length, wins: wins.length, winRate, avgWin, avgLoss, warnings, strengths };
+  return { totalTrades: trades.length, wins: wins.length, winRate, avgWin, avgLoss, avgPnl, warnings, strengths };
 }
 
 // paper 계좌 orders(sell만 실현)를 ClosedTrade로 변환
