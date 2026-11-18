@@ -89,7 +89,7 @@
 | **시즌전략** `season` | `tab:season` | MENU · MTABS · SWITCH | 목록만 | `UNSURVEYED` |
 | **계절성 분석** `seasonality` | `tab:seasonality` | MTABS · SWITCH | 목록만 | `UNSURVEYED` |
 | **소셜** `social` | `tab:social` | MENU · MTABS · SWITCH | 목록만 | `UNSURVEYED` |
-| **고객지원** `support` | `tab:support` | MENU · MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **피드백·문의** `feedback` | `tab:feedback` | MENU · MTABS · SWITCH | 목록만 | `UNSURVEYED` |
 | **구독** `subscription` | `tab:subscription` | MTABS · SWITCH | 목록만 | `UNSURVEYED` |
 | **손익·세금** `tax` | `tab:tax` | MTABS · SWITCH | 목록만 | `UNSURVEYED` |
 | **TradFi** `tradfi` | `tab:tradfi` | MTABS · SWITCH | 목록만 | `UNSURVEYED` |

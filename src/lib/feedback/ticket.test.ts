@@ -6,12 +6,12 @@ import {
   CATEGORY_LABEL, STATUS_LABEL, SEVERITY_LABEL,
   mustBePrivate, resolveVisibility, canChangeVisibility, canTransition,
   isTerminal, canUserReply, parseTicketInput, suggestSeverity,
-  TITLE_MAX, BODY_MAX,
+  TITLE_MAX, BODY_MAX, STEPS_MAX, EXPECTED_MAX, ACTUAL_MAX,
 } from './ticket';
 
 const ok = (o: any = {}) => parseTicketInput({ category: 'BUG', title: '봇이 안 켜져요', body: '실행 버튼을 눌러도 반응이 없습니다', ...o });
 
-export function runSupportTicketTests() {
+export function runFeedbackTicketTests() {
   // ── ① 되돌릴 수 없는 방향을 막는다 ──
   test('★★ 비공개를 공개로 바꾸는 전이는 없다 — 이미 읽힌 것은 못 되돌린다', () => {
     eq(canChangeVisibility('PRIVATE', 'PUBLIC'), false);
@@ -56,6 +56,30 @@ export function runSupportTicketTests() {
   test('★★ 해결 완료에서 다시 열 수 있다 — "아직 안 됐어요"가 이 시스템의 핵심이다', () => {
     eq(canTransition('RESOLVED', 'REVIEWING'), true);
     eq(canTransition('RESOLVED', 'IN_PROGRESS'), true);
+  });
+
+  // ── #618의 상태 4종 ──
+  test('★★ #618이 요구한 상태 넷이 있다 — 검증 중 · 보류 · 중복 · 재현 불가', () => {
+    for (const s of ['VERIFYING', 'ON_HOLD', 'DUPLICATE', 'CANNOT_REPRODUCE'] as const) {
+      assert((STATUSES as readonly string[]).includes(s), `${s}가 없습니다`);
+      assert(typeof STATUS_LABEL[s] === 'string' && STATUS_LABEL[s] !== '', s);
+    }
+  });
+
+  test('★★ 검증 중은 수정 중과 해결 사이에 있다 — 고쳤다고 적기 전에 확인한다', () => {
+    eq(canTransition('IN_PROGRESS', 'VERIFYING'), true);
+    eq(canTransition('VERIFYING', 'RESOLVED'), true);
+    // 검증이 실패하면 되돌아간다
+    eq(canTransition('VERIFYING', 'IN_PROGRESS'), true);
+  });
+
+  test('★★ 중복·재현 불가는 종결이 아니다 — 다시 열 수 있다', () => {
+    for (const s of ['DUPLICATE', 'CANNOT_REPRODUCE', 'ON_HOLD'] as const) {
+      eq(isTerminal(s), false);
+      assert(canTransition(s, 'REVIEWING') || canTransition(s, 'IN_PROGRESS'),
+        `${s}에서 다시 열 수 없습니다`);
+      eq(canUserReply(s), true);
+    }
   });
 
   test('★★ 종료된 문의는 어디로도 가지 않는다', () => {
@@ -105,6 +129,35 @@ export function runSupportTicketTests() {
 
   test('앞뒤 공백은 떼고 저장한다', () => {
     eq(ok({ title: '  제목  ' })!.title, '제목');
+  });
+
+  // ── #618의 재현 절차 · 기대 결과 · 실제 결과 ──
+  test('세 칸은 비워 둘 수 있다 — 버그가 아닌 문의엔 해당이 없다', () => {
+    const v = ok()!;
+    eq(v.steps, null); eq(v.expected, null); eq(v.actual, null);
+  });
+
+  test('★★ 빈 문자열을 저장하지 않는다 — null로 둔다', () => {
+    const v = ok({ steps: '   ', expected: '', actual: '\n' })!;
+    eq(v.steps, null); eq(v.expected, null); eq(v.actual, null);
+  });
+
+  test('적으면 그대로 들어간다', () => {
+    const v = ok({ steps: '1. 자동 탭\n2. 시작', expected: '봇이 켜짐', actual: '반응 없음' })!;
+    eq(v.steps, '1. 자동 탭\n2. 시작');
+    eq(v.expected, '봇이 켜짐');
+    eq(v.actual, '반응 없음');
+  });
+
+  test('★★ 길이를 넘기면 자르지 않고 거절한다 — 잘린 재현 절차는 다른 절차다', () => {
+    eq(ok({ steps: 'ㄱ'.repeat(STEPS_MAX + 1) }), null);
+    eq(ok({ expected: 'ㄱ'.repeat(EXPECTED_MAX + 1) }), null);
+    eq(ok({ actual: 'ㄱ'.repeat(ACTUAL_MAX + 1) }), null);
+    assert(ok({ steps: 'ㄱ'.repeat(STEPS_MAX) }) !== null, '상한 자체는 통과해야 합니다');
+  });
+
+  test('글이 아닌 값은 거절한다 — 조용히 버리지 않는다', () => {
+    for (const bad of [123, {}, []]) eq(ok({ steps: bad }), null);
   });
 
   test('요청이 객체가 아니면 거절한다', () => {

@@ -9,8 +9,8 @@
 // 한 겹이 뚫려도 다른 겹이 남는다.
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
-import { canUserReply, BODY_MAX } from '@/lib/support/ticket';
-import { redact, redactionNotice } from '@/lib/support/redact';
+import { canUserReply, BODY_MAX } from '@/lib/feedback/ticket';
+import { redact, redactionNotice } from '@/lib/feedback/redact';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -27,7 +27,7 @@ async function ctx(req: NextRequest) {
 
 /** 소유자 확인. **못 읽은 것과 남의 것을 구분한다** */
 async function own(sb: any, uid: string, id: string) {
-  const r = await sb.from('support_tickets')
+  const r = await sb.from('feedback_reports')
     .select('id,ref,category,title,status,severity,visibility,context,created_at,updated_at')
     .eq('id', id).eq('user_id', uid).maybeSingle();
   if (r.error) return { ticket: null, unreadable: true as const };
@@ -44,9 +44,9 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
     message: '문의를 확인하지 못했습니다' }, 503);
   if (!ticket) return json({ ok: false, error: 'not_found' }, 404);
 
-  const m = await sb.from('support_messages')
+  const m = await sb.from('feedback_comments')
     .select('id,author,body,created_at')
-    .eq('ticket_id', params.id).eq('internal', false)   // ① 내부 메모는 고르지 않는다
+    .eq('report_id', params.id).eq('internal', false)   // ① 내부 메모는 고르지 않는다
     .order('created_at', { ascending: true }).limit(200);
   if (m.error || !Array.isArray(m.data)) {
     return json({ ok: false, error: 'messages_unreadable',
@@ -82,8 +82,8 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
   for (const h of b.hits) merged.set(h.kind, (merged.get(h.kind) ?? 0) + h.count);
   const redactions = [...merged].map(([kind, count]) => ({ kind, count }));
 
-  const ins = await sb.from('support_messages').insert({
-    ticket_id: ticket.id, author: 'USER', internal: false, body: b.text, redactions,
+  const ins = await sb.from('feedback_comments').insert({
+    report_id: ticket.id, author: 'USER', internal: false, body: b.text, redactions,
   }).select('id,author,body,created_at').maybeSingle();
   if (ins.error || !ins.data) {
     return json({ ok: false, error: 'message_write_failed',
@@ -93,11 +93,11 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
   // 사용자가 답장했으면 "추가 정보 요청" 상태는 더 이상 맞지 않다.
   // **상태를 되돌리지는 않는다** — 진행 중인 수정을 접수로 내리면 안 된다.
   if (ticket.status === 'NEEDS_INFO') {
-    await sb.from('support_tickets')
+    await sb.from('feedback_reports')
       .update({ status: 'REVIEWING', updated_at: new Date().toISOString() })
       .eq('id', ticket.id).eq('user_id', uid);
   } else {
-    await sb.from('support_tickets')
+    await sb.from('feedback_reports')
       .update({ updated_at: new Date().toISOString() })
       .eq('id', ticket.id).eq('user_id', uid);
   }

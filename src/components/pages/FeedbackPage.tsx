@@ -19,8 +19,8 @@ import {
   CATEGORIES, CATEGORY_LABEL, STATUS_LABEL, SEVERITY_LABEL,
   mustBePrivate, TITLE_MAX, BODY_MAX,
   type Category, type Status, type Severity,
-} from '@/lib/support/ticket';
-import { deviceFromWidth } from '@/lib/support/context';
+} from '@/lib/feedback/ticket';
+import { deviceFromWidth } from '@/lib/feedback/context';
 import { F, SP, R, FW, buttonStyle, PAGE_STYLE } from '@/components/ui/tokens';
 import { T } from '@/lib/constants';
 
@@ -31,9 +31,18 @@ interface TicketRow {
 }
 interface MessageRow { id: string; author: 'USER' | 'STAFF' | 'AGENT'; body: string; created_at: string }
 
+// **`Record<Status, …>`라서 상태를 더하면 여기가 컴파일 오류가 된다.**
+// 그게 이 타입을 쓴 이유다 — 색을 안 채운 상태가 조용히 기본색으로
+// 그려지면, 화면만 보고는 빠진 줄을 영원히 못 찾는다.
 const STATUS_TONE: Record<Status, string> = {
   RECEIVED: T.sub, REVIEWING: T.acc, NEEDS_INFO: T.ylw,
-  IN_PROGRESS: T.acc, RESOLVED: T.grn, CLOSED: T.muted,
+  IN_PROGRESS: T.acc,
+  VERIFYING: T.acc,          // 아직 진행 중이다 — 해결과 같은 색을 쓰지 않는다
+  RESOLVED: T.grn,
+  ON_HOLD: T.muted,          // 멈춰 둔 것
+  DUPLICATE: T.muted,        // 다른 글로 합쳐진 것
+  CANNOT_REPRODUCE: T.ylw,   // 더 알려 줘야 하는 것 — 주의색
+  CLOSED: T.muted,
 };
 const when = (v: string) => {
   const t = Date.parse(v);
@@ -41,7 +50,7 @@ const when = (v: string) => {
     { month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '확인 불가';
 };
 
-export default function SupportPage({ screen }: { screen?: string } = {}) {
+export default function FeedbackPage({ screen }: { screen?: string } = {}) {
   const [auth, setAuth] = useState<string | null>(null);
   useEffect(() => watchAuthToken(setAuth), []);
 
@@ -72,7 +81,7 @@ export default function SupportPage({ screen }: { screen?: string } = {}) {
   const loadList = useCallback(async () => {
     if (!auth) { setTickets(null); return; }
     try {
-      const res = await fetch('/api/support/tickets', { headers: { Authorization: auth }, cache: 'no-store' });
+      const res = await fetch('/api/feedback/reports', { headers: { Authorization: auth }, cache: 'no-store' });
       const d = await res.json();
       if (!res.ok || !d.ok) throw new Error(d.message || '문의 목록을 확인하지 못했습니다');
       setTickets(d.tickets); setListError('');
@@ -87,7 +96,7 @@ export default function SupportPage({ screen }: { screen?: string } = {}) {
     setOpenId(id); setMessages(null);
     if (!auth) return;
     try {
-      const res = await fetch(`/api/support/tickets/${id}`, { headers: { Authorization: auth }, cache: 'no-store' });
+      const res = await fetch(`/api/feedback/reports/${id}`, { headers: { Authorization: auth }, cache: 'no-store' });
       const d = await res.json();
       if (!res.ok || !d.ok) throw new Error(d.message || '문의를 확인하지 못했습니다');
       setMessages(d.messages);
@@ -99,7 +108,7 @@ export default function SupportPage({ screen }: { screen?: string } = {}) {
     if (typeof window === 'undefined') return {};
     const w = window.innerWidth, h = window.innerHeight;
     return {
-      screen: screen ?? 'support',
+      screen: screen ?? 'feedback',
       device: deviceFromWidth(w) ?? undefined,
       viewport: `${w}x${h}`,
       occurredAt: new Date().toISOString(),
@@ -110,7 +119,7 @@ export default function SupportPage({ screen }: { screen?: string } = {}) {
     if (!auth || busy) return;
     setBusy(true); setError(''); setNotice(null);
     try {
-      const res = await fetch('/api/support/tickets', {
+      const res = await fetch('/api/feedback/reports', {
         method: 'POST', headers: { Authorization: auth, 'Content-Type': 'application/json' },
         body: JSON.stringify({ category, title, body, context: collect() }),
       });
@@ -127,7 +136,7 @@ export default function SupportPage({ screen }: { screen?: string } = {}) {
     if (!auth || busy || openId == null) return;
     setBusy(true); setError('');
     try {
-      const res = await fetch(`/api/support/tickets/${openId}`, {
+      const res = await fetch(`/api/feedback/reports/${openId}`, {
         method: 'POST', headers: { Authorization: auth, 'Content-Type': 'application/json' },
         body: JSON.stringify({ body: reply }),
       });
@@ -166,12 +175,12 @@ export default function SupportPage({ screen }: { screen?: string } = {}) {
         </button>)}
     </div>
 
-    {notice && <div role="status" data-testid="support-notice"
+    {notice && <div role="status" data-testid="feedback-notice"
       style={{ ...F.caption, padding: SP.md, borderRadius: R.md, color: T.txt,
         background: `${T.grn}14`, border: `1px solid ${T.grn}` }}>{notice}</div>}
     {error && <div role="alert" style={{ ...F.caption, color: T.red }}>{error}</div>}
 
-    {tab === 'new' && <div data-testid="support-new" style={{ display: 'grid', gap: SP.md,
+    {tab === 'new' && <div data-testid="feedback-new" style={{ display: 'grid', gap: SP.md,
       ...(wide ? { maxWidth: 720 } : {}) }}>
       <label style={{ display: 'grid', gap: SP.xs }}>
         <span style={F.caption}>어떤 문제인가요?</span>
@@ -216,13 +225,13 @@ export default function SupportPage({ screen }: { screen?: string } = {}) {
       </div>
 
       <button type="button" disabled={!canSend} onClick={() => void submit()}
-        data-testid="support-submit"
+        data-testid="feedback-submit"
         style={{ ...buttonStyle('primary', 'lg'), opacity: canSend ? 1 : 0.5 }}>
         {busy ? '접수 중…' : '문의 보내기'}
       </button>
     </div>}
 
-    {tab === 'mine' && <div data-testid="support-mine" style={{ display: 'grid', gap: SP.sm }}>
+    {tab === 'mine' && <div data-testid="feedback-mine" style={{ display: 'grid', gap: SP.sm }}>
       {listError && <div role="alert" style={{ ...F.caption, color: T.ylw }}>
         {listError} — 아래 목록은 마지막으로 읽은 값일 수 있어요.
       </div>}
@@ -230,7 +239,7 @@ export default function SupportPage({ screen }: { screen?: string } = {}) {
       {tickets != null && tickets.length === 0 && <div style={F.muted}>아직 남긴 문의가 없어요.</div>}
       {(tickets ?? []).map(t => {
         const open = openId === t.id;
-        return <article key={t.id} data-testid={`support-ticket-${t.ref}`}
+        return <article key={t.id} data-testid={`feedback-report-${t.ref}`}
           style={{ display: 'grid', gap: SP.xs, padding: SP.md, borderRadius: R.md,
             background: T.card, border: `1px solid ${T.border}` }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: SP.xs, flexWrap: 'wrap' }}>

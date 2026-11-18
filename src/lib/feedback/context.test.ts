@@ -2,7 +2,7 @@
 import { test, assert, eq } from '../../test/harness';
 import { pickContext, deviceFromWidth, CONTEXT_KEYS } from './context';
 
-export function runSupportContextTests() {
+export function runFeedbackContextTests() {
   test('★★ 목록에 없는 칸은 실리지 않는다 — 새 칸이 조용히 새지 않는다', () => {
     const r = pickContext({ screen: 'auto', apiKey: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', cookies: 'x=1' });
     eq(r.context.screen, 'auto');

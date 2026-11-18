@@ -9,7 +9,7 @@ function gone(secret: string, r: ReturnType<typeof redact>) {
   assert(!JSON.stringify(r.hits).includes(secret), '반환값(hits)에 값이 담겼습니다');
 }
 
-export function runSupportRedactTests() {
+export function runFeedbackRedactTests() {
   // ── ① 거래소 에러를 통째로 붙여넣는 경우 ──
   test('★★ 붙여넣은 바이낸스 요청에서 API 키가 사라진다', () => {
     const key = 'vmPUZE6mv9SD5V5e14y7Ju91duEh8A08dM2SHuM0';

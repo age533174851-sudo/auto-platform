@@ -8,9 +8,9 @@
 // user_id는 **읽지 않는다** — 읽으면 남의 이름으로 접수할 수 있다.
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
-import { parseTicketInput, suggestSeverity } from '@/lib/support/ticket';
-import { redact, redactionNotice } from '@/lib/support/redact';
-import { pickContext } from '@/lib/support/context';
+import { parseTicketInput, suggestSeverity } from '@/lib/feedback/ticket';
+import { redact, redactionNotice } from '@/lib/feedback/redact';
+import { pickContext } from '@/lib/feedback/context';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -30,7 +30,7 @@ export async function GET(req: NextRequest) {
   const { uid, sb } = await ctx(req);
   if (!uid) return json({ ok: false, error: 'auth_required' }, 401);
   if (!sb) return json({ ok: false, error: 'supabase_not_configured' }, 503);
-  const r = await sb.from('support_tickets')
+  const r = await sb.from('feedback_reports')
     .select('id,ref,category,title,status,severity,visibility,created_at,updated_at')
     .eq('user_id', uid).order('created_at', { ascending: false }).limit(100);
   // 못 읽은 것을 "없음"으로 적지 않는다.
@@ -64,7 +64,7 @@ export async function POST(req: NextRequest) {
   for (const h of hits) merged.set(h.kind, (merged.get(h.kind) ?? 0) + h.count);
   const redactions = [...merged].map(([kind, count]) => ({ kind, count }));
 
-  const ins = await sb.from('support_tickets').insert({
+  const ins = await sb.from('feedback_reports').insert({
     user_id: uid,                                 // 요청이 보낸 값은 쓰지 않는다
     category: parsed.category,
     title: t.text,
@@ -82,8 +82,8 @@ export async function POST(req: NextRequest) {
 
   // 본문은 첫 메시지로 쌓는다. 같은 문의 안에서 대화가 이어지려면
   // 본문도 메시지 줄 하나여야 한다 — 글에 칸으로 두면 첫 글만 모양이 다르다.
-  const msg = await sb.from('support_messages').insert({
-    ticket_id: ins.data.id, author: 'USER', internal: false,
+  const msg = await sb.from('feedback_comments').insert({
+    report_id: ins.data.id, author: 'USER', internal: false,
     body: b.text, redactions,
   }).select('id').maybeSingle();
 

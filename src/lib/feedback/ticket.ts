@@ -45,18 +45,24 @@ export const CATEGORY_LABEL: Record<Category, string> = {
 
 /** 지금 어디까지 왔는가 */
 export const STATUSES = [
-  'RECEIVED',    // 접수 완료
-  'REVIEWING',   // 확인 중
-  'NEEDS_INFO',  // 추가 정보 요청
-  'IN_PROGRESS', // 수정 진행 중
-  'RESOLVED',    // 해결 완료
-  'CLOSED',      // 종료
+  'RECEIVED',          // 접수 완료
+  'REVIEWING',         // 확인 중
+  'NEEDS_INFO',        // 추가 정보 요청
+  'IN_PROGRESS',       // 수정 진행 중
+  'VERIFYING',         // 검증 중 — 고쳤다고 적기 **전에** 확인하는 자리
+  'RESOLVED',          // 해결 완료
+  'ON_HOLD',           // 보류
+  'DUPLICATE',         // 중복
+  'CANNOT_REPRODUCE',  // 재현 불가
+  'CLOSED',            // 종료
 ] as const;
 export type Status = typeof STATUSES[number];
 
 export const STATUS_LABEL: Record<Status, string> = {
   RECEIVED: '접수 완료', REVIEWING: '확인 중', NEEDS_INFO: '추가 정보 요청',
-  IN_PROGRESS: '수정 진행 중', RESOLVED: '해결 완료', CLOSED: '종료',
+  IN_PROGRESS: '수정 진행 중', VERIFYING: '검증 중', RESOLVED: '해결 완료',
+  ON_HOLD: '보류', DUPLICATE: '중복', CANNOT_REPRODUCE: '재현 불가',
+  CLOSED: '종료',
 };
 
 /**
@@ -116,6 +122,13 @@ export function canChangeVisibility(from: Visibility, to: Visibility): boolean {
 }
 
 /** 더 이상 움직이지 않는 상태 */
+/**
+ * 더 이상 움직이지 않는 상태.
+ *
+ * `DUPLICATE`·`CANNOT_REPRODUCE`는 **종결이 아니다** — 중복으로 닫은 글이
+ * 사실 다른 문제였거나, 재현 못 하던 것이 재현되는 일이 실제로 있다.
+ * 되돌릴 수 있어야 사용자가 "아직 그래요"라고 말할 자리가 남는다.
+ */
 const TERMINAL: readonly Status[] = ['CLOSED'];
 
 /**
@@ -124,12 +137,22 @@ const TERMINAL: readonly Status[] = ['CLOSED'];
  * `RESOLVED`에서 다시 열 수 있는 이유: 사용자가 "아직 안 고쳐졌어요"라고
  * 답장하는 것이 이 시스템의 핵심이다. 해결됐다고 적었다고 끝이 아니다.
  */
+const PARKED: readonly Status[] = ['ON_HOLD', 'DUPLICATE', 'CANNOT_REPRODUCE'];
+const OPEN_AGAIN: readonly Status[] = ['REVIEWING', 'IN_PROGRESS'];
+
 const NEXT: Record<Status, readonly Status[]> = {
-  RECEIVED:    ['REVIEWING', 'NEEDS_INFO', 'IN_PROGRESS', 'RESOLVED', 'CLOSED'],
-  REVIEWING:   ['NEEDS_INFO', 'IN_PROGRESS', 'RESOLVED', 'CLOSED'],
-  NEEDS_INFO:  ['REVIEWING', 'IN_PROGRESS', 'RESOLVED', 'CLOSED'],
-  IN_PROGRESS: ['NEEDS_INFO', 'REVIEWING', 'RESOLVED', 'CLOSED'],
-  RESOLVED:    ['REVIEWING', 'IN_PROGRESS', 'CLOSED'],
+  RECEIVED:    ['REVIEWING', 'NEEDS_INFO', 'IN_PROGRESS', 'VERIFYING', 'RESOLVED', ...PARKED, 'CLOSED'],
+  REVIEWING:   ['NEEDS_INFO', 'IN_PROGRESS', 'VERIFYING', 'RESOLVED', ...PARKED, 'CLOSED'],
+  NEEDS_INFO:  ['REVIEWING', 'IN_PROGRESS', 'VERIFYING', 'RESOLVED', ...PARKED, 'CLOSED'],
+  IN_PROGRESS: ['NEEDS_INFO', 'REVIEWING', 'VERIFYING', 'RESOLVED', ...PARKED, 'CLOSED'],
+  // **검증 중에서 바로 해결로 간다.** 그것이 이 상태를 만든 이유다 —
+  // 고쳤다고 적기 전에 확인하는 자리. 검증이 실패하면 수정 중으로 돌아간다.
+  VERIFYING:   ['IN_PROGRESS', 'NEEDS_INFO', 'RESOLVED', ...PARKED, 'CLOSED'],
+  RESOLVED:    [...OPEN_AGAIN, 'VERIFYING', 'CLOSED'],
+  // 묶어 둔 것은 다시 열 수 있다 — 중복이 아니었거나 재현이 됐을 때.
+  ON_HOLD:          [...OPEN_AGAIN, 'NEEDS_INFO', 'CLOSED'],
+  DUPLICATE:        [...OPEN_AGAIN, 'CLOSED'],
+  CANNOT_REPRODUCE: [...OPEN_AGAIN, 'NEEDS_INFO', 'CLOSED'],
   CLOSED:      [],
 };
 
@@ -153,12 +176,31 @@ export function canUserReply(status: unknown): boolean {
 
 export const TITLE_MAX = 120;
 export const BODY_MAX = 8000;
+export const STEPS_MAX = 4000;
+export const EXPECTED_MAX = 2000;
+export const ACTUAL_MAX = 2000;
 
 export interface ParsedTicket {
   category: Category;
   title: string;
   body: string;
   visibility: Visibility;
+  /** #618의 재현 절차. **비어 있을 수 있다** — 버그가 아닌 문의엔 해당이 없다 */
+  steps: string | null;
+  /** 기대한 결과 */
+  expected: string | null;
+  /** 실제로 일어난 결과 */
+  actual: string | null;
+}
+
+/** 선택 칸 하나를 읽는다. 비면 null — **빈 문자열을 저장하지 않는다** */
+function optional(v: unknown, max: number): { ok: true; value: string | null } | { ok: false } {
+  if (v == null) return { ok: true, value: null };
+  if (typeof v !== 'string') return { ok: false };
+  const t = v.trim();
+  if (t === '') return { ok: true, value: null };
+  if (t.length > max) return { ok: false };
+  return { ok: true, value: t };
 }
 
 /**
@@ -175,10 +217,16 @@ export function parseTicketInput(raw: any): ParsedTicket | null {
   const body = typeof raw.body === 'string' ? raw.body.trim() : '';
   if (title === '' || title.length > TITLE_MAX) return null;
   if (body === '' || body.length > BODY_MAX) return null;
+  const steps = optional(raw.steps, STEPS_MAX);
+  const expected = optional(raw.expected, EXPECTED_MAX);
+  const actual = optional(raw.actual, ACTUAL_MAX);
+  // 길이를 넘기면 **자르지 않고 거절한다** — 잘린 재현 절차는 다른 절차다.
+  if (!steps.ok || !expected.ok || !actual.ok) return null;
   return {
     category: category as Category,
     title, body,
     visibility: resolveVisibility(category, raw.visibility),
+    steps: steps.value, expected: expected.value, actual: actual.value,
   };
 }
 

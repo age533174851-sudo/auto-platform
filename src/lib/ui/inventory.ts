@@ -225,7 +225,7 @@ export const SCREEN_INDEX: ScreenIdentity[] = [
     sources: ['MTABS', 'SWITCH'], note: null },
   { id: 'social', label: '소셜', routeOrSurface: 'tab:social',
     sources: ['MENU', 'MTABS', 'SWITCH'], note: null },
-  { id: 'support', label: '고객지원', routeOrSurface: 'tab:support',
+  { id: 'feedback', label: '피드백·문의', routeOrSurface: 'tab:feedback',
     sources: ['MENU', 'MTABS', 'SWITCH'], note: null },
   { id: 'subscription', label: '구독', routeOrSurface: 'tab:subscription',
     sources: ['MTABS', 'SWITCH'], note: null },

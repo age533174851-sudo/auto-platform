@@ -117,7 +117,7 @@ export const MIGRATION_MANIFEST: ManifestEntry[] = [
   { name: '102_paper_multi_bot.sql', id: 102, risk: 'DESTRUCTIVE', checksum: '92f03e0e5df0e583' },
   { name: '103_paper_auto_claim_lock.sql', id: 103, risk: 'ADDITIVE', checksum: 'c854f4b23728af62' },
   { name: '104_paper_bot_slots.sql', id: 104, risk: 'ADDITIVE', checksum: '34791d117e9bbded' },
-  { name: '106_support_tickets.sql', id: 106, risk: 'ADDITIVE', checksum: '1a918e993efa540f' },
+  { name: '106_feedback_board.sql', id: 106, risk: 'ADDITIVE', checksum: 'c81d05276107cc1a' },
 ];
 
 /** 코드가 요구하는 마이그레이션 파일 이름 (번호 순) */
