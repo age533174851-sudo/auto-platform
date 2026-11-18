@@ -11,8 +11,9 @@
 //
 // 둘 다 이 저장소에서 실제로 난 고장이다.
 
-import { test, eq } from '../../test/harness';
-import { dueDiagView } from './dueDiagView';
+import { test, eq, assert } from '../../test/harness';
+import { dueDiagView, UNKNOWN_TEXT, DB_DEFAULT_INTERVAL_MIN } from './dueDiagView';
+import { DEFAULT_INTERVAL_MIN } from '../autotrade/nextRun';
 
 // 2026-11-05 01:38 UTC = 10:38 KST
 const UTC_0138 = Date.UTC(2026, 10, 5, 1, 38, 0);
@@ -120,7 +121,56 @@ export function runDueDiagViewTests() {
     const flat = JSON.stringify(v);
     eq(flat.includes('AK-nope'), false, flat);
     eq(flat.includes('SK-nope'), false, flat);
+    // **칸 목록을 못 박는다.** 새 칸을 더하려면 여기를 같이 고쳐야 하고,
+    // 그때 "이 칸이 자유 문자열을 들고 나가는가"를 한 번 더 보게 된다.
+    // `intervalIsDbDefault`는 숫자 비교에서 나온 불린이라 들고 나갈
+    // 문자열이 없다.
     eq(Object.keys(v).sort().join(','),
-      ['code','intervalDefaulted','intervalText','lastText','nextText','reasonText'].sort().join(','));
+      ['code','intervalDefaulted','intervalIsDbDefault','intervalText',
+        'lastText','nextText','reasonText'].sort().join(','));
+  });
+  // ── 기본값과 같은 간격은 그 사실을 적는다 ──
+  //
+  // `interval_min`은 035에서 `NOT NULL DEFAULT 1440` + `CHECK (>= 1)`로
+  // 만들어진다. 그래서 `intervalMinDefaulted`가 참이 되는 조건(raw가
+  // null 또는 0)은 **운영 줄에서 한 번도 일어나지 않는다** — 돌려서
+  // 확인했다. 아무도 설정하지 않은 예약이 "설정 1440분"으로 나와
+  // 일부러 하루 1회를 고른 것과 구분되지 않았다.
+  //
+  // 값만으로 "사용자가 골랐는가"는 알 수 없다. 그래서 추측하지 않고
+  // 아는 것만 적는다: 지금 적용되는 간격이 DB 기본값과 같다는 사실.
+
+  test('아무도 설정하지 않은 줄(=DB 기본값 1440)은 그 사실이 보인다', () => {
+    const v = dueDiagView({
+      intervalMinRaw: 1440, intervalMin: 1440, intervalMinDefaulted: false,
+      lastEvaluationAtMs: null, nextEvaluationAtMs: null,
+      due: { due: false, code: 'WAITING', leftMin: null, reason: '아직 간격이 안 됐습니다' },
+    });
+    eq(v.intervalIsDbDefault, true);
+    assert(v.intervalText.includes('DB 기본값과 같습니다'), v.intervalText);
+    // 추측해서 '설정 없음'이라고 적지 않는다 — 고른 것일 수도 있다
+    assert(!v.intervalText.includes('설정 없음'), v.intervalText);
+  });
+
+  test('사용자가 고른 간격에는 기본값 표시를 붙이지 않는다', () => {
+    const v = dueDiagView({
+      intervalMinRaw: 60, intervalMin: 60, intervalMinDefaulted: false,
+      lastEvaluationAtMs: null, nextEvaluationAtMs: null,
+      due: { due: true, code: 'DUE', leftMin: 0, reason: '' },
+    });
+    eq(v.intervalIsDbDefault, false);
+    eq(v.intervalText, '설정 60분');
+  });
+
+  test('진단이 없으면 기본값과 같다고 적지 않는다', () => {
+    const v = dueDiagView(null);
+    eq(v.intervalIsDbDefault, false);
+    eq(v.intervalText, UNKNOWN_TEXT);
+  });
+
+  test('DB 기본값과 코드 기본값이 같은 수인지 못 박는다', () => {
+    // 둘은 **다른 사실**이다 — DB가 채우는 값 · 코드가 못 읽었을 때 쓰는 값.
+    // 지금은 같은 수이고, 갈라지면 화면 문구가 틀린 말을 하게 된다.
+    eq(DB_DEFAULT_INTERVAL_MIN, DEFAULT_INTERVAL_MIN);
   });
 }
