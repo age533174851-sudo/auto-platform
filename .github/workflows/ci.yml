@@ -136,6 +136,16 @@ jobs:
       - name: .mjs 시험 배선 검사 (디스크의 시험 = CI가 돌리는 시험)
         run: node scripts/check-ci-script-tests.mjs
 
+      # 검사기 전수의 **제외 목록**이 거짓말하지 않는지 센다.
+      #
+      # 목록은 `scripts/lib/checker-sweep.mjs` 에 있고, 무인 회차가 고칠 수
+      # 있다(그게 이 구조의 목적이다 — 워크플로 안에 있으면 못 고친다).
+      # 고치라고 연 길이지 **빼라고 연 길이 아니라서**, 모든 제외 항목이
+      # 이유와 "대신 도는 곳"을 갖는지, 그리고 그 곳이 실제로 그 검사기를
+      # 부르는지를 여기서 확인한다.
+      - name: 검사기 전수 제외 목록 검사 (뺀 것은 다른 곳에서 돈다)
+        run: node scripts/check-checker-sweep.mjs
+
       # ── 워커 빌드 ──
       #
       # 워커는 루트 tsconfig 밖에 있다. 그래서 `npx tsc --noEmit`도,
