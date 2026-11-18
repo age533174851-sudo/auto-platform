@@ -9,7 +9,7 @@
 // 한 겹이 뚫려도 다른 겹이 남는다.
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
-import { canUserReply, BODY_MAX } from '@/lib/feedback/ticket';
+import { canUserReply, BODY_MAX, redactedOverflow, redactedOverflowMessage } from '@/lib/feedback/ticket';
 import { redact, redactionNotice } from '@/lib/feedback/redact';
 
 export const dynamic = 'force-dynamic';
@@ -78,6 +78,20 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
   }
 
   const b = redact(text);
+
+  // ── 가린 뒤의 길이를 **저장 전에** 본다 ──
+  //
+  // 위 67줄은 **원문** 길이를 본다. 가림은 글을 늘릴 수 있어서, 통과한
+  // 답글이 `feedback_comments.body`의 CHECK(1..8000)에 막힐 수 있다.
+  // 글 쓰기 경로와 **같은 판정**을 쓴다 — 한쪽만 고치면 언젠가 갈린다.
+  const over = redactedOverflow({ body: b.text });
+  if (over) {
+    // **글 내용은 담지 않는다 — 길이만 돌려준다.**
+    return json({ ok: false, error: 'too_long_after_redaction',
+      field: over.field, length: over.length, max: over.max, over: over.over,
+      message: redactedOverflowMessage(over) }, 400);
+  }
+
   const merged = new Map<string, number>();
   for (const h of b.hits) merged.set(h.kind, (merged.get(h.kind) ?? 0) + h.count);
   const redactions = [...merged].map(([kind, count]) => ({ kind, count }));
