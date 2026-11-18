@@ -800,6 +800,106 @@ export async function runReconcileIntegrationTests() {
     });
   }
 
+  // ══════════ ⑤-d 손절 복구: 포지션을 못 읽은 것을 '포지션 없음'으로 적지 않는다 (#479) ══════════
+  //
+  //   체결이 확인된 진입의 손절 복구는 포지션이 실제로 있는지 먼저 본다.
+  //   그 조회가 실패하거나 수량이 깨져 있으면 `Number(x ?? 0)` → 0 →
+  //   "보호할 것 없음"으로 **경고 없이** 끝났다. 대조는 그 줄을 종료로
+  //   적으므로 다시 볼 기회도 없다 — 손절 없는 포지션이 조용히 남는다.
+  //   확인된 0만 '포지션 없음'이고, 못 읽은 것은 '확인 불가'로 남긴다.
+  //   어느 쪽이든 **주문은 새로 보내지 않는다** (지어낸 노출에 손절 금지).
+  const UNREAD = '손절 복구 확인 불가';
+  const bnFilledStopRow = (sym: string) => new FakeDb().seed('live_orders', [pendingRow({
+    symbol: sym, stop_policy: 'FIXED_SL', stop_loss: 58920.981,
+    sl_order_id: null, reduce_only: false,
+  })]);
+  const bnFilled = (sym: string) => ({ json: bnOrder({ symbol: sym, status: 'FILLED',
+    executedQty: '0.003', origQty: '0.003', avgPrice: '60000' }) });
+  const hasUnread = (r: any) => Array.isArray(r?.details)
+    && r.details.some((d: string) => d.includes(UNREAD));
+
+  for (const [label, posReply] of [
+    ['수량이 깨진 본문(positionAmt:"bad")', { json: [{ symbol: 'PRECUNREADUSDT', positionAmt: 'bad',
+      entryPrice: '60000', leverage: '100', marginType: 'isolated', liquidationPrice: '0' }] }],
+    ['조회 HTTP 500', { status: 500, json: { code: -1000, msg: 'internal' } }],
+  ] as const) {
+    const SYM = 'PRECUNREADUSDT';
+    const db = bnFilledStopRow(SYM);
+    const venue = new FakeVenue()
+      .on('/positionRisk', posReply as any)
+      .on('/fapi/v3/account', { json: { positions: [] } })
+      .on(BN_ORDER, bnFilled(SYM), 'GET');
+    const r = await scenario(venue, () => reconcile(db));
+    test(`★ Binance 손절 복구: ${label}을 '포지션 없음'으로 삼키지 않는다`, () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq((r as any).resolved, 1, '체결 확인 자체가 깨졌다 — 이 시험의 전제가 아니다');
+      eq(venue.orderSends().length, 0, '포지션을 모르는데 손절을 보냈다');
+      assert(hasUnread(r), `조회 실패가 경고 없이 사라졌다: ${JSON.stringify((r as any).details)}`);
+    });
+  }
+
+  {
+    // 회귀: **확인된** 0은 지금처럼 조용히 '걸 것 없음'이다.
+    const SYM = 'PRECFLATUSDT';
+    const db = bnFilledStopRow(SYM);
+    const venue = new FakeVenue()
+      .on(BN_POS, { json: [{ symbol: SYM, positionAmt: '0', entryPrice: '0',
+        leverage: '100', marginType: 'isolated', liquidationPrice: '0' }] })
+      .on(BN_ORDER, bnFilled(SYM), 'GET');
+    const r = await scenario(venue, () => reconcile(db));
+    test('★ Binance 손절 복구: 확인된 수량 0은 경고 없이 걸지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 0);
+      assert(!hasUnread(r), '확인된 0을 확인 불가로 적었다');
+    });
+  }
+
+  for (const [label, posReply] of [
+    ['조회 HTTP 500', { status: 500, json: { label: 'SERVER_ERROR', message: 'internal' } }],
+    ['수량이 깨진 본문(size:"bad")', { json: { contract: 'BTC_USDT', size: 'bad' } }],
+    ['계약 없는 빈 본문', { json: {} }],
+  ] as const) {
+    const db = new FakeDb().seed('live_orders', [pendingRow({
+      exchange: 'gate', status: 'ACKED', stop_policy: 'FIXED_SL', stop_loss: 58920.981,
+      sl_order_id: null, reduce_only: false,
+    })]);
+    const venue = new FakeVenue()
+      .on('/api/v4/futures/usdt/orders', { json: (i: number) => (i === 0
+        ? []
+        : [{ id: 9004, contract: 'BTC_USDT', size: 2, price: '0', status: 'finished',
+             finish_as: 'filled', text: 't-COID-R1', left: 0, fill_price: '95000' }]) }, 'GET')
+      .on('/api/v4/futures/usdt/positions/BTC_USDT', posReply as any)
+      .on('/api/v4/futures/usdt/positions', { json: [] });
+    const r = await scenario(venue, () => reconcile(db, 'gate'));
+    test(`★ Gate 손절 복구: ${label}을 '포지션 없음'으로 삼키지 않는다`, () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(db.row('live_orders', { id: 'ord-1' })?.status, 'FILLED', '시험 전제(체결 확정)가 깨졌다');
+      eq(venue.orderSends().length, 0, '포지션을 모르는데 손절을 보냈다');
+      assert(hasUnread(r), `조회 실패가 경고 없이 사라졌다: ${JSON.stringify((r as any).details)}`);
+    });
+  }
+
+  {
+    // 회귀: Gate가 **읽을 수 있는 0**을 주면 걸 것이 없다 — 경고도 없다.
+    const db = new FakeDb().seed('live_orders', [pendingRow({
+      exchange: 'gate', status: 'ACKED', stop_policy: 'FIXED_SL', stop_loss: 58920.981,
+      sl_order_id: null, reduce_only: false,
+    })]);
+    const venue = new FakeVenue()
+      .on('/api/v4/futures/usdt/orders', { json: (i: number) => (i === 0
+        ? []
+        : [{ id: 9005, contract: 'BTC_USDT', size: 2, price: '0', status: 'finished',
+             finish_as: 'filled', text: 't-COID-R1', left: 0, fill_price: '95000' }]) }, 'GET')
+      .on('/api/v4/futures/usdt/positions/BTC_USDT', { json: { contract: 'BTC_USDT', size: 0 } })
+      .on('/api/v4/futures/usdt/positions', { json: [] });
+    const r = await scenario(venue, () => reconcile(db, 'gate'));
+    test('★ Gate 손절 복구: 확인된 size 0은 경고 없이 걸지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 0);
+      assert(!hasUnread(r), '확인된 0을 확인 불가로 적었다');
+    });
+  }
+
   // ══════════ ⑥ Gate 선물 상태 어휘 ══════════
   {
     const db = new FakeDb().seed('live_orders', [
