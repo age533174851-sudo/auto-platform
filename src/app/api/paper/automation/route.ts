@@ -5,6 +5,7 @@ import { barIntervalLabel,DEFAULT_BAR_INTERVAL } from '@/lib/risk/bars';
 import { ENTRY_SIGNAL_LABEL,DEFAULT_ENTRY_SIGNAL } from '@/lib/engine/entrySignals';
 import { readRunnerConfig } from '@/lib/engine/paperRunner';
 import { paperRunnerStatus } from '@/lib/engine/paperRunnerStatus';
+import { summarizeBotPerf, PERF_ROW_CAP } from '@/lib/engine/paperBotPerf';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -43,7 +44,10 @@ export async function GET(req: NextRequest) {
       || !Array.isArray(bots.data))
     return json({ok:false,error:'automation_unreadable',message:'서버 반복 상태를 확인하지 못했습니다'},503);
   const positions = account.data ? await sb.from('paper_positions')
-    .select('id,symbol,side,status,fill_price,exit_price,stop_loss,take_profit,liquidation_price,quantity,realized_pnl,exit_reason,opened_at,closed_at')
+    // `strategy_id`를 **되살린다.** 이 조회는 봇으로 걸러 읽으면서 정작
+    // 그 칸을 빼고 보냈다 — 그래서 화면은 "이 체결이 어느 봇의 것인가"를
+    // 알 수 없었고, 봇 카드에 손익을 적을 방법이 없었다.
+    .select('id,strategy_id,symbol,side,status,fill_price,exit_price,stop_loss,take_profit,liquidation_price,quantity,realized_pnl,exit_reason,opened_at,closed_at')
     // **봇 전부의 체결을 읽는다.** 예전에는 `paper-auto-v1`만 봤다 — 그대로
     // 두면 새 봇이 낸 거래가 화면에도 점수판에도 안 잡힌다.
     .eq('user_id',uid).eq('paper_account_id',account.data.id)
@@ -82,6 +86,28 @@ export async function GET(req: NextRequest) {
   // 전략은 **판정하는 쪽과 같은 함수로** 읽는다. 화면이 따로 `config.signal`을
   // 해석하면 러너와 다른 답을 낼 수 있고, 그러면 "화면에는 돌파인데 추세
   // 추종이 도는" 상태가 된다.
+  // ── 봇별 **실제 측정된** 성과 ──
+  //
+  // 지어내지 않는다. `paper_positions`에 실재하는 `realized_pnl`과
+  // `margin`만 센다. 이 조회가 실패해도 503으로 만들지 않는다 — 나머지
+  // 화면은 그대로 쓸모 있고, 못 읽었다는 사실은 `unreadable`로 간다.
+  // **0으로 적지 않는다.**
+  const botIds: string[] = bots.data.map((b:any) => String(b.bot_id));
+  let perfRows: any[] | null = null, perfUnreadable = false;
+  if (account.data && botIds.length > 0) {
+    try {
+      const pr = await sb.from('paper_positions')
+        .select('strategy_id,status,realized_pnl,margin')
+        .eq('user_id',uid).eq('paper_account_id',account.data.id)
+        .in('strategy_id',botIds)
+        .order('opened_at',{ascending:false}).limit(PERF_ROW_CAP);
+      if (pr.error || !Array.isArray(pr.data)) perfUnreadable = true; else perfRows = pr.data;
+    } catch { perfUnreadable = true; }
+  } else if (!account.data) {
+    // 계좌가 없으면 체결도 없다. **못 읽은 것이 아니라 없는 것**이다.
+    perfRows = [];
+  }
+  const perf = summarizeBotPerf({ rows: perfRows, botIds, unreadable: perfUnreadable });
   const botView = bots.data.map((b:any) => {
     const { signal,bad } = readBotSignal(b.config);
     // 주기도 **판정하는 쪽과 같은 함수로** 읽는다. 화면이 따로 해석하면
@@ -89,6 +115,7 @@ export async function GET(req: NextRequest) {
     const tf = readBotTimeframe(b.config);
     const { config: _cfg,...rest } = b;
     return { ...rest,signal,signalLabel:ENTRY_SIGNAL_LABEL[signal],
+      perf: perf[String(b.bot_id)] ?? null,
       timeframe:tf.timeframe,timeframeLabel:barIntervalLabel(tf.timeframe),
       ...(bad ? { signalWarning:bad } : {}),
       ...(tf.bad ? { timeframeWarning:tf.bad } : {}) };
