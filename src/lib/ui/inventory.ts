@@ -225,6 +225,8 @@ export const SCREEN_INDEX: ScreenIdentity[] = [
     sources: ['MTABS', 'SWITCH'], note: null },
   { id: 'social', label: '소셜', routeOrSurface: 'tab:social',
     sources: ['MENU', 'MTABS', 'SWITCH'], note: null },
+  { id: 'support', label: '고객지원', routeOrSurface: 'tab:support',
+    sources: ['MENU', 'MTABS', 'SWITCH'], note: null },
   { id: 'subscription', label: '구독', routeOrSurface: 'tab:subscription',
     sources: ['MTABS', 'SWITCH'], note: null },
   { id: 'tax', label: '손익·세금', routeOrSurface: 'tab:tax',
