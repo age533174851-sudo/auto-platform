@@ -33,6 +33,13 @@ test('울타리 자기 점검이 실제로 돌고 통과한다', () => {
   const r = selfTest();
   assert.equal(r.code, 0, r.out);
   assert.match(r.out, /✅ 울타리 자기 점검 \d+\/\d+/);
+  // **센 것을 로그에 남긴다.** 단정만 하면 CI 로그에는 `ok 1` 한 줄뿐이고,
+  // 그걸 읽는 사람은 **무엇이 몇 건 확인됐는지 알 수 없다.** 이 PR 자체가
+  // "verify=success 인데 자기 점검이 로그에 없더라"에서 시작했다 —
+  // 같은 실수를 한 층 위에서 반복하지 않는다.
+  for (const line of r.out.split('\n')) {
+    if (/^\s*[✓✗]|^✅|^❌/.test(line)) console.log(`    ${line.trim()}`);
+  }
 });
 
 test('**셈이 0이 아니다** — 아무것도 안 보고 통과하지 않는다', () => {
