@@ -21,7 +21,7 @@ import { ownedOrderIds, cancelLedger, rollbackNote, type CancelAttempt } from '.
 import { futuresApplyLeverage, unknownResultVerdict } from '../exchanges/futuresExec';
 import { executionIdentityComplete } from '../execution/profile';
 import type { StopPolicy, TakeProfitPolicy } from '../strategies/profiles';
-import { stopReattachVerdict } from './stopReattach';
+import { stopReattachVerdict, reattachPositionEvidence } from './stopReattach';
 import { fillFactsOf } from './orderFillFacts';
 import { RECONCILE_QUERY_STATUSES } from './pendingReconcile';
 import { quantizeOrder } from '../exchanges/quantize';
@@ -741,22 +741,48 @@ export async function executeOrder(sb: any, args: ExecuteArgs): Promise<ExecuteR
     }
     adopted = prev;
   } else {
-    // 레거시 비-adoption 경로의 INSERT 및 중복 응답 의미는 유지한다.
+    // 레거시 비-adoption 경로의 INSERT 및 **보내지 않는다는 결정**은 유지한다.
     const { data: inserted, error: insErr } = await sb.from('live_orders')
       .insert(intent).select('id, status').single();
     if (insErr) {
       if (String(insErr.code) === '23505') {
-        const { data: prev } = await sb.from('live_orders')
+        // ── 중복이라고 말하려면 **중복임을 확인해야 한다** ──
+        //
+        // 23505는 "그 client_order_id로 줄이 하나 있다"까지만 증명한다.
+        // 그 줄이 어떤 상태인지는 이 조회가 알려 주고, **이 조회는 실패할
+        // 수 있다.** 전에는 조회 오류를 버리고(`const { data: prev }`)
+        // 결과와 무관하게 늘 같은 말을 했다 —
+        // `duplicate:true` · "이미 처리된 주문입니다".
+        //
+        // 그러면 두 가지가 처리됨으로 적힌다:
+        //   · 조회가 실패해 **아무것도 모르는** 경우 (status는 UNKNOWN인데
+        //     문구는 "이미 처리됐다"였다)
+        //   · 097이 커밋만 해 둔 `INTENT` 줄 — **거래소에는 아무 일도
+        //     없었다**
+        //
+        // 보내지 않는 것은 그대로 둔다(`duplicate`를 내리면 재주문이 열리고
+        // 포지션이 두 배가 된다). 바꾸는 것은 **무엇을 말하는가**다.
+        // 화면은 문구가 아니라 `settled === false`로 재주문을 잠근다.
+        const { data: prev, error: readErr } = await sb.from('live_orders')
           .select('*').eq('client_order_id', clientOrderId).maybeSingle();
+        const terminal = prev?.status === 'ACKED' || prev?.status === 'FILLED';
         return {
-          ok: prev?.status === 'ACKED' || prev?.status === 'FILLED',
+          ok: terminal,
           status: (prev?.status as OrderStatus) || 'UNKNOWN',
           clientOrderId,
           exchangeOrderId: prev?.exchange_order_id,
           filledQty: prev?.filled_qty != null ? Number(prev.filled_qty) : undefined,
           avgPrice: prev?.avg_price != null ? Number(prev.avg_price) : undefined,
           duplicate: true,
-          message: '이미 처리된 주문입니다 (중복 요청)',
+          // **확인된 체결만 확정이다.** 못 읽은 줄도, 나가지 않은 줄도 아니다.
+          settled: terminal,
+          message: terminal
+            ? '이미 처리된 주문입니다 (중복 요청)'
+            : readErr || !prev
+              ? '같은 주문 번호의 줄이 있지만 상태를 확인하지 못했습니다 — 처리됐는지 알 수 없어 재전송하지 않습니다'
+              : prev.status === 'INTENT'
+                ? '같은 주문 번호로 커밋된 주문 의도가 있고 아직 전송되지 않았습니다 — 이어받기 경로로만 전송됩니다'
+                : `같은 주문 번호의 줄이 ${String(prev.status)} 상태입니다 — 확정되지 않아 재전송하지 않습니다`,
         };
       }
       return { ok: false, status: 'FAILED', clientOrderId, message: `의도 기록 실패: ${insErr.message}` };
@@ -2065,9 +2091,12 @@ async function attachStopIfMissing(
       if (!contract) return null;
 
       // **포지션이 실제로 있는지 먼저 본다.**
+      // 못 읽은 것(null·깨진 size)은 '포지션 없음'이 아니다 (#479).
       const pos = await gf.getPositionGateFutures(creds.apiKey, creds.apiSecret, contract, creds.testnet);
-      const size = Number(pos?.size ?? 0);
-      if (!size) return null;                     // 포지션 없음 — 걸 이유가 없다
+      const gEv = reattachPositionEvidence(pos ? (pos as any).size : null);
+      if (gEv.kind === 'UNKNOWN') return gEv.note;
+      if (gEv.kind === 'FLAT') return null;      // 확인된 0 — 걸 이유가 없다
+      const size = gEv.qty;
       // 방향이 어긋나면 걸지 않는다. 반대 방향 손절은 즉시 발동한다.
       if ((size > 0 ? 'LONG' : 'SHORT') !== posSide) {
         return `손절 복구 안 함 — 기록은 ${posSide}인데 거래소 포지션은 ${size > 0 ? 'LONG' : 'SHORT'}입니다`;
@@ -2087,8 +2116,11 @@ async function attachStopIfMissing(
 
     const bf = await import('@/lib/exchanges/binanceFutures');
     const rr = await bf.getSymbolPositionRiskEx(creds.apiKey, creds.apiSecret, symbol, creds.testnet);
-    const amt = Number(rr.risk?.positionAmt ?? 0);
-    if (!amt) return null;
+    // `risk: null`은 조회 실패·깨진 수량이다. 0으로 바꾸지 않는다 (#479).
+    const bEv = reattachPositionEvidence(rr.risk ? rr.risk.positionAmt : null, rr.risk ? null : rr.error);
+    if (bEv.kind === 'UNKNOWN') return bEv.note;
+    if (bEv.kind === 'FLAT') return null;        // 확인된 0 — 걸 이유가 없다
+    const amt = bEv.qty;
     if ((amt > 0 ? 'LONG' : 'SHORT') !== posSide) {
       return `손절 복구 안 함 — 기록은 ${posSide}인데 거래소 포지션은 ${amt > 0 ? 'LONG' : 'SHORT'}입니다`;
     }
@@ -2162,11 +2194,16 @@ export async function reconcilePendingOrders(
   if (creds.userId) q = q.eq('user_id', creds.userId);
   if (creds.connectionId) q = q.eq('connection_id', creds.connectionId);
 
-  const { data: pending } = await q
+  const { data: pending, error: pendingError } = await q
     .order('created_at', { ascending: true })
     .limit(50);
 
-  if (!Array.isArray(pending) || !pending.length) return out;
+  // 조회 실패와 실제 미확정 주문 0건은 다르다. 실패를 빈 성공으로 반환하면
+  // 호출자가 "대조 완료"로 기록하고, 살아 있는 주문은 계속 방치된다.
+  if (pendingError || !Array.isArray(pending)) {
+    throw new Error(`미확정 주문 장부 조회 실패: ${pendingError?.message || '목록 응답이 배열이 아닙니다'}`);
+  }
+  if (pending.length === 0) return out;
 
   const { resolveUnknown, resolveAcked, shouldEscalate } = await import('./unknownResolver');
 

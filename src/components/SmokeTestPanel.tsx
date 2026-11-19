@@ -49,6 +49,68 @@ const ATTEMPT_TONE: Record<StepMark, string> = {
   CANCELLED: T.muted,
 };
 
+type GateRecoveryCandidate = {
+  id: string;
+  symbol: string;
+  evidence: { firstAt: number; confirmedAt: number | null } | null;
+};
+
+function GateRecoveryPanel({ auth, connectionId }: { auth: string; connectionId: string }) {
+  const [rows, setRows] = useState<GateRecoveryCandidate[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState('');
+  const endpoint = '/api/autotrade/smoke-test/gate-flat-evidence';
+
+  async function request(testId?: string) {
+    setBusy(true);
+    setNotice('');
+    try {
+      const params = new URLSearchParams({ connectionId });
+      if (testId) params.set('testId', testId);
+      const response = await fetch(`${endpoint}?${params}`, {
+        method: testId ? 'POST' : 'GET', headers: { Authorization: auth }, cache: 'no-store',
+      });
+      const result = await response.json();
+      if (!response.ok || !result.ok) {
+        const reason = result.code === 'VERIFIED_GATE_TESTNET_REQUIRED'
+          ? '연결 설정에서 Gate TESTNET을 선택해 주세요.'
+          : result.code === 'EXPOSURE_PRESENT'
+            ? '거래소에 남은 포지션 또는 주문이 있어 차단을 유지합니다.'
+            : '복구 확인에 실패했습니다. 잠시 후 다시 확인해 주세요.';
+        setNotice(reason);
+        return;
+      }
+      if (!testId) {
+        setRows(result.candidates);
+        if (result.candidates.length === 0) setNotice('복구할 Gate 실패 회차가 없습니다.');
+        return;
+      }
+      setRows(current => current?.map(row => row.id === testId ? { ...row, evidence: result.evidence } : row) ?? null);
+      setNotice(result.code === 'CONFIRMED'
+        ? '복구 확인이 완료됐습니다. 다음 테스트 시작 시 서버가 거래소 상태를 다시 확인합니다.'
+        : '첫 확인 후 10분이 지나면 다시 확인해 주세요.');
+    } catch {
+      setNotice('복구 상태를 읽지 못했습니다. 잠시 후 다시 확인해 주세요.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div style={{ display: 'grid', gap: 6, fontSize: 11 }}>
+      <button type="button" disabled={busy} onClick={() => void request()}>Gate Demo 차단 복구 확인</button>
+      {rows?.map(row => (
+        <button key={row.id} type="button" disabled={busy || row.evidence?.confirmedAt != null}
+          onClick={() => void request(row.id)}>
+          {row.symbol} · {row.id.slice(0, 8)} · {row.evidence?.confirmedAt != null
+            ? '복구 확인 완료' : row.evidence ? '두 번째 잔여 확인' : '첫 잔여 확인'}
+        </button>
+      ))}
+      {notice && <div role="status">{notice}</div>}
+    </div>
+  );
+}
+
 export default function SmokeTestPanel({
   auth, connectionId, isTestnet,
 }: { auth: string; connectionId: string; isTestnet: boolean }) {
@@ -382,6 +444,8 @@ export default function SmokeTestPanel({
               overflowWrap: 'anywhere',
             }}>{msg.text}</div>
           )}
+
+          {connectionId && isTestnet && <GateRecoveryPanel key={connectionId} auth={auth} connectionId={connectionId}/>}
 
           {data?.error === 'table_missing' && (
             <div style={{ fontSize: 10.5, color: T.ylw, lineHeight: 1.6 }}>{data.message}</div>

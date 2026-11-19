@@ -106,8 +106,10 @@ const CASES = [
      `  const ledger = usePaperLedger(target, !!auth);\n  const _f = useTradeForm({ symbol: 'BTCUSDT' } as any);`]]],
 
   ['MUT-N8 ★ 시장→화면 분기를 두 번째 자리에 복제한다 (COIN-M이 USDⓈ-M 화면을 받는다)', POS, 'RED',
-   [[`export function PositionsOrdersScreen({ auth }: PositionsOrdersScreenProps) {`,
-     `const _r = () => tradingScreenFor('SPOT' as any);\nexport function PositionsOrdersScreen({ auth }: PositionsOrdersScreenProps) {`]]],
+   // props 구조 분해는 입구를 추가할 때 바뀐다. 변이가 지키는 것은
+   // 시장 분기 단일성이므로 공개 props 선언 앞에 같은 위반을 주입한다.
+   [[`export interface PositionsOrdersScreenProps {`,
+     `const _r = () => tradingScreenFor('SPOT' as any);\nexport interface PositionsOrdersScreenProps {`]]],
 
   ['MUT-N9 ★ 모르는 시장에 기본 화면을 준다 (선물 주문이 현물로 나간다)', ROUTE, 'RED',
    [["  if (!id) throw new Error(", "  if (!id) return 'SPOT_SCREEN';\n  if (false) throw new Error("]]],
