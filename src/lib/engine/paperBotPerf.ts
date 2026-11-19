@@ -149,6 +149,20 @@ export interface PerfView {
   measured: boolean;
   /** 이익인가 손실인가. measured가 false면 null */
   sign: 'up' | 'down' | 'flat' | null;
+  /**
+   * **이 숫자가 전부가 아닌가.**
+   *
+   * 접힌 카드에서 완전한 합계와 구별되게 하려고 둔다. 예전에는 단서가
+   * `note`와 `title`에만 있었고, `note`는 상세를 펼쳐야 보였다 — 그래서
+   * 1000행 상한에 잘린 합계가 **휴대폰에서 완전한 합계와 글자 하나 다르지
+   * 않게** 굵게 보였다 (hover는 터치에 없다).
+   *
+   * 미결제 건수는 여기에 넣지 않는다. 아직 들고 있는 포지션은 **실현**
+   * 손익의 일부가 아니므로 합계를 불완전하게 만들지 않는다.
+   */
+  incomplete: boolean;
+  /** 접힌 카드에 함께 그릴 짧은 표식. `incomplete`가 아니면 null */
+  mark: string | null;
 }
 
 const fmt = (n: number, d = 2) =>
@@ -159,6 +173,9 @@ export function perfView(p: BotPerf | null | undefined): PerfView {
   const notes: string[] = [];
   if (p == null || p.unreadable) {
     return { amount: '확인 불가', rate: null, measured: false, sign: null,
+      // 읽지 못한 것은 **불완전한 합계가 아니라 합계가 아예 없는 것**이다.
+      // 금액 자리에 이미 '확인 불가'가 적히므로 표식을 덧붙이지 않는다.
+      incomplete: false, mark: null,
       note: '성과를 읽지 못했습니다', detailTitle: '성과를 읽지 못했습니다' };
   }
   if (p.open > 0) notes.push(`미결제 ${p.open}건`);
@@ -168,6 +185,7 @@ export function perfView(p: BotPerf | null | undefined): PerfView {
   // **청산이 없으면 0이 아니라 없음이다.**
   if (p.realizedPnl == null) {
     return { amount: '성과 데이터 없음', rate: null, measured: false, sign: null,
+      incomplete: false, mark: null,
       note: note ?? (p.closed === 0 ? '청산된 거래 없음' : null),
       detailTitle: `청산 ${p.closed}건 · 미결제 ${p.open}건 — 실현 손익이 아직 없습니다` };
   }
@@ -177,6 +195,9 @@ export function perfView(p: BotPerf | null | undefined): PerfView {
     // 분모를 빌려 오지 않는다. 없으면 칸이 빈다.
     rate: p.roiPct == null ? null : `${fmt(p.roiPct, 1)}%`,
     note,
+    // 상한에 걸렸거나 손익이 안 적힌 행이 있으면 **이 합계는 전부가 아니다.**
+    incomplete: p.partial || p.pnlMissing > 0,
+    mark: (p.partial || p.pnlMissing > 0) ? '일부' : null,
     measured: true,
     sign: v > 0 ? 'up' : v < 0 ? 'down' : 'flat',
     detailTitle: `청산 ${p.closed}건 · 실현 ${fmt(v)} USDT`
