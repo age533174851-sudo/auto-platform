@@ -7,7 +7,7 @@ import { calcMarketScore } from '../market';
 import { getCurrentSeasonMode, getAdjustedParams } from '../season';
 import { runStrategies, selectStrategy } from '../strategies';
 import { calcPositionSize } from '../risk';
-import { getDefaultConfig, calcFeeAmount } from '../fees';
+import { getDefaultConfig, calcFeeAmount } from '../fees/index';
 import { calcSlippage } from '../slippage';
 import type { ExchangeId } from '../exchanges/types';
 

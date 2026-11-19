@@ -826,3 +826,64 @@ export function migrationDrift(i: {
   }
   return out;
 }
+
+// ══════════════ 다른 경로가 먼저 적용했는가 ══════════════
+//
+// **마이그레이션이 운영 DB에 닿는 길은 하나가 아니다.** 저장소의 `migrate`
+// 워크플로 말고도, Supabase의 GitHub 연동이 `supabase/migrations/`를 읽어
+// main push에 적용할 수 있다. 실제로 106번이 그랬다 — 우리 실행이 SQL을
+// 돌리기 전에 대상 9개가 이미 카탈로그에 있었고, 우리는 그것을 조용히
+// `BASELINE`으로 적었다.
+//
+// 더하기만 하는 마이그레이션이면 결과는 같다. **문제는 승인이 필요한
+// 쪽이다** — 함수를 지우거나 표를 비우는 변경이 승인 전에 이미 적용돼
+// 있으면, 그 뒤에 사람이 누르는 "승인"은 이미 벌어진 일에 도장을 찍는
+// 것이다. 관문이 있었는데 지나간 것이고, 조용하면 아무도 모른다.
+//
+// **막지는 못한다.** 막는 것은 연동 설정을 끄거나 위험한 파일을 연동이
+// 읽지 않는 자리에 두는 일이고, 둘 다 이 함수 바깥이다. 여기서 하는 일은
+// **숨지 못하게 하는 것**이다 — 확인하지 못한 것을 통과로 적지 않는다.
+
+export type ForeignApplyCode =
+  | 'NONE'
+  /** 승인이 필요한 변경인데 이미 적용돼 있다 — 관문을 지나갔다 */
+  | 'FOREIGN_APPLIED_BLOCKED'
+  /** 자동 적용 대상인데 이미 적용돼 있다 — 결과는 같지만 우리가 한 일이 아니다 */
+  | 'FOREIGN_APPLIED_PENDING'
+  /** 카탈로그를 읽지 못했다. **"없다"가 아니다** */
+  | 'UNREADABLE';
+
+export interface ForeignApplyVerdict {
+  code: ForeignApplyCode;
+  /** 이 회차를 실패로 끝내야 하는가 */
+  fatal: boolean;
+  reason: string;
+}
+
+export function foreignApplyVerdict(i: {
+  name: string;
+  /** 승인이 필요해서 막혀 있는 파일인가 */
+  needsApproval: boolean;
+  /** `verifyTargets`의 판정 */
+  targets: 'PRESENT' | 'MISSING' | 'UNKNOWN' | 'NO_TARGET';
+}): ForeignApplyVerdict {
+  if (i.targets === 'UNKNOWN') {
+    return { code: 'UNREADABLE', fatal: false,
+      reason: `${i.name} — 대상이 이미 있는지 카탈로그에서 확인하지 못했습니다 (없다는 뜻이 아닙니다)` };
+  }
+  if (i.targets !== 'PRESENT') return { code: 'NONE', fatal: false, reason: '' };
+
+  if (i.needsApproval) {
+    return {
+      code: 'FOREIGN_APPLIED_BLOCKED', fatal: true,
+      reason: `${i.name} — 승인 전인데 대상이 이미 운영 DB에 있습니다. `
+        + '우리 워크플로는 실행하지 않았으므로 다른 경로(예: Supabase GitHub 연동)가 적용한 것입니다. '
+        + '승인 관문이 지나갔습니다 — 무엇이 적용됐는지 확인한 뒤 적용 기록을 맞추세요.',
+    };
+  }
+  return {
+    code: 'FOREIGN_APPLIED_PENDING', fatal: false,
+    reason: `${i.name} — 자동 적용 대상인데 대상이 이미 있습니다. `
+      + '결과는 같지만 우리 실행이 한 일이 아닙니다 (다른 경로가 먼저 적용했습니다).',
+  };
+}

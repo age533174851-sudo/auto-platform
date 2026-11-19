@@ -67,7 +67,31 @@ export const REFLECT_GRACE_MS = 5_000;
 /** 포지션 수량 비교 허용 오차 (수량 자체가 작을 수 있으므로 절대값 기준도 둔다) */
 const QTY_EPS = 1e-8;
 
+/**
+ * 교차 확인에 쓸 수 있는 포지션 증거인가.
+ *
+ * `null`만 '못 읽음'이 아니다. 호출부는 `Number(pos_qty_before)` 같은 값을
+ * 그대로 넘기므로 NaN이 올 수 있고, NaN은 어떤 비교에서도 false라
+ * `qtyChanged`가 **'변하지 않았다'로** 답한다. 그 답이 FAILED(전송 안 됨)
+ * 확정과 재전송으로 이어진다. 그래서 둘 다 유한한 숫자일 때만 증거로 친다.
+ */
+function positionReadable(p: PositionEvidence): boolean {
+  return p.qtyNow !== null && Number.isFinite(p.qtyNow) && Number.isFinite(p.qtyBefore);
+}
+
+/**
+ * 반영 유예가 **지났다고 확인되는가.**
+ *
+ * `elapsedMs < REFLECT_GRACE_MS`만 물으면 NaN(깨진 전송 시각)이 false가
+ * 되어 '유예 지남'으로 통과한다. 경과 시간을 모르는 것은 유예가 지났다는
+ * 증거가 아니다.
+ */
+function graceElapsed(elapsedMs: number): boolean {
+  return Number.isFinite(elapsedMs) && elapsedMs >= REFLECT_GRACE_MS;
+}
+
 function qtyChanged(p: PositionEvidence): boolean {
+  if (!positionReadable(p)) return false;
   if (p.qtyNow === null) return false;
   const diff = Math.abs(p.qtyNow - p.qtyBefore);
   const base = Math.max(Math.abs(p.qtyBefore), Math.abs(p.qtyNow), QTY_EPS);
@@ -116,7 +140,13 @@ export function resolveUnknown(input: ResolveInput): ResolveResult {
   }
 
   // 3-b. 거래소가 아직 반영하지 못했을 수 있다.
-  if (elapsedMs < REFLECT_GRACE_MS) {
+  if (!Number.isFinite(elapsedMs)) {
+    return {
+      state: 'UNKNOWN', resolved: false, action: 'RETRY_QUERY',
+      reason: `전송 후 경과 시간을 알 수 없습니다(${String(elapsedMs)}) — 반영 대기 시간이 지났다고 볼 수 없습니다`,
+    };
+  }
+  if (!graceElapsed(elapsedMs)) {
     return {
       state: 'UNKNOWN', resolved: false, action: 'RETRY_QUERY',
       reason: `전송 후 ${Math.round(elapsedMs)}ms — 거래소 반영 대기 시간(${REFLECT_GRACE_MS}ms) 내입니다`,
@@ -125,11 +155,14 @@ export function resolveUnknown(input: ResolveInput): ResolveResult {
 
   // 3-c. 포지션으로 교차 확인한다.
   if (position) {
-    if (position.qtyNow === null) {
-      // 주문도 안 보이고 포지션도 못 읽었다. 증거가 반쪽이다.
+    if (!positionReadable(position)) {
+      // 주문도 안 보이고 포지션도 못 읽었다(null 또는 숫자가 아님). 증거가 반쪽이다.
       return {
         state: 'UNKNOWN', resolved: false, action: 'RETRY_QUERY',
-        reason: '주문이 조회되지 않지만 포지션을 읽지 못해 교차 확인을 못 했습니다',
+        reason: position.qtyNow === null
+          ? '주문이 조회되지 않지만 포지션을 읽지 못해 교차 확인을 못 했습니다'
+          : `주문이 조회되지 않지만 포지션 수량이 숫자가 아니라 교차 확인을 못 했습니다 `
+            + `(전 ${String(position.qtyBefore)} → 지금 ${String(position.qtyNow)})`,
       };
     }
     if (qtyChanged(position)) {
@@ -249,10 +282,12 @@ export function resolveAcked(input: ResolveInput): AckedResolveResult {
       reason: '멱등 키가 없어 거래소에서 이 주문을 식별할 수 없습니다',
     };
   }
-  if (elapsedMs < REFLECT_GRACE_MS) {
+  if (!graceElapsed(elapsedMs)) {
     return {
       state: 'ACKED', resolved: false, action: 'RETRY_QUERY',
-      reason: `전송 후 ${Math.round(elapsedMs)}ms — 거래소 반영 대기 시간 내입니다`,
+      reason: Number.isFinite(elapsedMs)
+        ? `전송 후 ${Math.round(elapsedMs)}ms — 거래소 반영 대기 시간 내입니다`
+        : `전송 후 경과 시간을 알 수 없습니다(${String(elapsedMs)}) — 반영 대기 시간이 지났다고 볼 수 없습니다`,
     };
   }
 
@@ -263,7 +298,7 @@ export function resolveAcked(input: ResolveInput): AckedResolveResult {
   // 한다"는 뜻이다 — FILLED로도 FAILED로도 단정하지 않는다.
   return {
     state: 'RECONCILED', resolved: true, action: 'NONE',
-    reason: position && position.qtyNow !== null && !qtyChanged(position)
+    reason: position && positionReadable(position) && !qtyChanged(position)
       ? '거래소가 받았던 주문이 더 이상 조회되지 않고 포지션도 그대로입니다 — '
         + '이미 종료된 주문으로 정리합니다 (체결·취소 여부는 거래 내역에서 확인하세요)'
       : '거래소가 받았던 주문이 더 이상 조회되지 않습니다 — '
