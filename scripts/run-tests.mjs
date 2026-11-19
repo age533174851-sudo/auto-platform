@@ -199,6 +199,8 @@ import {
   runPrecisionMatrixTests,
   runAdoptIntentIntegrationTests,
 } from './src/test/integration/orderPathIntegration.test';
+import { runTenSlotDispatchIntegrationTests } from './src/test/integration/tenSlotDispatchIntegration.test';
+import { runTenSlotLifecycleTests } from './src/test/integration/tenSlotLifecycleIntegration.test';
 import { runSmokeStartRouteTests } from './src/test/integration/smokeStartRouteIntegration.test';
 import { runForcedEntryRouteTests } from './src/test/integration/forcedEntryRouteIntegration.test';
 import { runHoldExtensionIntegrationTests } from './src/test/integration/holdExtensionIntegration.test';
@@ -480,6 +482,8 @@ runPaperMultiBotTests(); runFeedbackRedactTests(); runFeedbackTicketTests(); run
   //   하나도 없다"로 보였다. 그래서 전부 끝난 뒤에 돌린다.
   await runOrderPathIntegrationTests();
   await runAdoptIntentIntegrationTests();
+  await runTenSlotDispatchIntegrationTests();
+  await runTenSlotLifecycleTests();
   await runReconcileIntegrationTests();
   await runSpotIntegrationTests();
   await runCloseIntegrationTests();
