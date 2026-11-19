@@ -1,4 +1,6 @@
 // src/lib/trading/marketStats.test.ts
+import { readFileSync } from 'fs';
+import { resolve } from 'path';
 import { test, eq, assert } from '../../test/harness';
 import {
   priceDigits, fmtStatPrice, fmtCompact, fmtChangePct, changeTone,
@@ -111,5 +113,20 @@ export function runMarketStatsTests() {
     eq(vol.label, '24h Vol(USDC)');
     eq(vol.text, '1.00B');
     eq(vol.unknown, false);
+  });
+
+  // ── ★ 같은 판단을 두 곳에 두지 않는다 ──
+  //
+  // #642는 `fmtCompact`만 고쳤다. 종목 검색 목록(`SymbolSearch.tsx`)은
+  // 자기 `fmtVol`을 따로 갖고 있어서 999,999를 여전히 `1000.00K`로 적었다.
+  // .tsx는 시험 러너가 컴파일하지 않으므로, 목록이 **이 함수를 쓰는지**를
+  // 원문으로 확인한다 — 자기 사본이 다시 생기면 여기서 갈린다.
+  test('★ 종목 검색 목록의 거래량도 fmtCompact 하나로 적는다 — 1000.00K 사본 금지', () => {
+    const src = readFileSync(
+      resolve(__dirname, '../../components/terminal/SymbolSearch.tsx'), 'utf8');
+    assert(/import\s*\{[^}]*\bfmtCompact\b[^}]*\}\s*from\s*'@\/lib\/trading\/marketStats'/.test(src),
+      'SymbolSearch가 marketStats의 fmtCompact를 가져와야 한다');
+    assert(!/\.toFixed\(\d\)\}[KMB]/.test(src),
+      'SymbolSearch에 K/M/B 축약을 직접 만드는 사본이 남아 있으면 안 된다');
   });
 }
