@@ -2,6 +2,8 @@
 import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { safeNumber, formatKRW, safePercent } from '@/lib/format';
+// 가격의 통화와 세금 공제의 통화를 맞추는 규칙은 lib 한 곳에만 둔다.
+import { quoteCurrencyOf, estimateCalcTax } from '@/lib/pnl/calcCurrency';
 
 // Re-exports for backward compatibility
 export { calcTradePnL, calcMinViableProfit, applyBacktestCosts } from '@/lib/pnl';
@@ -275,6 +277,9 @@ export default function PnLCalculatorPage({
     }
   }, [investment, buyPrice, showToast]);
 
+  // 결과를 그리는 통화 = 사용자가 가격을 적은 통화. 달러 이익에 ₩를 붙이지 않는다.
+  const quote = quoteCurrencyOf(assetType);
+
   /* ── Validation ─────────────────────────────────────── */
   const validation = useMemo(() => {
     const errors: string[] = [];
@@ -282,8 +287,10 @@ export default function PnLCalculatorPage({
     if (toNum(sellPrice) <= 0) errors.push('매도 가격을 입력해주세요');
     if (toNum(quantity)  <= 0) errors.push('수량을 입력해주세요');
     if (toNum(leverage)  <= 0) errors.push('레버리지는 1 이상이어야 합니다');
+    // 달러 가격에서 원화 공제를 빼려면 환율이 있어야 한다.
+    if (quoteCurrencyOf(assetType) === 'USD' && toNum(fxRate) <= 0) errors.push('환율을 입력해주세요');
     return errors;
-  }, [buyPrice, sellPrice, quantity, leverage]);
+  }, [buyPrice, sellPrice, quantity, leverage, assetType, fxRate]);
 
   /* ── Main calculation ───────────────────────────────── */
   const result = useMemo(() => {
@@ -303,25 +310,13 @@ export default function PnLCalculatorPage({
     const grossProfit = (sp - bp) * qty * lev * direction;
 
     const totalFee = (buyAmount + sellAmount) * fee;
-    const taxableProfit = Math.max(0, grossProfit);
-    let estimatedTax = taxableProfit * tax;
-
-    // Special tax rules
-    if (taxMode === 'us_stock') {
-      // 250만원 공제 후 22%
-      const deducted = Math.max(0, grossProfit - 2_500_000);
-      estimatedTax = deducted * 0.22;
-    } else if (taxMode === 'futures') {
-      const deducted = Math.max(0, grossProfit - 2_500_000);
-      estimatedTax = deducted * 0.20;
-    } else if (taxMode === 'kr_stock') {
-      // 거래세는 매도금액의 0.23%
-      estimatedTax = sellAmount * 0.0023;
-    } else if (taxMode === 'crypto') {
-      // 시행 시 250만원 공제 후 20%
-      const deducted = Math.max(0, grossProfit - 2_500_000);
-      estimatedTax = deducted * 0.20;
-    }
+    // 미국주식·ETF는 달러로 적는다 — 250만 원 공제는 환율로 바꿔서 뺀다.
+    // 환율을 모르면 세금을 0으로 꾸미지 않고 결과를 내지 않는다.
+    const estimatedTax = estimateCalcTax({
+      taxMode, grossProfit, sellAmount, taxRatePct: tax * 100,
+      quote: quoteCurrencyOf(assetType), fxRate: toNum(fxRate),
+    });
+    if (estimatedTax == null) return null;
 
     const netProfit = grossProfit - totalFee - estimatedTax - extra;
     const margin    = buyAmount / lev;
@@ -391,7 +386,7 @@ export default function PnLCalculatorPage({
       leveragedProfit, breakEven, targetPrice, stopPrice, liqPrice,
       rrRatio, margin, status,
     };
-  }, [buyPrice, sellPrice, quantity, leverage, feeRate, taxRate, side, taxMode, extraCost, targetROI, stopLoss]);
+  }, [buyPrice, sellPrice, quantity, leverage, feeRate, taxRate, side, taxMode, extraCost, targetROI, stopLoss, assetType, fxRate]);
 
   /* ── Split buy average ───────────────────────────────── */
   const splitAvg = useMemo(() => {
@@ -473,19 +468,19 @@ export default function PnLCalculatorPage({
     if (!result) return;
     const text = [
       `${symbol || '계산결과'} (${side === 'long' ? '롱' : '숏'})`,
-      `매수가: ${formatPrice(toNum(buyPrice))} × ${quantity}`,
-      `매도가: ${formatPrice(toNum(sellPrice))}`,
-      `총수수료: ${formatPrice(result.totalFee)}`,
-      `예상세금: ${formatPrice(result.estimatedTax)}`,
+      `매수가: ${formatPrice(toNum(buyPrice), quote)} × ${quantity}`,
+      `매도가: ${formatPrice(toNum(sellPrice), quote)}`,
+      `총수수료: ${formatPrice(result.totalFee, quote)}`,
+      `예상세금: ${formatPrice(result.estimatedTax, quote)}`,
       `━━━━━━━━━━━━━━`,
-      `순수익: ${formatPL(result.netProfit)}`,
+      `순수익: ${formatPL(result.netProfit, quote)}`,
       `수익률: ${safePercent(result.roi)}`,
-      `손익분기: ${formatPrice(result.breakEven)}`,
+      `손익분기: ${formatPrice(result.breakEven, quote)}`,
     ].join('\n');
     navigator.clipboard?.writeText(text)
       .then(() => showToast('결과 복사됨'))
       .catch(() => showToast('❌ 복사 실패'));
-  }, [result, symbol, side, buyPrice, sellPrice, quantity, showToast]);
+  }, [result, symbol, side, buyPrice, sellPrice, quantity, quote, showToast]);
 
   const statusColor = result?.status === 'profit' ? T.grn
                     : result?.status === 'loss'   ? T.red
@@ -555,7 +550,7 @@ export default function PnLCalculatorPage({
                 </div>
                 <div style={{ textAlign:'right' }}>
                   <div style={{ color: r.netProfit >= 0 ? T.grn : T.red, fontSize: 12, fontWeight: 700 }}>
-                    {formatPL(r.netProfit)}
+                    {formatPL(r.netProfit, quoteCurrencyOf(r.assetType))}
                   </div>
                   <div style={{ color: r.roi >= 0 ? T.grn : T.red, fontSize: 10 }}>
                     {safePercent(r.roi)}
@@ -740,7 +735,7 @@ export default function PnLCalculatorPage({
                   : result.status === 'loss' ? '❌ 손실 예상' : '➖ 본전'}
               </div>
               <div style={{ color: statusColor, fontSize: 24, fontWeight: 900, fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums' }}>
-                {formatPL(result.netProfit)}
+                {formatPL(result.netProfit, quote)}
               </div>
               <div style={{ color: statusColor, fontSize: 14, fontWeight: 700 }}>
                 {safePercent(result.roi)}
@@ -749,16 +744,16 @@ export default function PnLCalculatorPage({
 
             {/* Detail rows */}
             {[
-              ['총 매수금액',  formatPrice(result.buyAmount),    T.txt],
-              ['총 매도금액',  formatPrice(result.sellAmount),   T.txt],
-              ['총 수수료',    '-' + formatPrice(result.totalFee), T.red],
-              ['예상 세금',    '-' + formatPrice(result.estimatedTax), T.red],
-              ['세전 손익',    formatPL(result.grossProfit), result.grossProfit >= 0 ? T.grn : T.red],
-              ['레버리지 적용 수익', formatPL(result.leveragedProfit), result.leveragedProfit >= 0 ? T.grn : T.red],
-              ['손익분기 매도가 (추정)', formatPrice(result.breakEven), T.ylw],
+              ['총 매수금액',  formatPrice(result.buyAmount, quote),    T.txt],
+              ['총 매도금액',  formatPrice(result.sellAmount, quote),   T.txt],
+              ['총 수수료',    '-' + formatPrice(result.totalFee, quote), T.red],
+              ['예상 세금',    '-' + formatPrice(result.estimatedTax, quote), T.red],
+              ['세전 손익',    formatPL(result.grossProfit, quote), result.grossProfit >= 0 ? T.grn : T.red],
+              ['레버리지 적용 수익', formatPL(result.leveragedProfit, quote), result.leveragedProfit >= 0 ? T.grn : T.red],
+              ['손익분기 매도가 (추정)', formatPrice(result.breakEven, quote), T.ylw],
               ['리스크/리워드 비율', result.rrRatio > 0 ? `1 : ${result.rrRatio.toFixed(2)}` : '-', T.acl],
               ...(result.liqPrice
-                ? [['청산가 (추정)', formatPrice(result.liqPrice), T.red] as [string, string, string]]
+                ? [['청산가 (추정)', formatPrice(result.liqPrice, quote), T.red] as [string, string, string]]
                 : []),
             ].map(([label, value, color]) => (
               <div key={label} style={{ display:'flex', justifyContent:'space-between',
@@ -771,8 +766,8 @@ export default function PnLCalculatorPage({
             {/* Interpretation */}
             <div style={{ marginTop: 14, padding:'10px 12px', background: T.alt,
               borderRadius: 10, color: T.sub, fontSize: 11, lineHeight: 1.6 }}>
-              현재 조건에서 수수료 {formatPrice(result.totalFee)}와 세금 {formatPrice(result.estimatedTax)}를
-              제외하고 <strong style={{ color: statusColor }}>{formatPL(result.netProfit)}</strong>의
+              현재 조건에서 수수료 {formatPrice(result.totalFee, quote)}와 세금 {formatPrice(result.estimatedTax, quote)}를
+              제외하고 <strong style={{ color: statusColor }}>{formatPL(result.netProfit, quote)}</strong>의
               {result.status === 'profit' ? ' 순수익' : result.status === 'loss' ? ' 순손실' : ' 본전'}입니다.
               {result.status === 'profit' && result.roi >= 10 && ' 수익률이 우수합니다.'}
               {result.status === 'loss' && ' 손절 전략 검토를 권장합니다.'}
@@ -809,13 +804,13 @@ export default function PnLCalculatorPage({
             <div style={{ display:'flex', justifyContent:'space-between', padding:'8px 0', borderTop:`1px solid ${T.border}` }}>
               <span style={{ color: T.muted, fontSize: 11 }}>필요 매도가</span>
               <span style={{ color: T.grn, fontSize: 12, fontWeight: 700, fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums' }}>
-                {formatPrice(result.targetPrice)}
+                {formatPrice(result.targetPrice, quote)}
               </span>
             </div>
             <div style={{ display:'flex', justifyContent:'space-between', padding:'8px 0', borderTop:`1px solid ${T.border}` }}>
               <span style={{ color: T.muted, fontSize: 11 }}>추천 손절가</span>
               <span style={{ color: T.red, fontSize: 12, fontWeight: 700, fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums' }}>
-                {formatPrice(result.stopPrice)}
+                {formatPrice(result.stopPrice, quote)}
               </span>
             </div>
           </Card>
@@ -837,13 +832,13 @@ export default function PnLCalculatorPage({
             <div style={{ display:'flex', justifyContent:'space-between', marginBottom: 4 }}>
               <span style={{ color: T.muted, fontSize: 11 }}>평균 단가</span>
               <span style={{ color: T.acl, fontSize: 13, fontWeight: 700, fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums' }}>
-                {formatPrice(splitAvg.avgPrice)}
+                {formatPrice(splitAvg.avgPrice, quote)}
               </span>
             </div>
             <div style={{ display:'flex', justifyContent:'space-between' }}>
               <span style={{ color: T.muted, fontSize: 10 }}>총 {splitAvg.totalQty} 개</span>
               <span style={{ color: T.muted, fontSize: 10, fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums' }}>
-                = {formatPrice(splitAvg.totalCost)}
+                = {formatPrice(splitAvg.totalCost, quote)}
               </span>
             </div>
           </div>

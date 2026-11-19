@@ -800,6 +800,106 @@ export async function runReconcileIntegrationTests() {
     });
   }
 
+  // ══════════ ⑤-d 손절 복구: 포지션을 못 읽은 것을 '포지션 없음'으로 적지 않는다 (#479) ══════════
+  //
+  //   체결이 확인된 진입의 손절 복구는 포지션이 실제로 있는지 먼저 본다.
+  //   그 조회가 실패하거나 수량이 깨져 있으면 `Number(x ?? 0)` → 0 →
+  //   "보호할 것 없음"으로 **경고 없이** 끝났다. 대조는 그 줄을 종료로
+  //   적으므로 다시 볼 기회도 없다 — 손절 없는 포지션이 조용히 남는다.
+  //   확인된 0만 '포지션 없음'이고, 못 읽은 것은 '확인 불가'로 남긴다.
+  //   어느 쪽이든 **주문은 새로 보내지 않는다** (지어낸 노출에 손절 금지).
+  const UNREAD = '손절 복구 확인 불가';
+  const bnFilledStopRow = (sym: string) => new FakeDb().seed('live_orders', [pendingRow({
+    symbol: sym, stop_policy: 'FIXED_SL', stop_loss: 58920.981,
+    sl_order_id: null, reduce_only: false,
+  })]);
+  const bnFilled = (sym: string) => ({ json: bnOrder({ symbol: sym, status: 'FILLED',
+    executedQty: '0.003', origQty: '0.003', avgPrice: '60000' }) });
+  const hasUnread = (r: any) => Array.isArray(r?.details)
+    && r.details.some((d: string) => d.includes(UNREAD));
+
+  for (const [label, posReply] of [
+    ['수량이 깨진 본문(positionAmt:"bad")', { json: [{ symbol: 'PRECUNREADUSDT', positionAmt: 'bad',
+      entryPrice: '60000', leverage: '100', marginType: 'isolated', liquidationPrice: '0' }] }],
+    ['조회 HTTP 500', { status: 500, json: { code: -1000, msg: 'internal' } }],
+  ] as const) {
+    const SYM = 'PRECUNREADUSDT';
+    const db = bnFilledStopRow(SYM);
+    const venue = new FakeVenue()
+      .on('/positionRisk', posReply as any)
+      .on('/fapi/v3/account', { json: { positions: [] } })
+      .on(BN_ORDER, bnFilled(SYM), 'GET');
+    const r = await scenario(venue, () => reconcile(db));
+    test(`★ Binance 손절 복구: ${label}을 '포지션 없음'으로 삼키지 않는다`, () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq((r as any).resolved, 1, '체결 확인 자체가 깨졌다 — 이 시험의 전제가 아니다');
+      eq(venue.orderSends().length, 0, '포지션을 모르는데 손절을 보냈다');
+      assert(hasUnread(r), `조회 실패가 경고 없이 사라졌다: ${JSON.stringify((r as any).details)}`);
+    });
+  }
+
+  {
+    // 회귀: **확인된** 0은 지금처럼 조용히 '걸 것 없음'이다.
+    const SYM = 'PRECFLATUSDT';
+    const db = bnFilledStopRow(SYM);
+    const venue = new FakeVenue()
+      .on(BN_POS, { json: [{ symbol: SYM, positionAmt: '0', entryPrice: '0',
+        leverage: '100', marginType: 'isolated', liquidationPrice: '0' }] })
+      .on(BN_ORDER, bnFilled(SYM), 'GET');
+    const r = await scenario(venue, () => reconcile(db));
+    test('★ Binance 손절 복구: 확인된 수량 0은 경고 없이 걸지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 0);
+      assert(!hasUnread(r), '확인된 0을 확인 불가로 적었다');
+    });
+  }
+
+  for (const [label, posReply] of [
+    ['조회 HTTP 500', { status: 500, json: { label: 'SERVER_ERROR', message: 'internal' } }],
+    ['수량이 깨진 본문(size:"bad")', { json: { contract: 'BTC_USDT', size: 'bad' } }],
+    ['계약 없는 빈 본문', { json: {} }],
+  ] as const) {
+    const db = new FakeDb().seed('live_orders', [pendingRow({
+      exchange: 'gate', status: 'ACKED', stop_policy: 'FIXED_SL', stop_loss: 58920.981,
+      sl_order_id: null, reduce_only: false,
+    })]);
+    const venue = new FakeVenue()
+      .on('/api/v4/futures/usdt/orders', { json: (i: number) => (i === 0
+        ? []
+        : [{ id: 9004, contract: 'BTC_USDT', size: 2, price: '0', status: 'finished',
+             finish_as: 'filled', text: 't-COID-R1', left: 0, fill_price: '95000' }]) }, 'GET')
+      .on('/api/v4/futures/usdt/positions/BTC_USDT', posReply as any)
+      .on('/api/v4/futures/usdt/positions', { json: [] });
+    const r = await scenario(venue, () => reconcile(db, 'gate'));
+    test(`★ Gate 손절 복구: ${label}을 '포지션 없음'으로 삼키지 않는다`, () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(db.row('live_orders', { id: 'ord-1' })?.status, 'FILLED', '시험 전제(체결 확정)가 깨졌다');
+      eq(venue.orderSends().length, 0, '포지션을 모르는데 손절을 보냈다');
+      assert(hasUnread(r), `조회 실패가 경고 없이 사라졌다: ${JSON.stringify((r as any).details)}`);
+    });
+  }
+
+  {
+    // 회귀: Gate가 **읽을 수 있는 0**을 주면 걸 것이 없다 — 경고도 없다.
+    const db = new FakeDb().seed('live_orders', [pendingRow({
+      exchange: 'gate', status: 'ACKED', stop_policy: 'FIXED_SL', stop_loss: 58920.981,
+      sl_order_id: null, reduce_only: false,
+    })]);
+    const venue = new FakeVenue()
+      .on('/api/v4/futures/usdt/orders', { json: (i: number) => (i === 0
+        ? []
+        : [{ id: 9005, contract: 'BTC_USDT', size: 2, price: '0', status: 'finished',
+             finish_as: 'filled', text: 't-COID-R1', left: 0, fill_price: '95000' }]) }, 'GET')
+      .on('/api/v4/futures/usdt/positions/BTC_USDT', { json: { contract: 'BTC_USDT', size: 0 } })
+      .on('/api/v4/futures/usdt/positions', { json: [] });
+    const r = await scenario(venue, () => reconcile(db, 'gate'));
+    test('★ Gate 손절 복구: 확인된 size 0은 경고 없이 걸지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 0);
+      assert(!hasUnread(r), '확인된 0을 확인 불가로 적었다');
+    });
+  }
+
   // ══════════ ⑥ Gate 선물 상태 어휘 ══════════
   {
     const db = new FakeDb().seed('live_orders', [
@@ -2514,6 +2614,79 @@ export async function runAdoptIntentIntegrationTests() {
       // 예약됐는데, 거래소에는 아무 일도 일어나지 않고 ok는 false다.
       eq((r as any).ok, false);
       eq(db.table('live_orders')[0].status, 'INTENT');
+    });
+  }
+
+  // ══════════ ①-a 중복이라고 말하려면 **중복임을 확인해야 한다** ══════════
+  //
+  // 23505는 "그 `client_order_id`로 줄이 하나 있다"까지만 증명한다.
+  // 그 줄이 **어떤 상태인지**는 뒤이은 조회가 알려 주고, 그 조회는 실패할
+  // 수 있다. 그런데 응답은 조회 결과와 무관하게 늘 같은 말을 했다:
+  //
+  //     duplicate: true · "이미 처리된 주문입니다 (중복 요청)"
+  //
+  // 조회가 실패하면 status는 `UNKNOWN`인데 문구는 "이미 처리됐다"다.
+  // **확인하지 못한 것을 처리됨으로 적는 자리다.** 화면은
+  // `settled === false`를 재주문 잠금 신호로 쓰는데(이 파일의
+  // `ExecuteResult.settled` 설명) 이 경로는 그 값을 아예 주지 않아,
+  // 사람이 "이미 처리됐구나" 하고 넘어갈 수 있다.
+  //
+  // 보내지 않는 것은 그대로 둔다 — 바꾸는 것은 **무엇을 말하는가**다.
+  {
+    const db = new FakeDb({
+      failInsertCode: { table: 'live_orders', code: '23505' },
+      failSelectsOn: 'live_orders',
+    });
+    const venue = sendableVenue();
+    const r = await scenario(venue, () => exec(db, {}));
+
+    test('★★ 중복 줄을 읽지 못했으면 "이미 처리됨"으로 적지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      // 보내지 않는 것은 유지한다. 이쪽이 느슨해지면 포지션이 두 배가 된다.
+      eq(venue.orderSends().length, 0, '확인도 못 한 중복에 주문을 보냈다');
+      eq((r as any).ok, false);
+      eq((r as any).duplicate, true, '23505 자체는 줄이 있다는 증거다 — 재주문을 열지 않는다');
+      eq((r as any).status, 'UNKNOWN');
+      // 확정되지 않았으므로 화면이 재주문을 잠글 수 있어야 한다.
+      eq((r as any).settled, false, '확인 못 한 결과에 확정 신호를 주지 않았다');
+      assert(!String((r as any).message).includes('이미 처리된'),
+        `확인 못 한 줄을 "이미 처리됨"으로 적었다: ${(r as any).message}`);
+    });
+  }
+
+  // ══════════ ①-b 예약된 INTENT는 "처리된" 것이 아니다 ══════════
+  //
+  // 097이 커밋한 줄의 상태는 `INTENT`다 — 거래소에는 아무 일도 없었다.
+  // 그 자리에서 "이미 처리된 주문"이라고 적으면, 영원히 나가지 않은 주문이
+  // 처리된 것으로 보인다. 이것이 #531이 가리키는 구멍의 **보고 쪽 절반**이다.
+  {
+    const db = adoptDb();
+    const venue = sendableVenue();
+    const r = await scenario(venue, () => exec(db, {}));
+
+    test('★★ 전송되지 않은 예약 의도를 "이미 처리됨"으로 적지 않는다', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 0);
+      eq((r as any).status, 'INTENT');
+      eq((r as any).settled, false, '전송조차 안 된 주문을 확정으로 적었다');
+      assert(!String((r as any).message).includes('이미 처리된'),
+        `나가지도 않은 주문을 "이미 처리됨"으로 적었다: ${(r as any).message}`);
+    });
+  }
+
+  // ══════════ ①-c 실제로 체결된 중복은 그대로 확정이다 ══════════
+  {
+    const db = adoptDb({ status: 'FILLED', exchange_order_id: '7001', filled_qty: 0.01 });
+    const venue = sendableVenue();
+    const r = await scenario(venue, () => exec(db, {}));
+
+    test('확인된 체결 중복은 확정으로 적는다 (여기를 약하게 만들지 않는다)', () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(venue.orderSends().length, 0);
+      eq((r as any).ok, true);
+      eq((r as any).status, 'FILLED');
+      eq((r as any).settled, true, '확인된 체결을 확정으로 적지 않았다');
+      eq((r as any).duplicate, true);
     });
   }
 

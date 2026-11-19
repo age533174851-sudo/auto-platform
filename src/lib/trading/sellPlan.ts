@@ -205,3 +205,41 @@ export function newClientSellId(now: number, rand: number): string {
   if (!Number.isFinite(t) || !Number.isFinite(r)) return '';
   return `sell-${t.toString(36)}-${r.toString(36)}`;
 }
+
+// ══════════ 매도 결과의 체결가 ══════════
+//
+// `/api/paper/sell`이 응답에 싣는 체결가를 정한다. **돈을 계산하지 않는다** —
+// 어느 가격이 이 응답의 손익과 짝인지만 고른다.
+//
+// 재시도(`REPLAYED`)에서 088은 **처음 매도 때 적어 둔 답**(수량·손익)을
+// 돌려준다. 그런데 라우트는 RPC를 부르기 전에 시세를 새로 읽으므로, 그 값을
+// 그대로 실으면 "처음 손익 + 지금 시세"가 한 응답에 섞인다. 처음 체결가는
+// `paper_sell_events.exit_price`에 있다. 못 읽었으면 **null**이다 — 지금
+// 시세로 메우지 않는다(UNKNOWN을 다른 값으로 적지 않는다).
+
+export type SellPriceBasis = 'FILLED_NOW' | 'ORIGINAL_FILL' | 'ORIGINAL_FILL_UNREADABLE';
+
+export interface SellReceiptPrice {
+  exitPrice: number | null;
+  priceSource: string | null;
+  priceBasis: SellPriceBasis;
+}
+
+/** 처음 체결가의 출처. 시세 출처가 아니라 **모의 장부**다 */
+export const ORIGINAL_FILL_SOURCE = 'paper_sell_events';
+
+export function sellReceiptPrice(
+  status: string,
+  fresh: { price: number; source: string },
+  stored: { exit_price?: unknown } | null | undefined,
+): SellReceiptPrice {
+  if (status !== 'REPLAYED') {
+    return { exitPrice: fresh.price, priceSource: fresh.source, priceBasis: 'FILLED_NOW' };
+  }
+  const raw = stored?.exit_price;
+  const v = raw == null || raw === '' ? NaN : Number(raw);
+  if (!Number.isFinite(v) || v <= 0) {
+    return { exitPrice: null, priceSource: null, priceBasis: 'ORIGINAL_FILL_UNREADABLE' };
+  }
+  return { exitPrice: v, priceSource: ORIGINAL_FILL_SOURCE, priceBasis: 'ORIGINAL_FILL' };
+}
