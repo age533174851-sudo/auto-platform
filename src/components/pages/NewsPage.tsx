@@ -1,5 +1,6 @@
 'use client';
 import { ConsensusPanel } from '@/components/news/ConsensusPanel';
+import { analysisSourceLabel } from '@/lib/news/sourceLabel';
 import { AiVerdict, type AiVerdictData } from '@/components/news/AiVerdict';
 import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
@@ -396,9 +397,7 @@ function NewsPageInner({ onOpenAsset }: { currency?: string; onOpenAsset?: (a: {
             <div style={{ flex: 1 }}>
               <div style={F.section}>AI 분석</div>
               <div style={F.muted}>
-                {an?.source === 'openai' ? 'OpenAI 분석' :
-                 an?.source === 'cache'  ? '캐시된 분석' :
-                 an?.source === 'mock'   ? '키워드 기반 분석' : '분석 중...'}
+                {analysisSourceLabel(an)}
               </div>
             </div>
             {isAnalyzing && <RefreshCw size={14} strokeWidth={IC_STROKE} color={T.acl}

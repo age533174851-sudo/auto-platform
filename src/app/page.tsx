@@ -102,6 +102,7 @@ const ShortcutHelp = dynamic(() => import('@/components/ShortcutHelp'),{ ssr: fa
 const MenuHubPage = dynamic(() => import('@/components/pages/MenuHubPage'),{ ssr: false });
 const EasyModePage = dynamic(() => import('@/components/pages/EasyModePage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>로딩 중...</div> });
 const AiUsagePage = dynamic(() => import('@/components/pages/AiUsagePage'),{ ssr: false });
+const FeedbackPage = dynamic(() => import('@/components/pages/FeedbackPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>로딩 중...</div> });
 const PineGuidePage = dynamic(() => import('@/components/pages/PineGuidePage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>로딩 중...</div> });
 const SeasonalityPage = dynamic(() => import('@/components/pages/SeasonalityPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>로딩 중...</div> });
 const AIPortfolioPage = dynamic(() => import('@/components/pages/AIPortfolioPage'),{ ssr: false, loading: () => <div style={{padding:'40px 20px',textAlign:'center',color:'var(--t-muted)',fontSize:13}}>⏳ 로딩 중...</div> });
@@ -250,6 +251,7 @@ const MTABS: { id: string; label: string; Icon: IconComp; core?: boolean }[] = [
   {id:'watchlist',    label:'왓치리스트', Icon: Star, core: true},
   {id:'season',       label:'시즌전략',   Icon: Sprout},
   {id:'ai_usage',     label:'AI 관리센터', Icon: Cpu},
+  {id:'feedback',     label:'피드백·문의', Icon: MessageSquare},
   {id:'portfolio',    label:'포트폴리오', Icon: Briefcase, core: true},
   {id:'history',      label:'매매일지',   Icon: NotebookPen},
   {id:'backtest',     label:'백테스트',   Icon: FlaskConical, core: true},
@@ -309,6 +311,8 @@ export default function App() {
     setThemeMode(order[(order.indexOf(themeMode)+1)%order.length]);
   },[themeMode,setThemeMode]);
   const [tab,setTab]=useState('home');
+  const isEasyScreen = tab === 'easy';
+  const screenSwitchLabel = isEasyScreen ? '기본 화면' : '쉬운 화면';
   const [paletteOpen,setPaletteOpen]=useState(false);
   const [helpOpen,setHelpOpen]=useState(false);
   // ── 딥링크 ──
@@ -881,6 +885,7 @@ export default function App() {
   const TAB_DESC:Record<string,string>={
     home:'전체 요약을 한눈에 봐요',
     easy:'자주 쓰는 기능만 크게 모아봐요',
+    feedback:'버그 신고와 문의를 남기고 답변을 받아요',
     autobot:'돌아가는 자동매매 봇을 관리해요',
     paper:'가상 자금으로 연습 매매해요',
     season:'계절·이벤트 기반 전략을 봐요',
@@ -927,6 +932,7 @@ export default function App() {
       switch(tab) {
         case 'home':         return <HomePageComp {...p} onOpenAsset={openDetail}/>;
         case 'easy':         return <EasyModePage onNav={nav}/>;
+        case 'feedback':     return <FeedbackPage screen={tab}/>;
         case 'watchlist':    return <WatchlistPage prices={prices} currency={currency} onNav={nav} onOpenAsset={openDetail} liveIds={priceLiveIds}/>;
         case 'market':       return <MarketPageComp prices={prices} onNav={nav} currency={currency} onOpenAsset={openDetail} onOpenPnL={openPnL}/>;
         case 'trading':      return <PositionsOrdersScreen auth={authHeader||undefined} onPaperOrder={openPaperOrder}/>;
@@ -1219,9 +1225,10 @@ export default function App() {
               <div style={{display:'flex',alignItems:'center',gap:3,background:priceStatus==='live'?'rgba(16,185,129,.12)':priceStatus==='mock'?'rgba(245,158,11,.12)':'rgba(239,68,68,.12)',border:`1px solid ${priceStatus==='live'?'rgba(16,185,129,.3)':priceStatus==='mock'?'rgba(245,158,11,.3)':'rgba(239,68,68,.3)'}`,borderRadius:20,padding:'2px 7px'}}>
                 <Dot c={priceStatus==='live'?T.grn:priceStatus==='mock'?T.ylw:T.red}/><span style={{color:priceStatus==='live'?T.grn:priceStatus==='mock'?T.ylw:T.red,fontSize:9,fontWeight:700}}>{priceStatus==='live'?'LIVE':priceStatus==='mock'?'MOCK':'ERR'}</span>
               </div>
-              <button onClick={()=>nav('easy')} aria-label="쉬운 화면" title="쉬운 화면"
+              <button type="button" onClick={()=>nav(isEasyScreen ? 'home' : 'easy')} aria-label={screenSwitchLabel} title={screenSwitchLabel}
                 style={{minHeight:34,background:T.acg,border:`1px solid ${A(T.acl,'45')}`,borderRadius:20,padding:'0 10px',cursor:'pointer',fontSize:10,color:T.acl,fontWeight:800,display:'flex',alignItems:'center',gap:4,whiteSpace:'nowrap',flexShrink:0}}>
-                <Sparkles size={12} strokeWidth={2.4}/> 쉬운 화면
+                {isEasyScreen ? <LayoutGrid size={12} strokeWidth={2.4} aria-hidden="true"/> : <Sparkles size={12} strokeWidth={2.4} aria-hidden="true"/>}
+                {screenSwitchLabel}
               </button>
               {/* 테마는 설정에도 있지만 여기에도 둔다. 밝기는 자주 바꾸는
                   것이고, 그때마다 설정까지 들어가게 하면 아무도 안 쓴다.
@@ -1426,7 +1433,7 @@ export default function App() {
                       {title:'분석',ids:['backtest','scanner','seasonality','review','briefing','news','calendar','analysis','pine_guide']},
                       {title:'자산',ids:['portfolio','ai_portfolio','growth','dividends','accounts','manual_accounts']},
                       {title:'관리',ids:['ai_usage','risk_settings','history','alerts','safety','diagnostics','ops']},
-                      {title:'기타',ids:['academy','posters','social','settings']},
+                      {title:'기타',ids:['academy','posters','social','feedback','settings']},
                     ];
                     return mGroups.map((g,gi)=>{
                       // 관리자 전용 항목은 목록에서 뺀다. 서버가 막으니

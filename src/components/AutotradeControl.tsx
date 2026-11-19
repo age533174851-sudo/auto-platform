@@ -48,6 +48,7 @@ import { A } from '@/lib/theme/colors';
 import { strategyRunRequest } from '@/lib/strategies/runRequest';
 import { LEGACY_STRATEGY_ID } from '@/lib/strategies/registry';
 import SmokeTestPanel from './SmokeTestPanel';
+import SmokeExposureRecovery from './SmokeExposureRecovery';
 import { MIN_CONTROL_TARGET } from '@/lib/ui/panelPrefs';
 import { dueDiagView } from '@/lib/ui/dueDiagView';
 
@@ -764,6 +765,46 @@ export default function AutotradeControl({ onSnapshot, onReload }: {
     finally { setBusy(false); }
   };
 
+  // ── 취소된 줄에 길을 준다 ──
+  //
+  // 사용자가 그대로 말했다: "취소됨 할거면 다시 킬수 있게 만들어 놓든가
+  // ... 내역 삭제할건 하고 내비두면 다시 킬수 있게 만들어놔".
+  // 안내만 하고 길을 안 주면 쌓이기만 한다.
+  const restoreCancelled = async (row: any) => {
+    setBusy(true); setMsg(null);
+    try {
+      const r = await fetch('/api/autotrade/schedule', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: auth },
+        body: JSON.stringify({ id: row.id, action: 'restore' }),
+      });
+      const j = await r.json().catch(() => null);
+      setMsg({ ok: !!j?.ok, text: j?.message || toggleFailureNote(r.status, j) });
+      if (j?.ok) await load();
+    } catch (e: any) { setMsg({ ok: false, text: `되살리기 실패 (${e?.message || e})` }); }
+    finally { setBusy(false); }
+  };
+
+  // **되돌릴 수 없다.** 그래서 묻는다 — 그리고 무엇을 지우는지 적는다.
+  const purgeCancelled = async (row: any) => {
+    const when = row?.cancelled_at
+      ? new Date(row.cancelled_at).toLocaleString('ko-KR')
+      : '취소 시각 미기록';
+    if (!window.confirm(
+      `${row.symbol} (${row.mode}) · ${when}\n\n`
+      + '이 취소 기록을 영구히 지웁니다. 되돌릴 수 없습니다.\n'
+      + '체결·장부 기록은 다른 곳에 있어 사라지지 않습니다.')) return;
+    setBusy(true); setMsg(null);
+    try {
+      const r = await fetch(`/api/autotrade/schedule?id=${encodeURIComponent(row.id)}&purge=1`,
+        { method: 'DELETE', headers: { Authorization: auth } });
+      const j = await r.json().catch(() => null);
+      setMsg({ ok: !!j?.ok, text: j?.message || toggleFailureNote(r.status, j) });
+      if (j?.ok) await load();
+    } catch (e: any) { setMsg({ ok: false, text: `삭제 실패 (${e?.message || e})` }); }
+    finally { setBusy(false); }
+  };
+
   // ── '첫 점검 중'은 이제 저장 요청 중이라는 뜻이다 ──
   //
   // 예전에는 별도 단계(`phase === 'FIRST_RUN'`)가 있었다. 화면이 저장
@@ -1167,10 +1208,20 @@ export default function AutotradeControl({ onSnapshot, onReload }: {
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ color: T.txt, fontSize: 12, fontWeight: 700 }}>
                   {s.symbol}
+                  {/* ── 거래 환경 배지 ──
+                      **실행 상태와 다른 축이다.** 오른쪽 `켜짐/꺼짐`은 "이
+                      예약이 도는가"이고 이 배지는 "어느 돈으로 도는가"다.
+                      전에는 둘 다 색 글자여서 같은 종류로 보였고, 테스트넷
+                      예약이 켜져 있는 것과 실전 예약이 꺼져 있는 것을
+                      한눈에 구분할 수 없었다. 배지는 테두리로 감싸 축이
+                      다름을 드러낸다. */}
                   <span style={{
                     marginLeft: 6, fontSize: 9, fontWeight: 800,
+                    padding: '1px 5px', borderRadius: 4, whiteSpace: 'nowrap',
                     // 실전은 눈에 띄어야 한다. 테스트넷과 같은 색이면 못 알아본다.
                     color: String(s.mode).startsWith('LIVE') ? T.red : T.muted,
+                    border: `1px solid ${String(s.mode).startsWith('LIVE') ? A(T.red, '55') : T.border}`,
+                    background: String(s.mode).startsWith('LIVE') ? A(T.red, '12') : 'transparent',
                   }}>{s.mode}</span>
                 </div>
                 {/* ── 2행: 마지막 판단 ──
@@ -1211,16 +1262,62 @@ export default function AutotradeControl({ onSnapshot, onReload }: {
                     0으로 적는" 고장이 조용히 들어온다. */}
                 {(() => {
                   const dv = dueDiagView((s as any).dueDiag);
+                  // **간격 경고의 근거가 둘이다** — 아래 펼친 블록 주석 참조.
+                  const intervalWarn = dv.intervalDefaulted || dv.intervalIsDbDefault;
+                  const nextColor = dv.nextBlocked ? T.muted : dv.nextOverdue ? T.ylw : T.sub;
+
+                  // ── 접혀 있을 때는 **한 줄** ──
+                  //
+                  // 이 블록은 `rowOpen` 밖에 있었다. 그래서 예약 한 줄이
+                  // 항상 여덟 줄로 펼쳐졌고, 모바일(320~430px)에서 예약이
+                  // 몇 개만 돼도 같은 라벨이 끝없이 반복됐다. 바로 위
+                  // `rowOpen` 주석이 **"한 줄이 열 줄이 되면 목록이
+                  // 아니다"**라고 적어 둔 그 의도가 배선되지 않은 것이다
+                  // (`CLAUDE.md` 상습 고장 ①: 만들어 놓고 배선을 안 함).
+                  //
+                  // 접었을 때 남길 한 줄은 **다음 평가**다. 사용자가 목록
+                  // 에서 묻는 것이 "언제 도나"이고, 그 값은 이제 정지·연결
+                  // 없음·지난 시각을 시각으로 적지 않는다.
+                  if (rowOpen !== s.id) {
+                    return (
+                      <div style={{
+                        marginTop: 3, fontSize: 10, lineHeight: 1.5, color: T.muted,
+                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      }} title={`간격 ${dv.intervalText} · 다음 평가 ${dv.nextText}`}>
+                        다음 평가 <span style={{ color: nextColor, fontWeight: dv.nextOverdue ? 800 : 400 }}>{dv.nextText}</span>
+                        {intervalWarn && (
+                          <span style={{ color: T.ylw, marginLeft: 6, fontWeight: 700 }}>· 간격 확인</span>
+                        )}
+                      </div>
+                    );
+                  }
                   return (
                     <div style={{ marginTop: 3, fontSize: 10, lineHeight: 1.6, color: T.muted }}>
+                      {/* **경고색의 근거가 둘이다.**
+
+                          `intervalDefaulted`(표에 값이 없거나 쓸 수 없음)는
+                          `interval_min`이 NOT NULL DEFAULT 1440 + CHECK(>=1)
+                          이라 운영 줄에서 한 번도 참이 되지 않는다 — 즉 그
+                          경고만 두면 아무 줄도 노랗게 되지 않는다.
+
+                          실제로 사람을 헷갈리게 하는 쪽은 `intervalIsDbDefault`
+                          다: 아무도 설정하지 않은 예약이 "설정 1440분"으로,
+                          하루 1회를 일부러 고른 것과 똑같이 보인다. 그래서
+                          둘 중 하나라도 참이면 눈에 띄게 한다. */}
                       <div>
                         간격{' '}
-                        <span style={{ color: dv.intervalDefaulted ? T.ylw : T.sub, fontWeight: dv.intervalDefaulted ? 800 : 400 }}>
+                        <span style={{
+                          color: (dv.intervalDefaulted || dv.intervalIsDbDefault) ? T.ylw : T.sub,
+                          fontWeight: (dv.intervalDefaulted || dv.intervalIsDbDefault) ? 800 : 400,
+                        }}>
                           {dv.intervalText}
                         </span>
                       </div>
                       <div>마지막 평가 <span style={{ color: T.sub }}>{dv.lastText}</span></div>
-                      <div>다음 평가 <span style={{ color: T.sub }}>{dv.nextText}</span></div>
+                      <div>다음 평가 <span style={{
+                        color: dv.nextBlocked ? T.muted : dv.nextOverdue ? T.ylw : T.sub,
+                        fontWeight: dv.nextOverdue ? 800 : 400,
+                      }}>{dv.nextText}</span></div>
                       <div style={{ overflowWrap: 'anywhere' }}>
                         판정{' '}
                         {dv.code ? <span style={{ color: T.sub, fontWeight: 700 }}>{dv.code}</span> : null}
@@ -1403,15 +1500,38 @@ export default function AutotradeControl({ onSnapshot, onReload }: {
                         : '취소 시각을 기록하지 못했습니다'}
                     </div>
                   </div>
-                  <span style={{
-                    fontSize: 9, fontWeight: 800, color: T.muted,
-                    border: `1px solid ${T.border}`, borderRadius: 5, padding: '3px 7px',
-                  }}>취소됨</span>
+                  <div style={{ display: 'flex', gap: 5, alignItems: 'center', flexShrink: 0 }}>
+                    <button
+                      onClick={() => restoreCancelled(s)}
+                      disabled={busy}
+                      style={{
+                        minHeight: MIN_CONTROL_TARGET, fontSize: 9.5, fontWeight: 800,
+                        padding: '5px 8px', borderRadius: 6,
+                        border: `1px solid ${A(T.acl, '55')}`, background: 'transparent',
+                        color: T.acl, cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.5 : 1,
+                      }}
+                    >되살리기</button>
+                    <button
+                      onClick={() => purgeCancelled(s)}
+                      disabled={busy}
+                      style={{
+                        minHeight: MIN_CONTROL_TARGET, fontSize: 9.5, fontWeight: 800,
+                        padding: '5px 8px', borderRadius: 6,
+                        border: `1px solid ${T.border}`, background: 'transparent',
+                        color: T.muted, cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.5 : 1,
+                      }}
+                    >기록 삭제</button>
+                  </div>
                 </div>
               ))}
               {cancelOpen && (
                 <div style={{ color: T.muted, fontSize: 9, marginTop: 6, lineHeight: 1.5 }}>
-                  같은 종목으로 예약을 다시 만들면 이 줄이 되살아납니다.
+                  {/* **예전 문장은 조건부로만 참이었다.** `UNIQUE (user_id, symbol)`이
+                      실제로 걸려 있어야 같은 종목 재등록이 이 줄을 되살린다. 그렇지
+                      않은 DB에서는 새 줄만 생기고 이 줄은 영영 남는다. 그래서
+                      추측하지 않고 **버튼이 하는 일**만 적는다. */}
+                  되살리기는 <b>꺼진 상태</b>로 목록에 되돌립니다 — 켜는 것은 스위치로 따로 합니다.
+                  기록 삭제는 되돌릴 수 없습니다(체결·장부 기록은 다른 곳에 있어 사라지지 않습니다).
                 </div>
               )}
             </div>
@@ -1426,6 +1546,10 @@ export default function AutotradeControl({ onSnapshot, onReload }: {
 
           기능은 그대로 두고 **여는 방식만** 바꾼다. 서버로 나가는 값도,
           저장 의미도 건드리지 않는다. */}
+        {conns.some((c: any) => String(c.id) === String(connId)
+          && c.exchange_id === 'binance' && c.is_testnet === true)
+          && <SmokeExposureRecovery key={connId} auth={auth} connectionId={connId} />}
+
       <button onClick={() => setCreateOpen(v => !v)}
         aria-expanded={createOpen}
         style={{

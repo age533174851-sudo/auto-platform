@@ -58,8 +58,10 @@ export default function TradeRetrospect({ currency = 'KRW' }: { currency?: strin
         </div>
         <div style={{ flex: 1, background: T.alt, borderRadius: 10, padding: '10px 12px' }}>
           <div style={{ color: T.muted, fontSize: 10 }}>평균 손익</div>
-          <div style={{ color: result.avgWin + result.avgLoss >= 0 ? T.grn : T.red, fontSize: 13, fontWeight: 800 }}>
-            {result.avgWin > 0 ? cvt(result.avgWin, currency) : '—'}
+          {/* 전체 거래의 평균 순손익. 이긴 거래의 평균(avgWin)을 적지 않는다.
+              cvt()는 음수를 '₩0'으로 적으므로 부호를 따로 붙이고 절댓값을 넘긴다 */}
+          <div style={{ color: result.avgPnl == null ? T.muted : result.avgPnl >= 0 ? T.grn : T.red, fontSize: 13, fontWeight: 800 }}>
+            {result.avgPnl == null ? '—' : `${result.avgPnl >= 0 ? '+' : '-'}${cvt(Math.abs(result.avgPnl), currency)}`}
           </div>
         </div>
       </div>
@@ -125,7 +127,7 @@ export default function TradeRetrospect({ currency = 'KRW' }: { currency?: strin
                     <div style={{ color: c, fontSize: 12.5, fontWeight: 800 }}>{(t.realizedPct ?? 0) >= 0 ? '+' : ''}{(t.realizedPct ?? 0).toFixed(1)}%</div>
                     <div style={{ color: T.muted, fontSize: 9.5 }}>{new Date(t.ts).toLocaleDateString('ko-KR', { month: '2-digit', day: '2-digit' })} {new Date(t.ts).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })}</div>
                   </div>
-                  <span style={{ color: c, fontSize: 12, fontWeight: 700 }}>{t.realized >= 0 ? '+' : ''}{cvt(t.realized, currency)}</span>
+                  <span style={{ color: c, fontSize: 12, fontWeight: 700 }}>{t.realized >= 0 ? '+' : '-'}{cvt(Math.abs(t.realized), currency)}</span>
                   <span style={{ color: '#A78BFA', fontSize: 10, fontWeight: 700, flexShrink: 0 }}>복기 ›</span>
                 </button>
               );

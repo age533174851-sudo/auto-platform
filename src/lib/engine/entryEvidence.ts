@@ -72,6 +72,23 @@ export interface EntryEvidenceInput {
   avgPrice?: any;
   /** 진입 주문 자체가 거절됐는가 */
   rejected?: boolean | null;
+  /**
+   * **거래소가 왜 거절했는가.**
+   *
+   * 전에는 "거절됐고 포지션도 없습니다"까지만 적었다. 사용자는 그
+   * 화면을 보고 **무엇을 고쳐야 할지 알 수 없었다** — 최소 주문금액이
+   * 모자란 것인지, 배율이 안 맞는 것인지, 잔고가 없는 것인지.
+   *
+   * 사유는 실행기가 이미 들고 있었다(`ExecuteResult.message`). 판정이
+   * 그것을 받지 않았을 뿐이다.
+   *
+   * 바이낸스 어댑터는 오류 본문에서 **`[code] msg`만** 뽑아 던진다
+   * (`binanceFutures.ts`: "에러 본문에서는 code/msg만 쓴다"). 그래도
+   * 다른 거래소가 무엇을 넣을지 모르므로 `safeReason()`이 길이를 자르고
+   * 토큰처럼 보이는 긴 문자열을 지운다 — 사유를 보여 주려다 키를 남기면
+   * 안 된다.
+   */
+  rejectedReason?: string | null;
   /** **거래소 재조회** 결과. 주문 응답이 아니다 */
   position: OpenPosition | null;
   /** 요청한 배율이 거래소에서 확인됐는가. null은 모름 */
@@ -93,6 +110,16 @@ export interface EntryEvidenceInput {
  * 증거를 모으고, 마지막에 보호 여부를 본다. 순서를 바꾸면 보호 없는
  * 포지션이 '진입 실패'로 적혀서 아무도 안 닫는다.
  */
+/** 사유 한 줄. 길이를 자르고 **토큰처럼 보이는 것은 지운다** */
+export function safeReason(raw: unknown, max = 160): string {
+  if (raw == null) return '';
+  let t = String(raw).replace(/\s+/g, ' ').trim();
+  if (!t) return '';
+  // 32자 이상 이어지는 영숫자(+ - _ /)는 사유가 아니라 토큰·서명일 수 있다.
+  t = t.replace(/[A-Za-z0-9_\-/+=]{32,}/g, '[가림]');
+  return t.length > max ? t.slice(0, max - 1) + '…' : t;
+}
+
 export function enteredVerdict(i: EntryEvidenceInput): EnteredVerdict {
   const have: string[] = [];
   const missing: string[] = [];
@@ -106,10 +133,16 @@ export function enteredVerdict(i: EntryEvidenceInput): EnteredVerdict {
   // 응답만으로 없다고 적으면, 실제로는 체결됐는데 응답만 놓친
   // 경우에 보호 없는 포지션이 방치된다.
   if (i?.rejected === true && pos?.ok === true && pos.found === false) {
+    // **왜 거절됐는지를 함께 적는다.** 이것이 없으면 사용자는 무엇을
+    // 고쳐야 할지 알 수 없다. 사유를 못 받았으면 "사유 미확인"이라고
+    // 적는다 — 빈칸으로 두면 사유가 없는 것처럼 보인다.
+    const why = safeReason(i?.rejectedReason);
     return {
-      entered: false, code: 'NOT_ENTERED', have: ['거래소 재조회에서 포지션 없음'],
+      entered: false, code: 'NOT_ENTERED',
+      have: ['거래소 재조회에서 포지션 없음', why ? `거절 사유: ${why}` : '거절 사유 미확인'],
       missing: [], retryable: true,
-      reason: '진입 주문이 거절됐고 거래소에도 포지션이 없습니다 — 들어가지 않았습니다',
+      reason: '진입 주문이 거절됐고 거래소에도 포지션이 없습니다 — 들어가지 않았습니다'
+        + (why ? ` · 거래소 사유: ${why}` : ' · 거래소가 사유를 주지 않았습니다'),
     };
   }
   if (i?.settled === true && qty != null && qty <= 0 && pos?.ok === true && pos.found === false) {

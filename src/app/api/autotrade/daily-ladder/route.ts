@@ -468,8 +468,20 @@ export async function POST(req: NextRequest) {
   }
 
   // ── 주문 ──
-  const { releaseReservation, confirmReservation } = await import('@/lib/strategies/ladderGate');
+  const { releaseReservation, confirmReservation, reservationOutcome, holdReservationForReconcile } = await import('@/lib/strategies/ladderGate');
   const reservationId = result.ladder?.reservationId;
+
+  // **주문을 보내기 시작했는가.**
+  //
+  // 아래 catch는 예약을 지운다. 주문을 보내기 **전**에 막힌 것이라면
+  // 옳다 — 주문이 없으니 하루를 돌려주는 것이 맞다. 보낸 **뒤**라면
+  // 정반대다: 지우는 순간 하루 1회 잠금이 열리고, 앞 주문이 체결돼
+  // 있었다면 다음 주기에 포지션이 두 배가 된다.
+  //
+  // `executeOrder`는 응답을 못 받아도 던지지 않고 `UNKNOWN`을 돌려주지만,
+  // 그 **뒤의 코드**(장부 기록·응답 조립)가 던질 수 있다. 그때 주문은
+  // 이미 거래소에 있다.
+  let orderSent = false;
 
   try {
     if (!body.connectionId) throw new Error('connectionId가 없어 주문할 수 없습니다');
@@ -633,7 +645,11 @@ export async function POST(req: NextRequest) {
       }, { status: 400 });
     }
     const tradeDate = result.ladder?.tradeDate || new Date().toISOString().slice(0, 10);
-    const clientOrderId = `LD${tradeDate.replace(/-/g, '')}${symbol}`.slice(0, 36);
+    // **식별자를 여기서 조립하지 않는다.** 청산 감시가 손절을 옮길 때
+    // 같은 문자열을 다시 만들어야 하는데, 두 곳에 적으면 한쪽만 바뀐다.
+    // 그때 옮긴 손절이 고아가 되어도 "내 것"이라고 증명하지 못한다.
+    const { ladderEntryClientOrderId } = await import('@/lib/strategies/ladderIds');
+    const clientOrderId = ladderEntryClientOrderId({ tradeDate, symbol });
 
     // 손절가는 파이프라인이 쓴 것과 같은 기준(마지막 종가 ± 손절거리)으로
     // 되돌려 계산한다. plan에는 거리(%)만 있고 가격이 없다.
@@ -1021,6 +1037,9 @@ export async function POST(req: NextRequest) {
       }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
     }
 
+    // **보내기 직전에 표시한다.** 보낸 뒤에 표시하면 그 사이에 죽었을 때
+    // 주문은 나갔는데 표시는 안 된 상태가 된다 — 막으려던 바로 그 창이다.
+    orderSent = true;
     const exec = await executeOrder(sb, {
       userId,
       connectionId: body.connectionId,
@@ -1037,15 +1056,30 @@ export async function POST(req: NextRequest) {
       apiSecret: decryptSecret(conn.api_secret_enc ?? ''),
     });
 
-    if (exec.ok) {
+    // **판정은 ladderGate 한 곳에 있다.** `exec.ok` 하나로 가르면
+    // UNKNOWN(나갔는지 모름)이 "안 나갔다"로 접힌다.
+    const outcome = reservationOutcome(exec);
+    if (outcome === 'CONFIRM') {
       await confirmReservation(sb, reservationId, {
         leverage: result.plan!.leverage,
         entryPrice: exec.avgPrice,
+        // **장부에도 손절을 적는다.** 여기 없으면 `stop_loss`가 NULL로
+        // 남고, `exitMonitor`가 `if (!entry || !stop) continue`로 이 줄을
+        // 버린다 — 트레일링도 시간청산도 청산가 점검도 돌지 않는다.
+        // 거래소에 거는 값(`executeOrder`의 `stopLoss`)과 **같은 값**이다.
+        stopLoss,
         liquidationPrice: result.plan!.liquidationPrice,
       });
-    } else {
-      // 주문이 나가지 않았으면 오늘 하루를 돌려준다
+    } else if (outcome === 'RELEASE') {
+      // 거래소가 거부했거나 보내지 못했다 — 주문이 **없으므로** 하루를 돌려준다
       await releaseReservation(sb, reservationId);
+    } else {
+      // **나갔는지 모른다.** 지우면 하루 1회 잠금이 열리고 다음 주기에
+      // 두 번째 주문이 나간다 — 앞 주문이 체결돼 있었으면 포지션이 두 배다.
+      // 하루를 손해 보는 쪽이 싸다.
+      await holdReservationForReconcile(sb, reservationId,
+        `주문 응답을 확인하지 못했습니다(status=${exec.status ?? '없음'}) — `
+        + '나갔는지 확인될 때까지 하루를 돌려주지 않습니다');
     }
 
     return NextResponse.json({
@@ -1081,9 +1115,20 @@ export async function POST(req: NextRequest) {
       },
     }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (e: any) {
-    await releaseReservation(sb, reservationId);
+    if (orderSent) {
+      // 주문은 이미 나갔을 수 있다. **지우지 않는다.**
+      await holdReservationForReconcile(sb, reservationId,
+        `주문을 보낸 뒤 처리 중 오류(${String(e?.message || e).slice(0, 160)}) — `
+        + '나갔는지 확인될 때까지 하루를 돌려주지 않습니다');
+    } else {
+      // 보내기 전에 막혔다 — 주문이 없으므로 하루를 돌려준다
+      await releaseReservation(sb, reservationId);
+    }
     return NextResponse.json({
       ...base, executed: false, error: e?.message || '주문 실패',
+      // **하루를 돌려줬는지**를 응답에 남긴다. 이게 없으면 사용자는
+      // 오늘 다시 시도할 수 있는지 알 수 없다.
+      dayReturned: !orderSent,
     }, { status: 502, headers: { 'Cache-Control': 'no-store' } });
   }
 }
@@ -1174,13 +1219,58 @@ export async function GET(req: NextRequest) {
       : msg;
   }
 
+  // ── 예약이 가리키는 연결이 아직 있는가 ──
+  //
+  // 이 판정은 목록 API에만 있었고 **실행기에는 없었다.** 실행기가 보는
+  // 것은 `evaluationLoop`의 `NO_CONNECTION`뿐인데, 그건 연결 id가 비어
+  // 있을 때만 난다. id가 적혀 있는데 그 행이 사라진 경우는 그냥 통과하고,
+  // 간격이 안 됐으면 '건너뜀'이 되어 **ok로 집계된다.**
+  //
+  // 그래서 화면 위에는 "4개 중 2개가 막혀 있습니다", 아래에는 "4건 확인 ·
+  // 실패 0건"이 같이 떴다(2026-11-14). 같은 4줄을 두고 두 문장이 갈렸다.
+  //
+  // 판정은 `scheduleConnState` 한 곳에 있다. 여기서 다시 쓰지 않고 부른다.
+  // **못 읽으면 null이다** — 빈 배열로 두면 모든 예약이 막힘으로 뜬다.
+  let connRows: any[] | null = null;
+  if (!readError && rows.length > 0) {
+    try {
+      const uids = [...new Set(rows.map((r: any) => String(r.user_id || '')).filter(Boolean))];
+      if (uids.length === 0) {
+        connRows = [];
+      } else {
+        const { data, error } = await (sb as any).from('exchange_connections')
+          .select('id, user_id, exchange_id, label, is_testnet').in('user_id', uids);
+        if (!error) connRows = Array.isArray(data) ? data : [];
+      }
+    } catch { /* null 그대로 — 막혔다고 적지 않는다 */ }
+  }
+
   const results: any[] = [];
   if (!readError) {
     const origin = new URL(req.url).origin;
     const { evaluateIfDue } = await import('@/lib/autotrade/evaluationRunner');
+    const { scheduleConnState } = await import('@/lib/engine/schedulePlan');
+    const { blockedByConnection } = await import('@/lib/autotrade/runSummary');
     const nowMs = Date.now();
 
     for (const r of rows) {
+      // ── 돌 수 없는 줄은 '건너뜀'이 아니다 ──
+      //
+      // 간격을 보기 전에 본다. 연결이 사라진 예약은 간격이 됐든 안 됐든
+      // 주문을 낼 수 없다. 간격 검사에 맡기면 '아직 때가 아님'으로 묻힌다.
+      const mineConns = connRows === null
+        ? null
+        : connRows.filter((c: any) => String(c.user_id) === String(r.user_id));
+      const cv = scheduleConnState(r.connection_id, mineConns as any);
+      const blk = blockedByConnection(cv.state);
+      if (blk) {
+        results.push({
+          symbol: r.symbol, mode: r.mode,
+          ok: false, blocked: true, code: blk.code, detail: cv.message,
+        });
+        continue;
+      }
+
       // ── 예약 줄이 고른 전략으로 부른다 ──
       //
       // 예전에는 이 자리에서 **daily-ladder POST를 직접** 불렀다. 그래서
@@ -1250,8 +1340,7 @@ export async function GET(req: NextRequest) {
       readError ? 'failed' : rows.length === 0 ? 'skipped' : 'ok',
       // 확인한 줄 수 · 실제 진입 · 실패를 나눠 적는다. '성공 N건'만 적으면
       // 진입하지 않은 날도 매매가 일어난 것처럼 읽힌다.
-      readError || `${rows.length}건 확인 · 진입 ${results.filter(x => x.executed).length}건`
-        + ` · 실패 ${results.filter(x => !x.ok).length}건`,
+      readError || (await import('@/lib/autotrade/runSummary')).runSummary(results, rows.length).text,
       startedAt);
     cronLogError = lg.error;
   } catch (e: any) { cronLogError = String(e?.message || e); }

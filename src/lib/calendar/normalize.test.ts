@@ -9,6 +9,7 @@
 //  3. 중요도를 모를 때 'low'로 떨어뜨려 중요한 일정이 필터에서 빠지는 것
 //  4. 같은 지표가 여러 공급자에서 와서 달력에 세 번 뜨는 것
 import { test, assert, eq } from '../../test/harness';
+import { runEconManualEventTests } from './econCalendar.test';
 import {
   parseImpact, toUtc, toDate, cleanValue, eventKey,
   normalizeEvent, collectEvents, withEventName, syncCooldown, SYNC_COOLDOWN_MS,
@@ -283,4 +284,7 @@ export function runCalendarTests() {
     // 사전으로 옮길 수 있어야 한다.
     eq(localizeEventTitle('FOMC 금리 결정', 'en', DICT), 'FOMC 금리 결정');
   });
+
+  // 같은 캘린더 묶음 — Risk Veto가 읽는 수동 일정 입력(econCalendar)
+  runEconManualEventTests();
 }

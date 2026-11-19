@@ -29,6 +29,7 @@ const GATE = 'src/lib/ci/autoMergeGate.ts';
 const MERGER = 'scripts/auto-merge.mjs';
 const REPORTER = 'scripts/pr-backlog.mjs';
 const FACTS = 'scripts/lib/pr-facts.mjs';
+const REBASER = 'scripts/auto-rebase.mjs';
 
 let errors = [];
 let notes = [];
@@ -57,7 +58,7 @@ function read(p) {
  * 각 규칙이 실제로 걸리는지 확인한다. 통과만 하고 아무것도 막지 않는
  * 검사기는 없는 것보다 나쁘다 — 막는 것처럼 보이면서 안 막는다.
  */
-export function evaluate({ gate, merger, reporter, facts }) {
+export function evaluate({ gate, merger, reporter, facts, rebaser }) {
   errors = [];
   notes = [];
 // ── ① 스위치가 게이트에 그대로 있는가 ──
@@ -160,6 +161,35 @@ export function evaluate({ gate, merger, reporter, facts }) {
       notes.push(`${FACTS}: buildFacts가 리뷰 null을 그대로 넘기는지 확인하세요`);
     }
   }
+  // ── ⑤ 열린 PR 목록을 첫 장에서 끊지 않는가 ──
+  //
+  // 2026-11-07에 열린 PR이 225개인데 세 도구가 전부 **100개만** 보고
+  // 있었다. 셋 다 `?state=open&per_page=100`을 한 번 부르고 끝냈다.
+  // 그래서 `auto-merge`의 30분 안전망과 `auto-rebase`의 30분 안전망이
+  // 둘 다 첫 장 밖의 PR을 영원히 건너뛰었고, `pr-backlog`는 적체를
+  // 100개라고 적었다. **셋이 같은 자리에서 같이 틀린 것이다.**
+  //
+  // 그래서 목록을 `listOpenPulls` 하나로 모았다. 이 규칙은 그 자리가
+  // 다시 갈라지지 않게 한다 — 한 도구만 직접 장을 세는 순간 걸린다.
+  for (const [label, src] of [[MERGER, merger], [REPORTER, reporter], [REBASER, rebaser]]) {
+    if (!src) continue;
+    if (!/listOpenPulls/.test(src)) {
+      errors.push(`${label}: 열린 PR 목록을 \`listOpenPulls\`로 읽지 않습니다 — `
+        + '첫 장(100개)에서 끊기면 안전망이 그 밖의 PR을 영원히 건너뜁니다');
+    }
+    for (const m of src.matchAll(/pulls\?state=open[^`'"\n]*/g)) {
+      if (!/[?&]page=/.test(m[0])) {
+        errors.push(`${label}: 열린 PR 목록을 장 없이 직접 부릅니다 — 100개에서 조용히 잘립니다`);
+      }
+    }
+  }
+
+  // `listOpenPulls`는 **다 읽었을 때만** complete=true여야 한다.
+  if (facts && !/complete: false/.test(facts)) {
+    errors.push(`${FACTS}: listOpenPulls가 못 읽은 경우를 complete=false로 적지 않습니다 — `
+      + '부분을 전체로 읽습니다');
+  }
+
   return { errors: [...errors], notes: [...notes] };
 }
 
@@ -168,6 +198,7 @@ const SELF = process.argv.includes('--self-test');
 const sources = {
   gate: read(GATE)?.code, merger: read(MERGER)?.code,
   reporter: read(REPORTER)?.code, facts: read(FACTS)?.code,
+  rebaser: read(REBASER)?.code,
 };
 const fileErrors = [...errors];
 
@@ -203,6 +234,16 @@ if (SELF) {
       s => ({ ...s, merger: s.merger + '\n    const facts = { number: 1 };\n' })],
     ['사실 모듈이 리뷰 실패를 0으로 적음',
       s => ({ ...s, facts: s.facts.replace(/unresolvedThreads: null/g, 'unresolvedThreads: 0') })],
+    ['머지 러너가 목록을 첫 장만 읽음',
+      s => ({ ...s, merger: s.merger.replace(/listOpenPulls/g, 'nope') })],
+    ['보고기가 목록을 첫 장만 읽음',
+      s => ({ ...s, reporter: s.reporter.replace(/listOpenPulls/g, 'nope') })],
+    ['재배치기가 목록을 첫 장만 읽음',
+      s => ({ ...s, rebaser: s.rebaser.replace(/listOpenPulls/g, 'nope') })],
+    ['장 없는 단발 호출이 되살아남',
+      s => ({ ...s, merger: s.merger + '\nconst u = `/repos/${REPO}/pulls?state=open&per_page=100`;\n' })],
+    ['listOpenPulls가 부분을 전체로 적음',
+      s => ({ ...s, facts: s.facts.replace(/complete: false/g, 'complete: true') })],
   ];
 
   const bad = [];

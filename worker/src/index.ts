@@ -28,7 +28,7 @@ import {
 } from '../../src/lib/exchanges/futuresExec';
 import { futuresCancelAll, futuresCloseAll } from '../../src/lib/exchanges/futuresAdapter';
 import { evaluateIfDue } from '../../src/lib/autotrade/evaluationRunner';
-import { selectDueSchedules, shouldPollNow, POLL_INTERVAL_MS, lastEvaluationBrief } from '../../src/lib/autotrade/schedulePoll';
+import { selectDueSchedules, shouldPollNow, POLL_INTERVAL_MS, lastEvaluationBrief, offSkipCount } from '../../src/lib/autotrade/schedulePoll';
 import { exitMonitorPlan, exitMonitorOutcome, EXIT_MONITOR_INTERVAL_MS } from '../../src/lib/engine/exitMonitorSchedule';
 import { wakeCadenceHeaders } from '../../src/lib/engine/exitMonitorWake';
 
@@ -336,7 +336,15 @@ async function processPendingJobs() {
       // 잊은 주문이 완전히 다른 시세에서 체결된다.
       //
       // 만료 시각은 적재하는 쪽이 payload.expiresAt에 새긴다
-      // (src/lib/jobs/queueGuard.ts). 시각이 없는 주문 — 이 보호가 들어가기
+      // (src/lib/jobs/queueGuard.ts의 withExpiry). **다만 2026-11-08 현재
+      // 그 적재 경로는 제품 코드에 없다** — `enqueueJob` 호출 0건, 웹훅 셋
+      // 모두 적재하지 않는다. 즉 이 검사는 지금 들어오는 주문이 없어서
+      // 조용한 것이지, 통과시키고 있는 것이 아니다. 그래서 **그대로 둔다**:
+      // 누가 다시 적재를 붙였을 때 시각 없는 주문을 막는 것이 이 줄의
+      // 일이고, 적재 쪽에 가드를 요구하는 것은
+      // `scripts/check-order-guards.mjs`가 한다.
+      //
+      // 시각이 없는 주문 — 이 보호가 들어가기
       // 전에 쌓인 것 — 도 실행하지 않는다. 언제 만든 것인지 알 수 없는 주문을
       // 내보내는 쪽이 더 위험하다.
       //
@@ -569,6 +577,16 @@ async function pollSchedules(): Promise<void> {
     lastPollIso: new Date(nowMs).toISOString(),
     lastDueCount: sel.due.length,
     lastSkippedCount: sel.skipped.length,
+    // **"지금 때가 아니라 0"과 "꺼져 있어서 0"을 가른다.**
+    //
+    // 2026-11-10 운영에서 워커는 tick 39645회·pollCount 1956으로 멀쩡히
+    // 돌고 있었는데 `autotrade_schedules` 7건이 전부 `enabled=false`였다.
+    // 그때 판정은 "주 경로가 돌고 있습니다"였다 — 틀린 말은 아니지만
+    // **앞으로도 영원히 아무것도 쏘지 않는다**는 사실이 어디에도 없었다.
+    //
+    // 개수만 적는다. 종목·id는 담지 않는다 — 이 보고는 로그인 없이 열리는
+    // 경로로 나가고, `lastDueCount`와 같은 등급의 값이다.
+    lastOffCount: offSkipCount(sel),
     pollCount,
   });
   if (sel.due.length === 0) {

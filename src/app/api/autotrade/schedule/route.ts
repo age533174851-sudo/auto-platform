@@ -35,7 +35,10 @@ import {
   resolveStrategy, runnableStrategies, strategyIdOfRow, LEGACY_STRATEGY_ID,
 } from '@/lib/strategies/registry';
 import { runtimeStateOf, RUNTIME_LABEL, dueDiagnostics } from '@/lib/autotrade/evaluationLoop';
-import { parseTogglePatch, enabledUpdate, notFoundMessage } from '@/lib/autotrade/scheduleToggle';
+import {
+  parseTogglePatch, enabledUpdate, notFoundMessage, toggleAuditRecord,
+} from '@/lib/autotrade/scheduleToggle';
+import { recordAuditAsync } from '@/lib/safety/auditStore';
 import { workerPlan } from '@/lib/runtime/workerPlan';
 import { executionGateVerdict, enableFilterSpec } from '@/lib/execution/dormantGate';
 
@@ -916,6 +919,53 @@ export async function PATCH(req: NextRequest) {
   let body: any;
   try { body = await req.json(); } catch { return NextResponse.json({ ok: false, error: 'invalid_json' }, { status: 400 }); }
 
+  // ── 되살리기 ──
+  //
+  // 취소된 줄에는 길이 하나도 없었다. 같은 종목으로 새로 만들면
+  // 되살아난다고 화면이 적지만, 그건 `UNIQUE (user_id, symbol)`이 실제로
+  // 걸려 있을 때 얘기다. 그렇지 않은 DB에서는 새 줄만 생기고 취소된
+  // 줄은 영영 남는다.
+  //
+  // **켜진 채로 돌려주지 않는다.** 판정은 scheduleCancel 한 곳에 있다.
+  if (String(body?.action || '') === 'restore') {
+    const rid = String(body?.id || '').trim();
+    if (!rid) return NextResponse.json({ ok: false, error: 'missing_id' }, { status: 400 });
+    const { restoreVerdict, REVIVE_PATCH } = await import('@/lib/autotrade/scheduleCancel');
+
+    let existed = false, wasCancelled = false;
+    try {
+      const { data } = await (sb as any).from('autotrade_schedules')
+        .select('id, cancelled_at').eq('id', rid).eq('user_id', uid).maybeSingle();
+      if (data) { existed = true; wasCancelled = !!(data as any).cancelled_at; }
+    } catch { /* 아래 updated로 판단한다 */ }
+
+    let updated: number | null = null;
+    let errMsg: string | null = null;
+    try {
+      const { data, error } = await (sb as any).from('autotrade_schedules')
+        // 되살려도 **꺼진 상태**다. 되살리기 한 번에 주문이 다시 나가면
+        // 그건 사용자가 누른 적 없는 거래다.
+        .update({ ...REVIVE_PATCH, enabled: false })
+        .eq('id', rid).eq('user_id', uid)
+        // 취소된 줄만 바꾼다 — 살아 있는 줄을 건드리지 않는다.
+        .not('cancelled_at', 'is', null)
+        .select('id');
+      if (error) errMsg = String(error.message);
+      else updated = Array.isArray(data) ? data.length : null;
+    } catch (e: any) { errMsg = String(e?.message || e); }
+
+    const rv = restoreVerdict({ updated, existed, wasCancelled, error: errMsg });
+    if (!rv.ok) {
+      return NextResponse.json({
+        ok: false, error: rv.code === 'NOT_FOUND' ? 'not_found' : 'restore_failed',
+        code: rv.code, message: rv.reason,
+      }, { status: rv.code === 'NOT_FOUND' ? 404 : rv.code === 'NOT_CANCELLED' ? 409 : 500,
+           headers: { 'Cache-Control': 'no-store' } });
+    }
+    return NextResponse.json({ ok: true, code: rv.code, message: rv.reason, enabled: rv.enabledAfter },
+      { headers: { 'Cache-Control': 'no-store' } });
+  }
+
   const p = parseTogglePatch(body);
   if (!p.ok) {
     return NextResponse.json({ ok: false, error: p.code.toLowerCase(), message: p.message }, { status: p.status });
@@ -959,6 +1009,36 @@ export async function PATCH(req: NextRequest) {
     }, { status: 404, headers: { 'Cache-Control': 'no-store' } });
   }
 
+  // ── 끈 사실을 남긴다 ──
+  //
+  // 2026-11-10 운영에서 예약 7건이 전부 꺼져 있었는데 **누가 언제 껐는지
+  // 어떤 질의로도 답이 안 나왔다.** `enabledUpdate`는 `{ enabled }` 한
+  // 칸만 쓰고 시각도 주체도 남기지 않는다. 그래서 사람이 추측해야 했다.
+  //
+  // `audit_events`(040)는 남길 대상으로 "자동매매 ON/OFF"를 직접 적어 뒀고
+  // `'AUTOTRADE_TOGGLE'` 어휘까지 있었다. **배선만 없었다.**
+  //
+  // 왜 `recordAudit`(불 지르고 잊기)이 아니라 `recordAuditAsync`인가:
+  // 서버리스는 응답을 돌려주면 그 요청의 실행을 곧 정리한다. 잊어버린
+  // insert는 **완료 전에 잘릴 수 있고**, 그러면 기록은 있다고 믿는데 표는
+  // 비어 있다. 이 자리는 사람이 스위치를 누른 것이라 왕복 한 번이 늦어도
+  // 상관없다 — **주문 경로가 아니다.**
+  //
+  // 그리고 **끄는 것을 어렵게 만들지 않는다.** 기록이 실패해도 토글은
+  // 성공으로 돌아간다(그 함수는 던지지 않지만, 여기서 한 겹 더 막는다).
+  try {
+    const audit = toggleAuditRecord({
+      scheduleId: r.row.id, enabled: p.enabled === true,
+      symbol: r.row.symbol, mode: r.row.mode,
+    });
+    if (audit) {
+      await recordAuditAsync(sb, {
+        userId: uid, action: audit.action, resource: audit.resource,
+        result: audit.result, detail: audit.detail,
+      });
+    }
+  } catch { /* 기록 실패가 끄기를 실패시키지 않는다 */ }
+
   return NextResponse.json({
     ok: true, schedule: r.row,
     message: `${r.row.symbol} 자동매매를 ${p.enabled ? '켰습니다' : '껐습니다'}`
@@ -973,8 +1053,49 @@ export async function DELETE(req: NextRequest) {
   const sb = getSupabaseAdmin();
   if (!sb) return NextResponse.json({ ok: false, error: 'supabase_not_configured' }, { status: 503 });
 
-  const id = new URL(req.url).searchParams.get('id') || '';
+  const url = new URL(req.url);
+  const id = url.searchParams.get('id') || '';
   if (!id) return NextResponse.json({ ok: false, error: 'missing_id' }, { status: 400 });
+
+  // ── 기록 삭제 (purge=1) ──
+  //
+  // 기본 DELETE는 **취소**다(아래). `purge=1`일 때만 줄을 실제로 지운다.
+  // 그리고 **취소된 줄만** 지운다 — 삭제 앞에 되돌릴 수 있는 단계를
+  // 하나 세워 둔다. 판정은 scheduleCancel 한 곳에 있다.
+  if (url.searchParams.get('purge') === '1') {
+    const { purgeVerdict } = await import('@/lib/autotrade/scheduleCancel');
+    let existed = false, wasCancelled = false;
+    try {
+      const { data } = await (sb as any).from('autotrade_schedules')
+        .select('id, cancelled_at').eq('id', id).eq('user_id', uid).maybeSingle();
+      if (data) { existed = true; wasCancelled = !!(data as any).cancelled_at; }
+    } catch { /* 아래 deleted로 판단한다 */ }
+
+    let deleted: number | null = null;
+    let perr: string | null = null;
+    if (existed && wasCancelled) {
+      try {
+        const { data, error } = await (sb as any).from('autotrade_schedules')
+          .delete().eq('id', id).eq('user_id', uid)
+          // 읽은 뒤 지우기 전에 되살아났을 수 있다. 그 사이를 닫는다.
+          .not('cancelled_at', 'is', null)
+          .select('id');
+        if (error) perr = String(error.message);
+        else deleted = Array.isArray(data) ? data.length : null;
+      } catch (e: any) { perr = String(e?.message || e); }
+    }
+
+    const pv = purgeVerdict({ deleted, existed, wasCancelled, error: perr });
+    if (!pv.ok) {
+      return NextResponse.json({
+        ok: false, error: pv.code === 'NOT_FOUND' ? 'not_found' : 'purge_failed',
+        code: pv.code, message: pv.reason,
+      }, { status: pv.code === 'NOT_FOUND' ? 404 : pv.code === 'NOT_CANCELLED' ? 409 : 500,
+           headers: { 'Cache-Control': 'no-store' } });
+    }
+    return NextResponse.json({ ok: true, code: pv.code, message: pv.reason },
+      { headers: { 'Cache-Control': 'no-store' } });
+  }
 
   // ── 지우지 않고 취소한다 ──
   //

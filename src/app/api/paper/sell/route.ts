@@ -156,6 +156,27 @@ export async function POST(req: NextRequest) {
     }, { status: 500, headers: { 'Cache-Control': 'no-store' } });
   }
 
+  // ── 이 응답의 체결가 ──
+  //
+  // 재시도는 처음 매도의 손익을 돌려준다. 위에서 방금 읽은 시세를 붙이면
+  // "처음 손익 + 지금 시세"가 된다 — 처음 체결가를 장부에서 읽는다.
+  // 못 읽으면 null이다. 지금 시세로 메우지 않는다.
+  let stored: { exit_price?: unknown } | null = null;
+  if (status === 'REPLAYED' && row.out_sell_id) {
+    try {
+      // 088이 만든 표 — 생성 타입에 아직 없다(위 rpc와 같은 이유).
+      const { data: ev, error: evErr } = await (sb as any)
+        .from('paper_sell_events')
+        .select('exit_price')
+        .eq('id', row.out_sell_id)
+        .eq('paper_account_id', scope.accountId)
+        .maybeSingle();
+      if (!evErr && ev) stored = ev;
+    } catch { stored = null; }
+  }
+  const { sellReceiptPrice } = await import('@/lib/trading/sellPlan');
+  const fill = sellReceiptPrice(status, px, stored);
+
   return NextResponse.json({
     ok: true, paper: true,
     // 재시도였는지 화면이 알 수 있게. 값으로 들고 다닌다.
@@ -163,7 +184,7 @@ export async function POST(req: NextRequest) {
     replayed: status === 'REPLAYED',
     challengeId: scope.challengeId,
     symbol, market: 'SPOT',
-    exitPrice: px.price, priceSource: px.source,
+    exitPrice: fill.exitPrice, priceSource: fill.priceSource, priceBasis: fill.priceBasis,
     soldQuantity: row.out_sold_qty == null ? null : Number(row.out_sold_qty),
     grossPnl: row.out_gross == null ? null : Number(row.out_gross),
     exitFee: row.out_exit_fee == null ? null : Number(row.out_exit_fee),
