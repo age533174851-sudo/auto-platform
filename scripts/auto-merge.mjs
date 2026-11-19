@@ -45,7 +45,7 @@ function loadGate() {
   if (!existsSync(tsc)) throw new Error('typescript를 찾지 못했습니다 — npm ci 먼저');
   execFileSync(process.execPath, [
     tsc, 'src/lib/ci/autoMergeGate.ts', 'src/lib/ci/deployDispatch.ts',
-    'src/lib/ci/autoRebase.ts',
+    'src/lib/ci/autoRebase.ts', 'src/lib/ci/gateBackfill.ts',
     '--outDir', dir, '--module', 'commonjs', '--target', 'es2019',
     '--skipLibCheck', '--esModuleInterop',
   ], { stdio: 'pipe' });
@@ -158,6 +158,8 @@ async function main() {
     deployDispatchPlan, deployDispatchRequest, dispatchResultNote,
     migrateDispatchPlan, migrateDispatchRequest, migrateResultNote,
   } = await import(`file://${join(outDir, 'deployDispatch.js')}`);
+  const { gateBackfillVerdict, gateBackfillOutput } =
+    await import(`file://${join(outDir, 'gateBackfill.js')}`);
 
   assertSelfCheckWired(SELF_CHECK_NAME);
   assertRequiredChecksWired(REQUIRED_CHECKS);
@@ -179,6 +181,69 @@ async function main() {
       + '. 이 회차는 열린 PR 전부를 보지 못했습니다.');
   }
   const prs = listed.all.filter(p => (only == null || p.number === only));
+
+  // ══════════════ 빈 게이트를 메운다 ══════════════
+  //
+  // `auto-merge-gate`는 **라벨과 무관하게 모든 PR의 필수 검사**다. 그런데
+  // 그 체크는 아무도 PR을 판정해서 만드는 것이 아니라, 이 워크플로의 job이
+  // 그 커밋 위에서 돌았다는 부산물로 생긴다. run이 줄에서 밀리면 체크가
+  // 통째로 안 생기고 — **빨갛지 않고 아예 없어서** — PR이 이유 없이 막힌다.
+  //
+  // 그리고 30분 안전망은 그걸 못 고친다. `schedule` 실행의 `head_sha`는
+  // main이라 그 실행이 만드는 체크는 PR head에 안 붙는다.
+  //
+  // 그래서 여기서 PR head를 직접 보고, 없을 때만 적는다. 판정은
+  // `src/lib/ci/gateBackfill.ts`에 있고 시험이 붙어 있다.
+  //
+  // **라벨 검사보다 앞이다.** 라벨 없는 PR도 이 체크가 있어야 합쳐질 수 있다.
+  const RUN_URL = process.env.GITHUB_SERVER_URL && process.env.GITHUB_REPOSITORY
+    && process.env.GITHUB_RUN_ID
+    ? `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`
+    : null;
+  let filled = 0, unreadable = 0;
+  for (const brief of prs) {
+    const sha = brief?.head?.sha;
+    if (typeof sha !== 'string' || !sha) {
+      unreadable += 1;
+      console.log(`#${brief?.number} 게이트 확인 못 함 — head SHA가 없습니다`);
+      continue;
+    }
+    const got = await api(
+      `/repos/${REPO}/commits/${sha}/check-runs`
+      + `?check_name=${encodeURIComponent(SELF_CHECK_NAME)}&per_page=100`);
+    const runs = got.ok && Array.isArray(got.body?.check_runs) ? got.body.check_runs : null;
+    const v = gateBackfillVerdict({ selfName: SELF_CHECK_NAME, checkRuns: runs });
+    if (v.code === 'UNREADABLE') {
+      unreadable += 1;
+      console.log(`#${brief.number} ${v.reason}${got.ok ? '' : ` (HTTP ${got.status})`}`);
+      continue;
+    }
+    if (!v.publish) continue;
+
+    const out = gateBackfillOutput({ runUrl: RUN_URL });
+    const made = await api(`/repos/${REPO}/check-runs`, {
+      method: 'POST',
+      body: JSON.stringify({
+        name: SELF_CHECK_NAME,
+        head_sha: sha,
+        status: 'completed',
+        conclusion: 'success',
+        output: { title: out.title, summary: out.summary },
+      }),
+    });
+    if (made.ok) {
+      filled += 1;
+      console.log(`#${brief.number} 게이트를 메웠습니다 — ${sha.slice(0, 7)}`);
+    } else {
+      // **포크 PR의 head는 이 저장소에 없다.** 422가 정상이다 — 적고 넘어간다.
+      unreadable += 1;
+      console.log(`#${brief.number} 게이트를 메우지 못했습니다 — HTTP ${made.status}`
+        + ` ${made.body?.message || ''}`);
+    }
+  }
+  if (filled || unreadable) {
+    console.log(`게이트 메움 ${filled}건 · 확인 못 함 ${unreadable}건 (확인 못 한 것은 통과로 적지 않습니다)`);
+  }
 
   let merged = 0;
   for (const brief of prs) {
