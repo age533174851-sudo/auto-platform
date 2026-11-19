@@ -109,29 +109,59 @@ function assertRequiredChecksWired(required) {
   }
 }
 
+/**
+ * **망 오류는 답이 아니다 — 그런데 던지면 회차 전체가 죽는다.**
+ *
+ * 2026-11-19 run 44543639837: 빈 게이트를 수십 건 메우던 중에
+ * `fetch failed` 한 번으로 실행이 exit 1 로 끝났다. 그 앞까지 메운 것은
+ * 남았지만 나머지 PR 은 그 회차에 아예 보지 못했고, 왜 멈췄는지는
+ * 한 줄짜리 `fetch failed` 뿐이었다.
+ *
+ * 게이트 메우기가 호출 수를 한 회차에 ~100 개 늘렸으니, 일시적 실패를
+ * 만날 확률도 그만큼 커졌다. 그래서 **던지지 않고 `ok: false` 로
+ * 돌려준다** — 부르는 쪽은 이미 전부 `!ok` 를 다루고 있다.
+ *
+ * `status: 0` 은 "HTTP 응답을 받지 못했다"는 뜻이다. 404 와 구별된다 —
+ * 404 는 서버가 없다고 답한 것이고 0 은 **묻지도 못한 것**이다.
+ * 게이트 메우기는 이 둘을 다르게 읽는다: 못 물었으면 적지 않는다.
+ */
 async function api(path, init = {}) {
-  const r = await fetch(`https://api.github.com${path}`, {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${TOKEN}`,
-      Accept: 'application/vnd.github+json',
-      'X-GitHub-Api-Version': '2022-11-28',
-      ...(init.body ? { 'Content-Type': 'application/json' } : {}),
-      ...(init.headers || {}),
-    },
-  });
-  const text = await r.text();
+  let r;
+  try {
+    r = await fetch(`https://api.github.com${path}`, {
+      ...init,
+      headers: {
+        Authorization: `Bearer ${TOKEN}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        ...(init.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(init.headers || {}),
+      },
+    });
+  } catch (e) {
+    return { ok: false, status: 0, body: { message: `fetch 실패: ${e?.message || e}` } };
+  }
+  let text;
+  try { text = await r.text(); } catch (e) {
+    return { ok: false, status: r.status, body: { message: `본문을 읽지 못했습니다: ${e?.message || e}` } };
+  }
   let body = null;
   try { body = text ? JSON.parse(text) : null; } catch { body = { raw: text }; }
   return { ok: r.ok, status: r.status, body };
 }
 
 async function graphql(query, variables) {
-  const r = await fetch('https://api.github.com/graphql', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, variables }),
-  });
+  // api() 와 같은 이유로 던지지 않는다 — 망 오류 하나가 회차를 죽이지 않게.
+  let r;
+  try {
+    r = await fetch('https://api.github.com/graphql', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, variables }),
+    });
+  } catch (e) {
+    return { ok: false, body: { errors: [{ message: `fetch 실패: ${e?.message || e}` }] } };
+  }
   const j = await r.json().catch(() => null);
   return { ok: r.ok && !j?.errors, body: j };
 }
