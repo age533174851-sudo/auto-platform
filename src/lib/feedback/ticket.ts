@@ -241,3 +241,56 @@ export function suggestSeverity(category: Category): Severity {
   if (category === 'AUTOTRADE' || category === 'CONNECTION' || category === 'BUG') return 'NORMAL';
   return 'LOW';
 }
+
+/**
+ * 가림(`redact`)을 거친 **뒤의** 길이를 판정한다.
+ *
+ * **검증과 저장 사이에서 글이 늘어난다.** `parseTicketInput`은 사용자가
+ * 적은 원문을 보고 8000자를 통과시키는데, `redact`는 `a@b.co`(6자)를
+ * 그보다 **긴 표식**으로 바꾼다. 짧은 이메일을 잔뜩 적은 신고는
+ * 7994자로 들어와 11420자가 되고, DB의
+ * `CHECK (length(body) BETWEEN 1 AND 8000)`에 막힌다.
+ *
+ * 그때 사용자가 받던 말은 "다시 시도해 주세요"였다. **같은 글은 다시
+ * 보내도 똑같이 늘어나므로 영원히 실패한다** — 할 수 없는 일을 시키는
+ * 안내였다. 그래서 얼마나 넘쳤는지 숫자로 말한다.
+ *
+ * **자르지 않는다.** 잘린 신고는 다른 신고다.
+ *
+ * 한계는 `TITLE_MAX`·`BODY_MAX` 하나뿐이고 마이그레이션 106의 CHECK와
+ * 같은 값이다. 판정을 여기 한 곳에 두는 이유도 그것이다 — 라우트가
+ * 제 숫자를 따로 적으면 언젠가 DB와 갈린다.
+ */
+/**
+ * 가림 뒤에 넘친 칸. **넘치지 않았으면 `null`이다.**
+ *
+ * `{ ok: true } | { ok: false, ... }` 모양을 쓰지 않는다 — 이 저장소의
+ * `tsconfig`는 `strict: false`라서 그런 판별 유니온이 **좁혀지지 않는다**
+ * (`if (!v.ok)` 뒤에도 `v.field`가 없다고 한다). `parseTicketInput`이
+ * `T | null`을 쓰는 이유와 같다.
+ */
+export type RedactedOverflow = {
+  field: 'title' | 'body';
+  length: number;
+  max: number;
+  /** 몇 자를 줄여야 들어가는지 */
+  over: number;
+};
+
+export function redactedOverflow(t: { title?: string; body: string }): RedactedOverflow | null {
+  // 답글에는 제목이 없다. **그래서 판정을 둘로 나누지 않는다** —
+  // 글 쓰기와 답글 쓰기가 서로 다른 한계를 갖게 되는 순간 한쪽만 고쳐진다.
+  if (t.title != null && t.title.length > TITLE_MAX) {
+    return { field: 'title', length: t.title.length, max: TITLE_MAX, over: t.title.length - TITLE_MAX };
+  }
+  if (t.body.length > BODY_MAX) {
+    return { field: 'body', length: t.body.length, max: BODY_MAX, over: t.body.length - BODY_MAX };
+  }
+  return null;
+}
+
+/** 사용자에게 보여 줄 한 줄. **글 내용은 담지 않는다 — 길이만 말한다.** */
+export function redactedOverflowMessage(v: RedactedOverflow): string {
+  const where = v.field === 'title' ? '제목' : '내용';
+  return `비밀로 보이는 값을 가리면서 ${where}이 ${v.max}자를 ${v.over}자 넘었습니다 — ${v.over}자 이상 줄여 주세요`;
+}
