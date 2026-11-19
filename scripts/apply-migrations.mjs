@@ -287,35 +287,64 @@ let rows = null;
 // 그렇다고 "아마 적용했겠지"로 적으면 그건 증거 없는 기록이다.
 //
 // **카탈로그에 실제로 있는지 확인하고, 있는 것만 적는다.**
-async function catalogHas(target) {
-  const t = sqlLit(target.table), n = sqlLit(target.name);
-  const sql = {
-    table: `SELECT 1 FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog','information_schema') AND table_name = ${t} LIMIT 1`,
-    column: `SELECT 1 FROM information_schema.columns WHERE table_name = ${t} AND column_name = ${n} LIMIT 1`,
-    index: `SELECT 1 FROM pg_indexes WHERE indexname = ${n} LIMIT 1`,
-    policy: `SELECT 1 FROM pg_policies WHERE tablename = ${t} AND policyname = ${n} LIMIT 1`,
+// 서술어는 **여기 한 곳에만** 적는다.
+// `audit-production-legacy-runtime-schema.yml`이 같은 질문을 SQL로
+// 재현하므로, 여기에서 글자가 갈리면 두 곳이 다른 답을 낸다.
+// (이전 이름: `catalogHas` — 대상 하나씩 물었다)
+function catalogPredicate(kind, t, n) {
+  return {
+    table: `EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog','information_schema') AND table_name = ${t})`,
+    column: `EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = ${t} AND column_name = ${n})`,
+    index: `EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = ${n})`,
+    policy: `EXISTS (SELECT 1 FROM pg_policies WHERE tablename = ${t} AND policyname = ${n})`,
     // 함수는 pg_proc에 있다. 인자 조합이 여럿일 수 있으므로 이름만 본다 —
     // **있는지 없는지**가 여기서 답할 질문이고, 시그니처까지는 SQL 자신이
     // 트랜잭션 안에서 보장한다.
-    function: `SELECT 1 FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
-                WHERE ns.nspname = ${t} AND p.proname = ${n} LIMIT 1`,
-  }[target.kind];
-  if (!sql) return null;
-  const q = query(url, sql);
-  if (!q.ok) return null;              // 못 읽었다 → 없다고 단정하지 않는다
-  return q.rows.length > 0;
+    function: `EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
+                WHERE ns.nspname = ${t} AND p.proname = ${n})`,
+  }[kind] ?? null;
+}
+
+/**
+ * 대상 여러 개의 생사를 **질의 한 번**으로 묻는다.
+ *
+ * 전에는 대상 하나마다 psql 프로세스를 새로 띄워 물었다. 파일 101개에
+ * 대상 476개면 476번이고, 승인 경로 증명은 이 러너를 한 회차에 15번 ·
+ * 뮤테이션 하네스는 그 증명을 12번 돌린다(180번). 그래서 뮤테이션 job이
+ * 40분 상한에 걸려 취소됐다 — run 44462594137, 05:07부터 37분간 출력
+ * 한 줄 없이.
+ *
+ * **묻는 내용은 그대로다** — 서술어를 하나하나 그대로 한 줄에 모아서
+ * 물어본다. 읽지 못한 자리는 UNKNOWN이다. **없다고 단정하지 않는다.**
+ */
+async function catalogHasAll(targets) {
+  const rows = targets.map((t, i) => {
+    const p = catalogPredicate(t.kind, sqlLit(t.table), sqlLit(t.name));
+    // 모르는 종류는 묻지 않는다 — NULL로 두면 아래에서 UNKNOWN으로 읽힌다
+    return `(${i}, ${p ? `(${p})::text` : 'NULL::text'})`;
+  });
+  const q = query(url, `SELECT i, v FROM (VALUES ${rows.join(', ')}) AS q(i, v) ORDER BY i`);
+  if (!q.ok) return targets.map(() => null);   // 못 읽었다 → 없다고 단정하지 않는다
+  const byIdx = new Map(q.rows.map(r => [Number(r[0]), r[1]]));
+  return targets.map((_, i) => {
+    const v = byIdx.get(i);
+    if (v === 'true') return true;
+    if (v === 'false') return false;
+    return null;                               // 칸이 비었거나 못 읽었다
+  });
 }
 
 async function verifyTargets(f) {
   const targets = migrationTargets(f.sql);
   if (targets.length === 0) return { checked: 0, missing: [], unknown: 0, verdict: 'NO_TARGET' };
+  const answers = await catalogHasAll(targets);
   const missing = [];
   let unknown = 0;
-  for (const t of targets) {
-    const has = await catalogHas(t);
+  targets.forEach((t, i) => {
+    const has = answers[i];
     if (has === null) unknown += 1;
     else if (!has) missing.push(`${t.kind} ${t.table}.${t.name}`);
-  }
+  });
   return {
     checked: targets.length, missing, unknown,
     verdict: missing.length ? 'MISSING' : unknown ? 'UNKNOWN' : 'PRESENT',
