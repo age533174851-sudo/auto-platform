@@ -11,6 +11,10 @@ import {
   otherUiLevel, UI_LEVEL_LABEL,
   type Preferences, type PositionButton, type TradeUiLevel,
 } from './preferences';
+// 자동 적립 규칙도 localStorage에 저장되는 사용자 설정이다. 그 시험을 여기서
+// 부른다 — `scripts/run-tests.mjs`는 열린 PR 여러 개가 함께 고치고 있어서
+// 무인 회차가 손대지 않는다. 러너에 직접 등록하면 이 줄을 지운다.
+import { runDcaStoreTests } from '../accounts/dca.test';
 
 export function runPreferencesTests() {
   console.log('[화면 기본값 — 눌러도 아무 일 안 하는 스위치를 두지 않는다]');
@@ -193,4 +197,5 @@ export function runPreferencesTests() {
     }
   });
 
+  runDcaStoreTests();
 }
