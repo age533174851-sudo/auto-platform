@@ -45,7 +45,7 @@ function loadGate() {
   if (!existsSync(tsc)) throw new Error('typescript를 찾지 못했습니다 — npm ci 먼저');
   execFileSync(process.execPath, [
     tsc, 'src/lib/ci/autoMergeGate.ts', 'src/lib/ci/deployDispatch.ts',
-    'src/lib/ci/autoRebase.ts',
+    'src/lib/ci/autoRebase.ts', 'src/lib/ci/gateBackfill.ts',
     '--outDir', dir, '--module', 'commonjs', '--target', 'es2019',
     '--skipLibCheck', '--esModuleInterop',
   ], { stdio: 'pipe' });
@@ -109,29 +109,59 @@ function assertRequiredChecksWired(required) {
   }
 }
 
+/**
+ * **망 오류는 답이 아니다 — 그런데 던지면 회차 전체가 죽는다.**
+ *
+ * 2026-11-19 run 44543639837: 빈 게이트를 수십 건 메우던 중에
+ * `fetch failed` 한 번으로 실행이 exit 1 로 끝났다. 그 앞까지 메운 것은
+ * 남았지만 나머지 PR 은 그 회차에 아예 보지 못했고, 왜 멈췄는지는
+ * 한 줄짜리 `fetch failed` 뿐이었다.
+ *
+ * 게이트 메우기가 호출 수를 한 회차에 ~100 개 늘렸으니, 일시적 실패를
+ * 만날 확률도 그만큼 커졌다. 그래서 **던지지 않고 `ok: false` 로
+ * 돌려준다** — 부르는 쪽은 이미 전부 `!ok` 를 다루고 있다.
+ *
+ * `status: 0` 은 "HTTP 응답을 받지 못했다"는 뜻이다. 404 와 구별된다 —
+ * 404 는 서버가 없다고 답한 것이고 0 은 **묻지도 못한 것**이다.
+ * 게이트 메우기는 이 둘을 다르게 읽는다: 못 물었으면 적지 않는다.
+ */
 async function api(path, init = {}) {
-  const r = await fetch(`https://api.github.com${path}`, {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${TOKEN}`,
-      Accept: 'application/vnd.github+json',
-      'X-GitHub-Api-Version': '2022-11-28',
-      ...(init.body ? { 'Content-Type': 'application/json' } : {}),
-      ...(init.headers || {}),
-    },
-  });
-  const text = await r.text();
+  let r;
+  try {
+    r = await fetch(`https://api.github.com${path}`, {
+      ...init,
+      headers: {
+        Authorization: `Bearer ${TOKEN}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        ...(init.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(init.headers || {}),
+      },
+    });
+  } catch (e) {
+    return { ok: false, status: 0, body: { message: `fetch 실패: ${e?.message || e}` } };
+  }
+  let text;
+  try { text = await r.text(); } catch (e) {
+    return { ok: false, status: r.status, body: { message: `본문을 읽지 못했습니다: ${e?.message || e}` } };
+  }
   let body = null;
   try { body = text ? JSON.parse(text) : null; } catch { body = { raw: text }; }
   return { ok: r.ok, status: r.status, body };
 }
 
 async function graphql(query, variables) {
-  const r = await fetch('https://api.github.com/graphql', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, variables }),
-  });
+  // api() 와 같은 이유로 던지지 않는다 — 망 오류 하나가 회차를 죽이지 않게.
+  let r;
+  try {
+    r = await fetch('https://api.github.com/graphql', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, variables }),
+    });
+  } catch (e) {
+    return { ok: false, body: { errors: [{ message: `fetch 실패: ${e?.message || e}` }] } };
+  }
   const j = await r.json().catch(() => null);
   return { ok: r.ok && !j?.errors, body: j };
 }
@@ -158,6 +188,8 @@ async function main() {
     deployDispatchPlan, deployDispatchRequest, dispatchResultNote,
     migrateDispatchPlan, migrateDispatchRequest, migrateResultNote,
   } = await import(`file://${join(outDir, 'deployDispatch.js')}`);
+  const { gateBackfillVerdict, gateBackfillOutput } =
+    await import(`file://${join(outDir, 'gateBackfill.js')}`);
 
   assertSelfCheckWired(SELF_CHECK_NAME);
   assertRequiredChecksWired(REQUIRED_CHECKS);
@@ -179,6 +211,69 @@ async function main() {
       + '. 이 회차는 열린 PR 전부를 보지 못했습니다.');
   }
   const prs = listed.all.filter(p => (only == null || p.number === only));
+
+  // ══════════════ 빈 게이트를 메운다 ══════════════
+  //
+  // `auto-merge-gate`는 **라벨과 무관하게 모든 PR의 필수 검사**다. 그런데
+  // 그 체크는 아무도 PR을 판정해서 만드는 것이 아니라, 이 워크플로의 job이
+  // 그 커밋 위에서 돌았다는 부산물로 생긴다. run이 줄에서 밀리면 체크가
+  // 통째로 안 생기고 — **빨갛지 않고 아예 없어서** — PR이 이유 없이 막힌다.
+  //
+  // 그리고 30분 안전망은 그걸 못 고친다. `schedule` 실행의 `head_sha`는
+  // main이라 그 실행이 만드는 체크는 PR head에 안 붙는다.
+  //
+  // 그래서 여기서 PR head를 직접 보고, 없을 때만 적는다. 판정은
+  // `src/lib/ci/gateBackfill.ts`에 있고 시험이 붙어 있다.
+  //
+  // **라벨 검사보다 앞이다.** 라벨 없는 PR도 이 체크가 있어야 합쳐질 수 있다.
+  const RUN_URL = process.env.GITHUB_SERVER_URL && process.env.GITHUB_REPOSITORY
+    && process.env.GITHUB_RUN_ID
+    ? `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`
+    : null;
+  let filled = 0, unreadable = 0;
+  for (const brief of prs) {
+    const sha = brief?.head?.sha;
+    if (typeof sha !== 'string' || !sha) {
+      unreadable += 1;
+      console.log(`#${brief?.number} 게이트 확인 못 함 — head SHA가 없습니다`);
+      continue;
+    }
+    const got = await api(
+      `/repos/${REPO}/commits/${sha}/check-runs`
+      + `?check_name=${encodeURIComponent(SELF_CHECK_NAME)}&per_page=100`);
+    const runs = got.ok && Array.isArray(got.body?.check_runs) ? got.body.check_runs : null;
+    const v = gateBackfillVerdict({ selfName: SELF_CHECK_NAME, checkRuns: runs });
+    if (v.code === 'UNREADABLE') {
+      unreadable += 1;
+      console.log(`#${brief.number} ${v.reason}${got.ok ? '' : ` (HTTP ${got.status})`}`);
+      continue;
+    }
+    if (!v.publish) continue;
+
+    const out = gateBackfillOutput({ runUrl: RUN_URL });
+    const made = await api(`/repos/${REPO}/check-runs`, {
+      method: 'POST',
+      body: JSON.stringify({
+        name: SELF_CHECK_NAME,
+        head_sha: sha,
+        status: 'completed',
+        conclusion: 'success',
+        output: { title: out.title, summary: out.summary },
+      }),
+    });
+    if (made.ok) {
+      filled += 1;
+      console.log(`#${brief.number} 게이트를 메웠습니다 — ${sha.slice(0, 7)}`);
+    } else {
+      // **포크 PR의 head는 이 저장소에 없다.** 422가 정상이다 — 적고 넘어간다.
+      unreadable += 1;
+      console.log(`#${brief.number} 게이트를 메우지 못했습니다 — HTTP ${made.status}`
+        + ` ${made.body?.message || ''}`);
+    }
+  }
+  if (filled || unreadable) {
+    console.log(`게이트 메움 ${filled}건 · 확인 못 함 ${unreadable}건 (확인 못 한 것은 통과로 적지 않습니다)`);
+  }
 
   let merged = 0;
   for (const brief of prs) {

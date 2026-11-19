@@ -38,7 +38,7 @@ const planEntry100x = async (
 import {
   entryAuthorityVerdict, guardedEntry, type EntryAuthorityFacts,
 } from '../engine/entryAuthority';
-import { stopReattachVerdict } from '../engine/stopReattach';
+import { stopReattachVerdict, reattachPositionEvidence } from '../engine/stopReattach';
 import { leverageVerdict } from '../exchanges/futuresExec';
 import { appliesTo, FIXED_STOP_ONLY_CHECKS } from '../engine/preTradeChecklist';
 
@@ -399,6 +399,25 @@ export async function runDedicated100xTests() {
     eq(stopReattachVerdict({ sl_order_id: 'x', stop_loss: 1 }).code, 'ALREADY_ATTACHED');
     eq(stopReattachVerdict({ stop_loss: 0 }).code, 'NO_PLANNED_STOP');
     eq(stopReattachVerdict({}).code, 'NO_PLANNED_STOP');
+  });
+
+  test('복구 직전 포지션: 못 읽은 것·깨진 수량은 UNKNOWN이지 FLAT이 아니다 (#479)', () => {
+    for (const raw of [null, undefined, '', '  ', 'bad', 'NaN', NaN, Infinity, '0.003XYZ', {}, true]) {
+      eq(reattachPositionEvidence(raw).kind, 'UNKNOWN', `${String(raw)}을 '포지션 없음'으로 읽었다`);
+    }
+    const u = reattachPositionEvidence(null, 'v3: timeout');
+    assert(u.kind === 'UNKNOWN' && u.note.includes('손절 복구 확인 불가') && u.note.includes('v3: timeout'),
+      '확인 불가 사유가 기록에 남지 않는다');
+  });
+
+  test('복구 직전 포지션: 확인된 0만 FLAT, 유한한 수량은 부호를 지킨다', () => {
+    eq(reattachPositionEvidence(0).kind, 'FLAT');
+    eq(reattachPositionEvidence('0').kind, 'FLAT');
+    eq(reattachPositionEvidence('0.000').kind, 'FLAT');
+    const l = reattachPositionEvidence('0.003');
+    eq(l.kind, 'OPEN'); eq((l as any).qty, 0.003);
+    const sh = reattachPositionEvidence(-2);
+    eq(sh.kind, 'OPEN'); eq((sh as any).qty, -2);
   });
 
   // ── ⑨ 체크리스트 N/A ────────────────────────────────────

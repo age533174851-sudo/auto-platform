@@ -3,6 +3,7 @@
 import { calcTradePnL } from './index';
 import { test, close, gt, lt, assert, eq } from '../../test/harness';
 import { formatKRW } from '../format';
+import { quoteCurrencyOf, estimateCalcTax } from './calcCurrency';
 
 const feeCfg = { exchangeId: 'binance', makerRate: 0.001, takerRate: 0.001, slippage: 0.0005 } as any;
 const base = {
@@ -81,5 +82,47 @@ export function runPnlTests() {
     eq(formatKRW(-0), '₩0');
     eq(formatKRW(NaN), '₩0');
     eq(formatKRW(undefined), '₩0');
+  });
+  // ── 손익 계산기: 달러로 적은 가격을 원화로 셈하지 않는다 ──
+  //
+  // 미국주식·ETF 예시는 NVDA 875→920처럼 **달러**로 적는다. 그런데
+  // 계산기는 환율 칸을 받아 놓고 한 번도 쓰지 않았다 — 결과는 '₩450'으로
+  // 그려졌고, 양도세의 250만 **원** 공제를 달러 이익에서 뺐다. 그래서
+  // 이익이 250만 달러를 넘기 전에는 22% 양도세가 언제나 0이었다.
+  test('계산기: 미국주식·ETF 가격은 달러, 나머지는 원화다', () => {
+    eq(quoteCurrencyOf('us_stock'), 'USD');
+    eq(quoteCurrencyOf('etf'), 'USD');
+    eq(quoteCurrencyOf('kr_stock'), 'KRW');
+    eq(quoteCurrencyOf('crypto'), 'KRW');
+    eq(quoteCurrencyOf('futures'), 'KRW');
+  });
+
+  test('계산기: 달러 이익의 양도세는 250만 원을 환율로 바꿔 공제한다', () => {
+    // $20,000 × 1,375 = 2,750만 원 → 공제 후 2,500만 원 × 22% = 550만 원 = $4,000
+    const t = estimateCalcTax({ taxMode: 'us_stock', grossProfit: 20_000, sellAmount: 0,
+      taxRatePct: 22, quote: 'USD', fxRate: 1375 });
+    assert(t !== null, '환율이 있는데 세금을 확인 불가로 적었다');
+    close(t as number, 4_000, 1e-6);
+  });
+
+  test('계산기: 원화 자산의 세금 규칙은 그대로다', () => {
+    close(estimateCalcTax({ taxMode: 'us_stock', grossProfit: 10_000_000, sellAmount: 0,
+      taxRatePct: 22, quote: 'KRW', fxRate: 0 }) as number, 1_650_000, 1e-6);
+    close(estimateCalcTax({ taxMode: 'crypto', grossProfit: 1_000_000, sellAmount: 0,
+      taxRatePct: 0, quote: 'KRW', fxRate: 0 }) as number, 0, 1e-9);
+    close(estimateCalcTax({ taxMode: 'kr_stock', grossProfit: 0, sellAmount: 8_200_000,
+      taxRatePct: 0.23, quote: 'KRW', fxRate: 0 }) as number, 18_860, 1e-6);
+    close(estimateCalcTax({ taxMode: 'custom', grossProfit: 1_000, sellAmount: 0,
+      taxRatePct: 10, quote: 'KRW', fxRate: 0 }) as number, 100, 1e-9);
+  });
+
+  test('계산기: 환율을 모르면 원화 공제 세금을 0으로 적지 않는다', () => {
+    eq(estimateCalcTax({ taxMode: 'us_stock', grossProfit: 20_000, sellAmount: 0,
+      taxRatePct: 22, quote: 'USD', fxRate: 0 }), null);
+    eq(estimateCalcTax({ taxMode: 'futures', grossProfit: 20_000, sellAmount: 0,
+      taxRatePct: 20, quote: 'USD', fxRate: NaN }), null);
+    // 공제가 없는 규칙은 환율이 필요 없다
+    close(estimateCalcTax({ taxMode: 'kr_stock', grossProfit: 0, sellAmount: 1_000,
+      taxRatePct: 0.23, quote: 'USD', fxRate: 0 }) as number, 2.3, 1e-9);
   });
 }
