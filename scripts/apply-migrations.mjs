@@ -140,6 +140,8 @@ function sqlLit(v) {
 const report = {
   mode: MODE, ok: false, code: 'UNKNOWN', reason: '',
   required: 0, applied: [], adopted: [], adoptable: [], pending: [], blocked: [], failed: [], verified: [], drift: [],
+  /** 우리가 아닌 경로가 먼저 적용한 흔적 */
+  foreignApplied: [],
   /**
    * 사람이 승인해서 실행한 위험 마이그레이션. 없으면 null.
    *
@@ -238,7 +240,7 @@ if (!url) {
 say(`DB 접속 정보: ${from} (지문 ${fingerprint(url)}, 값은 출력하지 않습니다)`);
 
 const { classifyMigration, migrationIdOf, migrationPlanOf, migrationTargets, migrationDrift,
-        adoptionCandidates } = await loadPlan();
+        adoptionCandidates, foreignApplyVerdict } = await loadPlan();
 
 // 번호가 붙은 파일만 자동 파이프라인 대상이다. 나머지는 사본·구파일이고
 // gen-migration-manifest.mjs의 LEGACY에 이유가 적혀 있다(CI가 검사한다).
@@ -381,6 +383,33 @@ say('');
 say(`적용됨 ${plan.applied.length} / 남음 ${plan.pending.length} / 승인 필요 ${plan.blocked.length}`);
 for (const b of plan.blocked) say(`  ⛔ ${b.name} — ${b.risk}: ${b.reasons.join(' · ')}`);
 for (const n of plan.autoApply) say(`  ▶ ${n}`);
+
+// ══════════════ 다른 경로가 먼저 적용했는가 ══════════════
+//
+// 적용 기록이 없는 파일의 대상이 **이미 카탈로그에 있으면**, 우리가 아닌
+// 무언가가 적용한 것이다. 더하기만 하는 것이면 결과는 같다. 승인이
+// 필요한 것이면 **관문이 지나간 것이고, 조용하면 아무도 모른다.**
+//
+// 판정은 `migrationPlan.ts`에 있다 — 여기서 다시 적지 않는다.
+{
+  const blockedNames = new Set(plan.blocked.map(b => b.name));
+  const watch = files.filter(f => plan.pending.includes(f.name) || blockedNames.has(f.name));
+  let fatal = null;
+  for (const f of watch) {
+    const v = await verifyTargets(f);
+    const verdict = foreignApplyVerdict({
+      name: f.name, needsApproval: blockedNames.has(f.name), targets: v.verdict,
+    });
+    if (verdict.code === 'NONE') continue;
+    report.foreignApplied = report.foreignApplied || [];
+    report.foreignApplied.push({ name: f.name, code: verdict.code });
+    if (verdict.fatal) { say(`::error::${verdict.reason}`); fatal = verdict; }
+    else say(`::warning::${verdict.reason}`);
+  }
+  if (fatal) {
+    finish('FOREIGN_APPLIED', '승인 전에 다른 경로가 적용했습니다 — 적용하지 않고 멈춥니다', 1);
+  }
+}
 
 // ══════════════ 승인이 실제로 그 파일에 유효한가 ══════════════
 //
