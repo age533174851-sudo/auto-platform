@@ -14,6 +14,7 @@
 // 전부 멈추면 정리가 영영 안 되고, 전부 진행하면 잘못된 설정이 그대로
 // 실행된다.
 import { NextRequest, NextResponse } from 'next/server';
+import { cronAuthFromRequest } from '@/lib/cron/cronAuth';
 import { getSupabaseAdmin } from '@/lib/supabase/server';
 import {
   planCleanup, checkDeleteSize, DEFAULT_RULES,
@@ -37,11 +38,19 @@ interface TableResult {
 }
 
 export async function GET(req: NextRequest) {
-  const secret = process.env.CRON_SECRET || '';
-  if (secret) {
-    const given = req.headers.get('authorization')?.replace(/^Bearer\s+/i, '')
-      || req.nextUrl.searchParams.get('secret') || '';
-    if (given !== secret) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
+  // ── 크론 인증 ──
+  //
+  // **판정은 `cronAuthVerdict` 한 곳에 있다.** 예전에는 다섯 경로가
+  // 각자 적고 있었고, 그래서 `if (secret) { … }`라는 같은 실수를
+  // 다섯 벌이 같이 갖고 있었다 — `CRON_SECRET`이 없으면 인증이
+  // 통째로 사라져 아무나 부를 수 있었다.
+  //
+  // **인증 전에는 DB도 외부 API도 건드리지 않는다.** 이 반환이
+  // 함수의 첫 문장이어야 하는 이유다.
+  const auth = cronAuthFromRequest(req);
+  if (!auth.ok) {
+    return NextResponse.json({ ok: false, error: auth.error, message: auth.message },
+      { status: auth.status, headers: { 'Cache-Control': 'no-store' } });
   }
 
   const sb = getSupabaseAdmin();
