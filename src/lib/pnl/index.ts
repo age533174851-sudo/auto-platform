@@ -2,7 +2,29 @@
 // TRAIGO P&L Engine — Real Net Profit Calculator
 // Integrates: fees + funding + slippage
 // ─────────────────────────────────────────────────────────────
-import { UserFeeConfig } from '../fees';
+// ── 수수료 요율 — 이 모듈이 실제로 읽는 것만 받는다 ──
+//
+// 예전에는 `'../fees'`에서 요율 타입을 가져왔다. 그 경로가
+// **`src/lib/fees.ts`(파일)와 `src/lib/fees/index.ts`(디렉터리) 중
+// 조용히 파일 쪽을 골랐고**, 두 모듈은 같은 이름으로 다른 모양을
+// 내놓았다 — 파일 쪽은 `takerRate`를 직접 들고 있고, 디렉터리 쪽은
+// VIP 구간표에 `calcFeeRate()`로 계산한다.
+//
+// 그 모호함이 실제로 고장을 냈다: `backtest`·`safety`가
+// `getDefaultConfig(exchange, 'futures')`를 불렀는데 파일 쪽 서명은
+// 인자가 하나뿐이라 `'futures'`가 버려지고 **선물 비용을 현물 요율로**
+// 재고 있었다(정확히 2배).
+//
+// 그래서 파일 쪽을 없앴다. 이 모듈이 요구하는 것은 **taker 요율
+// 하나**이므로, 남의 타입을 빌리지 않고 여기서 그만큼만 적는다.
+// 필드를 다 채운 객체도 그대로 들어온다 — 구조적으로 더 넓기 때문이다.
+export interface PnlFeeRates {
+  /** 시장가 수수료율. 없으면 호출부에서 0.001로 가정한다 */
+  takerRate?: number;
+  makerRate?: number;
+  /** 예상 슬리피지 비율 */
+  slippage?: number;
+}
 import { calcFundingCost, FundingCostParams } from '../funding';
 import { calcSlippage, SlippageParams } from '../slippage';
 
@@ -13,7 +35,7 @@ export interface TradePnLParams {
   quantity:      number;       // units
   leverage:      number;       // 1 = spot
   isLong:        boolean;
-  feeConfig:     UserFeeConfig;
+  feeConfig:     PnlFeeRates;
   dailyVolume:   number;       // for slippage
   holdingHours:  number;       // for funding
   fundingRate:   number;       // per 8h
@@ -135,7 +157,7 @@ export function calcTradePnL(p: TradePnLParams): TradePnLResult {
 // ── Minimum viable profit calc ────────────────────────────────
 export function calcMinViableProfit(
   entryValue: number,
-  feeConfig: UserFeeConfig,
+  feeConfig: PnlFeeRates,
   fundingRate: number = 0.0001,
   holdingHours: number = 24,
   dailyVolume: number = 1e9,
@@ -172,7 +194,7 @@ export interface BacktestTrade {
 }
 
 export interface BacktestCostConfig {
-  feeConfig:      UserFeeConfig;
+  feeConfig:      PnlFeeRates;
   applySlippage:  boolean;
   applyFunding:   boolean;
   dailyVolume:    number;
