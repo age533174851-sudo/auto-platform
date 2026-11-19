@@ -8,7 +8,7 @@
 // user_id는 **읽지 않는다** — 읽으면 남의 이름으로 접수할 수 있다.
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
-import { parseTicketInput, suggestSeverity } from '@/lib/feedback/ticket';
+import { parseTicketInput, suggestSeverity, redactedOverflow, redactedOverflowMessage } from '@/lib/feedback/ticket';
 import { redact, redactionNotice } from '@/lib/feedback/redact';
 import { pickContext } from '@/lib/feedback/context';
 
@@ -57,6 +57,19 @@ export async function POST(req: NextRequest) {
   // ── 비밀을 지운다. 제목과 본문 둘 다 ──
   const t = redact(parsed.title);
   const b = redact(parsed.body);
+  // ── 가린 뒤의 길이를 **저장 전에** 본다 ──
+  //
+  // 가림은 글을 늘릴 수 있다. 늘어난 글은 DB의 CHECK에 막히고, 예전에는
+  // 그것이 "다시 시도해 주세요"로 나갔다 — 같은 글은 다시 보내도 똑같이
+  // 늘어나므로 영원히 실패하는 안내였다. 판정은 ticket.ts 한 곳에 있다.
+  const over = redactedOverflow({ title: t.text, body: b.text });
+  if (over) {
+    // **글 내용은 담지 않는다 — 길이만 돌려준다.**
+    return json({ ok: false, error: 'too_long_after_redaction',
+      field: over.field, length: over.length, max: over.max, over: over.over,
+      message: redactedOverflowMessage(over) }, 400);
+  }
+
   const picked = pickContext(raw?.context);
   const hits = [...t.hits, ...b.hits];
   // 종류별로 합친다. **값은 어디에도 담지 않는다**
