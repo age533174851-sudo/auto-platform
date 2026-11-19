@@ -21,7 +21,7 @@ import { ownedOrderIds, cancelLedger, rollbackNote, type CancelAttempt } from '.
 import { futuresApplyLeverage, unknownResultVerdict } from '../exchanges/futuresExec';
 import { executionIdentityComplete } from '../execution/profile';
 import type { StopPolicy, TakeProfitPolicy } from '../strategies/profiles';
-import { stopReattachVerdict } from './stopReattach';
+import { stopReattachVerdict, reattachPositionEvidence } from './stopReattach';
 import { fillFactsOf } from './orderFillFacts';
 import { RECONCILE_QUERY_STATUSES } from './pendingReconcile';
 import { quantizeOrder } from '../exchanges/quantize';
@@ -2073,8 +2073,9 @@ async function attachStopIfMissing(
 ): Promise<{ message: string; needsAttention: boolean } | null> {
   // 실패를 문자열 접두어로 판정하지 않는다. 집계는 구조화된 needsAttention만 본다.
   const note = (message: string) => ({ message, needsAttention: false });
-  const warnGate = async (reason: string): Promise<{ message: string; needsAttention: boolean }> => {
-    const message = `⚠ 손절 복구 미확인 — ${reason}`;
+  // 장부에 경고를 적는 자리는 **한 곳**이다. 보호되지 않은 포지션이
+  // 집계(needs_attention)에 들어가지 않으면 아무도 다시 보지 않는다.
+  const warnAttention = async (message: string): Promise<{ message: string; needsAttention: boolean }> => {
     try {
       const { error } = await sb.from('live_orders').update({
         needs_attention: true, error_message: message,
@@ -2085,6 +2086,8 @@ async function attachStopIfMissing(
       return { message: `${message} · 경고 장부 기록도 예외 (${e?.message || e})`, needsAttention: true };
     }
   };
+  // 거래소 경로가 넘기는 짧은 사유에는 공통 접두어만 붙인다.
+  const warnGate = (reason: string) => warnAttention(`⚠ 손절 복구 미확인 — ${reason}`);
   // **판정은 `stopReattachVerdict` 한 곳에 있다.** 여기서 조건을 다시
   // 쓰면 시험되는 규칙과 실제로 도는 규칙이 갈린다.
   const verdict = stopReattachVerdict(o);
@@ -2105,13 +2108,12 @@ async function attachStopIfMissing(
       if (!contract) return warnGate('Gate 계약 변환 실패 — 재부착 금지');
 
       // **포지션이 실제로 있는지 먼저 본다.**
+      // 못 읽은 것(null·깨진 size)은 '포지션 없음'이 아니다 (#479).
       const pos = await gf.getPositionGateFutures(creds.apiKey, creds.apiSecret, contract, creds.testnet);
-      if (pos == null) return warnGate('Gate 포지션 조회 미확인 — 재부착 금지');
-      // getPositionsGateFutures/closePositionGateFutures와 동일한 수치 정본.
-      // null·빈 문자열·공백·NaN·Infinity는 정상 0과 다르다.
-      const size = gf.gateNum(pos.size);
-      if (size == null) return warnGate('Gate 포지션 수량 미확인 — 재부착 금지');
-      if (size === 0) return null;               // 조회로 확인한 실제 무포지션
+      const gEv = reattachPositionEvidence(pos ? (pos as any).size : null);
+      if (gEv.kind === 'UNKNOWN') return warnAttention(`⚠ 손절 복구 미확인 — ${gEv.note}`);
+      if (gEv.kind === 'FLAT') return null;      // 확인된 0 — 걸 이유가 없다
+      const size = gEv.qty;
       // 방향이 어긋나면 걸지 않는다. 반대 방향 손절은 즉시 발동한다.
       if ((size > 0 ? 'LONG' : 'SHORT') !== posSide) {
         return warnGate(`기록은 ${posSide}인데 거래소 포지션은 ${size > 0 ? 'LONG' : 'SHORT'}입니다 — 재부착 금지`);
@@ -2179,8 +2181,11 @@ async function attachStopIfMissing(
 
     const bf = await import('@/lib/exchanges/binanceFutures');
     const rr = await bf.getSymbolPositionRiskEx(creds.apiKey, creds.apiSecret, symbol, creds.testnet);
-    const amt = Number(rr.risk?.positionAmt ?? 0);
-    if (!amt) return null;
+    // `risk: null`은 조회 실패·깨진 수량이다. 0으로 바꾸지 않는다 (#479).
+    const bEv = reattachPositionEvidence(rr.risk ? rr.risk.positionAmt : null, rr.risk ? null : rr.error);
+    if (bEv.kind === 'UNKNOWN') return warnAttention(`⚠ 손절 복구 미확인 — ${bEv.note}`);
+    if (bEv.kind === 'FLAT') return null;        // 확인된 0 — 걸 이유가 없다
+    const amt = bEv.qty;
     if ((amt > 0 ? 'LONG' : 'SHORT') !== posSide) {
       return note(`손절 복구 안 함 — 기록은 ${posSide}인데 거래소 포지션은 ${amt > 0 ? 'LONG' : 'SHORT'}입니다`);
     }

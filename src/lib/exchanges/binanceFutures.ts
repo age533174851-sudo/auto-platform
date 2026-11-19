@@ -411,7 +411,7 @@ export async function getCachedBracket(
 
 // ── 계정의 **실제** 수수료율 ────────────────────────────────
 //
-// 기본값 표(`lib/fees.ts`의 `DEFAULT_FEES`)는 등급·BNB 할인·프로모션을
+// 기본값 표(`lib/fees/index.ts`의 `DEFAULT_FEES`)는 등급·BNB 할인·프로모션을
 // 모르므로 100배 비용 계산의 출처로 쓸 수 없다. 심볼별 실제 수수료를
 // 계정에서 읽는다. **못 읽으면 null이다** — 기본값으로 대체하지 않는다.
 export interface CommissionRate {

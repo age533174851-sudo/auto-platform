@@ -87,6 +87,11 @@ try {
  // server clock advances; no ten-minute production observation is claimed.
  writeFileSync(clock,'660000');
  const second=await browser.newContext({viewport:{width:390,height:844},storageState:state,serviceWorkers:'block'});
+ // ★ 브라우저 시계도 같은 만큼 앞당긴다. 서버 시계만 앞당기면 화면은
+ //   "아직 간격 안 찼다"로 보고 기다리므로, **두 번째 관측이 자동으로
+ //   나가는지를 증명할 수 없다.** setFixedTime은 Date만 바꾸고 타이머는
+ //   건드리지 않으므로 하이드레이션이 멈추지 않는다.
+ await second.clock.setFixedTime(Date.now()+660000+60000);
  await second.addInitScript(()=>{const Real=window.WebSocket;window.WebSocket=class extends EventTarget{static OPEN=1;static CLOSED=3;readyState=3;constructor(url){super();if(['127.0.0.1','localhost'].includes(new URL(String(url),location.href).hostname))return new Real(url);}close(){}send(){}};});
  const p=await second.newPage();p.on('pageerror',e=>errors.push(e.message));await p.route('**/*',async route=>{
   const u=new URL(route.request().url());
@@ -96,14 +101,17 @@ try {
   return route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(body)});
  });
  await p.goto(origin+'/?tab=auto',{waitUntil:'domcontentloaded',timeout:120000});
- const resumed=p.getByTestId('smoke-exposure-recovery');await resumed.getByText('BTCUSDT · 첫 확인 기록 있음',{exact:true}).waitFor({timeout:60000});
- await resumed.getByRole('button',{name:'잔여 노출 확인',exact:true}).click();await resumed.getByRole('status').filter({hasText:'두 번의 잔여 노출 확인이 저장'}).waitFor();
+ const resumed=p.getByTestId('smoke-exposure-recovery');await resumed.waitFor({timeout:60000});
+ // ★ **누르지 않는다.** 간격이 찼으면 화면이 스스로 두 번째 관측을 보낸다.
+ //   전에는 사람이 10분 뒤에 다시 와서 눌러야 했고, 그래서 테스트넷 실주문
+ //   검증이 2026-08-15부터 풀리지 않았다.
+ await resumed.getByRole('status').filter({hasText:'두 번의 잔여 노출 확인이 저장'}).waitFor({timeout:60000});
  const final=JSON.parse(q(`SELECT jsonb_build_object('state',state,'verdict',verdict,'steps',steps) FROM smoke_tests WHERE id='${id}'`)[0]);
  assert.equal(final.state,'UNKNOWN');assert.equal(final.verdict,'UNKNOWN');assert.equal(final.steps.ENTRY.state,'FAIL');assert.equal(final.steps._attestation.code,'ATTESTED_FLAT');assert.equal(final.steps.ORDERS_ZERO,undefined);
  const calls=readFileSync(venueCalls,'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
  assert.equal(calls.filter(x=>x.path!=='/fapi/v1/time').length,6);assert.ok(calls.every(x=>x.method==='GET'));assert.deepEqual(errors,[]);
  await resumed.screenshot({path:join(out,'recovered.png')});
- writeFileSync(join(out,'evidence.json'),JSON.stringify({browserToApiToPostgrestToPG:true,firstPersisted:true,newBrowserResumed:true,offlineClockAdvanced:true,historicalVerdictPreserved:true,venueGets:calls.length,venueWrites:0,productionCalls:0},null,2));
- console.log('PASS: owner UI -> API -> PG, restart browser, second observation; historical verdict preserved, venue writes 0');
+ writeFileSync(join(out,'evidence.json'),JSON.stringify({browserToApiToPostgrestToPG:true,firstPersisted:true,newBrowserResumed:true,offlineClockAdvanced:true,secondObservationAutomatic:true,clicksAfterFirst:0,historicalVerdictPreserved:true,venueGets:calls.length,venueWrites:0,productionCalls:0},null,2));
+ console.log('PASS: owner UI -> API -> PG, restart browser, second observation sent automatically with zero further clicks; historical verdict preserved, venue writes 0');
 } catch(e){console.error('Probe logs:',tmp);throw e;}
 finally {if(browser)await browser.close();web.kill('SIGTERM');rest.kill('SIGTERM');await new Promise(r=>gateway.close(r));dropScratchDb(target,db);}
