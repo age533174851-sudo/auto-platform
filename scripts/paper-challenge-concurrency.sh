@@ -209,18 +209,41 @@ bal_y_before=$(q "SELECT balance FROM public.paper_accounts WHERE id='$ACC_Y'")
   PSQL -At -v ON_ERROR_STOP=1 <<SQL
 BEGIN;
 SELECT id FROM public.paper_accounts WHERE id='$ACC_X' FOR UPDATE;
--- A가 ②에서 이 잠금에 막힐 때까지 기다린다. 시간이 아니라 **상태**를 본다.
+-- A가 ②에서 **이 트랜잭션의** 계좌 잠금에 막힐 때까지 기다린다.
+-- 시간이 아니라 상태를 본다 — 그리고 그 상태는 "누군가 어딘가에서
+-- 기다린다"가 아니라 **"나를 기다린다"**여야 한다.
+--
+-- 전에는 `NOT l.granted`로 **클러스터 전체의** 대기 잠금을 셌다. 공식
+-- Supabase 로컬 스택에는 realtime·postgrest·storage가 같이 돌고, 그중
+-- 하나가 잠깐 잠금을 기다리는 것만으로 출발선이 열렸다. 그러면 B는 A가
+-- ①을 읽기도 전에 포지션을 Y로 옮기고, A는 **이미 Y인 포지션을 정상
+-- 정산**한다 — CAS는 멀쩡한데 검사가 빨개진다. main이 그래서 빨갰다
+-- (2026-11-16). 무관한 세션 둘로 대기 잠금 하나를 만들면 그 3건이
+-- 그대로 재현된다.
 DO \$do\$
 DECLARE n INT := 0; tries INT := 0;
 BEGIN
   LOOP
-    SELECT count(*) INTO n FROM pg_locks l
-      JOIN pg_stat_activity s ON s.pid = l.pid
-     WHERE NOT l.granted AND s.pid <> pg_backend_pid();
-    EXIT WHEN n > 0 OR tries > 500;
+    -- `pg_locks`에서 **대기 중인 백엔드**를 뽑고, 그중 나를 기다리는 것만 센다.
+    --
+    -- `pg_stat_activity`를 쓰지 않는다. 그 뷰는 트랜잭션 안에서 **첫 조회
+    -- 시점으로 고정**된다(`pg_stat_clear_snapshot()`을 부르지 않는 한). B는
+    -- `BEGIN` 안에서 도니까, B가 시작한 뒤 접속한 A는 그 목록에 끝까지
+    -- 나타나지 않는다 — 옛 코드가 셀 수 있었던 것은 **B보다 먼저 있던
+    -- 백엔드들의 대기 잠금뿐**이었다. 그래서 조용한 DB에서는 출발선이
+    -- 열리지 않고(5초 헛기다림), 다른 서비스가 도는 CI에서는 A와 무관하게
+    -- 즉시 열렸다. `pg_locks`는 캐시되지 않는다.
+    SELECT count(*) INTO n
+      FROM (SELECT DISTINCT l.pid FROM pg_locks l WHERE NOT l.granted) w
+     WHERE w.pid <> pg_backend_pid()
+       AND pg_backend_pid() = ANY (pg_blocking_pids(w.pid));
+    EXIT WHEN n > 0 OR tries > 1000;
     PERFORM pg_sleep(0.01);
     tries := tries + 1;
   END LOOP;
+  -- **출발선에 섰는지를 값으로 남긴다.** 못 섰으면 이 뒤의 CAS 확인은
+  -- 아무것도 증명하지 못한다 — 그것을 통과로 적지 않는다.
+  RAISE NOTICE 'CAS_BARRIER_WAITERS=%', n;
 END \$do\$;
 UPDATE public.paper_positions SET paper_account_id='$ACC_Y'::uuid WHERE id='$POS';
 COMMIT;
@@ -232,6 +255,14 @@ sleep 0.3
 settled=$(q "SELECT settled FROM public.paper_settle_close(
               '$POS'::uuid, 110, 'TP', 1, 10, 9, 1, '$EV'::timestamptz)")
 wait $B_PID
+
+# **경합이 실제로 일어났는가를 먼저 묻는다** — ①의 출발선 확인과 같은 이유다.
+# 이 줄이 없으면 "경합을 못 만들었다"와 "CAS가 샜다"가 같은 빨간불로 보인다.
+cas_waiters=$(grep -oE 'CAS_BARRIER_WAITERS=[0-9]+' /tmp/cas_b.out | head -1 | cut -d= -f2)
+case "${cas_waiters:-}" in
+  ''|0) bad "CAS 빗나감: A가 계좌 잠금에서 B를 기다렸다" "1 이상" "${cas_waiters:-읽지 못했습니다}" ;;
+  *)    ok  "CAS 빗나감: A가 계좌 잠금에서 B를 기다렸다" "$cas_waiters" ;;
+esac
 
 want "CAS 빗나감: settled=false" "f" "$settled"
 want "CAS 빗나감: 포지션은 여전히 open" "open" "$(q "SELECT status FROM public.paper_positions WHERE id='$POS'")"

@@ -440,16 +440,21 @@ export async function saveBacktestResult(result: {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// 10. AUDIT LOGS  (insert-only from client)
+// 10. AUDIT LOGS — **지웠다**
 // ═══════════════════════════════════════════════════════════════
-export async function logClientAudit(action: string, detail: Record<string, unknown>): Promise<void> {
-  const uid = await getClientUserId();
-  const sb  = getSupabaseClient();
-  if (!sb || !uid) return;
-  try {
-    await sb.from('audit_logs').insert({ actor_id: uid, action, details: detail, result: 'client' });
-  } catch {}
-}
+//
+// `logClientAudit`이 있었다. 세 가지가 동시에 틀렸다:
+//
+//  1. **부르는 곳이 한 곳도 없었다.**
+//  2. `audit_logs`에 `actor_id` · `details` · `result`로 썼는데 실제 DB의
+//     그 표에는 그 칸이 하나도 없다(`src/lib/supabase/types.ts` 참고 —
+//     Management API로 실제 DB에서 뽑은 파일이다).
+//  3. 브라우저 anon 키로는 감사 표에 쓸 수 없다. 쓸 수 있으면 사용자가
+//     제 감사 기록을 지어낼 수 있다는 뜻이므로, **막히는 것이 맞다.**
+//
+// 감사 기록은 서버에서 `recordAudit`(`lib/safety/auditStore`)이 남긴다.
+// 화면에서 남겨야 할 것이 생기면 서버 라우트를 하나 지나게 한다 —
+// 브라우저에서 직접 쓰는 길을 다시 만들지 않는다.
 
 // ═══════════════════════════════════════════════════════════════
 // HEALTH CHECK

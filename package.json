@@ -14,6 +14,7 @@
     "gen:ui-inventory": "node scripts/generate-ui-inventory.mjs",
     "check:migrations": "node scripts/check-migrations.mjs",
     "check:worker-coverage": "node scripts/check-worker-coverage.mjs",
+    "check:cron-auth": "node scripts/check-cron-auth-contract.mjs",
     "check:db-columns": "node scripts/check-db-columns.mjs",
     "check:get-writes": "node scripts/check-get-writes.mjs",
     "check:test-registry": "node scripts/check-test-registry.mjs",

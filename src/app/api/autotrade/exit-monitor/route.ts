@@ -23,7 +23,7 @@
 //       Authorization: Bearer <CRON_SECRET> 을 붙여 호출한다.
 //       워커·수동 점검용으로 x-admin-secret도 허용한다.
 import { NextRequest, NextResponse } from 'next/server';
-import { timingSafeEqual } from 'crypto';
+import { wakeAuthFromEnv } from '@/lib/system/cronAuth';
 import { checkPositionGuard, type GuardVerdict } from '@/lib/engine/positionGuard';
 import { makeCredsReader } from '@/lib/engine/connectionCreds';
 import {
@@ -39,14 +39,6 @@ export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 export const maxDuration = 60;
 
-function safeEqual(provided: string | null, expected: string): boolean {
-  if (!expected || !provided) return false;
-  const a = Buffer.from(provided, 'utf8');
-  const b = Buffer.from(expected, 'utf8');
-  if (a.length !== b.length) return false;
-  try { return timingSafeEqual(a, b); } catch { return false; }
-}
-
 /**
  * 인증 결과를 **boolean으로 버리지 않는다.**
  *
@@ -59,17 +51,13 @@ function safeEqual(provided: string | null, expected: string): boolean {
  *   인증 근거로 쓰지 않는다 — 그건 누구나 흉내 낼 수 있다.
  */
 function authorized(req: NextRequest): WakeAuth {
-  const cronSecret = process.env.CRON_SECRET || '';
-  const adminSecret = process.env.ADMIN_SECRET || '';
-
-  const auth = req.headers.get('authorization') || '';
-  if (cronSecret && auth.startsWith('Bearer ') && safeEqual(auth.slice(7), cronSecret)) {
-    return { ok: true, kind: 'CRON_BEARER' };
-  }
-  if (safeEqual(req.headers.get('x-admin-secret'), adminSecret)) {
-    return { ok: true, kind: 'ADMIN_HEADER' };
-  }
-  return { ok: false, kind: 'NONE' };
+  // **판정은 `system/cronAuth` 한 곳에 있다.** 전에는 이 함수와 모의
+  // 라우트에 각자 적혀 있었고, 받는 경로가 서로 달랐다 — 모의는 Vercel
+  // Cron을 못 받아 깨우는 길이 하나뿐이었다.
+  return wakeAuthFromEnv({
+    authorization: req.headers.get('authorization'),
+    adminHeader: req.headers.get('x-admin-secret'),
+  });
 }
 
 /**
@@ -1852,12 +1840,33 @@ async function runLifecycleSweep(
       // Gate 포지션은 진입은 되는데 손절을 옮길 수가 없었다 — 화면에는
       // "청산 감시 정상"이 떠 있었다.
       const opsMv = await import('@/lib/engine/venuePositionOps');
+      const { ladderEntryClientOrderId } = await import('@/lib/strategies/ladderIds');
+      const { stopLedgerVerdict, pickStopLedgerRow } = await import('@/lib/engine/stopLedger');
       const venueMv = { exchange: cr.exchange, apiKey: key, apiSecret: secret, testnet };
+
+      // **진입 식별자를 여기서 조립하지 않는다.** 진입과 같은 함수를 쓴다 —
+      // 두 곳에 적으면 한쪽만 바뀌고, 그때 아래에서 어느 장부 줄에 새
+      // 손절 번호를 적어야 하는지 못 찾는다. 거래일을 모르면 null이고,
+      // 그때는 `pickStopLedgerRow`가 번호가 적힌 가장 최근 줄로 떨어진다.
+      const entryCid = d.tradeDate
+        ? ladderEntryClientOrderId({ tradeDate: d.tradeDate, symbol: d.symbol })
+        : null;
+
       // ★ 손절을 거는 것도 거래소 쓰기다. 전송 직전에 권한을 묻는다.
+      //   위의 식별자 조립은 순수 계산이라 순서를 바꿔도 안전하지만,
+      //   **확인은 전송에 붙어 있어야 한다** — 사이에 I/O를 끼우면
+      //   확인과 전송 사이가 벌어진다.
       if (!(await stillMine())) {
         results.push({ symbol: d.symbol, action: 'MOVE_STOP', ok: false, error: LEASE_LOST_MSG });
         continue;
       }
+      // **새 손절에 표식을 새기지 않는다 — 아직 그 배선이 없다.**
+      //
+      //   `placeStop` → `futuresSetTpsl`에서 clientOrderId를 쓰는 것은
+      //   Gate 갈래뿐이고, 바이낸스 갈래는 `placeFuturesTPSL`에 그 칸이
+      //   아예 없어 **조용히 버려진다.** 넘기면 "표식을 새겼다"는 거짓이
+      //   코드에 남으므로 넘기지 않는다. 소유 증거는 아래에서 장부에
+      //   적는 거래소 주문 번호다 — 그것이 원래 1순위 증거다.
       const placed = await opsMv.placeStop(venueMv, {
         symbol: d.symbol, positionSide: d.side, stopPrice: d.newStop!,
       });
@@ -1865,6 +1874,57 @@ async function runLifecycleSweep(
       if (!placed.ok) {
         results.push({ symbol: d.symbol, action: 'MOVE_STOP', ok: false, error: `새 손절 실패: ${placed.message}` });
         continue;
+      }
+
+      // ── 새 번호를 **먼저** 적는다 ──
+      //
+      // 진입 때는 `sl_order_id`를 적고 있었는데 트레일링은 안 적었다.
+      // 그래서 손절을 한 번이라도 옮긴 포지션은, 그 손절이 나중에
+      // 고아가 됐을 때 소유를 증명하지 못한다 — 고아 정리는 적어 둔
+      // 번호를 1순위 증거로 쓰고 `ownedOnly`로 그것만 지운다.
+      //
+      // **취소보다 먼저 한다.** 반대로 하면 그 사이에 요청이 끊겼을 때
+      // 장부에는 이미 없는 옛 번호만 남고, 실제로 걸린 새 손절은
+      // 장부에 없어서 남의 것으로 보인다.
+      let ledger: any = null;
+      {
+        let targetFound = false;
+        let writeOk: boolean | null = null;
+        try {
+          let q = (sb as any).from('live_orders')
+            .select('id, client_order_id, sl_order_id, created_at')
+            .eq('symbol', d.symbol);
+          q = d.connectionId ? q.eq('connection_id', d.connectionId) : q.eq('user_id', d.userId);
+          const { data: rows } = await q.order('created_at', { ascending: false }).limit(10);
+          const row = pickStopLedgerRow(rows as any, entryCid);
+          targetFound = !!row?.id;
+          if (row?.id) {
+            const { error } = await (sb as any).from('live_orders')
+              .update({ sl_order_id: String(placed.orderId) }).eq('id', row.id);
+            writeOk = !error;
+          }
+        } catch { writeOk = false; }
+
+        const v = stopLedgerVerdict({
+          newOrderId: placed.orderId, targetFound, writeOk,
+        });
+        ledger = { code: v.code, recorded: v.recorded, reason: v.reason };
+
+        if (!v.cancelOld) {
+          // 손절이 잠깐 둘인 것은 위험하지 않다 — 둘 다 전량을 닫으므로
+          // 먼저 걸리는 쪽이 끝낸다. **번호를 잃는 쪽이 훨씬 비싸다.**
+          //
+          // 결과에는 **옛 손절이 남았다는 사실을 그대로 적는다** — 위의
+          // 임차 상실 갈래와 같은 어휘를 쓴다. 다른 이름을 쓰면 읽는 쪽이
+          // 같은 상태를 두 가지로 센다.
+          results.push({ symbol: d.symbol,
+            action: 'MOVE_STOP', code: 'OLD_STOP_REMAINS',
+            ok: true, exchange: cr.exchange,
+            newStop: d.newStop, cancelledOld: 0,
+            oldStopKept: true, cleanupSkipped: true,
+            cancelNote: v.reason, ledger, reason: d.reason });
+          continue;
+        }
       }
 
       // 기존 손절 중 방금 건 것 외에는 취소한다.
@@ -1895,7 +1955,7 @@ async function runLifecycleSweep(
         ok: true, exchange: cr.exchange,
         newStop: d.newStop, cancelledOld: cancelled,
         oldStopKept: !cleanupOwned, cleanupSkipped: !cleanupOwned,
-        cancelNote, reason: d.reason });
+        cancelNote, ledger, reason: d.reason });
     } catch (e: any) {
       results.push({ symbol: d.symbol, action: d.action, ok: false, error: e?.message || '실행 실패' });
     }
