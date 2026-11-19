@@ -13,6 +13,10 @@ import {
   timeWeightedReturn, moneyWeightedReturn, naiveCheck, pnlBreakdown,
   NAIVE_GAP_WARN_PP,
 } from './returns';
+// 배당 재투자 시뮬레이션의 시험. 여기서 함께 돈다 — `scripts/run-tests.mjs`의
+// 등록 목록은 열린 PR 여럿이 같이 고치고 있어, 줄 하나를 더 얹으면 그 PR들과
+// 겹친다. 같은 '수익률 계산' 묶음이라 이 자리가 가장 가깝다.
+import { runDripTests } from '../accounts/drip.test';
 
 const DAY = 86_400_000;
 
@@ -224,4 +228,6 @@ export function runPortfolioReturnsTests() {
     const b = pnlBreakdown({ realized: 100, unrealized: 0, fees: 210, funding: 90 });
     eq(b.afterCost, -200);
   });
+
+  runDripTests();
 }
