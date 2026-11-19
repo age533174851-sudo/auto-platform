@@ -1,10 +1,11 @@
 import { NextRequest,NextResponse } from 'next/server';
 import { getSupabaseAdmin,resolveUserId } from '@/lib/supabase/admin';
-import { parsePaperAutomationControl,readBotSignal,readBotTimeframe,DEFAULT_PAPER_BOT } from '@/lib/engine/paperAutomation';
+import { parsePaperAutomationControl,readBotSignal,readBotTimeframe,readBotLeverage,DEFAULT_PAPER_BOT } from '@/lib/engine/paperAutomation';
 import { barIntervalLabel,DEFAULT_BAR_INTERVAL } from '@/lib/risk/bars';
 import { ENTRY_SIGNAL_LABEL,DEFAULT_ENTRY_SIGNAL } from '@/lib/engine/entrySignals';
 import { readRunnerConfig } from '@/lib/engine/paperRunner';
 import { paperRunnerStatus } from '@/lib/engine/paperRunnerStatus';
+import { summarizeBotPerf, PERF_ROW_CAP } from '@/lib/engine/paperBotPerf';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -16,6 +17,14 @@ async function context(req: NextRequest) {
   const sb: any = uid ? getSupabaseAdmin() : null;
   return { uid,sb };
 }
+
+/**
+ * 봇이 배율을 안 적었을 때 쓸 값. **여기에 숫자를 적지 않는다** —
+ * 배포 설정(`PAPER_LEVERAGE`)을 읽는 같은 함수를 쓴다. 적어 두면
+ * 배포값을 바꿨을 때 저장되는 값과 돌아가는 값이 갈린다.
+ */
+const defaultLeverage = () => readRunnerConfig(k => process.env[k]).leverage;
+
 export async function GET(req: NextRequest) {
   const { uid,sb } = await context(req);
   if (!uid) return json({ok:false,error:'auth_required'},401);
@@ -43,7 +52,10 @@ export async function GET(req: NextRequest) {
       || !Array.isArray(bots.data))
     return json({ok:false,error:'automation_unreadable',message:'서버 반복 상태를 확인하지 못했습니다'},503);
   const positions = account.data ? await sb.from('paper_positions')
-    .select('id,symbol,side,status,fill_price,exit_price,stop_loss,take_profit,liquidation_price,quantity,realized_pnl,exit_reason,opened_at,closed_at')
+    // `strategy_id`를 **되살린다.** 이 조회는 봇으로 걸러 읽으면서 정작
+    // 그 칸을 빼고 보냈다 — 그래서 화면은 "이 체결이 어느 봇의 것인가"를
+    // 알 수 없었고, 봇 카드에 손익을 적을 방법이 없었다.
+    .select('id,strategy_id,symbol,side,status,fill_price,exit_price,stop_loss,take_profit,liquidation_price,quantity,realized_pnl,exit_reason,opened_at,closed_at')
     // **봇 전부의 체결을 읽는다.** 예전에는 `paper-auto-v1`만 봤다 — 그대로
     // 두면 새 봇이 낸 거래가 화면에도 점수판에도 안 잡힌다.
     .eq('user_id',uid).eq('paper_account_id',account.data.id)
@@ -82,16 +94,44 @@ export async function GET(req: NextRequest) {
   // 전략은 **판정하는 쪽과 같은 함수로** 읽는다. 화면이 따로 `config.signal`을
   // 해석하면 러너와 다른 답을 낼 수 있고, 그러면 "화면에는 돌파인데 추세
   // 추종이 도는" 상태가 된다.
+  // ── 봇별 **실제 측정된** 성과 ──
+  //
+  // 지어내지 않는다. `paper_positions`에 실재하는 `realized_pnl`과
+  // `margin`만 센다. 이 조회가 실패해도 503으로 만들지 않는다 — 나머지
+  // 화면은 그대로 쓸모 있고, 못 읽었다는 사실은 `unreadable`로 간다.
+  // **0으로 적지 않는다.**
+  const botIds: string[] = bots.data.map((b:any) => String(b.bot_id));
+  let perfRows: any[] | null = null, perfUnreadable = false;
+  if (account.data && botIds.length > 0) {
+    try {
+      const pr = await sb.from('paper_positions')
+        .select('strategy_id,status,realized_pnl,margin')
+        .eq('user_id',uid).eq('paper_account_id',account.data.id)
+        .in('strategy_id',botIds)
+        .order('opened_at',{ascending:false}).limit(PERF_ROW_CAP);
+      if (pr.error || !Array.isArray(pr.data)) perfUnreadable = true; else perfRows = pr.data;
+    } catch { perfUnreadable = true; }
+  } else if (!account.data) {
+    // 계좌가 없으면 체결도 없다. **못 읽은 것이 아니라 없는 것**이다.
+    perfRows = [];
+  }
+  const perf = summarizeBotPerf({ rows: perfRows, botIds, unreadable: perfUnreadable });
   const botView = bots.data.map((b:any) => {
     const { signal,bad } = readBotSignal(b.config);
     // 주기도 **판정하는 쪽과 같은 함수로** 읽는다. 화면이 따로 해석하면
     // "화면에는 1분봉인데 일봉이 도는" 상태가 된다.
     const tf = readBotTimeframe(b.config);
+    // 배율도 **판정하는 쪽과 같은 함수로** 읽는다. 화면이 계정 설정값을
+    // 그리면 "화면에는 5배인데 20배가 도는" 상태가 된다.
+    const lev = readBotLeverage(b.config, defaultLeverage());
     const { config: _cfg,...rest } = b;
     return { ...rest,signal,signalLabel:ENTRY_SIGNAL_LABEL[signal],
+      perf: perf[String(b.bot_id)] ?? null,
       timeframe:tf.timeframe,timeframeLabel:barIntervalLabel(tf.timeframe),
+      leverage:lev.leverage,
       ...(bad ? { signalWarning:bad } : {}),
-      ...(tf.bad ? { timeframeWarning:tf.bad } : {}) };
+      ...(tf.bad ? { timeframeWarning:tf.bad } : {}),
+      ...(lev.bad ? { leverageWarning:lev.bad } : {}) };
   });
   return json({ok:true,settings:settings.data,bots:botView,runs:runs.data,account:account.data ? accountView : null,positions:positions.data,runner});
 }
@@ -125,9 +165,22 @@ export async function POST(req: NextRequest) {
       message:'이 봇의 기존 봉 주기를 확인하지 못해 설정을 바꾸지 않았습니다. 잠시 뒤 다시 시도하세요.'},503);
     timeframe = prev.data ? readBotTimeframe(prev.data.config).timeframe : DEFAULT_BAR_INTERVAL;
   }
+  // 배율도 같다. config를 통째로 교체하는 `ON CONFLICT` 때문에, 배율을
+  // 안 보내는 요청이 20배 봇을 조용히 계정 기본값으로 되돌리면 그 봇의
+  // 20배 기록과 5배 기록이 한 `strategy_id`에 섞인다.
+  let leverage = input.leverage;
+  if (leverage == null) {
+    const prev = await sb.from('paper_automation_settings').select('config')
+      .eq('user_id',uid).eq('bot_id',input.botId).maybeSingle();
+    if (prev.error) return json({ok:false,error:'control_failed',
+      message:'이 봇의 기존 배율을 확인하지 못해 설정을 바꾸지 않았습니다. 잠시 뒤 다시 시도하세요.'},503);
+    leverage = prev.data
+      ? readBotLeverage(prev.data.config, defaultLeverage()).leverage
+      : defaultLeverage();
+  }
   const result = await sb.rpc('paper_auto_control',{ p_user_id:uid,p_bot_id:input.botId,p_enabled:input.enabled,
     p_symbol:input.symbol,p_interval:input.interval,
-    p_config:{...readRunnerConfig(k=>process.env[k]),maxOpenPositions:1,signal,timeframe} });
+    p_config:{...readRunnerConfig(k=>process.env[k]),maxOpenPositions:1,signal,timeframe,leverage} });
   if (result.error) return json({ok:false,error:'control_failed',message:'설정을 저장하지 못했습니다. 기본 모의 계좌를 먼저 시작하고 다시 시도하세요.'},409);
   return json({ok:true,settings:result.data});
 }

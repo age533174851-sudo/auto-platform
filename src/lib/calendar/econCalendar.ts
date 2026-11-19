@@ -159,14 +159,32 @@ export function makeManualEvent(args: {
   timezoneOffsetMinutes: number;  // KST면 540, UTC면 0
   country?: string;
 }): CalendarEvent | { error: string } {
-  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(args.localDateTime);
-  if (!m) return { error: 'localDateTime 형식은 YYYY-MM-DDTHH:mm 이어야 합니다' };
-  if (!isFinite(args.timezoneOffsetMinutes)) return { error: 'timezoneOffsetMinutes가 필요합니다 (KST=540, UTC=0)' };
+  // 일괄 경로(`/api/calendar/sync`의 validate)와 **같은 문을 지난다.**
+  // 여기만 열려 있으면 'HIGH'가 저장되고, 읽을 때 'low'로 떨어져
+  // Risk Veto(impact === 'high')가 그 FOMC를 보지 못한다.
+  if (typeof args?.event !== 'string' || !args.event.trim()) return { error: 'event 이름이 필요합니다' };
+  if (!(['low', 'medium', 'high'] as const).includes(args.impact as any)) {
+    return { error: 'impact는 low|medium|high 중 하나여야 합니다' };
+  }
 
-  const localMs = Date.UTC(
-    Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5])
-  );
-  const utcMs = localMs - args.timezoneOffsetMinutes * 60000;
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(String(args.localDateTime ?? ''));
+  if (!m) return { error: 'localDateTime 형식은 YYYY-MM-DDTHH:mm 이어야 합니다' };
+  // 전역 isFinite는 null·''을 0으로 읽는다 — 시간대를 안 적었는데 UTC가 된다.
+  const tz = args.timezoneOffsetMinutes;
+  if (typeof tz !== 'number' || !Number.isFinite(tz)) {
+    return { error: 'timezoneOffsetMinutes가 필요합니다 (KST=540, UTC=0)' };
+  }
+  if (Math.abs(tz) > 14 * 60) return { error: 'timezoneOffsetMinutes는 -840~840 사이여야 합니다' };
+
+  const [y, mo, d, h, mi] = m.slice(1).map(Number);
+  const localMs = Date.UTC(y, mo - 1, d, h, mi);
+  // Date.UTC는 2월 30일을 3월 2일로, 24시를 다음 날로 넘긴다. 되읽어 같아야 한다.
+  const back = new Date(localMs);
+  if (back.getUTCFullYear() !== y || back.getUTCMonth() !== mo - 1 || back.getUTCDate() !== d
+      || back.getUTCHours() !== h || back.getUTCMinutes() !== mi) {
+    return { error: `없는 날짜·시각입니다 (${args.localDateTime})` };
+  }
+  const utcMs = localMs - tz * 60000;
 
   return {
     id: `manual_${utcMs}_${args.event.slice(0, 12).replace(/\s/g, '')}`,

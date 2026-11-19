@@ -1208,10 +1208,20 @@ export default function AutotradeControl({ onSnapshot, onReload }: {
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ color: T.txt, fontSize: 12, fontWeight: 700 }}>
                   {s.symbol}
+                  {/* ── 거래 환경 배지 ──
+                      **실행 상태와 다른 축이다.** 오른쪽 `켜짐/꺼짐`은 "이
+                      예약이 도는가"이고 이 배지는 "어느 돈으로 도는가"다.
+                      전에는 둘 다 색 글자여서 같은 종류로 보였고, 테스트넷
+                      예약이 켜져 있는 것과 실전 예약이 꺼져 있는 것을
+                      한눈에 구분할 수 없었다. 배지는 테두리로 감싸 축이
+                      다름을 드러낸다. */}
                   <span style={{
                     marginLeft: 6, fontSize: 9, fontWeight: 800,
+                    padding: '1px 5px', borderRadius: 4, whiteSpace: 'nowrap',
                     // 실전은 눈에 띄어야 한다. 테스트넷과 같은 색이면 못 알아본다.
                     color: String(s.mode).startsWith('LIVE') ? T.red : T.muted,
+                    border: `1px solid ${String(s.mode).startsWith('LIVE') ? A(T.red, '55') : T.border}`,
+                    background: String(s.mode).startsWith('LIVE') ? A(T.red, '12') : 'transparent',
                   }}>{s.mode}</span>
                 </div>
                 {/* ── 2행: 마지막 판단 ──
@@ -1252,16 +1262,62 @@ export default function AutotradeControl({ onSnapshot, onReload }: {
                     0으로 적는" 고장이 조용히 들어온다. */}
                 {(() => {
                   const dv = dueDiagView((s as any).dueDiag);
+                  // **간격 경고의 근거가 둘이다** — 아래 펼친 블록 주석 참조.
+                  const intervalWarn = dv.intervalDefaulted || dv.intervalIsDbDefault;
+                  const nextColor = dv.nextBlocked ? T.muted : dv.nextOverdue ? T.ylw : T.sub;
+
+                  // ── 접혀 있을 때는 **한 줄** ──
+                  //
+                  // 이 블록은 `rowOpen` 밖에 있었다. 그래서 예약 한 줄이
+                  // 항상 여덟 줄로 펼쳐졌고, 모바일(320~430px)에서 예약이
+                  // 몇 개만 돼도 같은 라벨이 끝없이 반복됐다. 바로 위
+                  // `rowOpen` 주석이 **"한 줄이 열 줄이 되면 목록이
+                  // 아니다"**라고 적어 둔 그 의도가 배선되지 않은 것이다
+                  // (`CLAUDE.md` 상습 고장 ①: 만들어 놓고 배선을 안 함).
+                  //
+                  // 접었을 때 남길 한 줄은 **다음 평가**다. 사용자가 목록
+                  // 에서 묻는 것이 "언제 도나"이고, 그 값은 이제 정지·연결
+                  // 없음·지난 시각을 시각으로 적지 않는다.
+                  if (rowOpen !== s.id) {
+                    return (
+                      <div style={{
+                        marginTop: 3, fontSize: 10, lineHeight: 1.5, color: T.muted,
+                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      }} title={`간격 ${dv.intervalText} · 다음 평가 ${dv.nextText}`}>
+                        다음 평가 <span style={{ color: nextColor, fontWeight: dv.nextOverdue ? 800 : 400 }}>{dv.nextText}</span>
+                        {intervalWarn && (
+                          <span style={{ color: T.ylw, marginLeft: 6, fontWeight: 700 }}>· 간격 확인</span>
+                        )}
+                      </div>
+                    );
+                  }
                   return (
                     <div style={{ marginTop: 3, fontSize: 10, lineHeight: 1.6, color: T.muted }}>
+                      {/* **경고색의 근거가 둘이다.**
+
+                          `intervalDefaulted`(표에 값이 없거나 쓸 수 없음)는
+                          `interval_min`이 NOT NULL DEFAULT 1440 + CHECK(>=1)
+                          이라 운영 줄에서 한 번도 참이 되지 않는다 — 즉 그
+                          경고만 두면 아무 줄도 노랗게 되지 않는다.
+
+                          실제로 사람을 헷갈리게 하는 쪽은 `intervalIsDbDefault`
+                          다: 아무도 설정하지 않은 예약이 "설정 1440분"으로,
+                          하루 1회를 일부러 고른 것과 똑같이 보인다. 그래서
+                          둘 중 하나라도 참이면 눈에 띄게 한다. */}
                       <div>
                         간격{' '}
-                        <span style={{ color: dv.intervalDefaulted ? T.ylw : T.sub, fontWeight: dv.intervalDefaulted ? 800 : 400 }}>
+                        <span style={{
+                          color: (dv.intervalDefaulted || dv.intervalIsDbDefault) ? T.ylw : T.sub,
+                          fontWeight: (dv.intervalDefaulted || dv.intervalIsDbDefault) ? 800 : 400,
+                        }}>
                           {dv.intervalText}
                         </span>
                       </div>
                       <div>마지막 평가 <span style={{ color: T.sub }}>{dv.lastText}</span></div>
-                      <div>다음 평가 <span style={{ color: T.sub }}>{dv.nextText}</span></div>
+                      <div>다음 평가 <span style={{
+                        color: dv.nextBlocked ? T.muted : dv.nextOverdue ? T.ylw : T.sub,
+                        fontWeight: dv.nextOverdue ? 800 : 400,
+                      }}>{dv.nextText}</span></div>
                       <div style={{ overflowWrap: 'anywhere' }}>
                         판정{' '}
                         {dv.code ? <span style={{ color: T.sub, fontWeight: 700 }}>{dv.code}</span> : null}

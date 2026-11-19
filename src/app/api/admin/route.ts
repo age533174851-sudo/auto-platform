@@ -4,6 +4,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/auth/isAdmin';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
+// 감사 기록은 **한 곳에서만** 쓴다. 표 이름·칸 이름·시크릿 걸러내기가
+// 호출부마다 따로 있으면 언젠가 갈린다 — 이 라우트가 `audit_logs`에
+// 직접 쓰고 있었던 것이 그 결과다.
+import { recordAuditAsync } from '@/lib/safety/auditStore';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -83,16 +87,45 @@ export async function GET(req: NextRequest) {
   }
 
   // ── audit_logs ──────────────────────────────────────────
+  //
+  // **읽는 표가 바뀌었다.** 이 화면은 `audit_logs`를 읽고 있었는데 그
+  // 표는 마이그레이션 체인에 없다 — `schema.sql`에만 있다. 게다가
+  // 없는 칸(`resource`)까지 골랐으므로, 표가 있었더라도 조회가 실패하고
+  // 500으로 끝났다. 어느 쪽이든 **관리자 감사 화면은 비어 있었고, 빈
+  // 화면은 "아무 일도 없었다"로 읽힌다.**
+  //
+  // 실제로 기록이 쌓이는 표는 `audit_events`(040)다. `recordAudit`이
+  // 거기에 쓴다.
+  //
+  // 화면이 쓰는 이름(`actor_id` · `details`)은 그대로 둔다 — 두 화면이
+  // 그 이름으로 그리고 있고, 이름을 바꾸면 읽는 쪽도 같이 고쳐야 한다.
+  // 여기서 한 번 옮겨 주는 편이 실패 지점이 적다.
   if (action === 'audit_logs') {
     if (!sb) return NextResponse.json({ logs: [] });
     const limit = Math.min(Number(searchParams.get('limit') ?? 100), 500);
-    const { data, error } = await sb
-      .from('audit_logs')
-      .select('id,actor_id,action,target_id,resource,details,result,created_at')
+    // `as any`를 쓰는 이유: `src/lib/supabase/types.ts`는 Management API로
+    // **실제 DB에서 뽑은** 파일이고, `audit_events`(040)가 거기에 없다 —
+    // 040이 적용되기 전에 뽑혔다. 손으로 고치지 말라고 적혀 있는 파일이라
+    // 여기서 캐스트한다. `auditStore.ts`도 같은 이유로 캐스트한다.
+    const { data, error } = await (sb as any)
+      .from('audit_events')
+      .select('id,user_id,action,resource,result,detail,created_at')
       .order('created_at', { ascending: false })
       .limit(limit);
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-    return NextResponse.json({ logs: data ?? [] });
+    const logs = (data ?? []).map((r: any) => ({
+      id: r.id,
+      actor_id: r.user_id,
+      action: r.action,
+      // `resource`는 '무엇에 대한 동작인가'다 — 대상 사용자 id가 들어오면
+      // 그것이 예전의 `target_id`다. 두 이름을 다 실어 준다.
+      resource: r.resource,
+      target_id: r.resource || null,
+      result: r.result,
+      details: r.detail,
+      created_at: r.created_at,
+    }));
+    return NextResponse.json({ logs });
   }
 
   // ── stats — 통계 대시보드 ─────────────────────────────────
@@ -193,11 +226,11 @@ export async function POST(req: NextRequest) {
       .update({ enabled: false, status: 'stopped' })
       .eq('enabled', true);
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-    await sb.from('audit_logs').insert({
-      actor_id: userId,
-      action:   'EMERGENCY_BOT_STOP',
-      details:  { stopped_count: count ?? 'all', reason: body.reason ?? '관리자 긴급 정지' },
-      result:   'success',
+    await recordAuditAsync(sb, {
+      userId,
+      action: 'EMERGENCY_BOT_STOP',
+      detail: { stopped_count: count ?? 'all', reason: body.reason ?? '관리자 긴급 정지' },
+      result: 'success',
     });
     return NextResponse.json({ success: true, message: '모든 실행 중 전략이 중지되었습니다.', stoppedCount: count ?? 0 });
   }
@@ -213,12 +246,12 @@ export async function POST(req: NextRequest) {
       .update({ status: newStatus, updated_at: new Date().toISOString() })
       .eq('id', targetId);
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-    await sb.from('audit_logs').insert({
-      actor_id:  userId,
-      action:    action === 'ban_user' ? 'BAN_USER' : 'UNBAN_USER',
-      target_id: targetId,
-      details:   { reason: body.reason ?? '' },
-      result:    'success',
+    await recordAuditAsync(sb, {
+      userId,
+      action: action === 'ban_user' ? 'BAN_USER' : 'UNBAN_USER',
+      resource: targetId,
+      detail: { reason: body.reason ?? '' },
+      result: 'success',
     });
     return NextResponse.json({ success: true, status: newStatus });
   }
@@ -227,11 +260,11 @@ export async function POST(req: NextRequest) {
   if (action === 'maintenance_mode') {
     const enabled = !!body.enabled;
     if (!sb) return NextResponse.json({ error: 'Supabase 미연결' }, { status: 503 });
-    await sb.from('audit_logs').insert({
-      actor_id: userId,
-      action:   enabled ? 'MAINTENANCE_ON' : 'MAINTENANCE_OFF',
-      details:  { reason: body.reason ?? '' },
-      result:   'success',
+    await recordAuditAsync(sb, {
+      userId,
+      action: enabled ? 'MAINTENANCE_ON' : 'MAINTENANCE_OFF',
+      detail: { reason: body.reason ?? '' },
+      result: 'success',
     });
     return NextResponse.json({ success: true, maintenanceMode: enabled });
   }
@@ -255,11 +288,12 @@ export async function POST(req: NextRequest) {
     };
     const { data, error } = await (sb.from('admin_notices') as any).insert(row).select().single();
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-    await sb.from('audit_logs').insert({
-      actor_id: userId,
-      action:   'NOTICE_CREATE',
-      details:  { notice_id: data?.id, title },
-      result:   'success',
+    await recordAuditAsync(sb, {
+      userId,
+      action: 'NOTICE_CREATE',
+      resource: String(data?.id ?? ''),
+      detail: { notice_id: data?.id, title },
+      result: 'success',
     });
     return NextResponse.json({ success: true, notice: data });
   }
@@ -291,11 +325,12 @@ export async function POST(req: NextRequest) {
 
     const { error } = await (sb.from('admin_notices') as any).delete().eq('id', id);
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-    await sb.from('audit_logs').insert({
-      actor_id: userId,
-      action:   'NOTICE_DELETE',
-      details:  { notice_id: id },
-      result:   'success',
+    await recordAuditAsync(sb, {
+      userId,
+      action: 'NOTICE_DELETE',
+      resource: id,
+      detail: { notice_id: id },
+      result: 'success',
     });
     return NextResponse.json({ success: true });
   }
