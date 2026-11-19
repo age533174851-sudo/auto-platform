@@ -172,4 +172,85 @@ export function runUnknownResolverTests() {
     assert(r.reason.includes('거래 내역'), '확인할 곳을 안 알려줬다: ' + r.reason);
     assert(r.state !== 'FILLED' && r.state !== 'CANCELED', '단정했다: ' + r.state);
   });
+
+  // ── 숫자가 아닌 입력은 '유예가 지났다'·'포지션이 그대로다'의 증거가 아니다 ──
+  //
+  // 호출부(`reconcilePendingOrders`)는 `Date.now() - new Date(sent_at).getTime()`
+  // 과 `Number(pos_qty_before)`를 그대로 넘긴다. 시각 문자열이 깨졌거나 수량
+  // 칸이 숫자가 아니면 NaN이 온다. 그런데 `NaN < 5000`은 false라 반영 유예를
+  // **지난 것으로** 통과하고, `NaN / base > 0.001`도 false라 포지션이 **변하지
+  // 않은 것으로** 통과한다. 둘이 겹치면 SENT/UNKNOWN 주문이 FAILED(전송 안 됨)로
+  // 확정되고 — 재전송이 열린다. 이 파일 첫 줄의 경고 그대로다.
+  console.log('[UNKNOWN 확정 — 숫자가 아닌 입력]');
+
+  test('경과 시간이 NaN이면 반영 유예가 지난 것으로 보지 않는다 (UNKNOWN)', () => {
+    const r = resolveUnknown({
+      clientOrderId: 'x1', elapsedMs: NaN,
+      query: { ok: true, order: null },
+      position: { qtyBefore: 0, qtyNow: 0 },
+    });
+    eq(r.resolved, false, 'NaN 경과 시간으로 FAILED 확정했다: ' + r.reason);
+    eq(r.state, 'UNKNOWN');
+    eq(r.action, 'RETRY_QUERY');
+  });
+
+  test('경과 시간이 Infinity여도 확정 근거가 아니다 (UNKNOWN)', () => {
+    const r = resolveUnknown({
+      clientOrderId: 'x1', elapsedMs: Infinity,
+      query: { ok: true, order: null },
+    });
+    eq(r.resolved, false, 'Infinity 경과 시간으로 확정했다: ' + r.reason);
+    eq(r.state, 'UNKNOWN');
+  });
+
+  test('지금 포지션 수량이 NaN이면 "포지션 그대로"로 보지 않는다 (UNKNOWN)', () => {
+    const r = resolveUnknown({
+      clientOrderId: 'x1', elapsedMs: AFTER,
+      query: { ok: true, order: null },
+      position: { qtyBefore: 0, qtyNow: NaN },
+    });
+    eq(r.resolved, false, 'NaN 포지션을 변화 없음으로 읽고 FAILED 확정했다: ' + r.reason);
+    eq(r.state, 'UNKNOWN');
+    eq(r.action, 'RETRY_QUERY');
+  });
+
+  test('전송 전 수량(qtyBefore)이 NaN이면 교차 확인이 성립하지 않는다 (UNKNOWN)', () => {
+    const r = resolveUnknown({
+      clientOrderId: 'x1', elapsedMs: AFTER,
+      query: { ok: true, order: null },
+      position: { qtyBefore: NaN, qtyNow: 0.5 },
+    });
+    eq(r.resolved, false, 'NaN 기준값으로 FAILED 확정했다: ' + r.reason);
+    eq(r.state, 'UNKNOWN');
+  });
+
+  test('정상 유한값(0 → 0, 유예 지남)은 여전히 FAILED로 확정한다 — 막기만 하지 않는다', () => {
+    const r = resolveUnknown({
+      clientOrderId: 'x1', elapsedMs: AFTER,
+      query: { ok: true, order: null },
+      position: { qtyBefore: 0, qtyNow: 0 },
+    });
+    eq(r.resolved, true);
+    eq(r.state, 'FAILED');
+  });
+
+  test('ACKED도 경과 시간이 NaN이면 종료(RECONCILED)로 정리하지 않는다', () => {
+    const r = resolveAcked({
+      clientOrderId: 'c1', elapsedMs: NaN,
+      query: { ok: true, order: null },
+    });
+    eq(r.resolved, false, 'NaN 경과 시간으로 RECONCILED 정리했다: ' + r.reason);
+    eq(r.state, 'ACKED');
+    eq(r.action, 'RETRY_QUERY');
+  });
+
+  test('ACKED 정리 사유가 NaN 포지션을 "포지션도 그대로"라고 적지 않는다', () => {
+    const r = resolveAcked({
+      clientOrderId: 'c1', elapsedMs: AFTER,
+      query: { ok: true, order: null },
+      position: { qtyBefore: 0, qtyNow: NaN },
+    });
+    assert(!r.reason.includes('포지션도 그대로'),
+      '읽지 못한 포지션을 그대로라고 적었다: ' + r.reason);
+  });
 }

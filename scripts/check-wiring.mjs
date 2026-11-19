@@ -34,18 +34,31 @@
 // "아직 안 붙인 것" 목록이 된다.
 
 import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs';
-import { join, basename } from 'node:path';
+import { join, basename, dirname } from 'node:path';
 
-/** 판정 모듈이 사는 곳 */
-const WATCH_DIRS = [
-  'src/lib/engine', 'src/lib/risk', 'src/lib/strategies', 'src/lib/markets',
-  'src/lib/exchanges', 'src/lib/auth', 'src/lib/terminal', 'src/lib/ui', 'src/lib/nav',
-  // 수익률·성과 귀속. **이 칸이 없던 동안 여기는 검사 밖이었다** —
-  // 새 판정 디렉터리를 만들면 이 목록에도 같이 넣어야 한다.
-  'src/lib/portfolio',
-  // 백테스트 판정과 AI 출처 판정. 여기도 검사 밖이었다.
-  'src/lib/backtest', 'src/lib/ai', 'src/lib/runtime',
-];
+/**
+ * 판정 모듈이 사는 곳 — **목록을 손으로 적지 않는다.**
+ *
+ * 예전에는 디렉터리를 하나씩 적어 둔 배열이었다. 그래서 `src/lib`의
+ * 55개 중 **13개만** 보고 있었고, 밖에 있던 것 중에는 이런 것들이 있었다:
+ *
+ *   src/lib/autotrade  33개  ← 예약 평가·진입 창·강제 진입 판정
+ *   src/lib/trading    32개
+ *   src/lib/ops        14개
+ *   src/lib/safety      5개  ← 이름이 safety인데 검사 밖이었다
+ *
+ * 즉 "만들어 놓고 배선을 안 함"을 잡는 검사가 **그 고장이 가장 비싼
+ * 자리들을 보지 않고 있었다.** 그리고 목록을 손으로 적는 방식 자체가
+ * 이 저장소에서 반복된 고장이다(#571 "손으로 적은 모듈 목록 드리프트").
+ *
+ * 그래서 항목을 더 채우지 않고 **목록을 없앴다.** 새 디렉터리를 만들면
+ * 아무것도 안 해도 감시에 들어온다 — 사람이 기억해야 하는 단계가
+ * 사라지는 것이 항목을 늘리는 것보다 낫다.
+ */
+const WATCH_DIRS = readdirSync('src/lib', { withFileTypes: true })
+  .filter((e) => e.isDirectory())
+  .map((e) => join('src/lib', e.name))
+  .sort();
 
 /**
  * 어디서든 부를 수 있는 곳 — 여기 전부를 소비자로 본다.
@@ -59,6 +72,86 @@ const WATCH_DIRS = [
  * 그 순간 이 검사는 진짜로 끊긴 모듈을 덮기 시작한다.
  */
 const SEARCH_DIRS = ['src', 'scripts', 'worker/src'];
+
+/**
+ * **시험 파일인가** — 이 저장소의 시험 파일 이름은 한 모양이 아니다.
+ *
+ *   src/lib/risk/killSwitchTruth.test.ts     ← `.test.ts`
+ *   src/components/Foo.test.tsx              ← `.test.tsx`
+ *   scripts/ten-slot-pg.test.mjs             ← `.test.mjs`   (6개)
+ *   scripts/test-kill-retry.mjs              ← `test-` 접두어 (6개)
+ *
+ * 아래 소비자 판정은 `.test.ts`·`.test.tsx`만 뺐다. 그래서 뒤의 두 모양은
+ * **여전히 소비자로 세어진다.** 그리고 이 검사기가 확장자 붙은 경로까지
+ * 보게 된 뒤부터는(`'src/lib/risk/killRetry.ts'` 같은 문자열) 그 구멍이
+ * 실제로 열렸다 — `scripts/test-*.mjs`가 TS를 tsc 인자로 넘기려고 적어 둔
+ * 경로 문자열이 **배선으로 세어진다.**
+ *
+ * 전수 측정(다섯 PR을 한 트리에 모은 상태): 두 모양을 함께 빼면 새로
+ * orphan이 되는 모듈은 **1개뿐이고 그게 의도한 모듈이다** —
+ * `src/lib/risk/killRetry.ts`(제품 소비자 0곳, ALLOW에 사유가 적혀 있다).
+ * 다른 544개는 판정이 바뀌지 않는다. 즉 이 변경은 검사기를 **느슨하게
+ * 만드는 것이 아니라** 놓치던 것을 잡게 한다.
+ */
+function isTestSource(path) {
+  if (/\.test\.(ts|tsx|mjs|js)$/.test(path)) return true;
+  if (/^scripts\/test-[^/]+\.mjs$/.test(path)) return true;
+  return false;
+}
+
+// 이 판정이 틀리면 검사 전체가 조용히 뒤집힌다 — 끊긴 모듈이 "배선됨"이
+// 된다. 그래서 **CI가 평소에 돌리는 경로에서** 바로 확인한다. 별도
+// `--self-test` 모드로 두면 CI가 안 돌리고, 이 저장소의 규칙대로
+// **CI가 안 돌리는 검사기는 없는 검사기다.**
+for (const [p, want] of [
+  ['src/lib/risk/killSwitchTruth.test.ts', true],
+  ['src/components/terminal/PaperWallet.test.tsx', true],
+  ['scripts/ten-slot-pg.test.mjs', true],
+  ['scripts/test-kill-retry.mjs', true],
+  ['scripts/test-pr-facts.mjs', true],
+  // ── 시험이 **아닌데** 이름에 test가 들어간 것들 (전부 실재한다) ──
+  ['scripts/check-test-registry.mjs', false],
+  ['scripts/check-testnet-diagnose.mjs', false],
+  ['scripts/run-tests.mjs', false],
+  ['scripts/testnet-diagnose-mutations.mjs', false],
+  ['src/lib/engine/testnetDiagnoseVerdict.ts', false],
+  ['src/lib/risk/killRetry.ts', false],
+]) {
+  if (isTestSource(p) !== want) {
+    console.error(
+      `\n❌ 검사기 자기 점검 실패: isTestSource('${p}') 가 ${want} 여야 하는데 ${!want} 입니다.`,
+    );
+    console.error('   시험 파일을 소비자로 세면 끊긴 모듈이 "배선됨"으로 통과합니다.');
+    process.exit(1);
+  }
+}
+
+// **판단이 두 곳에 있으면 언젠가 갈린다.** 위 점검은 `isTestSource()`가
+// 맞는지만 본다 — 소비자 루프가 그 함수를 **안 쓰고** 제 손으로 정규식을
+// 다시 적으면, 점검은 통과하면서 실제 판정은 옛 규칙으로 돌아간다.
+// (실제로 변이로 확인했다: 루프만 `.test.ts` 규칙으로 되돌려도 이 저장소의
+// 현재 상태로는 결과가 똑같아서 **아무도 모른다.**)
+//
+// 그래서 이 파일 안에 `.test.` 정규식이 **한 개뿐**임을 자기 소스로 고정한다.
+{
+  const own = stripComments(readFileSync('scripts/check-wiring.mjs', 'utf8'));
+  const dup = (own.match(/\\\.test\\\./g) || []).length;
+  if (dup !== 1) {
+    console.error(
+      `\n❌ 검사기 자기 점검 실패: \`\\.test\\.\` 정규식이 ${dup}곳에 있습니다 (1곳이어야 합니다).`,
+    );
+    console.error('   시험 파일 판정은 isTestSource() 한 곳에만 둡니다 — 두 곳이면 갈립니다.');
+    process.exit(1);
+  }
+  // **문자열을 통째로 적으면 이 줄 자신이 그 문자열이다.** 처음에 그렇게
+  // 적었고, 그래서 루프에서 호출을 지워도 이 점검이 통과했다 — 점검이
+  // 자기 자신을 근거로 통과하는 것이 이 저장소에서 반복된 고장이다
+  // (`check-wiring.mjs`를 소비자에서 빼는 이유와 같다). 쪼개서 적는다.
+  if (!own.includes('isTestSource' + '(s.path)')) {
+    console.error('\n❌ 검사기 자기 점검 실패: 소비자 루프가 isTestSource() 를 쓰지 않습니다.');
+    process.exit(1);
+  }
+}
 
 /**
  * 아직 안 붙였지만 그럴 만한 이유가 있는 것.
@@ -120,6 +213,91 @@ const ALLOW = new Map([
     + '대신 기능이 멎는 것이라, 어느 쪽을 원하는지는 사용자가 정할 일이다. '
     + '덧붙여 getUsedCredits는 조회 실패 시 0을 돌려준다(= 항상 통과). '
     + '붙일 때 그것부터 고쳐야 한다 — 못 읽은 것은 안 쓴 것이 아니다'],
+
+  // ── 기준을 조인 순간 드러난 셋 ────────────────────────────────
+  //
+  // 예전 기준은 **자기 테스트만** 소비자에서 뺐다. 그래서 *다른 모듈의*
+  // 시험이 import하면 "배선됨"이 됐고, 아래 셋이 그 구멍으로 지나갔다.
+  // 셋 다 제품 코드 소비자가 **0곳**이다 — 지금 적는 것은 숨기는 것이
+  // 아니라 **빚을 장부에 올리는 것**이다. 비어 있는 것이 목표다.
+  ['src/lib/strategies/profileMonteCarlo.ts',
+    '프로필 숫자를 몬테카를로 입력으로 번역한다. 제품 소비자 0곳 — '
+    + 'import하는 것은 costAnalysis.test.ts와 roundLedger.test.ts뿐이다. '
+    + '이 파일의 머리말이 스스로 적고 있다: "엔진은 있는데 화면에 안 붙어 '
+    + '있었다 … 엔진이 있다는 것과 그 엔진이 도는 것은 다른 이야기다 — '
+    + '이 저장소에서 가장 자주 나는 고장이 이것이다." **그 문장을 쓴 파일이 '
+    + '그 상태다.** 붙일 자리는 전략 프로필 화면이고, 붙이면 그 화면이 '
+    + '한 경로의 끝 잔고 대신 분포를 적게 된다 — 즉 화면에 나가는 숫자가 '
+    + '바뀌는 변경이라 사람 확인이 필요하다'],
+  ['src/lib/strategies/roundRunner.ts',
+    '회차 종료를 한 곳으로 모은 함수(장부 한 줄 · 계좌 되돌리기 · 회차 '
+    + '번호 올리기). 제품 소비자 0곳 — roundLedger.test.ts만 import한다. '
+    + '머리말은 "화면은 이 함수만 부른다"고 적었는데 **부르는 화면이 없다.** '
+    + '즉 회차 종료가 여전히 화면 안에 흩어져 있을 가능성이 있고, 그것은 '
+    + '이 파일이 막으려던 바로 그 고장이다. 붙이려면 회차 종료 경로가 '
+    + '지금 어디에 몇 개 있는지부터 세어야 한다'],
+  ['src/lib/strategies/simFormat.ts',
+    '모의 성적표 표시 서식(기간·금액). 제품 소비자 0곳 — '
+    + 'profileSim.test.ts만 import한다. 이 파일은 화면에 실제로 나갔던 두 줄'
+    + '("표본 기간: 시작과 끝이 같은 시각", "누적손익 +238,790,…e+36")을 '
+    + '고치려고 썼다. 붙지 않은 동안 그 화면은 고쳐지지 않았을 수 있다 — '
+    + '어느 화면이 그 두 줄을 그리는지 확인하고 거기에 붙여야 한다'],
+
+  // ── 목록을 없애고 `src/lib` 전부를 보게 한 뒤 남은 넷 ──────────
+  //
+  // 처음에는 16건이 잡혔다. 그중 **12건은 이 검사기 자신의 오탐**이었다 —
+  // 확장자 붙은 경로(`'src/lib/ci/autoMergeGate.ts'`)를 못 봤기 때문이다.
+  // 정규식을 고치자 12건이 사라졌다. 남은 넷은 하나씩 확인했다.
+  ['src/lib/ops/opsQueue.ts',
+    '**배선돼 있다 — 정규식으로 볼 수 없는 모양이다.** '
+    + "scripts/ops-runner.mjs:80이 join(ROOT,'src','lib','ops','opsQueue.ts')로 "
+    + '경로를 조립해 복사·컴파일하고 opsQueue.js를 동적 import한다. '
+    + '인용된 경로 문자열이 아니라 **조각으로 조립**하므로 어떤 정규식도 '
+    + '보지 못한다. 이것을 정규식으로 쫓으면 오탐이 다시 늘어난다 — '
+    + '그래서 쫓지 않고 여기 적는다. **이 항목은 빚이 아니라 한계다**'],
+  ['src/lib/jobs/queueGuard.ts',
+    '진짜 미배선이다. 그리고 그보다 중요한 것: '
+    + 'src/app/api/binance/futures/order/route.ts:525의 주석이 '
+    + '"큐는 남겨 둔다 — 웹훅(signal·tradingview)이 아직 쓴다. 다만 그쪽도 '
+    + '실행자가 없으면 적재하지 않는다(queueGuard)"라고 적고 있는데, '
+    + '**웹훅 라우트 셋 다 이 모듈을 부르지 않는다.** 다만 그 셋은 '
+    + 'enqueueJob도 from(\'jobs\')도 쓰지 않아서 **막을 적재 자체가 없다** — '
+    + '즉 지금 새고 있는 것은 아니다. 고칠 것은 둘 중 하나다: 웹훅이 다시 '
+    + '적재하게 되면 이 가드를 붙이거나, 적재 경로가 없어진 사실을 그 주석에 '
+    + '반영하는 것. **2026-11-08에 그 주석을 고쳤고**, 약속은 주석이 아니라 '
+    + 'scripts/check-order-guards.mjs로 옮겼다 — 제품 코드에 적재가 다시 '
+    + '생기면 그 검사기가 실행자 확인을 요구한다. 이 모듈은 그때 쓰인다'],
+  ['src/lib/autotrade/decision.ts',
+    '진짜 미배선이다 — 참조가 **모든 모양에서 0건**이다(인용 경로 · 확장자 '
+    + '붙은 경로 · join 조립 전부 확인). export 6개. 머리말은 '
+    + '"설명가능한(XAI) 판단 엔진 … 아무것도 안 하는 이유(대기 사유)까지 '
+    + '투명하게 설명한다"고 적었다. 그 설명이 화면에 나가지 않고 있다. '
+    + '붙일지 지울지는 결정이 필요하다 — 자동매매 판정 경로에 두 번째 '
+    + '엔진을 붙이는 일이라 사람 확인 없이 할 수 없다'],
+  ['src/lib/fx/rate.ts',
+    '진짜 미배선이다 — 참조 0건, export 2개(getUsdKrw 계열). '
+    + '**실패 시 fallback 1375를 쓰는 환율 모듈**이다. 이 저장소에는 '
+    + '환율로 1,000배가 틀어진 기록이 있다(walletMoney.ts: 공용 cvt()가 '
+    + '입력을 KRW로 가정). 그래서 이것을 붙이는 일은 "환율이 없으면 원화로 '
+    + '바꾸지 않는다"는 기존 규칙과 충돌하지 않는지 먼저 봐야 한다 — '
+    + '고정 fallback은 **환율을 모르는데 아는 척하는 값**이다'],
+  // ── 배선이 **아직 승인되지 않은** 판정 ──
+  ['src/lib/risk/killRetry.ts',
+    '킬스위치 자동 재시도 판정(killRetryVerdict). 부르는 곳이 0곳인 것이 '
+    + '지금은 맞다 — 이것을 부르는 유일한 자리는 운영 job 큐 처리자이고, '
+    + '그 배선은 승인 범위 밖이다(이번 작업은 "판정 검증"이고 "운영 복구"가 '
+    + '아니다). 그래서 **배선하지 않은 것이 실수가 아니라 결정이다.** '
+    + '다만 그 결정 때문에 지금 이 판정은 화면에도 운영에도 아무 영향이 '
+    + '없다 — 재시도 간격·한도·중복 방지는 여전히 아무도 판단하지 않는다. '
+    + '시험은 `node --test scripts/test-kill-retry.mjs`로 직접 돌려야 돈다 '
+    + '(`scripts/run-tests.mjs`와 CI 워크플로에 미등록 — 등록은 #564/#566과 '
+    + '겹치는 파일을 건드려야 해서 이번 단계에서 하지 않았다). 붙일 때 '
+    + '함께 봐야 할 것: ① 지금 큐에 KILL_SWITCH_EXECUTE를 넣는 제품 코드는 '
+    + 'Worker의 자가복구 한 곳뿐이고 주 실행은 발동 라우트가 직접 한다 '
+    + '(`killSwitchExecutionPath()`가 세어 준다) — 즉 이 판정이 실제로 쓰이는 '
+    + '것은 그 자가복구 경로다. ② `attempts`는 jobs 행 단위라 새 행을 쌓으면 '
+    + '횟수가 리셋된다. 한도를 지키려면 같은 행을 다시 시도하거나 횟수를 '
+    + '킬스위치 상태에 남겨야 한다'],
 ]);
 
 const files = [];
@@ -149,36 +327,182 @@ function walk(dir) {
     const st = statSync(p);
     if (st.isDirectory()) { walk(p); continue; }
     if (!/\.(ts|tsx|mjs|js)$/.test(name)) continue;
-    sources.push({ path: p, text: readFileSync(p, 'utf8') });
+    // ── **주석은 소비자가 아니다** ─────────────────────────────
+    //
+    // 이 검사기가 2026-11-08에 제 변경을 잡았다. 제가 다른 검사기의
+    // 주석에 `src/lib/jobs/queueGuard.ts`라고 적었더니 그 줄이 소비자로
+    // 세어져서, **진짜로 끊긴 모듈이 "이미 배선됨"으로 뒤집혔다.**
+    //
+    // 이 파일의 머리말이 이미 같은 함정을 적어 두었다 — "주석에 이름이
+    // 적혀 있다는 이유로 통과가 난다. 이 저장소에서 이미 두 번 일어난
+    // 일이다." 그런데 소비자 판정 자체는 원문을 보고 있었다.
+    //
+    // 주석으로 배선을 증명할 수는 없다. 지우고 본다. (전수 측정:
+    // 이 변경으로 새로 끊기는 모듈 0건.)
+    sources.push({ path: p, text: stripComments(readFileSync(p, 'utf8')) });
   }
 }
 for (const d of SEARCH_DIRS) walk(d);
+
+// ── **새 그림자 배럴을 만들지 않는다** ─────────────────────────
+//
+// `X.ts`와 `X/index.ts`가 함께 있으면 `'…/X'`는 **파일**로 간다. 그래서
+// 배럴은 명시 경로가 없는 한 아무도 닿지 못하고, 두 파일이 같은 이름의
+// export를 갖고 있으면 **어느 쪽을 고쳤는지 모르는 상태**가 된다.
+// 이 저장소에 실제로 하나 있고(`fees`), 그 하나가 지금 죽어 있다.
+//
+// 아는 짝만 통과시킨다. 새로 생기면 막는다 — 고친 뒤에 발견하는 것보다
+// 만들 때 막는 것이 싸다.
+// 비어 있는 것이 정상이다. `fees` 짝은 2026-11-17에 **없앴다** —
+// `src/lib/fees.ts`를 지우고 `src/lib/fees/index.ts` 하나로 모았다.
+// 면제로 덮지 않고 원인을 없앤 경우다. 새 그림자가 생기면 아래가 막는다.
+const KNOWN_SHADOWS = new Set([]);
+{
+  const found = [];
+  for (const f of files) {
+    if (basename(f) !== 'index.ts') continue;
+    const d = dirname(f);
+    const sibling = join(dirname(d), `${basename(d)}.ts`);
+    if (existsSync(sibling)) found.push({ barrel: f.replaceAll('\\', '/'), sibling: sibling.replaceAll('\\', '/') });
+  }
+  const fresh = found.filter((x) => !KNOWN_SHADOWS.has(x.barrel));
+  if (fresh.length > 0) {
+    console.error('\n❌ 같은 이름의 파일과 디렉터리가 함께 있습니다 (그림자 배럴):');
+    for (const x of fresh) console.error(`   · ${x.sibling}  ↔  ${x.barrel}`);
+    console.error('\n   `\'…/이름\'` import는 **파일로 갑니다** — 배럴은 아무도 못 부릅니다.');
+    console.error('   둘 중 하나로 합치거나, 배럴 쪽 이름을 바꾸세요.');
+    process.exit(1);
+  }
+  const goneStale = [...KNOWN_SHADOWS].filter((b) => !found.some((x) => x.barrel === b));
+  if (goneStale.length > 0) {
+    console.error('\n❌ KNOWN_SHADOWS에 적혀 있는데 더는 그림자가 아닌 것:');
+    for (const b of goneStale) console.error(`   · ${b}`);
+    console.error('   해결됐으면 목록에서 지우세요. 낡은 면제는 다음 짝을 덮습니다.');
+    process.exit(1);
+  }
+}
+
+/**
+ * 이 모듈을 가리키는 import 경로의 모양.
+ *
+ * **한 곳에만 둔다.** 아래 두 규칙(끊긴 모듈 찾기 · 죽은 쌍둥이 찾기)이
+ * 같은 질문("이 모듈을 부르는 제품 파일이 있는가")에 답하므로, 해석
+ * 규칙이 갈리면 한쪽이 다른 쪽을 덮는다. 이 파일이 지금까지 고쳐 온
+ * 고장이 전부 그 모양이었다.
+ */
+function consumerMatcherFor(file) {
+  const stem = basename(file).replace(/\.ts$/, '');
+  const stemEsc = stem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const isBarrel = stem === 'index';
+  const dirName = basename(dirname(file));
+  const dirEsc = dirName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const shadowedBy = isBarrel ? join(dirname(dirname(file)), `${dirName}.ts`) : null;
+  const shadowed = shadowedBy != null && existsSync(shadowedBy);
+  const re = !isBarrel
+    ? new RegExp(`['"\`][^'"\`]*/${stemEsc}(\\.(ts|tsx|js|mjs))?['"\`]`)
+    : shadowed
+      // 형제 파일에 가려졌다 — 디렉터리 경로는 그 파일로 간다
+      ? new RegExp(`['"\`][^'"\`]*/${dirEsc}/index(\\.(ts|tsx|js|mjs))?['"\`]`)
+      : new RegExp(`['"\`][^'"\`]*/${dirEsc}(/index(\\.(ts|tsx|js|mjs))?)?['"\`]`);
+  // 같은 디렉터리 안에서 `'./index'`로 부르는 것도 배선이다
+  // (`src/lib/safety/auditStore.ts:61`이 그렇게 한다). 경로에 디렉터리
+  // 이름이 없으므로 위 정규식으로는 보이지 않는다.
+  const sameDirRe = /['"`]\.\/index(\.(ts|tsx|js|mjs))?['"`]/;
+  return { re, sameDirRe, isBarrel, ownDir: dirname(file) };
+}
+
+/**
+ * 이 제품 파일이 `file` 모듈을 부르는가.
+ *
+ * ── **시험 파일은 소비자가 아니다** ──────────────────────────
+ *
+ * 예전에는 **자기 테스트만** 뺐다. 그러면 *다른 모듈의* 시험이
+ * import하는 것으로 "배선됨"이 된다. 그 구멍으로 셋이 지나갔다:
+ *
+ *   profileMonteCarlo.ts ← costAnalysis.test.ts · roundLedger.test.ts
+ *   roundRunner.ts       ← roundLedger.test.ts
+ *   simFormat.ts         ← profileSim.test.ts
+ *
+ * 셋 다 제품 코드에서 부르는 곳이 **0곳**인데 이 검사는 "배선 안 된 것
+ * 0개"라고 적었다. 하필 그 셋이 **이 고장을 고치려고 쓴 파일들**이다 —
+ * `profileMonteCarlo.ts`의 머리말이 직접 적고 있다: "엔진이 있다는 것과
+ * 그 엔진이 도는 것은 다른 이야기다."
+ *
+ * 시험이 소비자로 세어지면 이 검사는 **자기 목적을 잃는다.** 시험은
+ * 판정이 맞는지 보는 것이고, 그 판정이 **쓰이는지**는 보지 않는다.
+ * 이름 모양은 `isTestSource()` 한 곳이 정하고 자기 점검이 붙어 있다.
+ *
+ * ── **이 스크립트 자신도 소비자가 아니다** ───────────────────
+ *
+ * WATCH_DIRS에 'src/lib/runtime'을 넣자마자 `src/lib/ai/runtime.ts`가
+ * "이미 배선됨"으로 뒤집혔다. 이 파일의 설정 문자열이 import 경로처럼
+ * 보였기 때문이다. 검사기가 **자기 설정을 근거로** 통과시키면, 진짜로
+ * 끊긴 모듈이 조용히 살아난다.
+ */
+function isConsumerOf(s, file, m) {
+  if (s.path === file) return false;
+  if (isTestSource(s.path)) return false;
+  if (s.path === 'scripts/check-wiring.mjs') return false;
+  if (m.re.test(s.text)) return true;
+  return m.isBarrel && dirname(s.path) === m.ownDir && m.sameDirRe.test(s.text);
+}
 
 const orphans = [];
 const stale = [];
 
 for (const file of files) {
-  const stem = basename(file).replace(/\.ts$/, '');
   // **정적·동적 import를 함께 본다.** 이 저장소는 라우트에서 동적
   // import를 많이 쓴다 — 그것만 빼먹으면 멀쩡한 모듈이 죽은 것으로
   // 보인다(내가 실제로 한 번 그렇게 틀렸다).
   //
   // 따옴표 안에서 이 파일 이름으로 끝나는 경로를 찾는다:
   //   from './foo'  ·  from '@/lib/engine/foo'  ·  import('./foo')
-  const re = new RegExp(`['"\`][^'"\`]*/${stem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}['"\`]`);
+  //
+  // **확장자가 붙은 모양도 본다.** 이 저장소의 스크립트들은 판정을
+  // 복제하지 않으려고 TS 파일을 **tsc 인자로 넘겨 컴파일한 뒤** 산출물을
+  // 동적 import한다:
+  //
+  //   scripts/auto-merge.mjs:47   tsc, 'src/lib/ci/autoMergeGate.ts', …
+  //   scripts/auto-merge.mjs:156  await import(`…/autoMergeGate.js`)
+  //
+  // 확장자 없는 모양만 보면 그 셋(`autoMergeGate` · `autoRebase` ·
+  // `deployDispatch`)이 **멀쩡히 배선됐는데 끊긴 것으로** 잡힌다. 그러면
+  // 사람은 ALLOW에 적어 넣고, 그 순간 이 검사는 믿을 수 없는 것이 된다.
+  // 못 잡는 것과 **없는 것을 잡는 것**은 둘 다 검사기를 무용하게 만든다.
+  //
+  // ── **`index.ts`는 스템으로 찾을 수 없다** ────────────────────
+  //
+  // 여기까지는 파일 이름(스템)으로 경로를 찾았다. `index.ts`에서는 그
+  // 스템이 `index`라서, 저장소 안의 **아무 `/index` 경로**나 소비자로
+  // 세어진다. 실측했다 — `src/lib/*/index.ts` 배럴 12개가 전부 **같은
+  // 22개**를 소비자로 받고 있었다:
+  //
+  //   scripts/check-100x-contract.mjs …  'worker/src/index.ts'        (7개)
+  //   scripts/probe/auto-targets.mjs …   '…/playwright/index.mjs'     (13개)
+  //
+  // 22개 중 **단 하나도** 그 배럴에 관한 증거가 아니다. 즉 이 검사는
+  // "배선 안 된 것 0개"라고 적으면서 **12개를 아예 안 보고 있었다.**
+  //
+  // 그래서 배럴은 **디렉터리 이름**으로 찾는다. Node/TS가 디렉터리
+  // import를 그 안의 `index`로 푸는 것과 같은 규칙이다.
+  //
+  // ── 그림자 배럴 ───────────────────────────────────────────────
+  //
+  // 단, 같은 이름의 **형제 파일**이 있으면 디렉터리 import는 그 파일로
+  // 간다. 파일이 디렉터리보다 먼저다. 이 저장소에 실제로 하나 있다:
+  //
+  //   src/lib/fees.ts  ↔  src/lib/fees/index.ts
+  //
+  // `tsc --traceResolution`으로 확인했다 —
+  // `'../fees'`는 `src/lib/fees.ts`로 해석된다. 그러니 그 경우 배럴은
+  // **명시적인 `/fees/index` 경로로만** 닿을 수 있다.
+  const m = consumerMatcherFor(file);
 
+  // 소비자 판정은 `isConsumerOf()` 한 곳이 한다 — 아래 쌍둥이 규칙도
+  // 같은 함수를 쓴다. 규칙마다 따로 적으면 둘이 갈린다.
   let consumers = 0;
   for (const s of sources) {
-    if (s.path === file) continue;                     // 자기 자신
-    if (s.path === file.replace(/\.ts$/, '.test.ts')) continue;   // 자기 테스트
-    // **이 스크립트 자신은 소비자가 아니다.**
-    //
-    // WATCH_DIRS에 'src/lib/runtime'을 넣자마자 `src/lib/ai/runtime.ts`가
-    // "이미 배선됨"으로 뒤집혔다. 이 파일의 설정 문자열이 import 경로처럼
-    // 보였기 때문이다. 검사기가 자기 설정을 근거로 통과시키면, 진짜로
-    // 끊긴 모듈이 조용히 살아난다.
-    if (s.path === 'scripts/check-wiring.mjs') continue;
-    if (re.test(s.text)) consumers++;
+    if (isConsumerOf(s, file, m)) consumers++;
   }
 
   const allowed = ALLOW.has(file);
@@ -187,6 +511,7 @@ for (const file of files) {
 }
 
 let bad = false;
+
 
 if (orphans.length > 0) {
   console.error('\n❌ 만들어 놓고 부르는 곳이 없는 판정 모듈:');
@@ -207,7 +532,537 @@ if (stale.length > 0) {
   bad = true;
 }
 
+// ── **같은 판정이 두 곳에 있고 한쪽이 죽어 있다** ──────────────
+//
+// `CLAUDE.md`가 적은 두 고장 중 하나다: "경로가 둘인데 한쪽만 고침 —
+// 같은 판단이 두 곳에 있으면 언젠가 갈린다."
+//
+// 최근 고친 셋이 전부 이 모양이었다:
+//
+//   fees                 `fees.ts` ↔ `fees/index.ts` — export 이름 8개 공유,
+//                        죽은 쪽이 선물 수수료를 아는 쪽이었다
+//   워커 생존 기준        180초 · 180초 · **30초** 세 상수. 하한을 요구하는
+//                        시험이 있었는데 다른 상수여서 못 봤다
+//   risk/index.ts        트레일링 스톱·주간 한도의 초기 구현. 뒤에 생긴
+//                        `engine/trailPlan.ts` · `risk/lossStreak.ts`에 밀렸다
+//
+// 셋 다 **고쳐도 아무 일이 안 일어나는 쪽**이 남아 있었다. 그게 이 모양의
+// 비용이다 — 가격 눈금 버그를 죽은 쪽에서 고치면 주문은 그대로 나간다.
+//
+// 그래서 **같은 이름을 두 모듈이 내보내는데 한쪽은 제품 소비자가 0곳**인
+// 경우를 막는다. 이름이 둘 다 살아 있으면(동명이인) 막지 않는다 — 그건
+// 중복일 수는 있어도 "죽은 쌍둥이"는 아니다.
+//
+// 전수 측정 (이 커밋 시점):
+//   src/lib 의 export 함수 이름 2232개
+//     → 두 곳 이상이 내보내는 것            54개
+//     → 그중 **한쪽이 죽은 것**              22개   ← 아래 목록
+//
+// **23개로 셌다가 정정했다.** 제 측정 스크립트는 `tabOf`를 죽은 쌍둥이로
+// 셌는데 둘 다 살아 있는 **동명이인**이었다 — `ui/autoOverview.ts`의 것은
+// `AutoPage.tsx`가, `portfolio/wallet.ts`의 것은 `WalletPage.tsx`가 부른다
+// (타입도 `AutoTabId` ↔ `WalletTabId`로 다르다). **이 규칙이 그것을 잡아
+// 줘서 알았다.** 그래서 목록은 스크래치 측정이 아니라 **이 검사기가 말한
+// 것**으로 적는다 — 그게 이 파일이 지금까지 고쳐 온 교훈이다.
+const TWIN_ALLOW = new Map([
+  // ── 돈 경로. **정본을 사람이 골라야 한다** ──
+  ['roundToTick@src/lib/exchanges/binanceFutures.ts',
+    '가격 눈금. 산 쪽은 src/lib/kernel/quantize.ts. 눈금을 여기서 고치면 주문은 그대로 나간다'],
+  ['floorToStep@src/lib/engine/orderSizing.ts',
+    '수량 눈금. 산 쪽은 src/lib/kernel/quantize.ts'],
+  ['unrealizedPnl@src/lib/engine/paperExecution.ts',
+    '미실현 손익. 산 쪽은 src/lib/markets/costBasis.ts'],
+  ['utcDayStart@src/lib/risk/tradingHistory.ts',
+    '일일 손실 경계. 산 쪽은 src/lib/risk/dailyLoss.ts. 둘이 갈리면 한도가 엉뚱한 시각에 리셋된다'],
+  ['setCooldown@src/lib/risk/guard.ts',
+    '연속손실 쿨다운. 산 쪽은 src/lib/safety/index.ts'],
+  ['getUsdKrw@src/lib/fx/rate.ts',
+    '환율. 산 쪽은 src/lib/currency.ts. 이 저장소에는 환율로 1,000배가 틀어진 기록이 있다'],
+
+  // ── 돈 경로가 아닌 것. 지워도 되지만 **이 PR의 일이 아니다** ──
+  ['toggleFavorite@src/lib/assetCache.ts', '산 쪽은 src/lib/favorites.ts'],
+  ['clearLogs@src/lib/log/logger.ts', '산 쪽은 src/lib/autotrade/store.ts'],
+  ['ema@src/lib/trading/indicators.ts', '산 쪽은 src/lib/backtest/engine.ts'],
+  ['agoText@src/lib/engine/autoRuntimeView.ts', '산 쪽은 src/lib/engine/autotradeHealth.ts'],
+  ['outcomeOf@src/lib/strategies/runStrategy.ts', '산 쪽은 src/lib/engine/entryEvidence.ts'],
+  ['sameIdentity@src/lib/trading/tradeIdentity.ts', '산 쪽은 src/lib/exchanges/connectionIdentity.ts'],
+  ['exchangeLabel@src/lib/markets/tradeMode.ts', '산 쪽은 src/lib/risk/killAlert.ts'],
+  ['syncPlan@src/lib/ops/secretParity.ts', '산 쪽은 src/lib/strategies/syncPlan.ts'],
+  ['envOf@src/lib/portfolio/wallet.ts', '산 쪽은 src/lib/ui/autoOverview.ts'],
+  ['kindOf@src/lib/signals/creatorIntake.ts', '산 쪽은 src/lib/ui/strategyCard.ts'],
+  ['canClose@src/lib/strategies/ledger.ts', '산 쪽은 src/lib/strategies/sleeveLedger.ts'],
+  ['saveStrategy@src/lib/supabase/hooks.ts', '산 쪽은 src/lib/strategies/store.ts'],
+  ['deleteStrategy@src/lib/supabase/hooks.ts', '산 쪽은 src/lib/strategies/store.ts'],
+  ['fingerprintOf@src/lib/strategies/syncPlan.ts', '산 쪽은 src/lib/system/fingerprint.ts'],
+]);
+{
+  // 쌍둥이는 `src/lib` **바로 아래 파일까지** 본다 — `fees.ts` ·
+  // `currency.ts` · `favorites.ts` 가 거기 있고, 위의 orphan 검사는
+  // 하위 디렉터리만 본다. 더 좁게 보면 이 규칙이 자기 증거를 놓친다.
+  const twinFiles = [...files];
+  for (const n of readdirSync('src/lib')) {
+    if (!n.endsWith('.ts') || n.endsWith('.test.ts') || n.endsWith('.d.ts')) continue;
+    const p = join('src/lib', n);
+    if (statSync(p).isFile()) twinFiles.push(p);
+  }
+
+  const owners = new Map();
+  for (const f of twinFiles) {
+    const text = stripComments(readFileSync(f, 'utf8'));
+    const seen = new Set();
+    let mm;
+    const re = /export\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/g;
+    while ((mm = re.exec(text))) seen.add(mm[1]);
+    for (const name of seen) {
+      if (!owners.has(name)) owners.set(name, []);
+      owners.get(name).push(f.replaceAll('\\', '/'));
+    }
+  }
+
+  const consumersCache = new Map();
+  const consumersFor = (f) => {
+    if (!consumersCache.has(f)) {
+      const mm = consumerMatcherFor(f);
+      consumersCache.set(f, sources.filter((s) => isConsumerOf(s, f, mm)));
+    }
+    return consumersCache.get(f);
+  };
+
+  const twins = [];
+  for (const [name, where] of owners) {
+    if (where.length < 2) continue;
+    const nameRe = new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
+    const status = where.map((f) => ({ f, live: consumersFor(f).some((s) => nameRe.test(s.text)) }));
+    const dead = status.filter((x) => !x.live).map((x) => x.f);
+    const live = status.filter((x) => x.live).map((x) => x.f);
+    if (dead.length === 0 || live.length === 0) continue;
+    for (const d of dead) twins.push({ name, dead: d, live });
+  }
+
+  const freshTwins = twins.filter((t) => !TWIN_ALLOW.has(`${t.name}@${t.dead}`));
+  if (freshTwins.length > 0) {
+    console.error('\n❌ 같은 판정이 두 곳에 있고 한쪽은 아무도 안 부릅니다:');
+    for (const t of freshTwins) {
+      console.error(`   · ${t.name}`);
+      console.error(`       죽음    ${t.dead}`);
+      console.error(`       살아있음 ${t.live.join(' · ')}`);
+    }
+    console.error('\n   고쳐도 아무 일이 안 일어나는 쪽이 생깁니다 — 이 저장소에서');
+    console.error('   반복된 고장입니다(fees 쌍둥이 · 워커 생존 기준 세 상수).');
+    console.error('\n   셋 중 하나를 하세요:');
+    console.error('     1. 죽은 쪽을 지우고 산 쪽으로 부른다');
+    console.error('     2. 둘이 정말 다른 판정이면 이름을 다르게 한다');
+    console.error('     3. 정본 결정이 필요하면 TWIN_ALLOW에 사유와 함께 적는다');
+    bad = true;
+  }
+
+  const goneTwins = [...TWIN_ALLOW.keys()].filter(
+    (k) => !twins.some((t) => `${t.name}@${t.dead}` === k));
+  if (goneTwins.length > 0) {
+    console.error('\n❌ TWIN_ALLOW에 적혀 있는데 더는 죽은 쌍둥이가 아닌 것:');
+    for (const k of goneTwins) console.error(`   · ${k}`);
+    console.error('   해결됐으면 목록에서 지우세요. 낡은 면제는 다음 쌍둥이를 덮습니다.');
+    bad = true;
+  }
+  if (!bad) {
+    console.log(`✅ 죽은 쌍둥이 판정 0건 (면제 ${TWIN_ALLOW.size}건 — 정본 결정 대기)`);
+  }
+}
+
+/**
+ * 주석을 지운 코드만 본다.
+ *
+ * **처음 쓴 규칙은 주석으로 만족됐다.** 라우트에
+ * `// 판정은 judgeExecutor 한 곳에 있다`라고 적어 둔 것이 있어서,
+ * `judgeExecutor`를 찾는 정규식이 **실제 호출이 아니라 그 문장에**
+ * 걸렸다. 설명을 적었다는 것은 그렇게 했다는 증거가 아니다.
+ *
+ * 문자열 안의 `//`는 주석이 아니다(`https://`). 그래서 인용부호를
+ * 보면서 지운다 — 안 그러면 URL 뒤의 진짜 코드가 같이 날아가고,
+ * **있는 것을 없다고** 한다.
+ */
+function stripComments(text) {
+  let out = '', i = 0;
+  const n = text.length;
+  let quote = null;      // ' " ` 중 지금 열려 있는 것
+  while (i < n) {
+    const c = text[i], d = text[i + 1];
+    if (quote) {
+      out += c;
+      if (c === '\\') { out += d ?? ''; i += 2; continue; }
+      if (c === quote) quote = null;
+      i++; continue;
+    }
+    if (c === '"' || c === "'" || c === '`') { quote = c; out += c; i++; continue; }
+    if (c === '/' && d === '/') { while (i < n && text[i] !== '\n') i++; continue; }
+    if (c === '/' && d === '*') { i += 2; while (i < n && !(text[i] === '*' && text[i + 1] === '/')) i++; i += 2; continue; }
+    out += c; i++;
+  }
+  return out;
+}
+
+// ── 청산 감시 응답에 워커 생존 증거가 실려 있는가 ──
+//
+// 위 검사는 "부르는 곳이 있는가"를 센다. 이 규칙은 그 다음 단계다 —
+// **부르기는 하는데 그 결과가 사람에게 닿는 자리에 실리는가.**
+//
+// `judgeExecutor`는 배선돼 있었다(`/api/worker/status`가 부른다). 그런데
+// 그 라우트는 인증이 필요하고 **아무 자동 회차도 부르지 않는다.** 그래서
+// 워커가 죽어도 사람이 로그인해서 열어 보기 전에는 어디에도 안 적혔고,
+// `CLAUDE.md`가 금지한 "fly logs를 열어 확인해 주세요"가 거기서 나왔다.
+//
+// 청산 감시 라우트는 워커가 5분마다, 백업 회차가 한 시간에 한 번 부르고
+// **응답 본문이 Actions 로그에 그대로 남는다.** 거기 실리면 생존이 사람
+// 손을 타지 않고 기록된다.
+//
+// 이 라우트에는 200 응답 경로가 **넷**이다. 한쪽에만 넣으면 그 경로로
+// 끝난 회차의 로그에는 증거가 없다 — 상습 고장 ② "경로가 둘인데 한쪽만
+// 고침"이다. 그래서 숫자를 세지 않고 **경로를 전수로** 본다.
+//
+// 왜 check-wiring에 넣는가: CI는 검사기를 **글롭이 아니라 명시 목록**으로
+// 돌린다(`.github/workflows/ci.yml`). 새 파일을 만들면 CI가 안 돌리고,
+// 워크플로는 사람 승인 사항이다. **CI가 안 돌리는 검사기는 없는
+// 검사기다** — 그래서 이미 돌고 있는 이 파일에 붙인다.
+const EXIT_MONITOR = 'src/app/api/autotrade/exit-monitor/route.ts';
+const evidenceGaps = [];
+const evidenceSeen = [];
+{
+  const raw = readFileSync(EXIT_MONITOR, 'utf8');
+  const text = stripComments(raw);
+  const NEEDLE = 'NextResponse.json(';
+  for (let i = text.indexOf(NEEDLE); i !== -1; i = text.indexOf(NEEDLE, i + 1)) {
+    // 괄호를 짝 맞춰 인자 전체를 뗀다. 정규식으로 `}`까지 긁으면
+    // 중첩 객체에서 잘려 **있는 것을 없다고** 한다.
+    let depth = 0, j = i + NEEDLE.length - 1;
+    for (; j < text.length; j++) {
+      const c = text[j];
+      if (c === '(') depth++;
+      else if (c === ')') { depth--; if (depth === 0) break; }
+    }
+    const args = text.slice(i + NEEDLE.length, j);
+    const line = text.slice(0, i).split('\n').length;
+    // 4xx·5xx는 면제다. 인증 실패 응답에 운영 상태를 실으면
+    // **인증 전에 상태가 샌다.**
+    if (/status:\s*[45]\d\d/.test(args)) continue;
+    evidenceSeen.push(line);
+    if (!/\bexecutor\b/.test(args)) evidenceGaps.push(`${EXIT_MONITOR}:${line}`);
+  }
+  if (evidenceSeen.length === 0) {
+    evidenceGaps.push(`${EXIT_MONITOR} — 200 응답을 하나도 찾지 못했습니다 (이 규칙이 헛돌고 있습니다)`);
+  }
+  // 임계값을 라우트가 따로 갖지 않는지. 두 곳에 있으면 화면은 '정상'인데
+  // 주문은 막히는 상태가 생긴다.
+  // 산문이 아니라 **import 문**을 본다.
+  if (!/from\s+['"]@\/lib\/runtime\/executorEvidence['"]/.test(text)
+      || !/\breadExecutorEvidence\s*\(/.test(text)) {
+    evidenceGaps.push(`${EXIT_MONITOR} — 생존 판정을 executorEvidence에서 가져와 부르지 않았습니다`
+      + ' (임계값을 라우트에 복제하면 화면과 주문 경로가 갈립니다)');
+  }
+}
+
+if (evidenceGaps.length > 0) {
+  console.error('\n❌ 청산 감시 응답에 워커 생존 증거가 빠진 경로:');
+  for (const g of evidenceGaps) console.error(`   · ${g}`);
+  console.error('\n   그 경로로 끝난 회차의 Actions 로그에는 워커 생존이 적히지 않습니다.');
+  console.error('   `executor: await executorNow()`를 그 응답에도 넣으세요.');
+  bad = true;
+}
+
+// ── 회차가 왜 실패했는지 **한 곳에서만** 정하는가 ──
+//
+// 위 두 규칙은 판정을 부르는지, 그 결과가 사람에게 닿는지를 본다.
+// 이 규칙은 그 다음이다 — **같은 판정을 두 곳에서 하지 않는가.**
+//
+// 무엇이 있었나
+// ─────────────
+// 무인 회차의 실패 원인은 `scripts/claude-exec-category.mjs`가 범주로
+// 정한다. 그런데 같은 워크플로의 `실패 원인 기록` 단계가 그 아래에서
+// **스스로 원인을 또 추측**했다:
+//
+//   echo "인증 단계에서 멈췄다면 시크릿이 없는 것입니다."
+//
+// 회차 41264530329(main `4f6ee8c6`)은 진단기가 `credit_or_billing`으로
+// 분류했는데 그 줄은 인증을 가리켰다. 갈릴 수 있는 것이 아니라 **갈렸다.**
+// 상습 고장 ② "경로가 둘인데 한쪽만 고침"이다.
+//
+// 이 규칙은 그 두 번째 경로가 돌아오는 것을 막는다. 처방을 YAML에 적지
+// 말고 표에 올린다 — 그래야 범주와 처방이 같이 움직인다.
+const HOURLY = [
+  '.github/workflows/claude-hourly-dev.yml',
+  '.github/workflows/claude-hourly-trading.yml',
+];
+// `"…에서 멈췄다면 …입니다"` 모양. 조건부 원인 추측의 서명이다.
+const CAUSE_GUESS = /에서 멈췄다면/;
+const causeGaps = [];
+for (const wf of HOURLY) {
+  const text = readFileSync(wf, 'utf8');
+  // 진단기가 **항상** 돌아야 한다. 실패한 회차에만 돌면 `cancelled`·
+  // `timed_out`으로 끝난 회차에는 범주가 없다.
+  if (!/node scripts\/claude-exec-category\.mjs/.test(text)) {
+    causeGaps.push(`${wf} — 진단기(claude-exec-category)를 부르지 않습니다`);
+  }
+  const at = text.indexOf('- name: 실패 원인 기록');
+  if (at === -1) {
+    // 단계 이름이 바뀌면 아래 검사가 **조용히 통과한다.** 못 찾은 것을
+    // 통과로 적지 않는다.
+    causeGaps.push(`${wf} — '실패 원인 기록' 단계를 찾지 못했습니다 (이 규칙이 헛돌고 있습니다)`);
+    continue;
+  }
+  const rest = text.slice(at + 1);
+  const end = rest.search(/\n {6}- name:/);
+  const step = end === -1 ? rest : rest.slice(0, end);
+  const firstLine = text.slice(0, at).split('\n').length;
+  for (const [i, l] of step.split('\n').entries()) {
+    if (CAUSE_GUESS.test(l)) causeGaps.push(`${wf}:${firstLine + i} — ${l.trim()}`);
+  }
+}
+
+if (causeGaps.length > 0) {
+  console.error('\n❌ 실패 원인을 진단기 밖에서 또 정하는 자리:');
+  for (const g of causeGaps) console.error(`   · ${g}`);
+  console.error('\n   범주는 scripts/claude-exec-category.mjs가 정합니다.');
+  console.error('   처방을 YAML에 적지 말고 그 파일의 NEXT_ACTION 표에 올리세요.');
+  bad = true;
+}
+
+// ── **배선된 파일 속의 죽은 판정** ────────────────────────────
+//
+// 위의 두 규칙에는 각각 구멍이 있고, 그 구멍이 겹치는 자리가 있다.
+//
+//   orphan 규칙   **파일 단위**로 본다. export 하나라도 제품에서 쓰이면
+//                 그 파일은 "배선됨"이고, 같은 파일의 죽은 판정은 안 보인다
+//   쌍둥이 규칙   **이름이 겹치는** 것만 본다. 이름이 유일하면 안 보인다
+//
+// 그래서 **이름이 유일하고, 파일은 배선돼 있고, 그 함수만 아무도 안 부르는**
+// 판정은 지금까지 어떤 검사도 보지 못했다. 실제로 그런 것이 있다:
+//
+//   src/lib/risk/index.ts   updateTrailingStop · checkBreakeven ·
+//                           checkPartialTP · checkWeeklyLimits
+//                           → 살아 있는 대체는 engine/trailPlan.ts ·
+//                             risk/lossStreak.ts 쪽이다
+//   src/lib/engine/leverageMath.ts  liquidationWarning ·
+//                           stopFiresBeforeLiquidation
+//
+// `risk/index.ts`의 유일한 산 소비자는 `backtest/index.ts`가
+// `calcPositionSize` 하나를 가져가는 것이다. 그 하나 때문에 파일이
+// "배선됨"이 되고, 트레일링 스톱·본전·부분청산·주간한도 판정 넷이
+// 그 뒤에 숨는다. **거기서 손절 로직을 고치면 아무 일도 일어나지 않는다.**
+//
+// 왜 전체가 아니라 돈 경로만 보는가
+// ─────────────────────────────────
+// 저장소 전체로 재면 수백 건이고, 그 대부분은 라벨·상수·표시 헬퍼다.
+// 그걸 다 막으면 **사람은 목록에 적어 넣기만 하고 이 검사는 믿을 수 없는
+// 것이 된다**(이 파일이 이미 두 번 배운 교훈이다). 그래서
+//
+//   · **돈 경로 디렉터리**만 보고
+//   · **`export function`만** 본다 — 판정은 함수다. 라벨·상수가 안 쓰이는
+//     것은 어질러진 것이고, 판정이 안 쓰이는 것은 **고장**이다
+// **이번 단계는 `src/lib/risk`만 막는다.** 다섯 디렉터리 전부로 재면
+// 91건이고(engine 42 · markets 21 · risk 14 · exchanges 13 · safety 1),
+// 그걸 한 번에 목록으로 만들면 사유가 고무도장이 된다 — 이 파일이 이미
+// 적어 둔 실패다("사람은 ALLOW에 적어 넣기만 하고 이 검사는 믿을 수
+// 없는 것이 된다"). 그래서 **세어서 적어 두고**, 디렉터리를 하나씩
+// 늘리면서 각 항목을 확인한 사유와 함께 올린다. 아래 14건은 **전수
+// 하나씩 직접 확인했다**(표본이 아니다).
+const MONEY_DIRS = ['src/lib/risk'];
+const DEAD_FN_ALLOW = new Map([
+  // ── src/lib/risk/index.ts ─────────────────────────────────
+  //
+  // 이 파일의 유일한 산 소비자는 `backtest/index.ts`가 `calcPositionSize`
+  // 하나를 가져가는 것이다. 그 하나 때문에 파일이 "배선됨"이 되고 아래
+  // 다섯이 그 뒤에 숨는다. 다섯 다 **살아 있는 대체가 따로 있다** —
+  // 즉 이 파일은 초기 구현이 밀려난 자리로 보인다.
+  ['updateTrailingStop@src/lib/risk/index.ts',
+    '트레일링 스톱. 산 쪽은 engine/trailPlan.ts · exitPlan.ts · exitLifecycle.ts'],
+  ['checkBreakeven@src/lib/risk/index.ts',
+    '본전 이동. 산 쪽은 engine/trailPlan.ts · exitPlan.ts · exitLifecycle.ts'],
+  ['checkPartialTP@src/lib/risk/index.ts',
+    '부분 청산. 산 쪽은 engine/exitPlan.ts · asymmetricExit.ts · orderExecutor.ts'],
+  ['calcNextDCA@src/lib/risk/index.ts',
+    '다음 DCA 지점. 산 쪽은 src/lib/dca/aiDca.ts'],
+  ['checkWeeklyLimits@src/lib/risk/index.ts',
+    '주간 손실 한도. 산 쪽은 risk/lossStreak.ts · limitScope.ts · collectLimits.ts · lossStreakCheck.ts'],
+
+  // ── src/lib/risk/conviction.ts ────────────────────────────
+  //
+  // **이 파일이 `CLAUDE.md`가 적은 첫 예다**: "conviction.ts 판정 넷을
+  // 만들고 테스트까지 붙였는데 저장소 전체에서 부르는 곳이 0곳이었다."
+  // 지금 상태를 세어 보면 export 7개 중 **`overtradingGate` 하나만**
+  // 외부 참조가 있고(5곳), 나머지 여섯은 0곳이다. 그 하나 때문에
+  // 파일이 "배선됨"이 되어 **orphan 검사가 아래 셋을 못 본다.**
+  ['gradeOf@src/lib/risk/conviction.ts',
+    '확신 등급 판정. 살아 있는 대체를 찾지 못했다 — 배선 아니면 삭제 결정이 필요하다'],
+  ['riskBudgetFor@src/lib/risk/conviction.ts',
+    '등급별 리스크 예산. 위와 같다 — 이것이 안 불리면 등급이 사이징에 반영되지 않는다'],
+  ['patienceScore@src/lib/risk/conviction.ts',
+    '인내 점수. 위와 같다'],
+
+  // ── src/lib/risk/killSwitch.ts ────────────────────────────
+  //
+  // 이 파일은 잘 배선돼 있다 — `loadKillSwitch` · `saveKillSwitch` ·
+  // `logKillEvent` · `executeKillActions` · `evaluate` · `reconcile`를
+  // 킬스위치 라우트 셋이 쓴다. 아래 셋이 그 뒤에 숨는다.
+  ['computeUsdtEquity@src/lib/risk/killSwitch.ts',
+    'USDT 환산 자산. 제품 참조 0곳 — 킬스위치 판정이 쓰는 자산값은 다른 경로에서 온다'],
+  ['acquireLock@src/lib/risk/killSwitch.ts',
+    '**쌍둥이다.** 워커는 자기 것(worker/src/supabase.ts:22)을 쓴다 — '
+    + 'worker/src/index.ts:18이 `./supabase`에서 가져온다. 이 복사본은 아무도 안 부른다'],
+  ['releaseLock@src/lib/risk/killSwitch.ts',
+    '위와 같은 짝. 워커의 4개 참조는 전부 worker/src/supabase.ts 쪽이다'],
+
+  // ── 나머지 ────────────────────────────────────────────────
+  ['confirmLines@src/lib/risk/emergencyLevel.ts',
+    '비상 단계 확인 문구. 제품 참조 0곳. 비슷한 이름의 `confirmLinesFor`가 '
+    + 'engine/mismatchRecovery.ts에도 있고 그것도 죽어 있다(이 PR 범위 밖)'],
+  ['signalKey@src/lib/risk/idempotency.ts',
+    '**멱등키 생성기인데 아무도 안 부른다.** 중복 주문을 막는 판정이 '
+    + '안 불리는 것이므로 이름만 보면 가장 위험하다. 다만 실제 중복 방지는 '
+    + '`clientOrderId` 경로가 한다(engine/venuePositionOps.ts · stateReconcile.ts · '
+    + 'risk/killSwitch.ts · killCloseRun.ts) — 그래서 "중복 주문이 막히지 않는다"는 '
+    + '아니다. 이 파일이 무엇을 위한 것인지 확인한 뒤 배선 아니면 삭제'],
+  ['retriggerPlan@src/lib/risk/killSwitchTruth.ts',
+    '재발동 계획 판정. 제품 참조 0곳 — 유일한 언급은 같은 파일 214행의 '
+    + '**주석**이다(검사기는 주석을 지우고 센다). #589의 killRetryVerdict와 '
+    + '겹치는 영역이라 함께 결정해야 한다'],
+]);
+{
+  const deadFns = [];
+  for (const dir of MONEY_DIRS) {
+    if (!existsSync(dir)) continue;
+    for (const name of readdirSync(dir)) {
+      if (!name.endsWith('.ts') || name.endsWith('.test.ts') || name.endsWith('.d.ts')) continue;
+      const file = join(dir, name).replaceAll('\\', '/');
+      const own = stripComments(readFileSync(file, 'utf8'));
+      const fns = [];
+      let mm;
+      const fnRe = /export\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/g;
+      while ((mm = fnRe.exec(own))) fns.push(mm[1]);
+      if (fns.length === 0) continue;
+
+      const m = consumerMatcherFor(file);
+      const consumers = sources.filter((s) => isConsumerOf(s, file, m));
+      if (consumers.length === 0) continue;      // 파일째 끊김 — orphan 규칙 소관
+
+      for (const fn of fns) {
+        const esc2 = fn.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const useRe = new RegExp(`\\b${esc2}\\b`);
+        if (consumers.some((s) => useRe.test(s.text))) continue;   // 제품이 부른다
+        // 같은 파일 안에서 쓰이면 내부 헬퍼다 — 죽은 것이 아니다.
+        // 선언 줄 자신은 세지 않는다.
+        const declRe = new RegExp(`export\\s+(?:async\\s+)?function\\s+${esc2}\\b`);
+        const withoutDecl = own.replace(declRe, ' '.repeat(10));
+        if (useRe.test(withoutDecl)) continue;
+        deadFns.push({ file, fn });
+      }
+    }
+  }
+  const fresh = deadFns.filter((d) => !DEAD_FN_ALLOW.has(`${d.fn}@${d.file}`));
+  if (fresh.length > 0) {
+    console.error('\n❌ 돈 경로에 **아무도 부르지 않는 판정 함수**가 있습니다:');
+    for (const d of fresh) console.error(`   · ${d.fn}  —  ${d.file}`);
+    console.error('\n   파일은 배선돼 있어서 위의 orphan 검사가 못 봅니다.');
+    console.error('   이름이 유일해서 쌍둥이 검사도 못 봅니다.');
+    console.error('   거기서 손절·눈금·손익 로직을 고치면 **아무 일도 일어나지 않습니다.**');
+    console.error('\n   셋 중 하나를 하세요:');
+    console.error('     1. 실제로 부르는 곳에 배선한다');
+    console.error('     2. 살아 있는 대체가 있으면 지운다');
+    console.error('     3. 정본 결정이 필요하면 DEAD_FN_ALLOW에 사유와 함께 적는다');
+    bad = true;
+  }
+  const goneDead = [...DEAD_FN_ALLOW.keys()].filter(
+    (k) => !deadFns.some((d) => `${d.fn}@${d.file}` === k));
+  if (goneDead.length > 0) {
+    console.error('\n❌ DEAD_FN_ALLOW에 적혀 있는데 더는 죽지 않은 것:');
+    for (const k of goneDead) console.error(`   · ${k}`);
+    console.error('   해결됐으면 목록에서 지우세요. 낡은 면제는 다음 것을 덮습니다.');
+    bad = true;
+  }
+  if (fresh.length === 0 && goneDead.length === 0) {
+    console.log(`✅ 돈 경로에 죽은 판정 함수 0건 (면제 ${DEAD_FN_ALLOW.size}건) · 디렉터리 ${MONEY_DIRS.length}개`);
+  }
+}
+
+// ── 검사기 자신이 배선돼 있는가 ──
+//
+// 이 파일의 머리말은 **"만들어 놓고 배선을 안 하는 것을 CI가 잡는다"**다.
+// 그런데 지금까지 본 것은 `src/lib`의 판정 모듈뿐이었고, **검사기 자신이
+// 아무도 안 부르는 상태**는 보지 않았다.
+//
+// 실제로 그런 것이 있었다. `scripts/check-auto-merge-switches.mjs`는
+// 규칙 14개로 "라벨 없는 초안 PR이 합쳐지는 것"을 막는데(자기 시험까지
+// 통과한다), **어떤 워크플로도 그것을 부르지 않았다.** 저장소에 적힌
+// 그대로다 — **CI가 안 돌리는 검사기는 없는 검사기다.**
+//
+// 무엇을 '부른다'로 세는가: `.github/workflows/`의 워크플로, 또는
+// `scripts/run-tests.mjs`(CI가 돌리는 유일한 JS 진입점). **다른 검사기가
+// 이름을 언급하는 것은 세지 않는다** — 그 검사기 자신이 안 돌면 같이
+// 안 돈다.
+//
+// 주석은 호출이 아니다. YAML의 `#` 줄과 JS 주석을 걷어낸 뒤에 본다 —
+// "왜 아직 안 붙였나"를 주석으로 적으면 그 설명이 통과 근거가 되는
+// 모양을 이 저장소가 이미 겪었다.
+const CHECKER_ALLOW = new Map([
+  ['scripts/check-undefined.mjs',
+    '막는 것: 이 검사기는 tsc가 안 돌아도 초록을 켠다(fail-open). 그 상태로 '
+    + '배선하면 "검사가 돌고 있다"는 거짓 신호만 생긴다. #602가 먼저 그 '
+    + 'fail-open을 닫는다 — 닫힌 뒤에 배선하고 이 줄을 지운다'],
+]);
+
+const CHECK_RUNNER = 'scripts/run-tests.mjs';
+const checkerFiles = readdirSync('scripts')
+  .filter(f => /^check-.*\.mjs$/.test(f))
+  .map(f => `scripts/${f}`)
+  .sort();
+
+// 하나도 못 찾으면 **통과가 아니라 실패다.** 0개를 보고 초록을 켜는 검사는
+// 막는 것처럼 보이면서 아무것도 막지 않는다.
+if (checkerFiles.length === 0) {
+  console.error('\n❌ scripts/check-*.mjs를 하나도 찾지 못했습니다 — 이 규칙이 헛돌고 있습니다');
+  bad = true;
+}
+
+const checkerCallers = [];
+for (const wf of readdirSync('.github/workflows').filter(f => /\.ya?ml$/.test(f))) {
+  const text = readFileSync(join('.github/workflows', wf), 'utf8');
+  // YAML 주석 줄을 뺀다.
+  checkerCallers.push(text.split('\n').filter(l => !l.trim().startsWith('#')).join('\n'));
+}
+checkerCallers.push(stripComments(readFileSync(CHECK_RUNNER, 'utf8')));
+
+const unwiredCheckers = [];
+const staleCheckerAllow = [];
+for (const c of checkerFiles) {
+  const name = basename(c);
+  const called = checkerCallers.some(t => t.includes(name));
+  const allowed = CHECKER_ALLOW.has(c);
+  if (!called && !allowed) unwiredCheckers.push(c);
+  if (called && allowed) staleCheckerAllow.push(c);
+}
+
+if (unwiredCheckers.length > 0) {
+  console.error('\n❌ 아무도 부르지 않는 검사기:');
+  for (const c of unwiredCheckers) console.error(`   · ${c}`);
+  console.error('\n   CI가 안 돌리는 검사기는 없는 검사기입니다. 막는 것처럼 보이면서');
+  console.error('   아무것도 막지 않고, 그 사실을 아무도 모릅니다.');
+  console.error('\n   셋 중 하나를 하세요:');
+  console.error('     1. 워크플로나 scripts/run-tests.mjs에서 실제로 부른다');
+  console.error('     2. 아직이면 scripts/check-wiring.mjs의 CHECKER_ALLOW에 사유와 함께 적는다');
+  console.error('     3. 쓸 데가 없으면 지운다');
+  bad = true;
+}
+
+if (staleCheckerAllow.length > 0) {
+  console.error('\n⚠ CHECKER_ALLOW에 적혀 있는데 이미 배선된 검사기:');
+  for (const c of staleCheckerAllow) console.error(`   · ${c} — ${CHECKER_ALLOW.get(c)}`);
+  console.error('\n   지우세요. 면제 목록이 낡으면 다음에 진짜로 끊긴 것을 덮습니다.');
+  bad = true;
+}
+
 if (bad) process.exit(1);
 
 console.log(`✅ 판정 모듈 ${files.length}개 · 배선 안 된 것 0개`
   + (ALLOW.size > 0 ? ` (면제 ${ALLOW.size}개)` : ''));
+console.log(`✅ 청산 감시 200 응답 ${evidenceSeen.length}개 전부 워커 생존 증거를 싣는다`);
+console.log(`✅ 무인 회차 워크플로 ${HOURLY.length}개 전부 실패 원인을 진단기 한 곳에서만 정한다`);
+console.log(`✅ 검사기 ${checkerFiles.length}개 · 아무도 안 부르는 것 0개`
+  + (CHECKER_ALLOW.size > 0 ? ` (면제 ${CHECKER_ALLOW.size}개)` : ''));

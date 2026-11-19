@@ -288,6 +288,33 @@ export async function getOpenOrdersGateFutures(
     '/api/v4/futures/usdt/orders', base, key, secret, testnet);
 }
 
+/** Read all three Gate TESTNET books for a recovery observation, preserving unknowns. */
+export async function readGateTestnetExposure(key: string, secret: string, contract: string) {
+  const credentials = { key, secret, testnet: true };
+  const [positions, regularOrders, conditionalOrders] = await Promise.all([
+    gateReq<unknown>('GET', '/api/v4/futures/usdt/positions', { ...credentials, qs: 'holding=true' }).catch(() => null),
+    gateReq<unknown>('GET', '/api/v4/futures/usdt/orders', {
+      ...credentials, qs: new URLSearchParams({ status: 'open', contract }).toString(),
+    }).catch(() => null),
+    getPriceOrdersGateFutures(key, secret, contract, true),
+  ]);
+
+  // Gate returns all held positions when no limit is supplied, including both hedge legs.
+  const positionsReadable = Array.isArray(positions) && positions.every(row => (
+    typeof row?.contract === 'string' && row.contract.length > 0
+    && (typeof row.size === 'number' || (typeof row.size === 'string' && /^-?\d+(\.\d+)?$/.test(row.size)))
+    && Number.isFinite(Number(row.size))
+  ));
+  const openPositions = positionsReadable
+    ? positions.filter(row => row.contract === contract && Number(row.size) !== 0).length
+    : null;
+  return {
+    openPositions,
+    regularOrders: Array.isArray(regularOrders) ? regularOrders.length : null,
+    conditionalOrders: conditionalOrders?.length ?? null,
+  };
+}
+
 /** 걸려 있는 조건부 주문(손절·익절). 못 읽으면 null — 빈 배열과 구분한다 */
 export async function getPriceOrdersGateFutures(
   key: string, secret: string, contract: string, testnet = true,
@@ -295,7 +322,19 @@ export async function getPriceOrdersGateFutures(
   try {
     // ★ 위 한 줄(**"못 읽으면 null — 빈 배열과 구분한다"**)이 이 함수의
     //   계약인데, 예전 코드는 비배열 200에 `[]`를 돌려줬다. 문서와 코드가
-    //   달랐고, 그 `[]`는 호출부에서 "보호주문 없음"이 된다.
+    //   달랐고, 그 `[]`는 호출부에서 "보호주문 없음"이 된다. Gate가 200에
+    //   `{label:'ERROR'}`·`null`·빈 본문을 줄 때 **"기존 보호주문 없음"이
+    //   확정되고** 새 보호주문이 나갔다.
+    //
+    // ★ **`gateReq` 한 번이 아니라 `gatePagedList`를 쓴다.** 둘 다 비배열을
+    //   막지만, 단건 요청은 **잘린 목록을 "전부"로 읽는다** — Gate의 기본
+    //   페이지 크기를 넘는 조건부 주문이 있으면 뒤쪽을 못 보고, 못 본 것이
+    //   "없음"이 된다. 그것이 #516이 킬스위치 자가복구에서 고친 바로 그
+    //   결함이다. `gatePagedList`는 비배열과 **끝까지 못 읽음** 둘 다 던지고,
+    //   그 던짐은 아래 `catch`에서 `null`(모름)이 된다.
+    //
+    //   같은 파일의 `getAllPriceOrdersGateFutures`·`getOpenOrdersGateFutures`도
+    //   이 함수를 쓴다 — 선례가 옆에 있다.
     return await gatePagedList<any>(
       '/api/v4/futures/usdt/price_orders', `status=open&contract=${contract}`,
       key, secret, testnet);
