@@ -15,7 +15,7 @@ import { test, assert, eq } from '../../test/harness';
 import {
   parsePaperAutomationControl, readBotSignal, PAPER_BOT_ID, DEFAULT_PAPER_BOT,
   derivePaperBotId, readBotTimeframe,
-} from './paperAutomation';
+  readBotLeverage, parseBotLeverage, BOT_LEVERAGE_MIN, BOT_LEVERAGE_MAX, BOT_LEVERAGE_CHOICES } from './paperAutomation';
 import { BAR_INTERVALS, BAR_INTERVAL_LABEL, BAR_INTERVAL_MS, DEFAULT_BAR_INTERVAL,
   parseBarInterval } from '../risk/bars';
 import { ENTRY_SIGNAL_IDS, DEFAULT_ENTRY_SIGNAL } from './entrySignals';
@@ -253,4 +253,59 @@ export function runPaperMultiBotTests() {
     }
     eq(start({ symbol: 'DOGEUSDT' }), null);
   });
+
+  // ── 봇마다 배율 ──
+  //
+  // 이 시험이 막는 것: **사용자가 20배 봇을 켰는데 5배가 도는 것.**
+  // 배율은 계정 설정 하나였고, 모든 봇이 그 한 값을 같이 썼다.
+
+  test('배율을 안 적었으면 받은 기본값이다 — 0으로 떨어지지 않는다', () => {
+    eq(readBotLeverage({ signal: 'trend' }, 5).leverage, 5);
+    eq(readBotLeverage({ signal: 'trend' }, 5).bad, null);
+    eq(readBotLeverage(null, 7).leverage, 7);
+  });
+
+  test('★ 적힌 배율을 그대로 쓴다', () => {
+    const r = readBotLeverage({ leverage: 20 }, 5);
+    eq(r.leverage, 20);
+    eq(r.bad, null);
+  });
+
+  test('★★ 범위를 벗어나면 조용히 깎지 않는다 — bad를 적고 기본값을 지킨다', () => {
+    for (const bad of [0, -1, 126, 1000, 2.5, 'x', true, {}]) {
+      const r = readBotLeverage({ leverage: bad as any }, 5);
+      eq(r.leverage, 5, `${String(bad)}를 썼다`);
+      assert(r.bad != null, `${String(bad)}를 통과시켰다`);
+      assert(!r.bad!.includes('undefined'));
+    }
+  });
+
+  test('경계값은 받는다', () => {
+    eq(readBotLeverage({ leverage: BOT_LEVERAGE_MIN }, 5).leverage, BOT_LEVERAGE_MIN);
+    eq(readBotLeverage({ leverage: BOT_LEVERAGE_MAX }, 5).leverage, BOT_LEVERAGE_MAX);
+    eq(parseBotLeverage(BOT_LEVERAGE_MIN - 1), null);
+    eq(parseBotLeverage(BOT_LEVERAGE_MAX + 1), null);
+  });
+
+  test('화면이 고르는 단계는 전부 받아들여진다 — 고를 수 있는데 거절되는 자리를 만들지 않는다', () => {
+    for (const x of BOT_LEVERAGE_CHOICES) eq(parseBotLeverage(x), x);
+  });
+
+  test('★ 모르는 배율을 보내면 400이다 — 조용히 기본값으로 켜지 않는다', () => {
+    const base = { action: 'start', botId: 'paper-auto-v1', symbol: 'BTCUSDT', interval: 60 };
+    eq(parsePaperAutomationControl({ ...base, leverage: 999 }), null);
+    eq(parsePaperAutomationControl({ ...base, leverage: 'x' }), null);
+  });
+
+  test('★ 배율을 안 보내면 null이다 — 저장된 값을 지키라는 뜻', () => {
+    const got = parsePaperAutomationControl({ action: 'start', botId: 'paper-auto-v1', symbol: 'BTCUSDT', interval: 60 });
+    assert(got != null);
+    eq(got!.leverage, null);
+  });
+
+  test('받아들인 배율은 그대로 실려 간다', () => {
+    const got = parsePaperAutomationControl({ action: 'start', botId: 'paper-auto-v1', symbol: 'BTCUSDT', interval: 60, leverage: 20 });
+    eq(got!.leverage, 20);
+  });
+
 }

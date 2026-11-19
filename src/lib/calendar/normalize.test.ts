@@ -283,4 +283,5 @@ export function runCalendarTests() {
     // 사전으로 옮길 수 있어야 한다.
     eq(localizeEventTitle('FOMC 금리 결정', 'en', DICT), 'FOMC 금리 결정');
   });
+
 }

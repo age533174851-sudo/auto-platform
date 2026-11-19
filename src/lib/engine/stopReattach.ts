@@ -76,3 +76,56 @@ export function stopReattachVerdict(o: {
 
   return { attach: true, code: 'ATTACH', note: '', stopPrice: stop };
 }
+
+// ──────────────────────────────────────────────────────────────────
+// 복구 직전의 포지션 증거 — **못 읽은 것은 '없음'이 아니다** (#479)
+// ──────────────────────────────────────────────────────────────────
+//
+// 복구는 포지션이 실제로 있을 때만 손절을 건다. 그 확인이 예전에는
+// `Number(x ?? 0)` 다음 `if (!x) return null`이었다. 그러면
+//
+//   · 조회 실패(Gate HTTP 오류 → null, 바이낸스 `risk: null`)
+//   · 깨진 수량('bad' → NaN → `!NaN`은 true)
+//
+// 이 전부 "포지션 없음 → 걸 것 없음"이 되고 **아무 말도 남지 않는다.**
+// 대조는 그 줄을 종료로 적으므로 다시 볼 기회도 없다 — 손절 없는 포지션이
+// 조용히 남는다. `positionRiskRead`는 이미 깨진 수량을 `risk: null`로
+// 돌려주는데, 받는 쪽이 그것을 다시 0으로 바꾸고 있었다.
+//
+// 그래서 셋으로 나눈다. 확인된 0만 FLAT이다. UNKNOWN이어도 **주문은
+// 보내지 않는다** — 모르는 노출에 손절을 지어내 걸지 않는다. 대신 그 사실을
+// 남긴다.
+
+export type ReattachPositionEvidence =
+  | { kind: 'OPEN'; qty: number }
+  | { kind: 'FLAT' }
+  | { kind: 'UNKNOWN'; note: string };
+
+/**
+ * @param rawQty   거래소가 준 부호 있는 수량. 포지션 응답 자체를 못 받았으면
+ *                 `undefined`/`null`을 넘긴다.
+ * @param readError 조회 쪽이 알려 준 실패 이유(있으면 기록에 붙인다).
+ */
+export function reattachPositionEvidence(
+  rawQty: unknown,
+  readError?: string | null,
+): ReattachPositionEvidence {
+  const unknown = (why: string): ReattachPositionEvidence => ({
+    kind: 'UNKNOWN',
+    note: `손절 복구 확인 불가 — ${why}${readError ? ` (${readError})` : ''}`
+      + ' · 포지션이 열려 있다면 손절 없이 남아 있을 수 있습니다',
+  });
+
+  if (rawQty === null || rawQty === undefined) {
+    return unknown('거래소 포지션을 읽지 못했습니다');
+  }
+  let n: number;
+  if (typeof rawQty === 'number') n = rawQty;
+  else if (typeof rawQty === 'string' && rawQty.trim() !== '') n = Number(rawQty.trim());
+  else n = NaN;
+  if (!Number.isFinite(n)) {
+    return unknown(`거래소 포지션 수량을 해석할 수 없습니다 (${String(rawQty).slice(0, 32)})`);
+  }
+  if (n === 0) return { kind: 'FLAT' };
+  return { kind: 'OPEN', qty: n };
+}

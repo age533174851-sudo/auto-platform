@@ -5736,12 +5736,51 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
           if (!authBody) {
             err(`${MON5}: authorized를 찾지 못했습니다`);
           } else {
-            if (!/CRON_BEARER/.test(authBody[1]) || !/ADMIN_HEADER/.test(authBody[1])) {
-              err(`${MON5}: 인증 경로를 구분해서 돌려주지 않습니다`
-                + ' — 헤더가 없으면 provenance를 복원할 수 없습니다');
-            }
             if (/:\s*boolean\s*\{/.test(authBody[0])) {
               err(`${MON5}: 인증 결과를 boolean으로 버립니다`);
+            }
+            // 경로를 구분하는 자리가 **이 함수 안**이거나, 아니면
+            // **정본에 위임**해야 한다. 위임이면 거기까지 따라가서 확인한다
+            // — 본문에 이름만 적혀 있는 것으로는 통과시키지 않는다.
+            const here = /CRON_BEARER/.test(authBody[1]) && /ADMIN_HEADER/.test(authBody[1]);
+            const delegates = /wakeAuthFromEnv\(/.test(authBody[1]);
+            if (!here && !delegates) {
+              err(`${MON5}: 인증 경로를 구분해서 돌려주지 않습니다`
+                + ' — 헤더가 없으면 provenance를 복원할 수 없습니다');
+            } else if (delegates) {
+              const AUTH = 'src/lib/system/cronAuth.ts';
+              const asrc = code(AUTH);
+              if (!asrc) {
+                err(`${MON5}: ${AUTH}에 위임하는데 그 파일이 없습니다`);
+              } else {
+                // ① 정본이 **세 경로를 모두** 돌려주는가
+                for (const kind of ['CRON_BEARER', 'ADMIN_HEADER', 'NONE']) {
+                  if (!new RegExp(`kind:\\s*'${kind}'`).test(asrc)) {
+                    err(`${AUTH}: ${kind} 경로를 돌려주지 않습니다`
+                      + ' — provenance를 복원할 수 없습니다');
+                  }
+                }
+                // ② **빈 비밀로는 아무도 통과하지 못하는가.** 이 줄이 없으면
+                //    비밀이 설정되지 않은 환경에서 빈 헤더가 관리자가 된다.
+                if (!/if\s*\(!expected\s*\|\|\s*!provided\)\s*return false/.test(asrc)) {
+                  err(`${AUTH}: 빈 비밀을 먼저 막지 않습니다`
+                    + ' — 비밀이 비어 있으면 빈 헤더가 통과합니다');
+                }
+                // ③ 비교가 timing-safe인가 (정본이 되었으므로 여기서 고정한다)
+                if (!/timingSafeEqual\(/.test(asrc)) {
+                  err(`${AUTH}: 비밀을 timing-safe로 비교하지 않습니다`);
+                }
+                // ④ **두 깨우기 라우트가 같은 정본을 쓰는가.** 경로가 둘인데
+                //    한쪽만 고치는 것이 이 저장소에서 가장 자주 난 고장이다
+                //    — 모의 라우트가 Vercel Cron을 못 받아 깨우는 길이
+                //    하나뿐이었던 것이 정확히 그 사고다.
+                for (const r of [MON5, 'src/app/api/paper/exit-monitor/route.ts']) {
+                  if (!/wakeAuthFromEnv\(/.test(code(r))) {
+                    err(`${r}: 깨우기 인증을 ${AUTH}에 위임하지 않습니다`
+                      + ' — 판정이 둘로 갈리면 한쪽만 고쳐집니다');
+                  }
+                }
+              }
             }
           }
           // ★ cadence telemetry를 **판단에 쓰지 않는가** (ESC18c)
