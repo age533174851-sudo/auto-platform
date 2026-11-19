@@ -31,6 +31,26 @@ export interface ExitDecision {
   userId: string;
   symbol: string;
   side: 'LONG' | 'SHORT';
+  /**
+   * **이 포지션이 있는 연결.** 없으면 연결을 적기 전에 만들어진 줄이다.
+   *
+   * `decideExits`는 이 값을 이미 읽어서 `venueFor`에 넘기고 있었지만
+   * **판정 결과에는 담지 않았다.** 그래서 부르는 쪽이 같은 포지션의 장부
+   * 줄을 찾을 때 사용자 단위로밖에 못 좁혔다 — 같은 종목을 두 연결에
+   * 걸어 두면 엉뚱한 줄에 손절 번호를 적는다.
+   *
+   * 값은 `venueFor`에 넘기는 것과 **같은 줄에서 같은 방식으로** 읽는다.
+   * 두 곳에서 따로 조립하면 언젠가 갈린다.
+   */
+  connectionId: string | null;
+  /**
+   * 이 거래의 거래일.
+   *
+   * 손절을 옮길 때 **그 손절이 내 것이라는 표식**을 새기려면 진입
+   * 식별자와 같은 열쇠가 필요하다(`ladderIds`). 여기서 문자열을 다시
+   * 조립하지 않고 값만 들고 나간다.
+   */
+  tradeDate: string | null;
   action: 'NONE' | 'MOVE_STOP' | 'CLOSE';
   newStop?: number;
   currentStop: number;
@@ -153,7 +173,7 @@ export async function decideExits(
 
   let q = sb
     .from('ladder_daily_trades')
-    .select('id, user_id, symbol, side, entry_price, stop_loss, created_at, connection_id')
+    .select('id, user_id, symbol, side, entry_price, stop_loss, created_at, connection_id, trade_date')
     .eq('status', 'OPEN');
   if (opts.userId) q = q.eq('user_id', opts.userId);
   const { data: open } = await q.limit(opts.limit ?? 25);
@@ -170,6 +190,8 @@ export async function decideExits(
     const openedAt = new Date(t.created_at).getTime();
     const common = {
       tradeId: t.id, userId: t.user_id, symbol: t.symbol, side,
+      connectionId: t.connection_id == null ? null : String(t.connection_id),
+      tradeDate: String(t.trade_date ?? '').trim() || null,
       currentStop: stop, entryPrice: entry,
     };
 
@@ -195,9 +217,12 @@ export async function decideExits(
     let venueEx: 'binance' | 'gate' = 'binance';
     let venueNote = '';
     if (opts.venueFor) {
+      // **같은 값을 두 번 조립하지 않는다.** 아래 판정 결과에 담는 것과
+      // 여기서 계좌를 고르는 데 쓰는 것이 갈리면, 손절은 A 연결로 나가고
+      // 장부는 B 연결의 줄에 적힌다.
       const v = await opts.venueFor({
         userId: String(t.user_id),
-        connectionId: t.connection_id == null ? null : String(t.connection_id),
+        connectionId: common.connectionId,
       });
       if (!v.actionable || !v.connection) {
         out.push({ ...common, action: 'NONE', highWaterR: 0, lastPrice: entry,

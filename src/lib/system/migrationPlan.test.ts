@@ -15,7 +15,7 @@
 import { test, eq, assert } from '../../test/harness';
 import {
   classifyMigration, migrationIdOf, migrationPlanOf, migrationEntryGate,
-  migrationTargets, migrationDrift,
+  migrationTargets, migrationDrift, foreignApplyVerdict,
 } from './migrationPlan';
 import { MIGRATION_MANIFEST } from './migrationManifest';
 
@@ -678,6 +678,51 @@ export function runMigrationPlanTests() {
     eq(plan.pending.length, 0);
     eq(plan.blocked.length, 0);
     eq(plan.autoApply.length, 0);
+  });
+
+
+  // ── 다른 경로가 먼저 적용했는가 ──
+  //
+  // 이 시험이 막는 것: **승인 관문이 지나갔는데 조용히 넘어가는 것.**
+  // 106번에서 실제로 그랬다 — 우리 실행이 SQL을 돌리기 전에 대상이 이미
+  // 카탈로그에 있었고, 우리는 그것을 BASELINE으로 적고 끝냈다.
+
+  test('대상이 없으면 아무 말도 하지 않는다', () => {
+    const v = foreignApplyVerdict({ name: '110_x.sql', needsApproval: false, targets: 'MISSING' });
+    eq(v.code, 'NONE');
+    eq(v.fatal, false);
+  });
+
+  test('대상이 아예 없는 파일도 아무 말 하지 않는다', () => {
+    eq(foreignApplyVerdict({ name: '110_x.sql', needsApproval: true, targets: 'NO_TARGET' }).code, 'NONE');
+  });
+
+  test('★★ 승인이 필요한데 이미 적용돼 있으면 치명이다 — 관문이 지나갔다', () => {
+    const v = foreignApplyVerdict({ name: '111_drop.sql', needsApproval: true, targets: 'PRESENT' });
+    eq(v.code, 'FOREIGN_APPLIED_BLOCKED');
+    eq(v.fatal, true);
+    assert(v.reason.includes('111_drop.sql'), '어느 파일인지 안 적었다');
+    assert(v.reason.includes('승인'), '무엇이 지나갔는지 안 적었다');
+  });
+
+  test('★ 자동 적용 대상이 이미 적용돼 있으면 경고지 치명은 아니다', () => {
+    const v = foreignApplyVerdict({ name: '106_feedback_board.sql', needsApproval: false, targets: 'PRESENT' });
+    eq(v.code, 'FOREIGN_APPLIED_PENDING');
+    eq(v.fatal, false);
+    assert(v.reason.includes('우리 실행이 한 일이 아닙니다'), '누가 했는지 흐렸다');
+  });
+
+  test('★★ 못 읽은 것을 "없다"로 적지 않는다', () => {
+    const v = foreignApplyVerdict({ name: '112_y.sql', needsApproval: true, targets: 'UNKNOWN' });
+    eq(v.code, 'UNREADABLE');
+    eq(v.fatal, false);
+    assert(v.reason.includes('없다는 뜻이 아닙니다'), '모름을 통과로 읽히게 적었다');
+  });
+
+  test('승인 필요 여부가 치명 여부를 가른다 — 같은 PRESENT라도', () => {
+    const a = foreignApplyVerdict({ name: 'a.sql', needsApproval: true,  targets: 'PRESENT' });
+    const b = foreignApplyVerdict({ name: 'a.sql', needsApproval: false, targets: 'PRESENT' });
+    assert(a.fatal && !b.fatal);
   });
 
 }
