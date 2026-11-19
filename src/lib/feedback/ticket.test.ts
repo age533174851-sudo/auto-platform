@@ -7,7 +7,9 @@ import {
   mustBePrivate, resolveVisibility, canChangeVisibility, canTransition,
   isTerminal, canUserReply, parseTicketInput, suggestSeverity,
   TITLE_MAX, BODY_MAX, STEPS_MAX, EXPECTED_MAX, ACTUAL_MAX,
+  redactedOverflow, redactedOverflowMessage,
 } from './ticket';
+import { redact } from './redact';
 
 const ok = (o: any = {}) => parseTicketInput({ category: 'BUG', title: '봇이 안 켜져요', body: '실행 버튼을 눌러도 반응이 없습니다', ...o });
 
@@ -181,4 +183,63 @@ export function runFeedbackTicketTests() {
   test('모든 분류에 심각도 제안이 있다', () => {
     for (const c of CATEGORIES) assert(SEVERITIES.includes(suggestSeverity(c)), c);
   });
+
+  // ── 가린 뒤의 길이 ──
+  //
+  // 이 시험이 막는 것: **검증을 통과한 신고가 DB에서 조용히 막히고,
+  // 사용자가 "다시 시도해 주세요"를 받는 것.** 같은 글은 다시 보내도
+  // 똑같이 늘어나므로 그 안내로는 영원히 성공하지 못한다.
+
+  test('한계 안이면 null이다 — 넘친 것이 없다', () => {
+    eq(redactedOverflow({ title: '제목', body: '내용' }), null);
+    eq(redactedOverflow({ body: '제목 없는 답글' }), null);
+  });
+
+  test('★ 제목이 넘치면 제목을 지목하고 초과분을 센다', () => {
+    const v = redactedOverflow({ title: 'x'.repeat(TITLE_MAX + 7), body: '내용' });
+    assert(v != null, '넘친 제목을 통과시켰다');
+    eq(v!.field, 'title');
+    eq(v!.max, TITLE_MAX);
+    eq(v!.over, 7);
+    eq(v!.length, TITLE_MAX + 7);
+  });
+
+  test('★ 내용이 넘치면 내용을 지목한다 — 제목이 멀쩡해도', () => {
+    const v = redactedOverflow({ title: '제목', body: 'x'.repeat(BODY_MAX + 1) });
+    assert(v != null, '넘친 내용을 통과시켰다');
+    eq(v!.field, 'body');
+    eq(v!.over, 1);
+  });
+
+  test('★ 답글에는 제목이 없다 — 제목 없이도 내용을 판정한다', () => {
+    const v = redactedOverflow({ body: 'x'.repeat(BODY_MAX + 5) });
+    assert(v != null && v.field === 'body' && v.over === 5);
+  });
+
+  test('제목을 먼저 지목한다 — 둘 다 넘쳤을 때 고칠 곳이 하나여야 한다', () => {
+    const v = redactedOverflow({ title: 'x'.repeat(TITLE_MAX + 1), body: 'x'.repeat(BODY_MAX + 1) });
+    assert(v != null && v.field === 'title');
+  });
+
+  test('★ 안내문에 글 내용이 섞이지 않는다 — 길이만 말한다', () => {
+    const secret = 'a@b.co';
+    const v = redactedOverflow({ title: '제목', body: secret + 'x'.repeat(BODY_MAX) });
+    assert(v != null, '전제가 깨졌다');
+    const msg = redactedOverflowMessage(v!);
+    assert(!msg.includes(secret), '안내문이 글 내용을 담았다');
+    assert(msg.includes(String(v!.over)), '얼마나 줄여야 하는지 숫자가 없다');
+  });
+
+  test('★★ 가림이 늘린 글도 이 판정이 잡는다 — redact와 함께', () => {
+    // 짧은 이메일을 잔뜩 적은 신고. parseTicketInput은 통과시킨다.
+    const raw = 'a@b.co\n'.repeat(Math.floor(BODY_MAX / 7));
+    assert(raw.length <= BODY_MAX, '전제: 원문은 한계 안이어야 한다');
+    assert(ok({ body: raw }) != null, '전제: 원문 검증은 통과한다');
+    const r = redact(raw);
+    const v = redactedOverflow({ title: '알림이 안 와요', body: r.text });
+    // 가림이 늘렸으면 막아야 하고, 늘리지 않았으면 통과해야 한다.
+    // **어느 쪽이든 판정과 실제가 어긋나면 실패한다.**
+    eq(v == null, r.text.length <= BODY_MAX, `가림 후 ${r.text.length}자 / 한계 ${BODY_MAX}자`);
+  });
+
 }

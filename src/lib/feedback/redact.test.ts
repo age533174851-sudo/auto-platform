@@ -49,8 +49,34 @@ export function runFeedbackRedactTests() {
     eq(r.redacted, false);
   });
 
-  test('단어 수가 시드 길이가 아니면 지우지 않는다 (13단어)', () => {
-    const s = 'abandon ability able about above absent absorb abstract absurd abuse access accident account';
+  // ★★ 시드 뒤에 영단어 하나만 붙어도 12단어 시드는 그대로 남아 있었다.
+  //    예전 판정은 "연속 단어 수가 정확히 12·15·18·21·24"였고, 이 시험은
+  //    13단어를 **지우지 않는 것**을 확인하고 있었다 — 그런데 그 13단어
+  //    안에 12단어 시드가 통째로 들어 있다. 사람은 시드 뒤에 "thanks"·
+  //    "please help"를 붙여 쓴다. 폐기할 수 없는 비밀이라 막는 쪽으로 틀린다.
+  test('★★ 12단어 시드 뒤에 단어가 붙어도 지운다 (13단어)', () => {
+    const seed = 'abandon ability able about above absent absorb abstract absurd abuse access accident';
+    const r = redact(`${seed} account`);
+    gone(seed, r);
+    eq(r.hits.find((h) => h.kind === 'SEED_PHRASE')?.count, 1);
+  });
+
+  test('★★ 시드 뒤에 "please help"를 붙여 써도 지운다 (14단어)', () => {
+    const seed = 'abandon ability able about above absent absorb abstract absurd abuse access accident';
+    const r = redact(`지갑 복구가 안 돼요 ${seed} please help`);
+    gone(seed, r);
+    assert(r.text.includes('지갑 복구가 안 돼요'), '본문까지 지웠습니다');
+  });
+
+  test('★★ 24단어보다 긴 줄에 시드가 뒤쪽에 있어도 남지 않는다', () => {
+    const lead = 'please check this wallet backup phrase since recovery keeps failing every time today'; // 13단어 + 시드 12 = 25
+    const seed = 'zebra zero zone zoo young youth yellow wrong wrist write wolf woman';
+    const r = redact(`${lead} ${seed}`);
+    for (const w of seed.split(' ')) assert(!r.text.includes(w), `시드 단어가 남았습니다: ${w}`);
+  });
+
+  test('11단어는 시드 길이가 아니다 — 지우지 않는다', () => {
+    const s = 'abandon ability able about above absent absorb abstract absurd abuse access';
     eq(redact(s).hits.find((h) => h.kind === 'SEED_PHRASE'), undefined);
   });
 

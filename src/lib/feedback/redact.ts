@@ -106,16 +106,23 @@ function sub(text: string, re: RegExp, mask: string): { text: string; count: num
 }
 
 /**
- * 연속된 소문자 영단어 12·15·18·21·24개를 시드 구문으로 본다.
+ * 연속된 소문자 영단어 **12개 이상**을 시드 구문 후보로 본다.
  *
  * 단어 수가 맞는 것만으로는 부족하다 — 영어 문장도 12단어가 된다. 그래서
  * **BIP39 표본에 둘 이상 걸릴 것**을 함께 본다.
+ *
+ * ★ 단어 수를 "정확히 12·15·18·21·24"로 보지 않는다. 예전에는 그렇게 봤고,
+ *   시드 뒤에 `thanks`·`please help` 한두 단어만 붙어도 줄 전체가 13·14단어가
+ *   되어 **12단어 시드가 통째로 남았다.** 줄 길이에 상한(24)을 두면 앞에
+ *   영어 문장이 붙은 시드의 뒤쪽 단어가 다음 조각으로 넘어가 남는다.
+ *   시드는 폐기할 수 없으므로 시드를 품을 수 있는 줄은 통째로 지운다.
+ *   (입력은 `BODY_MAX` 8,000자로 잘려 들어온다 — 상한 없는 반복의 비용 한계)
  */
 function maskSeedPhrases(text: string): { text: string; count: number } {
   let count = 0;
-  const out = text.replace(/\b(?:[a-z]{3,8}[ \t]+){11,23}[a-z]{3,8}\b/g, (m) => {
+  const out = text.replace(/\b(?:[a-z]{3,8}[ \t]+){11,}[a-z]{3,8}\b/g, (m) => {
     const words = m.trim().split(/[ \t]+/);
-    if (![12, 15, 18, 21, 24].includes(words.length)) return m;
+    if (words.length < 12) return m;
     const known = words.filter((w) => BIP39_SAMPLE.has(w)).length;
     if (known < 2) return m;
     count += 1;

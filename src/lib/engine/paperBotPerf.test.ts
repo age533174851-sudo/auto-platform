@@ -174,4 +174,57 @@ export function runPaperBotPerfViewTests() {
   test('거래가 없는 봇에는 "청산된 거래 없음"을 덧붙인다', () => {
     eq(perfView({ ...base, closed: 0 }).note, '청산된 거래 없음');
   });
+
+  // ── 불완전한 합계는 접힌 카드에서도 구별돼야 한다 ──
+  //
+  // 이 시험이 막는 것: **1000행 상한에 잘린 합계가 완전한 합계와 똑같이
+  // 보이는 것.** 단서가 `note`와 `title`에만 있던 동안, 320px 화면에서
+  // 두 카드는 글자 하나 다르지 않았다 (hover는 터치에 없다).
+
+  test('완전한 합계에는 표식이 없다', () => {
+    const v = perfView({ closed: 10, open: 0, realizedPnl: 142.5, marginSum: 1000,
+      roiPct: 14.25, pnlMissing: 0, partial: false, unreadable: false });
+    eq(v.incomplete, false);
+    eq(v.mark, null);
+    eq(v.measured, true);
+  });
+
+  test('★ 상한에 걸린 합계는 incomplete이고 표식이 있다', () => {
+    const v = perfView({ closed: PERF_ROW_CAP, open: 0, realizedPnl: 5120.75,
+      marginSum: 40000, roiPct: 12.8, pnlMissing: 0, partial: true, unreadable: false });
+    eq(v.incomplete, true);
+    assert(v.mark != null && v.mark.length <= 4, '표식이 없거나 너무 길다');
+    assert((v.note ?? '').includes('최근 분만 집계'), '전체 문구가 사라졌다');
+  });
+
+  test('★ 손익이 안 적힌 행이 있으면 incomplete이다', () => {
+    const v = perfView({ closed: 5, open: 0, realizedPnl: 10, marginSum: 100,
+      roiPct: 10, pnlMissing: 2, partial: false, unreadable: false });
+    eq(v.incomplete, true);
+    assert(v.mark != null);
+  });
+
+  test('★ 미결제는 incomplete로 세지 않는다 — 실현 손익의 일부가 아니다', () => {
+    const v = perfView({ closed: 5, open: 3, realizedPnl: 10, marginSum: 100,
+      roiPct: 10, pnlMissing: 0, partial: false, unreadable: false });
+    eq(v.incomplete, false);
+    eq(v.mark, null);
+    assert((v.note ?? '').includes('미결제 3건'), '미결제 안내는 그대로 남아야 한다');
+  });
+
+  test('★ 못 읽은 것은 불완전한 합계가 아니다 — 금액 자리가 이미 말한다', () => {
+    const v = perfView(null);
+    eq(v.amount, '확인 불가');
+    eq(v.incomplete, false);
+    eq(v.mark, null);
+  });
+
+  test('청산이 없으면 표식을 붙이지 않는다 — 합계 자체가 없다', () => {
+    const v = perfView({ closed: 0, open: 0, realizedPnl: null, marginSum: null,
+      roiPct: null, pnlMissing: 0, partial: false, unreadable: false });
+    eq(v.amount, '성과 데이터 없음');
+    eq(v.incomplete, false);
+    eq(v.mark, null);
+  });
+
 }
