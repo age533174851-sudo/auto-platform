@@ -11,6 +11,7 @@ import { derivePaperBotId, DEFAULT_PAPER_BOT } from '@/lib/engine/paperAutomatio
 import { BAR_INTERVALS, BAR_INTERVAL_LABEL, DEFAULT_BAR_INTERVAL, type BarInterval } from '@/lib/risk/bars';
 import { nextRunText, parseAt } from '@/lib/ui/nextRunText';
 import { perfView, type BotPerf } from '@/lib/engine/paperBotPerf';
+import { BOT_LEVERAGE_CHOICES } from '@/lib/engine/paperAutomation';
 import { envView } from '@/lib/ui/status';
 import { F, SP, R, FS, FW, CONTROL, buttonStyle } from '@/components/ui/tokens';
 import { T } from '@/lib/constants';
@@ -30,6 +31,8 @@ interface Status {
   bots?: { bot_id: string; enabled: boolean; symbol: string; interval_seconds: number;
     next_run_at: string | null; signal: string; signalLabel: string; signalWarning?: string;
     timeframe?: string; timeframeLabel?: string; timeframeWarning?: string;
+    /** 이 봇이 거는 배율. 서버가 판정해서 보낸다 — 화면이 계정값을 그리지 않는다 */
+    leverage?: number; leverageWarning?: string;
     /** 서버가 실제 체결에서 센 성과. **없으면 null이고 0이 아니다** */
     perf?: BotPerf | null }[];
 }
@@ -60,6 +63,8 @@ export function PaperAutomationControl() {
   const [newSymbol,setNewSymbol] = useState('ETHUSDT');
   const [newSignal,setNewSignal] = useState<EntrySignalId>(DEFAULT_ENTRY_SIGNAL);
   const [newTimeframe,setNewTimeframe] = useState<BarInterval>(DEFAULT_BAR_INTERVAL);
+  // 새 봇의 배율. **기본은 계정 기본값과 같은 5배** — 숫자를 여기서 올려 두지 않는다.
+  const [newLeverage,setNewLeverage] = useState<number>(5);
   const [newInterval,setNewInterval] = useState(60);
   /** 어느 봇의 상세를 펼쳤는가. **기본은 접힘** — 한 줄이 열 줄이 되면 목록이 아니다 */
   const [detailOpen,setDetailOpen] = useState<string | null>(null);
@@ -110,7 +115,7 @@ export function PaperAutomationControl() {
   async function controlBot(
     action: 'start' | 'stop',
     bot: { botId: string; symbol: string; interval: number; signal?: EntrySignalId;
-      timeframe?: BarInterval },
+      timeframe?: BarInterval; leverage?: number },
   ) {
     if (!auth || busy) return;
     setBusy(true); setActionError('');
@@ -119,7 +124,9 @@ export function PaperAutomationControl() {
         headers:{Authorization:auth,'Content-Type':'application/json'},
         body:JSON.stringify({ action, botId:bot.botId, symbol:bot.symbol, interval:bot.interval,
           ...(bot.signal ? { signal:bot.signal } : {}),
-          ...(bot.timeframe ? { timeframe:bot.timeframe } : {}) })});
+          ...(bot.timeframe ? { timeframe:bot.timeframe } : {}),
+          // **안 보내면 저장된 배율을 지킨다.** 0이나 기본값으로 채우지 않는다.
+          ...(bot.leverage != null ? { leverage:bot.leverage } : {}) })});
       const data = await res.json().catch(()=>null);
       if (!res.ok || !data?.ok) throw new Error(data?.message || data?.error || `요청 실패 (${res.status})`);
       await load();
@@ -147,7 +154,7 @@ export function PaperAutomationControl() {
   const enabledBots = bots.filter(b => b.enabled === true).length;
   // 설정이 깨진 봇 — 켜져 있어도 **돌지 않거나 다른 전략으로 돈다**.
   // 머리글에서 세어 두면 목록을 끝까지 내리지 않아도 보인다.
-  const warnBots = bots.filter(b => b.signalWarning != null || b.timeframeWarning != null).length;
+  const warnBots = bots.filter(b => b.signalWarning != null || b.timeframeWarning != null || b.leverageWarning != null).length;
   // 새 봇 이름은 종목·전략에서 만든다. 같은 조합이면 같은 이름이라
   // 같은 봇의 기록이 쪼개지지 않는다. 못 만들면 null이다.
   const newBotId = derivePaperBotId(newSymbol, newSignal, newTimeframe);
@@ -195,7 +202,7 @@ export function PaperAutomationControl() {
     </div>
     {status && !status.account?.started_at && <p>기본 모의 계좌를 먼저 시작하세요.</p>}
     {status?.settings && <div style={{fontSize:12}}>
-      배율 {status.settings.config.leverage}배 · 거래 위험 {status.settings.config.riskPctPerTrade}% · 최대 동시 1개 · 손절 {status.settings.config.stopPct}% · 익절 {status.settings.config.takeProfitPct}% · 최대 보유 {status.settings.config.maxHoldHours}시간
+      계정 기본 배율 {status.settings.config.leverage}배 · 거래 위험 {status.settings.config.riskPctPerTrade}% · 봇당 최대 동시 {status.settings.config.maxOpenPositions ?? 1}개 · 손절 {status.settings.config.stopPct}% · 익절 {status.settings.config.takeProfitPct}% · 최대 보유 {status.settings.config.maxHoldHours}시간
       <br/>다음 평가 예정: {enabled ? time(status.settings.next_run_at) : '정지'} · 최근 완료: {time(lastDone?.finished_at)}
     </div>}
     {/* 여기 있던 "최근 서버 평가 완료를 아직 확인하지 못했습니다"는 지웠다.
@@ -226,7 +233,7 @@ export function PaperAutomationControl() {
         // **상태와 환경은 다른 축이다.** 켜짐/꺼짐은 "이 봇이 도는가"이고
         // 모의/테스트넷/실전은 "어느 돈으로 도는가"다. 사진에서는 오른쪽
         // 「정지」가 버튼인데 상태처럼 읽혔다 — 전부 켜져 있는 목록이었다.
-        const warn = b.signalWarning ?? b.timeframeWarning ?? null;
+        const warn = b.signalWarning ?? b.timeframeWarning ?? b.leverageWarning ?? null;
         const nv = nextRunText({
           // 꺼진 봇의 `next_run_at`도 서버는 계산해 둔다. 그 숫자를 그대로
           // 적으면 오지 않을 시각을 약속하는 것이다.
@@ -276,6 +283,7 @@ export function PaperAutomationControl() {
           <div style={{...F.muted,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',
             ...(wide ? { flex:'1 1 220px',minWidth:0 } : {})}}>
             {wide ? `${b.symbol} · ` : ''}{b.timeframeLabel ?? '주기 미확인'} · {b.signalLabel}
+            {b.leverage != null && ` · ${b.leverage}배`}
           </div>
           {warn && <div role="alert" style={{...F.caption,color:T.ylw}}>⚠ {warn}</div>}
           {/* ④ 값 두 칸 — 라벨과 값을 분리한다 */}
@@ -364,6 +372,11 @@ export function PaperAutomationControl() {
           onChange={e=>setNewTimeframe(e.target.value as BarInterval)}>
           {BAR_INTERVALS.map(tf=><option key={tf} value={tf}>{BAR_INTERVAL_LABEL[tf]}</option>)}
         </select>
+        <select aria-label="새 봇 배율" data-testid="paper-bot-new-leverage"
+          value={newLeverage} disabled={busy}
+          onChange={e=>setNewLeverage(Number(e.target.value))}>
+          {BOT_LEVERAGE_CHOICES.map(x=><option key={x} value={x}>{x}배</option>)}
+        </select>
         <select aria-label="새 봇 간격" value={newInterval} disabled={busy}
           onChange={e=>setNewInterval(Number(e.target.value))}>
           <option value={60}>1분</option><option value={300}>5분</option><option value={900}>15분</option>
@@ -372,7 +385,7 @@ export function PaperAutomationControl() {
           disabled={!auth || busy || !status.account?.started_at || newBotId == null || newBotExists}
           onClick={()=>void controlBot('start',
             { botId:newBotId!, symbol:newSymbol, interval:newInterval, signal:newSignal,
-              timeframe:newTimeframe })}>
+              timeframe:newTimeframe, leverage:newLeverage })}>
           봇 추가 시작
         </button>
         {newBotId == null && <span role="alert">이 조합으로는 봇 이름을 만들 수 없습니다</span>}
