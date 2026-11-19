@@ -12,7 +12,7 @@ import { BAR_INTERVALS, BAR_INTERVAL_LABEL, DEFAULT_BAR_INTERVAL, type BarInterv
 import { nextRunText, parseAt } from '@/lib/ui/nextRunText';
 import { perfView, type BotPerf } from '@/lib/engine/paperBotPerf';
 import { envView } from '@/lib/ui/status';
-import { F, SP, R, FS, FW, CONTROL, buttonStyle } from '@/components/ui/tokens';
+import { F, SP, R, FS, FW, CONTROL, BORDER_W, buttonStyle } from '@/components/ui/tokens';
 import { T } from '@/lib/constants';
 
 interface Status {
@@ -304,6 +304,17 @@ export function PaperAutomationControl() {
                 {pv.amount}
               </span>
               {pv.rate && <span style={{color:pnlColor,marginLeft:4}}>({pv.rate})</span>}
+              {/* **접힌 카드에서도 보여야 한다.** 단서가 `title`에만 있으면
+                  휴대폰에서는 없는 것과 같다 — 터치에 hover가 없다. 전체
+                  문구는 아래 상세에 그대로 있고, 여기엔 짧은 표식만 둔다
+                  (줄을 늘리지 않으려고 같은 줄에 붙인다). */}
+              {pv.mark && <span data-testid={`paper-bot-pnl-mark-${b.bot_id}`}
+                title={pv.note ?? undefined}
+                style={{marginLeft:4,padding:'0 4px',borderRadius:R.sm,
+                  border:`${BORDER_W}px dashed ${T.border}`,color:T.muted,
+                  fontSize:FS.micro,fontWeight:FW.medium,whiteSpace:'nowrap'}}>
+                {pv.mark}
+              </span>}
             </span>
           </div>
           {/* ⑤ 조작 — 44px 터치. 실제로 서버를 부르는 것만 둔다 */}
