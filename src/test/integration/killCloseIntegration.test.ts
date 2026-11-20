@@ -37,6 +37,8 @@ interface VOpts {
   positions?: any[];
   /** 전송 뒤에도 남아 있는가 */
   leftAfter?: boolean;
+  /** 전송 뒤 positionRisk 응답을 직접 정한다 (`leftAfter`보다 우선) */
+  positionsAfter?: any[];
   openOrders?: any[];
   /** 미체결 조회가 실패한다 */
   openOrdersFail?: boolean;
@@ -83,6 +85,7 @@ function venueFor(o: VOpts = {}): FakeVenue {
     ? { status: 500, json: { code: -1000, msg: 'down' } }
     : { json: () => {
         const sent = v.orderSends().length > 0;
+        if (sent && o.positionsAfter) return o.positionsAfter;
         const open = !sent || o.leftAfter === true;
         const rows = o.positions ?? [{ symbol: 'BTCUSDT', positionAmt: '0.010',
           entryPrice: '100000', markPrice: '100000', leverage: '10',
@@ -467,6 +470,39 @@ export async function runKillCloseIntegrationTests() {
     test('★ ⑨ 거부 뒤 재시도 전에 거래소에 먼저 묻는다', () => {
       assert(v.countOf(ORDER, 'GET') >= 1,
         '★ 재시도 전 조회가 없으면 중복 주문이 나간다');
+    });
+  }
+
+  // ══════════ ⑨-b 수량을 못 읽은 줄이 남았는데 "전부 닫혔다"로 적었다 ══════════
+  //
+  //   계획(`planKillClose`)은 수량을 못 읽은 줄을 **플랫이라고 말할 수
+  //   없다**며 `unusableTargets`로 세고 닫지 않는다. 그런데 종료 뒤
+  //   잔여를 세는 `readLeftover`는 같은 줄을 `Number(null) === 0`으로
+  //   읽어 **잔여에서 뺐다.** 읽을 수 있던 BTC만 닫히면 잔여 0 →
+  //   `CLOSED_VERIFIED` · "포지션 0을 거래소에서 확인했습니다" — ETH
+  //   포지션은 거래소에 그대로 열려 있는데.
+  {
+    const ETH_UNREADABLE = { symbol: 'ETHUSDT', positionAmt: 'garbage',
+      entryPrice: '3000', markPrice: '3000', leverage: '10',
+      marginType: 'isolated', liquidationPrice: '2700', unRealizedProfit: '0' };
+    const BTC = { symbol: 'BTCUSDT', positionAmt: '0.010',
+      entryPrice: '100000', markPrice: '100000', leverage: '10',
+      marginType: 'isolated', liquidationPrice: '90000', unRealizedProfit: '0' };
+    const v = venueFor({
+      positions: [BTC, ETH_UNREADABLE],
+      positionsAfter: [{ ...BTC, positionAmt: '0' }, ETH_UNREADABLE],
+    });
+    const { r } = await exec(v, 'ABCD');
+
+    test('★★ ⑨-b 수량을 못 읽은 포지션이 남았으면 닫혔다고 적지 않는다', () => {
+      eq(r.safety?.planCode, 'PROCEED_PARTIAL', '읽을 수 있는 BTC만 닫는 계획');
+      eq(r.safety?.unusableTargets, 1, 'ETH 줄은 수량을 못 읽었다');
+      eq(v.orderSends().length, 1, 'BTC 종료 1건만 — 모르는 수량으로 보내지 않는다');
+      eq(r.close?.success, false, '★ ETH가 남았는데 성공으로 적었다');
+      eq(r.close?.remaining, 1, '★ 못 읽은 줄은 잔여 0이 아니다');
+      assert(r.safety?.protectionCode !== 'CLOSED',
+        `★ "포지션 0을 확인했다"고 적었다 (${r.safety?.protectionCode})`);
+      eq(r.safety?.manualInterventionRequired, true);
     });
   }
 

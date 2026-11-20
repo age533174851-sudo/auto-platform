@@ -8,7 +8,11 @@
 // user_id는 **읽지 않는다** — 읽으면 남의 이름으로 접수할 수 있다.
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
-import { parseTicketInput, suggestSeverity, redactedOverflow, redactedOverflowMessage } from '@/lib/feedback/ticket';
+import {
+  parseTicketInput, redactedOverflow, redactedOverflowMessage,
+  ticketReportRow, TICKET_OPTIONAL_FIELDS, TICKET_REPORT_COLUMNS,
+  type TicketOptionals,
+} from '@/lib/feedback/ticket';
 import { redact, redactionNotice } from '@/lib/feedback/redact';
 import { pickContext } from '@/lib/feedback/context';
 
@@ -31,7 +35,7 @@ export async function GET(req: NextRequest) {
   if (!uid) return json({ ok: false, error: 'auth_required' }, 401);
   if (!sb) return json({ ok: false, error: 'supabase_not_configured' }, 503);
   const r = await sb.from('feedback_reports')
-    .select('id,ref,category,title,status,severity,visibility,created_at,updated_at')
+    .select(`${TICKET_REPORT_COLUMNS},updated_at`)
     .eq('user_id', uid).order('created_at', { ascending: false }).limit(100);
   // 못 읽은 것을 "없음"으로 적지 않는다.
   if (r.error || !Array.isArray(r.data)) {
@@ -62,7 +66,22 @@ export async function POST(req: NextRequest) {
   // 가림은 글을 늘릴 수 있다. 늘어난 글은 DB의 CHECK에 막히고, 예전에는
   // 그것이 "다시 시도해 주세요"로 나갔다 — 같은 글은 다시 보내도 똑같이
   // 늘어나므로 영원히 실패하는 안내였다. 판정은 ticket.ts 한 곳에 있다.
-  const over = redactedOverflow({ title: t.text, body: b.text });
+  // ── 선택 칸도 같은 가림을 지난다 ──
+  //
+  // #618의 세 칸(재현 절차·기대·실제)은 **저장되지 않고 버려지고 있었다.**
+  // 저장하기로 했으면 제목·본문과 **같은 가림**을 지나야 한다 — 사용자가
+  // 재현 절차에 API 키를 붙여 넣는 일은 실제로 일어난다.
+  const optionals: TicketOptionals = { steps: null, expected: null, actual: null };
+  const optionalHits = [];
+  for (const f of TICKET_OPTIONAL_FIELDS) {
+    const v = parsed[f];
+    if (v == null) continue;
+    const r = redact(v);
+    optionals[f] = r.text;
+    optionalHits.push(...r.hits);
+  }
+
+  const over = redactedOverflow({ title: t.text, body: b.text, ...optionals });
   if (over) {
     // **글 내용은 담지 않는다 — 길이만 돌려준다.**
     return json({ ok: false, error: 'too_long_after_redaction',
@@ -71,22 +90,18 @@ export async function POST(req: NextRequest) {
   }
 
   const picked = pickContext(raw?.context);
-  const hits = [...t.hits, ...b.hits];
+  const hits = [...t.hits, ...b.hits, ...optionalHits];
   // 종류별로 합친다. **값은 어디에도 담지 않는다**
   const merged = new Map<string, number>();
   for (const h of hits) merged.set(h.kind, (merged.get(h.kind) ?? 0) + h.count);
   const redactions = [...merged].map(([kind, count]) => ({ kind, count }));
 
-  const ins = await sb.from('feedback_reports').insert({
-    user_id: uid,                                 // 요청이 보낸 값은 쓰지 않는다
-    category: parsed.category,
-    title: t.text,
-    status: 'RECEIVED',
-    severity: suggestSeverity(parsed.category),   // 관리자가 바꿀 수 있는 제안
-    visibility: parsed.visibility,
-    context: picked.context,
-    redactions,
-  }).select('id,ref,category,title,status,severity,visibility,created_at').maybeSingle();
+  // 줄을 손으로 적지 않는다 — 칸이 빠진 것을 아무도 모르던 자리였다.
+  const ins = await sb.from('feedback_reports').insert(ticketReportRow({
+    userId: uid,                                  // 요청이 보낸 값은 쓰지 않는다
+    parsed, title: t.text, optionals,
+    context: picked.context, redactions,
+  })).select(TICKET_REPORT_COLUMNS).maybeSingle();
 
   if (ins.error || !ins.data) {
     return json({ ok: false, error: 'ticket_write_failed',
