@@ -943,4 +943,37 @@ export function runFuturesExecTests() {
     eq(sent.length, 1, '규격 조회 실패로 손절이 아예 안 나갔다');
     eq(sent[0], '3.477979');
   });
+
+  // ── 상태 대조: Gate 포지션 수량이 깨졌을 때 ──
+  //
+  // `getPositionsGateFutures`는 `Number(size) !== 0`으로 거른다. 'NaN'은
+  // 거기를 통과한다. 그 행을 대조가 `qty: 0`으로 옮기면 "읽었고, 0이다"가
+  // 되어 대조가 성공으로 끝난다 — 확인하지 못한 것을 통과로 적는 자리다.
+  netTest('Gate 포지션 수량을 못 읽으면 대조는 도달 불가다 — qty 0으로 적지 않는다', async () => {
+    const { gatherAndReconcile } = await import('../engine/reconcileCheck');
+    // 어떤 체인이든 받아 주고, await하면 빈 결과를 주는 가짜 DB
+    const conn = { exchange_id: 'gate', api_key: 'k', api_secret_enc: '', has_withdrawal: false };
+    const chain = (final: any): any => new Proxy(function () {}, {
+      get: (_t, p) => {
+        if (p === 'then') return (res: any) => res(final);
+        if (p === 'maybeSingle') return () => Promise.resolve({ data: conn, error: null });
+        return () => chain(final);
+      },
+      apply: () => chain(final),
+    });
+    const sb = { from: () => chain({ data: [], error: null }) };
+
+    let r: any = null;
+    await withFetch((url) => {
+      if (!url.startsWith(GATE_T)) return null;
+      if (url.includes('/futures/usdt/positions')) {
+        return { body: [{ contract: 'BTC_USDT', size: 'NaN', leverage: '100' }] };
+      }
+      return { body: [] };
+    }, async () => { r = await gatherAndReconcile(sb, 'u1', true, 'c1'); });
+
+    eq(r.reachable, false,
+      `수량을 모르는 포지션을 대조했다 — ${JSON.stringify(r.exchangePositions)}`);
+    assert(/수량/.test(String(r.error || '')), `이유가 수량을 말하지 않는다: ${r.error}`);
+  });
 }
