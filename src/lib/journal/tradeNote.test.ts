@@ -7,6 +7,7 @@
 // 관계가 없었다.
 import { test, eq, assert } from '../../test/harness';
 import { tradeNote } from './tradeNote';
+import { analyzeTrades } from '../autotrade/retrospect';
 
 export function runTradeNoteTests() {
   console.log('[매매일지 한 줄 — 입력에서 따라 나온 것만]');
@@ -69,5 +70,34 @@ export function runTradeNoteTests() {
     const r = tradeNote(null);
     eq(r.text, '', '값도 없이 무언가를 적었다');
     assert(r.unknown.length >= 3, JSON.stringify(r.unknown));
+  });
+
+  // ── 같은 화면(매매 복기)의 'AI 매매 복기' 요약 칸 ──
+  //
+  // '평균 손익' 칸이 **이긴 거래의 평균**(avgWin)을 적고 있었다.
+  // 1승 9패로 순손실인 사용자에게 '평균 손익 +10,000'이 보였다.
+  console.log('[AI 매매 복기 — 평균 손익은 전체 거래의 평균이다]');
+
+  test('★★ 1승 9패 순손실이면 평균 손익은 음수다 — 이긴 거래의 평균이 아니다', () => {
+    const t0 = Date.UTC(2026, 10, 1);
+    const closed = [{ ts: t0, symbol: 'BTC', realized: 10_000 }]
+      .concat(Array.from({ length: 9 }, (_, i) => ({ ts: t0 + (i + 1) * 3_600_000, symbol: 'ETH', realized: -5_000 })));
+    const r = analyzeTrades(closed);
+    eq(r.avgPnl, (10_000 - 45_000) / 10, '평균 손익이 전체 거래 평균이 아니다');
+    assert((r.avgPnl as number) < 0, `순손실인데 평균 손익이 ${r.avgPnl}`);
+  });
+
+  test('★ 거래가 없으면 평균 손익은 0이 아니라 모름(null)이다', () => {
+    const r = analyzeTrades([]);
+    eq(r.avgPnl, null, '거래 0건의 평균을 0으로 적었다');
+  });
+
+  test('★ 깨진 손익(NaN)은 평균에 넣지 않는다', () => {
+    const r = analyzeTrades([
+      { ts: 1, symbol: 'A', realized: 300 },
+      { ts: 2, symbol: 'A', realized: NaN },
+      { ts: 3, symbol: 'A', realized: -100 },
+    ]);
+    eq(r.avgPnl, 100);
   });
 }

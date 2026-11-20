@@ -21,7 +21,7 @@ import { ownedOrderIds, cancelLedger, rollbackNote, type CancelAttempt } from '.
 import { futuresApplyLeverage, unknownResultVerdict } from '../exchanges/futuresExec';
 import { executionIdentityComplete } from '../execution/profile';
 import type { StopPolicy, TakeProfitPolicy } from '../strategies/profiles';
-import { stopReattachVerdict } from './stopReattach';
+import { stopReattachVerdict, reattachPositionEvidence } from './stopReattach';
 import { fillFactsOf } from './orderFillFacts';
 import { RECONCILE_QUERY_STATUSES } from './pendingReconcile';
 import { quantizeOrder } from '../exchanges/quantize';
@@ -2091,9 +2091,12 @@ async function attachStopIfMissing(
       if (!contract) return null;
 
       // **포지션이 실제로 있는지 먼저 본다.**
+      // 못 읽은 것(null·깨진 size)은 '포지션 없음'이 아니다 (#479).
       const pos = await gf.getPositionGateFutures(creds.apiKey, creds.apiSecret, contract, creds.testnet);
-      const size = Number(pos?.size ?? 0);
-      if (!size) return null;                     // 포지션 없음 — 걸 이유가 없다
+      const gEv = reattachPositionEvidence(pos ? (pos as any).size : null);
+      if (gEv.kind === 'UNKNOWN') return gEv.note;
+      if (gEv.kind === 'FLAT') return null;      // 확인된 0 — 걸 이유가 없다
+      const size = gEv.qty;
       // 방향이 어긋나면 걸지 않는다. 반대 방향 손절은 즉시 발동한다.
       if ((size > 0 ? 'LONG' : 'SHORT') !== posSide) {
         return `손절 복구 안 함 — 기록은 ${posSide}인데 거래소 포지션은 ${size > 0 ? 'LONG' : 'SHORT'}입니다`;
@@ -2113,8 +2116,11 @@ async function attachStopIfMissing(
 
     const bf = await import('@/lib/exchanges/binanceFutures');
     const rr = await bf.getSymbolPositionRiskEx(creds.apiKey, creds.apiSecret, symbol, creds.testnet);
-    const amt = Number(rr.risk?.positionAmt ?? 0);
-    if (!amt) return null;
+    // `risk: null`은 조회 실패·깨진 수량이다. 0으로 바꾸지 않는다 (#479).
+    const bEv = reattachPositionEvidence(rr.risk ? rr.risk.positionAmt : null, rr.risk ? null : rr.error);
+    if (bEv.kind === 'UNKNOWN') return bEv.note;
+    if (bEv.kind === 'FLAT') return null;        // 확인된 0 — 걸 이유가 없다
+    const amt = bEv.qty;
     if ((amt > 0 ? 'LONG' : 'SHORT') !== posSide) {
       return `손절 복구 안 함 — 기록은 ${posSide}인데 거래소 포지션은 ${amt > 0 ? 'LONG' : 'SHORT'}입니다`;
     }
