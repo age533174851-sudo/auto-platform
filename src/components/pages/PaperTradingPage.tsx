@@ -167,6 +167,14 @@ export default function PaperTradingPage({
   }, [account, selected, qty, side, priceLookup]);
 
   const handleReset = useCallback(async () => {
+    // **초기화도 쓰기다 — 그것도 가장 큰 쓰기다.** 옛 장부 정책은
+    // `erase: false`(사용자가 적어 온 기록을 우리가 지우지 않는다)인데, 이
+    // 버튼만 관문 없이 장부를 통째로 새 1천만 원으로 덮어썼다. 지운 뒤에는
+    // 어차피 거래도 할 수 없는 빈 장부만 남는다.
+    if (!isTradableLedger(LEDGER)) {
+      notify('error', '이 장부는 초기화하지 않습니다', legacyLedgerNotice(LEDGER));
+      return;
+    }
     if (!(await confirmDialog('가상 계좌를 초기화하시겠습니까? (보유 종목·매매 기록 모두 삭제)', { danger: true }))) return;
     setAccount(resetAccount());
     showToast('계좌 초기화 완료');
