@@ -9,7 +9,9 @@
 // 한 겹이 뚫려도 다른 겹이 남는다.
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
-import { canUserReply, BODY_MAX, redactedOverflow, redactedOverflowMessage } from '@/lib/feedback/ticket';
+import {
+  canUserReply, BODY_MAX, redactedOverflow, redactedOverflowMessage, TICKET_REPORT_COLUMNS,
+} from '@/lib/feedback/ticket';
 import { redact, redactionNotice } from '@/lib/feedback/redact';
 
 export const dynamic = 'force-dynamic';
@@ -28,7 +30,7 @@ async function ctx(req: NextRequest) {
 /** 소유자 확인. **못 읽은 것과 남의 것을 구분한다** */
 async function own(sb: any, uid: string, id: string) {
   const r = await sb.from('feedback_reports')
-    .select('id,ref,category,title,status,severity,visibility,context,created_at,updated_at')
+    .select(`${TICKET_REPORT_COLUMNS},context,updated_at`)
     .eq('id', id).eq('user_id', uid).maybeSingle();
   if (r.error) return { ticket: null, unreadable: true as const };
   return { ticket: r.data ?? null, unreadable: false as const };
