@@ -411,6 +411,7 @@ import { runSafetyLogTests } from './src/lib/safety/safetyLog.test';
 import { runFredTests } from './src/lib/calendar/fred.test';
 import { runEventGuardTests } from './src/lib/risk/eventGuard.test';
 import { runAllocationTests } from './src/lib/portfolio/allocation.test';
+import { runStoredHoldingsTests } from './src/lib/portfolio/storedHoldings.test';
 import { runStatsTests } from './src/lib/portfolio/stats.test';
 import { runRoutingTests } from './src/lib/ai/routing.test';
 import { runGateSpotPlanTests } from './src/lib/exchanges/gateSpotPlan.test';
@@ -463,7 +464,7 @@ runPnlTests(); runBacktestTests(); runRiskManagerTests(); runExitPlanTests(); ru
 runEntry100xTests(); runMaxOpenPositionsGateTests(); runOrderFillFactsTests(); runLedgerFillQtyTests(); runReconcileLedgerStatusTests(); runHoldingEvidenceTests(); runFoundOrderLedgerTests(); runProvenFillTests(); runOtherVenueLedgerTests(); runCoinMFillTests(); runFailureRecoveryTests(); runCredentialExposureTests(); runMarketTypeTests(); runWalletTests(); runCoinMTests(); runCostBasisTests(); runLedgerTests(); runSpotStrategyTests(); runSpotOrderPlanTests(); runCombinedTests(); runBinanceHostTests(); runAuthErrorTests(); runErrorTextTests(); runAutotradeHealthTests(); runOverlayStackTests(); runThemeTests(); runPositionViewTests(); runDisplayTests(); runStatusTests(); runPaperRunnerModeTests(); runDueDiagViewTests(); runInventoryTests(); runPracticeEnvTests();
 runOrderViewTests(); runNewsSchemaTests(); runAnalyzeOneTests(); runCollectTests(); runEnrichPlanTests(); runConsensusTests(); runPricingTests(); runCalendarTests(); runEconManualEventTests(); runRetentionTests(); runAdminGateTests(); runCommandTests(); runKeymapTests(); runPreTradeChecklistTests(); runReconcileEvidenceTests(); runAutoMergeGateTests(); runGateBackfillTests(); runAutoRebaseTests(); runEntryBarSignalsTests(); runPaperRunnerStatusTests(); runWakeAuthTests(); runAttestScheduleTests();
 runDeployDispatchTests(); runExecutorHealthTests(); runManualPlanTests(); runCloseQtyTests(); runLosslessJsonTests(); runGatePlanTests(); runBinanceTpSlFallbackTests();
-runFuturesExecTests(); runPromotionMapTests(); runTradeModeTests(); runPaperPlanTests(); runDailyLossTests(); runRegimeGateTests(); runRefreshStateTests(); runTrailPlanTests(); runPaperRunnerTests(); runAllocationTests(); runStatsTests(); runRoutingTests(); runGateSpotPlanTests(); runLossStreakTests(); runTradeVetoTests(); runCalibrationTests(); runRecordPredictionTests(); runSubAccountTests(); runExitRulesTests(); runSafetyLogTests(); runFredTests(); runEventGuardTests(); runStopVerifyTests();
+runFuturesExecTests(); runPromotionMapTests(); runTradeModeTests(); runPaperPlanTests(); runDailyLossTests(); runRegimeGateTests(); runRefreshStateTests(); runTrailPlanTests(); runPaperRunnerTests(); runAllocationTests(); runStoredHoldingsTests(); runStatsTests(); runRoutingTests(); runGateSpotPlanTests(); runLossStreakTests(); runTradeVetoTests(); runCalibrationTests(); runRecordPredictionTests(); runSubAccountTests(); runExitRulesTests(); runSafetyLogTests(); runFredTests(); runEventGuardTests(); runStopVerifyTests();
 runManualOverrideTests();
 runGateRecoveryTests();
 runWebhookAuthTests();
