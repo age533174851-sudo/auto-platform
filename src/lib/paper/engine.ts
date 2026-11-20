@@ -139,7 +139,12 @@ export function placeOrder(
   }
 
   const proceeds = value - fee;
-  const realized = (price - cur.avgPrice) * qty - fee;
+  // 매수 수수료도 이 거래의 비용이다. 평단(avgPrice)은 수수료 없는 가격이고
+  // 매수 수수료는 매수 금액 × FEE_RATE였으므로, 파는 수량 몫의 매수
+  // 수수료는 정확히 avgPrice × qty × FEE_RATE다 — 새 필드 없이 옛 기록에도
+  // 맞는다. 빼지 않으면 실제로 잃은 거래가 이긴 거래(+)로 적힌다.
+  const buyFee = cur.avgPrice * qty * FEE_RATE;
+  const realized = (price - cur.avgPrice) * qty - fee - buyFee;
   const realizedPct = cur.avgPrice > 0 ? ((price - cur.avgPrice) / cur.avgPrice) * 100 : 0;
 
   const next = { ...account };
