@@ -7,7 +7,7 @@ import {
   mustBePrivate, resolveVisibility, canChangeVisibility, canTransition,
   isTerminal, canUserReply, parseTicketInput, suggestSeverity,
   TITLE_MAX, BODY_MAX, STEPS_MAX, EXPECTED_MAX, ACTUAL_MAX,
-  redactedOverflow, redactedOverflowMessage,
+  redactedOverflow, redactedOverflowMessage, ticketReportRow, TICKET_OPTIONAL_FIELDS,
 } from './ticket';
 import { redact } from './redact';
 
@@ -240,6 +240,91 @@ export function runFeedbackTicketTests() {
     // 가림이 늘렸으면 막아야 하고, 늘리지 않았으면 통과해야 한다.
     // **어느 쪽이든 판정과 실제가 어긋나면 실패한다.**
     eq(v == null, r.text.length <= BODY_MAX, `가림 후 ${r.text.length}자 / 한계 ${BODY_MAX}자`);
+  });
+
+  // ── ⑦ #618의 세 칸 — 칸만 있고 저장이 없었다 ──
+  //
+  // 마이그레이션 106에 `steps`·`expected`·`actual`이 있고
+  // `parseTicketInput`이 셋을 검증하는데, 접수 라우트의 insert에는 셋이
+  // **한 번도 나오지 않았다.** 사용자가 적은 재현 절차가 조용히 사라졌다.
+  // 판정을 라우트에 두면 또 빠뜨리므로 **줄을 만드는 함수 하나**로 모은다.
+
+  test('★★ 재현 절차·기대·실제가 저장 줄에 들어간다 — 라우트가 빠뜨릴 수 없다', () => {
+    const parsed = ok({ steps: '1. 자동 탭\n2. 시작', expected: '봇이 켜짐', actual: '반응 없음' })!;
+    const row: any = ticketReportRow({
+      userId: 'u-1', parsed,
+      title: parsed.title,
+      optionals: { steps: parsed.steps, expected: parsed.expected, actual: parsed.actual },
+      context: {}, redactions: [],
+    });
+    eq(row.steps, '1. 자동 탭\n2. 시작');
+    eq(row.expected, '봇이 켜짐');
+    eq(row.actual, '반응 없음');
+  });
+
+  test('★★ 선택 칸은 비어도 줄에 **있어야** 한다 — 없으면 다음 칸이 또 빠진다', () => {
+    const parsed = ok()!;
+    const row: any = ticketReportRow({
+      userId: 'u-1', parsed, title: parsed.title,
+      optionals: { steps: null, expected: null, actual: null },
+      context: {}, redactions: [],
+    });
+    for (const f of TICKET_OPTIONAL_FIELDS) {
+      assert(f in row, `저장 줄에 ${f} 칸이 없다 — 칸을 빠뜨리면 조용히 사라진다`);
+      eq(row[f], null);
+    }
+  });
+
+  test('★★ 저장 줄은 요청이 보낸 user_id를 쓰지 않는다', () => {
+    const parsed = ok()!;
+    const row: any = ticketReportRow({
+      userId: 'u-real', parsed, title: parsed.title,
+      optionals: { steps: null, expected: null, actual: null },
+      context: {}, redactions: [],
+    });
+    eq(row.user_id, 'u-real');
+    eq(row.status, 'RECEIVED');
+  });
+
+  test('★★ 선택 칸도 가림 뒤 길이를 본다 — 제목·본문만 보면 DB가 거절한다', () => {
+    // 가림은 글을 늘린다. 늘어난 재현 절차가 4000자를 넘으면 106의 CHECK가
+    // 막고, 사용자에게는 "다시 시도해 주세요"만 간다 — 영원히 실패한다.
+    const v1 = redactedOverflow({ body: '내용', steps: 'ㄱ'.repeat(STEPS_MAX + 7) });
+    assert(v1 != null, 'steps 초과를 잡지 못했다');
+    eq(v1!.field, 'steps'); eq(v1!.max, STEPS_MAX); eq(v1!.over, 7);
+    const v2 = redactedOverflow({ body: '내용', expected: 'ㄱ'.repeat(EXPECTED_MAX + 3) });
+    assert(v2 != null, 'expected 초과를 잡지 못했다');
+    eq(v2!.field, 'expected'); eq(v2!.over, 3);
+    const v3 = redactedOverflow({ body: '내용', actual: 'ㄱ'.repeat(ACTUAL_MAX + 1) });
+    assert(v3 != null, 'actual 초과를 잡지 못했다');
+    eq(v3!.field, 'actual'); eq(v3!.over, 1);
+  });
+
+  test('★ 선택 칸이 한계 안이면 통과한다 — 과도 검출 없음', () => {
+    eq(redactedOverflow({ body: '내용', steps: 'ㄱ'.repeat(STEPS_MAX) }), null);
+    eq(redactedOverflow({ body: '내용', expected: 'ㄱ'.repeat(EXPECTED_MAX) }), null);
+    eq(redactedOverflow({ body: '내용', actual: 'ㄱ'.repeat(ACTUAL_MAX) }), null);
+    eq(redactedOverflow({ body: '내용', steps: null, expected: null, actual: null }), null);
+  });
+
+  test('★★ 안내문이 어느 칸인지 말한다 — "내용"이라고만 하면 못 고친다', () => {
+    const m = redactedOverflowMessage(
+      { field: 'steps', length: STEPS_MAX + 5, max: STEPS_MAX, over: 5 });
+    assert(m.includes('재현 절차'), `어느 칸인지 말하지 않는다: ${m}`);
+    assert(m.includes('5'), '얼마나 줄여야 하는지 숫자가 없다');
+    assert(redactedOverflowMessage(
+      { field: 'expected', length: 1, max: 1, over: 1 }).includes('기대한 결과'), 'expected 이름이 없다');
+    assert(redactedOverflowMessage(
+      { field: 'actual', length: 1, max: 1, over: 1 }).includes('실제 결과'), 'actual 이름이 없다');
+  });
+
+  test('★ 안내문은 어느 칸이든 글 내용을 담지 않는다', () => {
+    const secret = 'sk-live-ABCDEF0123456789';
+    for (const f of ['title', 'body', ...TICKET_OPTIONAL_FIELDS] as const) {
+      const m = redactedOverflowMessage({ field: f as any, length: 10, max: 5, over: 5 });
+      assert(!m.includes(secret), `${f} 안내문이 값을 담을 수 있는 모양이다`);
+      assert(m.length > 0, `${f} 안내문이 비어 있다`);
+    }
   });
 
 }

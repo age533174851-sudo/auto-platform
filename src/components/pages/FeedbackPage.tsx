@@ -17,8 +17,9 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { watchAuthToken } from '@/lib/auth/authToken';
 import {
   CATEGORIES, CATEGORY_LABEL, STATUS_LABEL, SEVERITY_LABEL,
-  mustBePrivate, TITLE_MAX, BODY_MAX,
-  type Category, type Status, type Severity,
+  mustBePrivate, TITLE_MAX, BODY_MAX, STEPS_MAX, EXPECTED_MAX, ACTUAL_MAX,
+  TICKET_OPTIONAL_FIELDS,
+  type Category, type Status, type Severity, type TicketOptionalField,
 } from '@/lib/feedback/ticket';
 import { deviceFromWidth } from '@/lib/feedback/context';
 import { F, SP, R, FW, buttonStyle, PAGE_STYLE } from '@/components/ui/tokens';
@@ -28,7 +29,24 @@ interface TicketRow {
   id: string; ref: number; category: Category; title: string;
   status: Status; severity: Severity; visibility: 'PRIVATE' | 'PUBLIC';
   created_at: string; updated_at: string;
+  // #618의 세 칸. **없을 수 있다** — 예전에 접수된 글에는 비어 있다.
+  steps?: string | null; expected?: string | null; actual?: string | null;
 }
+
+/**
+ * 선택 칸의 화면 문구. **`Record<TicketOptionalField, …>`라서 칸을 더하면
+ * 여기가 컴파일 오류가 된다** — 칸만 늘고 입력이 안 생기는 것이 이 묶음의
+ * 원래 고장이었다.
+ */
+const OPTIONAL_UI: Record<TicketOptionalField,
+  { label: string; placeholder: string; max: number; rows: number }> = {
+  steps: { label: '어떻게 하면 다시 생기나요? (선택)', max: STEPS_MAX, rows: 4,
+    placeholder: '1. 자동매매 탭을 엽니다\n2. 시작을 누릅니다\n3. 아무 반응이 없습니다' },
+  expected: { label: '원래는 어떻게 돼야 하나요? (선택)', max: EXPECTED_MAX, rows: 2,
+    placeholder: '예: 봇이 켜지고 상태가 가동 중으로 바뀐다' },
+  actual: { label: '실제로는 어떻게 됐나요? (선택)', max: ACTUAL_MAX, rows: 2,
+    placeholder: '예: 버튼만 깜빡이고 상태가 그대로다' },
+};
 interface MessageRow { id: string; author: 'USER' | 'STAFF' | 'AGENT'; body: string; created_at: string }
 
 // **`Record<Status, …>`라서 상태를 더하면 여기가 컴파일 오류가 된다.**
@@ -68,6 +86,10 @@ export default function FeedbackPage({ screen }: { screen?: string } = {}) {
   const [category, setCategory] = useState<Category>('BUG');
   const [title, setTitle] = useState('');
   const [body, setBody] = useState('');
+  // 세 칸을 따로 두지 않고 한 묶음으로 둔다 — 칸이 늘 때 상태 변수를
+  // 하나 빠뜨리는 일이 없다.
+  const [extra, setExtra] = useState<Record<TicketOptionalField, string>>(
+    { steps: '', expected: '', actual: '' });
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState('');
@@ -121,11 +143,18 @@ export default function FeedbackPage({ screen }: { screen?: string } = {}) {
     try {
       const res = await fetch('/api/feedback/reports', {
         method: 'POST', headers: { Authorization: auth, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ category, title, body, context: collect() }),
+        // 빈 칸은 **보내지 않는다.** 서버가 빈 문자열을 null로 바꾸지만,
+        // 보내지 않는 쪽이 "적지 않았다"는 뜻을 그대로 옮긴다.
+        body: JSON.stringify({
+          category, title, body, context: collect(),
+          ...Object.fromEntries(TICKET_OPTIONAL_FIELDS
+            .map(f => [f, extra[f].trim()])
+            .filter(([, v]) => v !== '')),
+        }),
       });
       const d = await res.json().catch(() => null);
       if (!res.ok || !d?.ok) throw new Error(d?.message || `접수 실패 (${res.status})`);
-      setTitle(''); setBody('');
+      setTitle(''); setBody(''); setExtra({ steps: '', expected: '', actual: '' });
       setNotice(d.redactionNotice ?? '접수됐습니다. 내 문의에서 진행 상황을 볼 수 있어요.');
       setTab('mine'); await loadList();
     } catch (e) { setError(e instanceof Error ? e.message : '접수 실패'); }
@@ -150,7 +179,10 @@ export default function FeedbackPage({ screen }: { screen?: string } = {}) {
 
   const titleOver = title.length > TITLE_MAX;
   const bodyOver = body.length > BODY_MAX;
-  const canSend = !!auth && !busy && title.trim() !== '' && body.trim() !== '' && !titleOver && !bodyOver;
+  // 선택 칸도 상한을 넘으면 서버가 거절한다. **보내기 전에 막는다.**
+  const extraOver = TICKET_OPTIONAL_FIELDS.filter(f => extra[f].length > OPTIONAL_UI[f].max);
+  const canSend = !!auth && !busy && title.trim() !== '' && body.trim() !== ''
+    && !titleOver && !bodyOver && extraOver.length === 0;
   const field: React.CSSProperties = {
     width: '100%', boxSizing: 'border-box', padding: SP.md, borderRadius: R.md,
     border: `1px solid ${T.border}`, background: T.bg, color: T.txt, fontSize: 15,
@@ -218,6 +250,24 @@ export default function FeedbackPage({ screen }: { screen?: string } = {}) {
         </span>
       </label>
 
+      {/* #618의 세 칸. **선택이다** — 버그가 아닌 문의에는 해당이 없고,
+          억지로 채우게 하면 사용자가 아무 글자나 넣는다. */}
+      {TICKET_OPTIONAL_FIELDS.map(f => {
+        const ui = OPTIONAL_UI[f];
+        const over = extra[f].length > ui.max;
+        return <label key={f} style={{ display: 'grid', gap: SP.xs }}>
+          <span style={F.caption}>{ui.label}</span>
+          <textarea value={extra[f]} disabled={busy} rows={wide ? ui.rows + 2 : ui.rows}
+            onChange={e => setExtra(prev => ({ ...prev, [f]: e.target.value }))}
+            aria-label={ui.label} data-testid={`feedback-${f}`}
+            placeholder={ui.placeholder}
+            style={{ ...field, resize: 'vertical', borderColor: over ? T.red : T.border }} />
+          <span style={{ ...F.muted, color: over ? T.red : T.muted }}>
+            {extra[f].length} / {ui.max}
+          </span>
+        </label>;
+      })}
+
       {/* 비밀이 지워진다는 것을 **보내기 전에** 알린다 */}
       <div style={{ ...F.muted, padding: SP.sm, borderRadius: R.sm, border: `1px dashed ${T.border}` }}>
         안전을 위해 API 키 · 비밀번호 · 시드 구문 · 연락처가 섞여 있으면
@@ -263,6 +313,21 @@ export default function FeedbackPage({ screen }: { screen?: string } = {}) {
 
           {open && <div style={{ display: 'grid', gap: SP.sm, paddingTop: SP.sm,
             borderTop: `1px solid ${T.border}` }}>
+            {/* 적어 보낸 세 칸을 **되돌려 보여 준다.** 보이지 않으면
+                사용자는 자기가 보낸 것이 남았는지 알 수 없다. 가림이
+                지운 자리도 여기서 보인다. */}
+            {TICKET_OPTIONAL_FIELDS.some(f => (t[f] ?? '') !== '')
+              && <div style={{ display: 'grid', gap: SP.xs, padding: SP.sm, borderRadius: R.sm,
+                border: `1px dashed ${T.border}` }}>
+                {TICKET_OPTIONAL_FIELDS.filter(f => (t[f] ?? '') !== '').map(f =>
+                  <div key={f} style={{ display: 'grid', gap: 2 }}>
+                    <div style={F.muted}>{OPTIONAL_UI[f].label.replace(' (선택)', '')}</div>
+                    <div data-testid={`feedback-detail-${f}`}
+                      style={{ ...F.caption, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                      {t[f]}
+                    </div>
+                  </div>)}
+              </div>}
             {messages == null && <div style={F.muted}>불러오는 중…</div>}
             {messages?.map(m => <div key={m.id}
               style={{ display: 'grid', gap: 2, padding: SP.sm, borderRadius: R.sm,

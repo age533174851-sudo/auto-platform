@@ -269,28 +269,107 @@ export function suggestSeverity(category: Category): Severity {
  * (`if (!v.ok)` 뒤에도 `v.field`가 없다고 한다). `parseTicketInput`이
  * `T | null`을 쓰는 이유와 같다.
  */
+/**
+ * #618의 선택 칸 세 개. **이 목록이 정본이다.**
+ *
+ * 마이그레이션 106에 칸이 있고 `parseTicketInput`이 검증하는데도 접수
+ * 라우트의 insert에 셋이 한 번도 나오지 않아 **사용자가 적은 재현 절차가
+ * 조용히 사라졌다.** 칸 이름을 세 파일에 손으로 적으면 또 하나가 빠지므로
+ * 저장 줄·길이 판정·안내문이 전부 이 목록을 돈다.
+ */
+export const TICKET_OPTIONAL_FIELDS = ['steps', 'expected', 'actual'] as const;
+export type TicketOptionalField = typeof TICKET_OPTIONAL_FIELDS[number];
+/** 가린 뒤의 선택 칸 값들. 비어 있으면 null — **빈 문자열을 저장하지 않는다** */
+export type TicketOptionals = Record<TicketOptionalField, string | null>;
+
+export type TicketTextField = 'title' | 'body' | TicketOptionalField;
+
+/** 칸마다의 상한. DB(106)의 CHECK와 같은 수여야 한다 */
+const FIELD_MAX: Record<TicketTextField, number> = {
+  title: TITLE_MAX, body: BODY_MAX,
+  steps: STEPS_MAX, expected: EXPECTED_MAX, actual: ACTUAL_MAX,
+};
+
+/**
+ * 안내문에 쓸 이름. **조사까지 함께 둔다** — '제목이'·'재현 절차가'처럼
+ * 받침에 따라 달라지므로, 이름만 두면 문장을 만드는 쪽에서 틀린다.
+ */
+const FIELD_SUBJECT: Record<TicketTextField, string> = {
+  title: '제목이', body: '내용이',
+  steps: '재현 절차가', expected: '기대한 결과가', actual: '실제 결과가',
+};
+
+/** 판정 순서. 먼저 걸린 칸 하나를 돌려준다 */
+const OVERFLOW_ORDER: readonly TicketTextField[] = ['title', 'body', ...TICKET_OPTIONAL_FIELDS];
+
 export type RedactedOverflow = {
-  field: 'title' | 'body';
+  field: TicketTextField;
   length: number;
   max: number;
   /** 몇 자를 줄여야 들어가는지 */
   over: number;
 };
 
-export function redactedOverflow(t: { title?: string; body: string }): RedactedOverflow | null {
+export function redactedOverflow(
+  t: { title?: string | null; body: string } & Partial<TicketOptionals>,
+): RedactedOverflow | null {
   // 답글에는 제목이 없다. **그래서 판정을 둘로 나누지 않는다** —
   // 글 쓰기와 답글 쓰기가 서로 다른 한계를 갖게 되는 순간 한쪽만 고쳐진다.
-  if (t.title != null && t.title.length > TITLE_MAX) {
-    return { field: 'title', length: t.title.length, max: TITLE_MAX, over: t.title.length - TITLE_MAX };
-  }
-  if (t.body.length > BODY_MAX) {
-    return { field: 'body', length: t.body.length, max: BODY_MAX, over: t.body.length - BODY_MAX };
+  //
+  // 선택 칸도 같은 자리에서 본다. 가림은 글을 늘리므로, 늘어난 재현 절차는
+  // 106의 CHECK에 막히고 사용자에게는 "다시 시도해 주세요"만 간다 —
+  // 같은 글은 다시 보내도 똑같이 늘어나므로 영원히 실패하는 안내다.
+  for (const f of OVERFLOW_ORDER) {
+    const v = (t as Record<string, unknown>)[f];
+    if (typeof v !== 'string') continue;
+    const max = FIELD_MAX[f];
+    if (v.length > max) return { field: f, length: v.length, max, over: v.length - max };
   }
   return null;
 }
 
 /** 사용자에게 보여 줄 한 줄. **글 내용은 담지 않는다 — 길이만 말한다.** */
 export function redactedOverflowMessage(v: RedactedOverflow): string {
-  const where = v.field === 'title' ? '제목' : '내용';
-  return `비밀로 보이는 값을 가리면서 ${where}이 ${v.max}자를 ${v.over}자 넘었습니다 — ${v.over}자 이상 줄여 주세요`;
+  const where = FIELD_SUBJECT[v.field] ?? '내용이';
+  return `비밀로 보이는 값을 가리면서 ${where} ${v.max}자를 ${v.over}자 넘었습니다 — ${v.over}자 이상 줄여 주세요`;
 }
+
+/**
+ * 접수 글 한 줄을 만든다. **라우트가 칸을 빠뜨릴 수 없는 자리다.**
+ *
+ * 예전에는 라우트가 insert 객체를 직접 적었고, 그래서 선택 칸 세 개가
+ * 그 객체에 없다는 것을 아무도 몰랐다. 줄을 만드는 곳이 한 곳이면
+ * 시험 하나가 세 칸 전부를 지킨다.
+ *
+ * `user_id`는 **인자로 받은 값만** 쓴다 — 요청이 보낸 값은 여기까지
+ * 오지 않는다.
+ */
+export function ticketReportRow(i: {
+  userId: string;
+  parsed: ParsedTicket;
+  /** 가린 뒤의 제목 */
+  title: string;
+  /** 가린 뒤의 선택 칸들 */
+  optionals: TicketOptionals;
+  context: unknown;
+  redactions: unknown;
+}): Record<string, unknown> {
+  const row: Record<string, unknown> = {
+    user_id: i.userId,
+    category: i.parsed.category,
+    title: i.title,
+    status: 'RECEIVED',
+    severity: suggestSeverity(i.parsed.category),   // 관리자가 바꿀 수 있는 제안
+    visibility: i.parsed.visibility,
+    context: i.context,
+    redactions: i.redactions,
+  };
+  // **목록을 돌며 넣는다.** 비어 있어도 칸은 넣는다 — 없는 칸과 null은
+  // 다르고, 다음에 칸이 하나 늘 때 여기만 보면 된다.
+  for (const f of TICKET_OPTIONAL_FIELDS) row[f] = i.optionals[f] ?? null;
+  return row;
+}
+
+/** 저장·조회에서 함께 읽을 칸 목록. **쓰고 아무도 안 읽으면 같은 병이다.** */
+export const TICKET_REPORT_COLUMNS =
+  `id,ref,category,title,status,severity,visibility,${TICKET_OPTIONAL_FIELDS.join(',')},created_at`;
