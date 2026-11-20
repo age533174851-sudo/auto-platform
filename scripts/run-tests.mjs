@@ -199,6 +199,7 @@ import {
   runPrecisionMatrixTests,
   runAdoptIntentIntegrationTests,
 } from './src/test/integration/orderPathIntegration.test';
+import { runReconcileCronAuthIntegrationTests } from './src/test/integration/reconcileCronAuthIntegration.test';
 import { runSmokeStartRouteTests } from './src/test/integration/smokeStartRouteIntegration.test';
 import { runForcedEntryRouteTests } from './src/test/integration/forcedEntryRouteIntegration.test';
 import { runHoldExtensionIntegrationTests } from './src/test/integration/holdExtensionIntegration.test';
@@ -496,6 +497,10 @@ runProtectiveOrderSupportTests(); runRunSummaryTests(); runExposureAttestationTe
   await runPrecisionIntegrationTests();
   await runPrecisionMatrixTests();
   await runSmokeStartRouteTests();
+  // smokeStartRoute registers asynchronous tests; finish them before swapping
+  // the Supabase module cache and fetch boundary for the cron auth cases.
+  await flushAsync();
+  await runReconcileCronAuthIntegrationTests();
   await runForcedEntryRouteTests();
   await runRunnerStaleConnectionTests();
   await runHoldExtensionIntegrationTests();
