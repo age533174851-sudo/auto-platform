@@ -211,6 +211,21 @@ export function runGatePlanTests() {
     }
   });
 
+  // 수량 칸이 깨진 응답을 '포지션 0'으로 옮기면, 거래 전 점검의
+  // PROTECTIVE_ORDER가 "열린 포지션이 없어 붙일 보호 주문이 없습니다"로
+  // **통과**한다. 실제로는 손절 없는 포지션이 열려 있을 수 있다.
+  test('수량을 못 읽으면 null이다 — 깨진 size를 "포지션 0"으로 적지 않는다', () => {
+    for (const size of [undefined, null, '', 'NaN', 'abc', Infinity, {}]) {
+      eq(gatePositionToRisk({ contract: 'BTC_USDT', size, leverage: '100' }), null,
+        `size=${String(size)}를 읽은 값으로 옮겼다 — 확인 못 한 수량이 '포지션 없음'이 된다`);
+    }
+  });
+
+  test('명시적인 0과 문자열 수량은 그대로 읽는다', () => {
+    eq(gatePositionToRisk({ contract: 'BTC_USDT', size: '0', leverage: '100' })!.positionAmt, 0);
+    eq(gatePositionToRisk({ contract: 'BTC_USDT', size: '-7', leverage: '100' })!.positionAmt, -7);
+  });
+
   test('수량이 없는 신규 계약도 마진 모드를 돌려준다 — 첫 주문이 막히지 않게', () => {
     const r = gatePositionToRisk({ contract: 'ETH_USDT', size: 0, leverage: '15' })!;
     eq(r.marginType, 'isolated');

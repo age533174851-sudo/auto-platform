@@ -70,6 +70,42 @@ export interface DeploymentFacts {
   workerSha?: string | null;
 }
 
+/**
+ * **서버 응답에서 '배포 사실'을 고르는 한 곳.**
+ *
+ * 왜 함수인가 — 2026-11-01부터 12일 동안 화면은 워커가 96커밋 뒤처진
+ * 것을 말하지 않았다. 서버는 알고 있었다(`skew: MISMATCH`). 그런데
+ * 화면이 `verdict.code`를 먼저 읽었고 그 값이 `'UNKNOWN'`이었다.
+ * `??`는 null·undefined에서만 넘어가므로 **`skew`로 가는 길은 죽어
+ * 있었다.** `DEPLOY_SKEW` 경고도, "웹과 워커가 다른 코드를 돌리고
+ * 있습니다"도 코드로는 있었지만 켜질 수가 없었다.
+ *
+ * 그래서 고르는 규칙을 '먼저 쓰인 칸'이 아니라 **더 확실한 답**으로
+ * 바꾼다:
+ *
+ *   ① 둘 중 하나라도 MISMATCH 면 MISMATCH. **확정된 어긋남이 이긴다** —
+ *      모름이 아는 것을 덮지 않는다.
+ *   ② 그 다음 `verdict` — 마이그레이션까지 보므로 더 많이 안다.
+ *   ③ 비어 있으면 `skew`, 둘 다 없으면 `null`.
+ *
+ * ①은 `skew`가 판정을 **내리기만** 할 뿐 **풀어 주지는 못하게** 한다.
+ * `verdict`가 UNKNOWN 인데 `skew`가 MATCHED 라고 MATCHED 로 적으면,
+ * SHA 둘만 보고 "배포 끝"이라고 말하는 것이 된다 — 그건 모르는 것을
+ * '같다'로 읽는 것이다.
+ *
+ * 그리고 이 규칙은 화면 안이 아니라 **시험이 붙은 한 곳**에 있다.
+ */
+export function deploymentFactsOf(dj: any): DeploymentFacts {
+  const verdict = dj?.verdict?.code ?? null;
+  const skew = dj?.skew?.code ?? null;
+  const proven = s(verdict).toUpperCase() === 'MISMATCH' || s(skew).toUpperCase() === 'MISMATCH';
+  return {
+    code: proven ? 'MISMATCH' : (verdict ?? skew ?? null),
+    webSha: dj?.vercel?.sha ?? null,
+    workerSha: dj?.fly?.sha ?? null,
+  };
+}
+
 export interface AutoRuntimeView {
   health: RuntimeHealth;
   tone: Tone;

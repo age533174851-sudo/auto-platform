@@ -70,17 +70,34 @@ function hostOf(url) {
 
 const host = DB ? hostOf(DB) : (process.env.PGHOST || '');
 
+/**
+ * **왜 멈췄는지 CI 주석에 남긴다.**
+ *
+ * 워크플로는 이 스크립트가 0이 아니면 무조건
+ * `::error::규칙을 깨뜨렸는데 검사가 초록입니다`를 붙인다. 그런데 멈추는
+ * 이유는 다섯 가지이고 **그중 넷은 그 문장과 아무 상관이 없다.**
+ *
+ * 실제로 그 때문에 헛짚었다 — run 43669299493은 정본 기준선에서 멈췄는데
+ * 주석이 "규칙을 깨뜨렸는데 초록"이라고 적혀 있어, 살아남은 뮤테이션을
+ * 찾으러 갔다. 뮤테이션은 **한 건도 돌지 않았다.**
+ *
+ * 이 스크립트의 출력은 `cat`으로 그 단계의 stdout에 실리므로, 여기서 찍는
+ * `::error::`도 주석이 된다. **멈춘 쪽이 이유를 적는다.**
+ */
+function fail(reason) {
+  console.error(`::error::${reason}`);
+  process.exit(1);
+}
+
 // ── 운영에 닿을 수 있는 환경에서는 시작하지 않는다 ──
 //
 // 이 검사는 함수를 **일부러 망가뜨린 판으로 바꿔 가며** 돈다. 운영에서 돌면
 // 그 사이에 들어온 실제 호출이 망가진 함수를 쓴다.
 if (!(host.startsWith('/') || ['localhost', '127.0.0.1', '::1', 'db', 'postgres'].includes(host))) {
-  console.error(`거부: 접속 대상이 로컬이 아닙니다 (${host}) — 이 검사는 함수를 망가뜨리므로 로컬 빈 DB에서만 돕니다`);
-  process.exit(1);
+  fail(`거부: 접속 대상이 로컬이 아닙니다 (${host}) — 이 검사는 함수를 망가뜨리므로 로컬 빈 DB에서만 돕니다`);
 }
 if (process.env.SUPABASE_DB_URL || process.env.DATABASE_URL) {
-  console.error('거부: SUPABASE_DB_URL/DATABASE_URL이 설정돼 있습니다 — 운영에 닿을 수 있는 환경입니다');
-  process.exit(1);
+  fail('거부: SUPABASE_DB_URL/DATABASE_URL이 설정돼 있습니다 — 운영에 닿을 수 있는 환경입니다');
 }
 
 /** 접속 URL이 있으면 첫 인자로 넘긴다. */
@@ -114,8 +131,17 @@ function install(sql) {
  * 되돌릴 때마다 그 뒤 마이그레이션을 순서대로 다시 세운다.
  */
 function restoreCanonical() {
-  if (!install(canonical)) return false;
-  return reapplyAfter(MIG_DIR, MIG_NAME, install);
+  // **어디서 못 세웠는지 적는다.** 예전에는 호출부가 '정본을 세우지
+  // 못했습니다' 한 줄만 찍어서, 099가 재적용 불가라는 것을 알아내는 데
+  // 재적용 대상 14개를 손으로 좁혀야 했다.
+  if (!install(canonical)) {
+    console.error(`  ✗ 정본 ${MIG_NAME}을 세우지 못했습니다`);
+    return false;
+  }
+  return reapplyAfter(MIG_DIR, MIG_NAME, install, (p) => {
+    console.error(`  ✗ ${p}를 다시 세우지 못했습니다`
+      + ' — 이 파일이 재적용 가능한지 보세요 (CREATE … IF NOT EXISTS · DROP POLICY IF EXISTS)');
+  });
 }
 
 /**
@@ -237,10 +263,15 @@ const MUTATIONS = [
 let anchorFails = 0, survivors = 0;
 
 console.log('── 정본 기준선 ──');
-if (!restoreCanonical()) { console.error('정본을 세우지 못했습니다'); process.exit(1); }
+if (!restoreCanonical()) {
+  // **뮤테이션은 한 건도 돌지 않았다.** 위의 ✗ 줄이 어느 파일에서 멈췄는지 적는다
+  fail('정본을 세우지 못했습니다 — 뮤테이션은 한 건도 돌지 않았습니다 (살아남은 뮤테이션 이야기가 아닙니다)');
+}
 const baseline = gatesPass();
 console.log(baseline ? '  ✓ 정본 GREEN' : '  ✗ 정본이 빨갛다 — 아래 결과는 의미가 없다');
-if (!baseline) process.exit(1);
+if (!baseline) {
+  fail('정본이 빨갛습니다 — 뮤테이션은 한 건도 돌지 않았습니다 (살아남은 뮤테이션 이야기가 아닙니다)');
+}
 
 console.log('\n── 뮤테이션 ──');
 for (const m of MUTATIONS) {
@@ -285,6 +316,6 @@ restoreCanonical();
 console.log('');
 if (anchorFails || survivors) {
   console.log(`뮤테이션 검사 실패 — 살아남은 뮤테이션 ${survivors}건 · 낡은 앵커 ${anchorFails}건`);
-  process.exit(1);
+  fail(`뮤테이션 검사 실패 — 살아남은 뮤테이션 ${survivors}건 · 낡은 앵커 ${anchorFails}건`);
 }
 console.log(`뮤테이션 ${MUTATIONS.length}건 전부 RED · 주석 대조군 GREEN`);

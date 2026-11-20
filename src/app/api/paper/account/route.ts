@@ -115,8 +115,15 @@ export async function GET(req: NextRequest) {
       totalFees: started ? (Number(acct.total_fees) || 0) : null,
       tradeCount: started ? (Number(acct.trade_count) || 0) : null,
       winCount: started ? (Number(acct.win_count) || 0) : null,
-      returnPct: started && initial != null && initial > 0 && balance != null
-        ? ((balance - initial) / initial) * 100 : null,
+      // **같은 판정을 쓴다.** 예전에는 이 줄이 `balance`(현금)로 수익률을
+      // 냈다 — 두 가지가 틀렸다: ① 충전액을 수익으로 셌고 ② 현금으로
+      // 나눠서 미실현손익·증거금을 무시했다. 바로 아래 주석이 "`balance`는
+      // 현금이지 총자산이 아니다"라고 경고하는데, 그 경고 위에서 그
+      // 현금으로 나누고 있었다(#592).
+      netPnl: started ? eq.netPnl : null,
+      returnPct: started ? eq.returnPct : null,
+      /** 수익률을 적지 못한 이유 — 화면이 '—'만 보여 주지 않도록 */
+      returnPctReason: started ? eq.returnPctReason : '',
     },
     // ── 화면이 읽을 canonical 값 ──
     //
@@ -132,7 +139,10 @@ export async function GET(req: NextRequest) {
       initialBalance: eq.initialBalance,
       realizedPnl: eq.realizedPnl,
       totalFees: eq.totalFees,
+      /** 거래로 번 돈 — 충전·출금에 면역 */
+      netPnl: eq.netPnl,
       returnPct: eq.returnPct,
+      returnPctReason: eq.returnPctReason,
       currency: 'USDT',
       note: eq.note,
     },

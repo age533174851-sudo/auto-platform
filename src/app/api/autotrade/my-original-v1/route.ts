@@ -924,6 +924,8 @@ export async function POST(req: NextRequest) {
       filledQty: exec?.filledQty ?? null,
       avgPrice: exec?.avgPrice ?? null,
       rejected: exec?.ok === false,
+      // 사유는 실행기가 이미 들고 있었다 — 판정이 받지 않았을 뿐이다.
+      rejectedReason: exec?.ok === false ? (exec?.message ?? null) : null,
       position: posAfter,
       leverageConfirmed: exec?.leverageConfirmed ?? null,
       positionModeConfirmed: exec?.positionModeConfirmed ?? null,
