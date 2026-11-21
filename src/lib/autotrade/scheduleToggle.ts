@@ -165,6 +165,80 @@ export function enabledUpdate(enabled: boolean): { enabled: boolean } {
   return { enabled: enabled === true };
 }
 
+// ── 끈 사실을 남긴다 ─────────────────────────────────
+
+/**
+ * 예약을 켜거나 끈 사실의 감사 기록.
+ *
+ * **왜 이게 없어서 문제가 됐는가**
+ * ────────────────────────────────
+ * 2026-11-10 운영에서 `autotrade_schedules` 7건이 전부 꺼져 있었다. 그런데
+ * **누가 언제 껐는지 어떤 질의로도 답이 안 나왔다** — `enabledUpdate`가
+ * `{ enabled }` 한 칸만 쓰고, 시각도 주체도 사유도 남기지 않기 때문이다.
+ * 취소는 `cancelled_at`으로 시각이 남는데 **끄기는 아무 흔적이 없다.**
+ *
+ * 남길 자리는 이미 있었다. `040_audit_events.sql`의 머리말이 남길 대상으로
+ * **"자동매매 ON/OFF"**를 직접 적어 뒀고 `action` 어휘에 `'AUTOTRADE_TOGGLE'`이
+ * 박혀 있다. 그런데 그 값을 쓰는 코드는 저장소에 한 곳뿐이었고, 그곳은
+ * 거래소 **연결** 토글(`exchange/route.ts`)이지 예약이 아니었다.
+ * 표도 어휘도 함수도 있는데 **매매를 멈추는 스위치가 거기 연결돼 있지
+ * 않았다** — 이 저장소의 "만들어 놓고 배선을 안 함" 그대로다.
+ *
+ * **왜 `scope`가 필요한가**
+ * ─────────────────────────
+ * 같은 `action`을 거래소 연결 토글이 이미 쓴다. 구분값 없이 끼워 넣으면
+ * 감사 로그에서 **"연결을 껐다"와 "예약을 껐다"가 한 이름으로 섞인다.**
+ * 나중에 "왜 안 돌았나"를 묻는 사람이 그 둘을 구별할 수 없게 된다.
+ *
+ * **무엇을 담지 않는가**
+ * ──────────────────────
+ * 사용자 id·연결 id·키는 이 함수를 지나가지 않는다. `detail`은 네 칸으로
+ * 닫혀 있고, 그 사실을 시험이 못 박는다. `recordAudit`이 `redactSecrets`로
+ * 한 겹 더 걸러 주지만, **걸러 주니까 넣어도 된다가 되면 안 된다.**
+ *
+ * id가 없으면 `null`이다 — **빈 `resource`로 "무엇에 대한 동작인지 모르는"
+ * 기록을 남기지 않는다.** 모르는 것을 적는 것은 안 적는 것보다 나쁘다.
+ */
+export interface ToggleAuditRecord {
+  action: 'AUTOTRADE_TOGGLE';
+  /** 어느 예약인가. **빈 문자열이면 기록을 만들지 않는다** */
+  resource: string;
+  result: 'success';
+  detail: {
+    /** 거래소 연결 토글과 구별한다 */
+    scope: 'SCHEDULE';
+    enabled: boolean;
+    symbol?: string;
+    mode?: string;
+  };
+}
+
+/** `detail`에 들어갈 수 있는 이름 전부. 늘면 시험이 깨진다 */
+export const TOGGLE_AUDIT_DETAIL_KEYS = ['scope', 'enabled', 'symbol', 'mode'] as const;
+
+export function toggleAuditRecord(i: {
+  scheduleId: any;
+  enabled: any;
+  symbol?: any;
+  mode?: any;
+}): ToggleAuditRecord | null {
+  // **문자열이 아니면 기록하지 않는다.** 예약 id 는 uuid 다 — 숫자 `0` 이
+  // 올 자리가 아니고, 그걸 `'0'` 으로 적으면 **없는 예약에 대한 기록**이 남는다.
+  const id = typeof i?.scheduleId === 'string' ? i.scheduleId.trim() : '';
+  if (!id) return null;
+  const detail: ToggleAuditRecord['detail'] = {
+    scope: 'SCHEDULE',
+    // **boolean으로 못 박는다.** 'false' 같은 문자열이 true가 되면
+    // 감사 로그가 켰다고 적는다 — 실제로는 끈 것이다.
+    enabled: i?.enabled === true,
+  };
+  const sym = String(i?.symbol ?? '').trim();
+  if (sym) detail.symbol = sym;
+  const mode = String(i?.mode ?? '').trim();
+  if (mode) detail.mode = mode.toUpperCase();
+  return { action: 'AUTOTRADE_TOGGLE', resource: id, result: 'success', detail };
+}
+
 /** UPDATE가 0줄을 바꿨을 때. **만들지 않는다** */
 export function notFoundMessage(id: string): string {
   return `그 예약을 찾지 못했습니다 (id: ${id}) — 내 예약이 아니거나 이미 지워졌습니다. `

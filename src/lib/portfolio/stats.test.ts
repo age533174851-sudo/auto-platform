@@ -180,4 +180,17 @@ export function runStatsTests() {
     eq(paperRowToTrade({ strategy_id: 'a', realized_pnl: null, closed_at: null }), null);
     eq(paperRowToTrade({ strategy_id: 'a', realized_pnl: 5, closed_at: null }), null);
   });
+
+  test('닫혔는데 손익이 비어 있으면 0원 거래가 아니라 버린다 — 모르는 것을 0으로 적지 않는다', () => {
+    // Number(null) === 0, Number('') === 0. 그대로 두면 손익을 모르는 거래가
+    // "본전 거래 1건"이 되어 거래 수(점수의 표본)를 부풀린다.
+    const at = new Date(NOW).toISOString();
+    eq(paperRowToTrade({ strategy_id: 'a', realized_pnl: null, closed_at: at }), null);
+    eq(paperRowToTrade({ strategy_id: 'a', realized_pnl: undefined, closed_at: at }), null);
+    eq(paperRowToTrade({ strategy_id: 'a', realized_pnl: '', closed_at: at }), null);
+    eq(paperRowToTrade({ strategy_id: 'a', realized_pnl: '  ', closed_at: at }), null);
+    // 진짜 0은 관측이다 — 버리지 않는다.
+    eq(paperRowToTrade({ strategy_id: 'a', realized_pnl: 0, closed_at: at })?.realizedPnl, 0);
+    eq(paperRowToTrade({ strategy_id: 'a', realized_pnl: '0', closed_at: at })?.realizedPnl, 0);
+  });
 }

@@ -11,9 +11,9 @@
 
 | | 수 |
 |---|--:|
-| **실제 화면 (SCREEN_INDEX)** | 68 |
+| **실제 화면 (SCREEN_INDEX)** | 69 |
 | 들여다본 화면 (SURVEYED) | 6 |
-| 존재만 확인 (LISTED_ONLY) | 62 |
+| 존재만 확인 (LISTED_ONLY) | 63 |
 | 조사한 것 중 이관 완료 / 일부 / 미이관 | 2 / 1 / 3 |
 | primitive (있음 / 중복 / 없음 / 옛방식 / 제안) | 10 / 3 / 6 / 2 / 2 |
 | 네비게이션 정의 위치 | 3 |
@@ -89,6 +89,7 @@
 | **시즌전략** `season` | `tab:season` | MENU · MTABS · SWITCH | 목록만 | `UNSURVEYED` |
 | **계절성 분석** `seasonality` | `tab:seasonality` | MTABS · SWITCH | 목록만 | `UNSURVEYED` |
 | **소셜** `social` | `tab:social` | MENU · MTABS · SWITCH | 목록만 | `UNSURVEYED` |
+| **피드백·문의** `feedback` | `tab:feedback` | MENU · MTABS · SWITCH | 목록만 | `UNSURVEYED` |
 | **구독** `subscription` | `tab:subscription` | MTABS · SWITCH | 목록만 | `UNSURVEYED` |
 | **손익·세금** `tax` | `tab:tax` | MTABS · SWITCH | 목록만 | `UNSURVEYED` |
 | **TradFi** `tradfi` | `tab:tradfi` | MTABS · SWITCH | 목록만 | `UNSURVEYED` |

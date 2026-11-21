@@ -43,6 +43,20 @@ export function runMismatchRecoveryTests() {
     eq(st.safeToAutomate, false);
   });
 
+  test('수량을 모르는 포지션은 자동으로 "거래소 수량으로 맞추지" 않는다', () => {
+    // POSITION_QTY_DIFFERS는 거래소 값을 자동으로 들여온다. 거래소 값이
+    // NaN이면 들여올 사실이 없다 — 그건 사람이 거래소에서 봐야 한다.
+    const st = recoveryStepOf(mm('POSITION_QTY_UNKNOWN', 'critical', { app: 0.5, exchange: null }))!;
+    eq(st.action, 'MANUAL_ONLY');
+    eq(st.safeToAutomate, false);
+    eq(st.destructive, false);
+    eq(st.blocking, true);
+    eq(st.authority, 'UNKNOWN', '모르는 값을 기준으로 삼을 수 없다');
+    eq(st.exchangeValue, '—');
+    const plan = recoveryPlan([mm('POSITION_QTY_UNKNOWN', 'critical')]);
+    eq(plan.autoSteps.length, 0, '모르는 수량을 자동 복구 대상으로 셌다');
+  });
+
   test('지우는 작업의 확인 문구에 무엇이 지워지는지 적는다', () => {
     const st = recoveryStepOf(mm('POSITION_MISSING_ON_EXCHANGE', 'critical',
       { app: '0.5 LONG', exchange: '없음' }))!;
