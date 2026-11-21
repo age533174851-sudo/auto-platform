@@ -257,6 +257,33 @@ export async function getOpenOrdersGateFutures(
   return Array.isArray(rows) ? rows : [];
 }
 
+/** Read all three Gate TESTNET books for a recovery observation, preserving unknowns. */
+export async function readGateTestnetExposure(key: string, secret: string, contract: string) {
+  const credentials = { key, secret, testnet: true };
+  const [positions, regularOrders, conditionalOrders] = await Promise.all([
+    gateReq<unknown>('GET', '/api/v4/futures/usdt/positions', { ...credentials, qs: 'holding=true' }).catch(() => null),
+    gateReq<unknown>('GET', '/api/v4/futures/usdt/orders', {
+      ...credentials, qs: new URLSearchParams({ status: 'open', contract }).toString(),
+    }).catch(() => null),
+    getPriceOrdersGateFutures(key, secret, contract, true),
+  ]);
+
+  // Gate returns all held positions when no limit is supplied, including both hedge legs.
+  const positionsReadable = Array.isArray(positions) && positions.every(row => (
+    typeof row?.contract === 'string' && row.contract.length > 0
+    && (typeof row.size === 'number' || (typeof row.size === 'string' && /^-?\d+(\.\d+)?$/.test(row.size)))
+    && Number.isFinite(Number(row.size))
+  ));
+  const openPositions = positionsReadable
+    ? positions.filter(row => row.contract === contract && Number(row.size) !== 0).length
+    : null;
+  return {
+    openPositions,
+    regularOrders: Array.isArray(regularOrders) ? regularOrders.length : null,
+    conditionalOrders: conditionalOrders?.length ?? null,
+  };
+}
+
 /** 걸려 있는 조건부 주문(손절·익절). 못 읽으면 null — 빈 배열과 구분한다 */
 export async function getPriceOrdersGateFutures(
   key: string, secret: string, contract: string, testnet = true,
@@ -265,7 +292,14 @@ export async function getPriceOrdersGateFutures(
     const rows = await gateReq<any[]>('GET', '/api/v4/futures/usdt/price_orders', {
       key, secret, qs: `status=open&contract=${contract}`, testnet,
     });
-    return Array.isArray(rows) ? rows : [];
+    // **200인데 목록이 아니면 `null`이다.** 주석이 처음부터 그렇게 적혀
+    // 있었는데(`못 읽으면 null — 빈 배열과 구분한다`) 구현은 `[]`를
+    // 돌려줬다. 그러면 Gate가 200에 `{label:'ERROR'}`·`null`·빈 본문을
+    // 줄 때 **"기존 보호주문 없음"이 확정되고** 새 보호주문이 나간다.
+    //
+    // 같은 파일의 `getAllPriceOrdersGateFutures`는 이미 비배열을 `null`로
+    // 돌려준다 — 선례가 옆에 있는데 이 함수만 빠져 있었다.
+    return Array.isArray(rows) ? rows : null;
   } catch { return null; }
 }
 

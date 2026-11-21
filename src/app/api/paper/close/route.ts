@@ -44,8 +44,17 @@ export async function POST(req: NextRequest) {
   // 가격으로 닫히고 있었다.
   // 생성된 Supabase 타입에는 `market`이 없다(`025`가 나중에 더한 칸이라
   // 타입 재생성이 밀려 있다). 값은 DB에 실재하므로 여기서만 캐스팅한다.
-  const { data: pos } = await (sb as any).from('paper_positions')
+  const { data: pos, error: posErr } = await (sb as any).from('paper_positions')
     .select('id, user_id, symbol, status, market').eq('id', positionId).maybeSingle();
+  // **조회 실패는 "없음"이 아니다.** 예전에는 `error`를 버렸고, DB가 잠깐
+  // 실패하면 있는 포지션을 404 `not_found`로 답했다 — 사용자는 포지션이
+  // 사라진 줄 안다. `/api/paper/positions`와 같은 규칙으로 503을 낸다.
+  if (posErr) {
+    return NextResponse.json({
+      ok: false, error: 'position_unreadable',
+      message: '포지션을 읽지 못해 청산하지 않았습니다 — 포지션이 없다는 뜻이 아닙니다',
+    }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
+  }
   if (!pos || pos.user_id !== uid) {
     return NextResponse.json({ ok: false, error: 'not_found' }, { status: 404 });
   }

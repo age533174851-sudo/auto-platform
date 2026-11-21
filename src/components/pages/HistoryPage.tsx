@@ -1,5 +1,6 @@
 'use client';
 import { A } from '@/lib/theme/colors';
+import { tradeNote } from '@/lib/journal/tradeNote';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { T, CURRENCIES, LANGS, I18N, WORLD_MARKETS, MOCK_NEWS, ECON_EVENTS, LOGO_SOURCES } from '@/lib/constants';
 import { cvt, fmt, fmtPct, clamp, tr, gS, sS, uid } from '@/lib/utils';
@@ -15,17 +16,6 @@ import { Card, Dot, Spark, Pill, Bdg, Toggle, AreaChart, WorldClock, Heatmap,
 function HistoryPage() {
   const STORE = 'tg_journal_v1';
   const EMOTIONS = ['😊','😔','😤','😰','🤔','😎','🙁','😡'];
-  const AI_REVIEWS = [
-    '손절 규칙을 잘 지켰습니다. 계획대로 실행하는 것이 중요합니다.',
-    '진입 타이밍이 좋았습니다. 지지선에서의 매수는 좋은 전략입니다.',
-    'FOMO 진입 가능성이 있습니다. 다음에는 신호를 기다리세요.',
-    '목표가 도달 전 조기 청산은 아쉽습니다. 계획을 지켜보세요.',
-    '추세 방향과 일치한 거래입니다. 흐름을 읽는 눈이 좋습니다.',
-    '손절이 너무 타이트했습니다. ATR 기반 손절을 고려해보세요.',
-    '수익 실현 타이밍이 훌륭했습니다. 고점 근처에서 잘 나왔습니다.',
-    '거래 횟수가 많습니다. 과거래는 수수료 손실로 이어질 수 있습니다.',
-    '포지션 크기가 적절했습니다. 리스크 관리가 잘 되었습니다.',
-  ];
 
   const loadEntries = (): any[] => {
     if (typeof window === 'undefined') return [];
@@ -75,7 +65,18 @@ function HistoryPage() {
     setSaving(true);
     await new Promise(r => setTimeout(r, 500));
     const computed = computePnl(form);
-    const aiReview = AI_REVIEWS[Math.floor(Math.random() * AI_REVIEWS.length)];
+    // **지어내지 않는다.** 예전에는 고정 문장 아홉 개 중 하나를 난수로
+    // 골라 "AI 리뷰"로 붙였다 — 종목·진입가·손익 중 아무것도 보지 않았고,
+    // 손절을 놓친 거래에 "손절 규칙을 잘 지켰습니다"가 뜰 수 있었다.
+    // 판정은 `src/lib/journal/tradeNote.ts` 한 곳에 있고 시험이 붙어 있다.
+    const noted = tradeNote({
+      side: form.side,
+      entryPrice: parseFloat(form.entryPrice) || 0,
+      exitPrice:  parseFloat(form.exitPrice)  || 0,
+      size:       parseFloat(form.size)       || 0,
+      pnl:        computed.pnl,
+      pnlPct:     computed.pnlPct,
+    });
     const entry = {
       id: editId || ('j_' + Date.now().toString(36)),
       sym: form.sym.toUpperCase().trim(),
@@ -90,7 +91,8 @@ function HistoryPage() {
       emotion:    form.emotion || '😊',
       rating:     form.rating || 3,
       tags:       form.tags ? form.tags.split(',').map((t:string)=>t.trim()).filter(Boolean) : [],
-      aiReview,
+      note: noted.text,
+      noteUnknown: noted.unknown,
       createdAt: new Date().toISOString(),
     };
     const next = editId
@@ -289,10 +291,15 @@ function HistoryPage() {
                 ))}
               </div>
               {e.memo && <div style={{color:T.muted,fontSize:11,marginBottom:6,lineHeight:1.5}}>{e.memo}</div>}
-              {e.aiReview && (
+              {e.note && (
                 <div style={{background:A(T.acl,'12'),border:`1px solid ${A(T.acl,'25')}`,borderRadius:8,padding:'7px 10px'}}>
-                  <div style={{color:T.acl,fontSize:9,fontWeight:700,marginBottom:2}}>AI 리뷰</div>
-                  <div style={{color:T.sub,fontSize:11,lineHeight:1.5}}>{e.aiReview}</div>
+                  <div style={{color:T.acl,fontSize:9,fontWeight:700,marginBottom:2}}>기록에서 따라 나온 것</div>
+                  <div style={{color:T.sub,fontSize:11,lineHeight:1.5}}>{e.note}</div>
+                  {Array.isArray(e.noteUnknown) && e.noteUnknown.length > 0 && (
+                    <div style={{color:T.muted,fontSize:10,lineHeight:1.5,marginTop:4}}>
+                      알 수 없음 — {e.noteUnknown.join(' · ')}
+                    </div>
+                  )}
                 </div>
               )}
             </Card>

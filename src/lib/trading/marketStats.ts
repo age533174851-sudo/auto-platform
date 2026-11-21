@@ -44,12 +44,17 @@ export function fmtCompact(v: number | null | undefined): string {
   if (v == null || !Number.isFinite(v)) return UNKNOWN_TEXT;
   const neg = v < 0;
   const a = Math.abs(v);
+  // 단위는 **반올림한 뒤의 값**으로 고른다. 999,999를 K로 고르고 나서
+  // 소수 2자리로 반올림하면 `1000.00K`가 된다 — 다음 단위(`1.00M`)로 올린다.
+  const units: Array<[number, string]> = [[1, ''], [1e3, 'K'], [1e6, 'M'], [1e9, 'B'], [1e12, 'T']];
   const pick = (): string => {
-    if (a >= 1e12) return `${(a / 1e12).toFixed(2)}T`;
-    if (a >= 1e9) return `${(a / 1e9).toFixed(2)}B`;
-    if (a >= 1e6) return `${(a / 1e6).toFixed(2)}M`;
-    if (a >= 1e3) return `${(a / 1e3).toFixed(2)}K`;
-    return a.toLocaleString('en-US', { maximumFractionDigits: 2 });
+    let i = 0;
+    while (i < units.length - 1 && a >= units[i + 1][0]) i++;
+    // 이 단위로 반올림한 값이 1000에 닿으면 한 단위 올린다 (T가 끝이다).
+    if (i < units.length - 1 && Number((a / units[i][0]).toFixed(2)) >= 1000) i++;
+    const [base, suffix] = units[i];
+    if (base === 1) return a.toLocaleString('en-US', { maximumFractionDigits: 2 });
+    return `${(a / base).toFixed(2)}${suffix}`;
   };
   return (neg ? '-' : '') + pick();
 }
