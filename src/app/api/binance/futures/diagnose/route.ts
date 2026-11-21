@@ -9,7 +9,7 @@ import { decryptSecret } from '@/lib/exchanges/crypto';
 import { binanceTestnetDiagnoseGate } from '@/lib/engine/testnetReadiness';
 import {
   positionModeVerdict, isolationVerdict, withdrawalEvidence,
-  overallDiagnoseVerdict, statusToOk, type DiagnoseStatus,
+  clockSkewVerdict, overallDiagnoseVerdict, statusToOk, type DiagnoseStatus,
 } from '@/lib/engine/testnetDiagnoseVerdict';
 import { overrideOf } from '@/lib/strategies/profilePreset';
 import { summarizeTestnetOpenOrders, summarizeTestnetOpenPositions } from '@/lib/engine/testnetVenueEvidence';
@@ -17,6 +17,14 @@ import { testFuturesConnection, getFuturesBalance, getFuturesPositions, getFutur
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
+
+// 서명 요청이 실제로 싣는 `recvWindow`(ms). **정본은 여기가 아니다** —
+// `src/lib/exchanges/binanceFutures.ts`가 서명에 적는 값이 정본이고, 이
+// 숫자는 그것을 따라 적은 것이다. 그 파일에서 상수를 내보내는 쪽이
+// 맞지만 지금은 열린 PR 여러 건이 그 파일을 잡고 있어 건드리지 않는다.
+// 두 자리가 갈리면 `scripts/check-testnet-diagnose.mjs`가 빨개진다 —
+// 숫자가 둘로 갈린 채 조용히 지나가지는 않는다.
+const SIGNED_RECV_WINDOW_MS = 5000;
 
 // ★ `ok` 한 칸으로는 "확인했고 틀리다"와 "확인하지 못했다"를 가를 수
 //   없다. 둘은 다음 할 일이 완전히 다르다. 그래서 `status`를 더한다.
@@ -270,6 +278,35 @@ export async function POST(req: NextRequest) {
     checks.push({
       name: '출금 비허용 (확인 수준)', ok: statusToOk(v.status), detail: v.reason,
       ms: 0, status: v.status, code: `WITHDRAWAL:${v.code}`,
+    });
+  }
+
+  // ── 12. 거래소 서버 시각과의 오차 ──
+  //
+  //   왜 이 칸이 필요한가: 로컬 시계가 `recvWindow`보다 더 벗어나면
+  //   **서명이 붙는 모든 요청이 -1021로 거부된다.** 그러면 1~8번이
+  //   줄줄이 빨개지고 화면은 "키가 틀렸다"처럼 보인다 — 사람은 멀쩡한
+  //   키를 다시 발급하고, 다시 같은 자리에서 막힌다. 그래서 오차를
+  //   **값으로 재서** 따로 적는다.
+  //
+  //   ★ 진단은 시계를 맞추지 않는다. 맞추는 수단을 부르지 않는다 —
+  //     진단이 환경을 고쳐 놓으면 원래 상태를 영영 못 본다.
+  //
+  //   ★ 허용 오차를 판정 정본에 적지 않는다. 서명이 싣는
+  //     `recvWindow`가 정본이고 그 값을 여기서 넘긴다.
+  {
+    const { getFuturesServerTime } = await import('@/lib/exchanges/binanceFutures');
+    // 보낸 시각과 받은 시각을 **둘 다** 잰다. 하나만 재면 왕복 시간이
+    // 오차에 섞여 들어가고, 느린 회선이 "시계가 틀렸다"로 적힌다.
+    const sentAtMs = Date.now();
+    const serverTimeMs = await getFuturesServerTime(testnet).catch(() => null);
+    const receivedAtMs = Date.now();
+    const v = clockSkewVerdict({
+      serverTimeMs, sentAtMs, receivedAtMs, toleranceMs: SIGNED_RECV_WINDOW_MS,
+    });
+    checks.push({
+      name: '서버 시각 오차 (서명 허용 범위)', ok: statusToOk(v.status), detail: v.reason,
+      ms: receivedAtMs - sentAtMs, status: v.status, code: `CLOCK:${v.code}`,
     });
   }
 
