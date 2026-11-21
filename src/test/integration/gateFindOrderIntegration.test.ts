@@ -34,6 +34,13 @@ const ROW = {
   status: 'finished', finish_as: 'filled', text: TEXT, left: 0, fill_price: '100000',
 };
 
+/** 내 이름이 아닌 줄로 한 쪽을 채운다 */
+function filler(n: number) {
+  return Array.from({ length: n }, (_, i) => ({
+    ...ROW, id: 1000 + i, text: `t-other-${i}`,
+  }));
+}
+
 async function on<T>(v: FakeVenue, fn: () => Promise<T>): Promise<T> {
   const restore = v.install();
   try { return await fn(); } finally { restore(); }
@@ -117,6 +124,84 @@ export async function runGateFindOrderTests() {
     test('★ ⑤ 번호를 못 읽은 줄은 확인된 주문이 아니다', () => {
       eq(r.ok, false, '번호 없는 줄을 넘기면 장부에 "undefined"가 적힌다');
       eq(r.order, null);
+    });
+  }
+  // ══════════ ⑥ 101번째 주문을 놓치지 않는다 ══════════
+  //
+  // Gate 문서는 이 엔드포인트의 **정렬 순서를 말하지 않는다.** `limit`
+  // 기본값은 100이고 `offset`으로 다음 쪽을 읽는다. 즉 첫 100건에 없다고
+  // 해서 없는 것이 아니다 — 내 주문이 101번째에 있을 수 있다.
+  //
+  // 예전에는 첫 쪽만 보고 `{ ok: true, order: null }`을 돌려줬고, 그것은
+  // 호출부에게 **"보내도 된다"**는 허가다. 그대로 중복 주문이 된다.
+  {
+    const v = new FakeVenue();
+    v.on(ORDERS, { json: () => {
+      const c = v.calls[v.calls.length - 1];
+      const status = c?.params?.status;
+      const offset = Number(c?.params?.offset ?? 0);
+      // open 목록은 101건이다. 내 주문은 **마지막 한 건**이다.
+      if (status === 'open') {
+        if (offset === 0) return filler(100);
+        if (offset === 100) return [ROW];
+        return [];
+      }
+      return [];
+    } });
+    const r: any = await on(v, () => findOrderByClientIdGateFutures(
+      KEY, SECRET, CONTRACT, CID, true));
+
+    test('★ ⑥ 첫 100건에 없으면 다음 쪽을 읽는다 (101번째를 찾는다)', () => {
+      eq(r.ok, true, String(r.error));
+      assert(r.order != null,
+        '첫 쪽만 보고 "없음"으로 끝내면 같은 주문이 한 번 더 나간다');
+      eq(String(r.order.text), TEXT);
+    });
+  }
+
+  // ══════════ ⑦ 쪽이 끝나면 "없음"이 증명된다 (막지 않는다) ══════════
+  //
+  // 한 쪽이 `limit`보다 짧게 오면 그것이 목록의 끝이다. 그때의 '없음'은
+  // 단정해도 되는 사실이고, 호출부는 주문을 보내도 된다.
+  // 흔한 계정(주문 몇 건)에서는 첫 쪽이 이미 짧으므로 **요청 수도
+  // 예전과 같다** — 느려지지 않는다.
+  {
+    const v = new FakeVenue().on(ORDERS, { json: [] });
+    const r: any = await on(v, () => findOrderByClientIdGateFutures(
+      KEY, SECRET, CONTRACT, CID, true));
+
+    test('★ ⑦ 짧은 쪽에서 끝나면 ok:true · null이고 요청은 두 번뿐이다', () => {
+      eq(r.ok, true);
+      eq(r.order, null);
+      eq(v.countOf(ORDERS), 2, 'open·finished 한 번씩이면 충분하다');
+    });
+  }
+
+  // ══════════ ⑧ 끝까지 꽉 차 있으면 "없음"이라 말하지 않는다 ══════════
+  //
+  // 상한까지 모든 쪽이 가득 찼다 = 아직 목록이 남았다는 뜻이다. 창을 다
+  // 보지 못했으므로 '없다'고 단정할 수 없다. 여기서 허가를 내주면 그것이
+  // 바로 중복 주문이다.
+  {
+    const v = new FakeVenue().on(ORDERS, { json: () => filler(100) });
+    const r: any = await on(v, () => findOrderByClientIdGateFutures(
+      KEY, SECRET, CONTRACT, CID, true));
+
+    test('★ ⑧ 모든 쪽이 가득 차면 ok:false다 (보내도 된다고 하지 않는다)', () => {
+      eq(r.ok, false, '다 보지 못한 목록을 "주문 없음"으로 적었다');
+      eq(r.order, null);
+      assert(typeof r.error === 'string' && r.error.length > 0, '이유가 남아야 한다');
+    });
+  }
+
+  // ══════════ ⑨ 쪽수는 유한하다 (영원히 읽지 않는다) ══════════
+  {
+    const v = new FakeVenue().on(ORDERS, { json: () => filler(100) });
+    await on(v, () => findOrderByClientIdGateFutures(KEY, SECRET, CONTRACT, CID, true));
+
+    test('★ ⑨ 가득 찬 목록이어도 요청 수에 상한이 있다', () => {
+      const n = v.countOf(ORDERS);
+      assert(n > 2 && n <= 20, `요청이 ${n}번 나갔다 — 상한이 없거나 쪽을 안 넘긴다`);
     });
   }
 }
