@@ -95,9 +95,18 @@ TRAIGO 저장소 age533174851-sudo/auto-platform 의 검수를 맡는다.
 | | |
 |---|---|
 | 방식 | 격리 worktree → RED 재현 → 최소 수정 → GREEN → 브랜치 + Draft PR → CI 전수 초록 |
-| 매시간 | 무인 회차 자동 실행 (`claude-hourly-dev` :17 / `claude-hourly-trading` :47) |
+| 매시간 | 무인 회차 자동 실행 — **매시 :32** (`CRON_TZ=Asia/Seoul 32 * * * *`). GitHub Actions 워크플로 `claude-hourly-dev` :17 / `claude-hourly-trading` :47은 별개로 돕니다 |
 | 보고 | 회차마다 #724에 코멘트 — **파일 점유 지도 포함** |
-| 머지 | 사용자 승인이 있을 때만. 머지 전 3가지 확인: head가 main 포함 / diff가 PR 자신의 것 / **검사의 `started_at`이 그 head를 실제로 돈 시각인가**(낡은 초록 거르기) |
+| 머지 | 사용자 승인이 있을 때만. 머지 전 4가지 확인: head가 main 포함 / diff가 PR 자신의 것 / `.github` 변경 0줄 / **검사의 `started_at`이 그 head를 실제로 돈 시각인가**(낡은 초록 거르기) |
+
+### 아직 안 되는 것 — 회차가 남을 읽지 않습니다
+
+지금 제 매시 회차 프롬프트에는 **「다른 자리의 #724 코멘트를 읽고 한 번
+답한다」가 없습니다.** 그래서 회차가 혼자 일하고 혼자 보고합니다.
+자기 프롬프트 수정은 사용자 승인 사항이라 손대지 않았습니다 — 그 한
+줄이 추가되기 전까지 셋은 **같은 게시판에 쓰기만** 하고 서로를 안
+읽습니다. 첫 시험이 3제안+3답변이 아니라 **2제안+1답변**이었던 이유가
+이것입니다.
 
 Claude가 추가로 하기로 한 것: **다른 도구가 패치로 잡고 있는 파일도**
 #724 코멘트에서 읽어 점유 지도에 더합니다. Codex는 PR을 만들지 않고
@@ -110,15 +119,42 @@ Claude가 추가로 하기로 한 것: **다른 도구가 패치로 잡고 있�
 세 도구 모두, **파일을 고치기 전에 #724 최근 코멘트에서 그 경로를 검색**합니다.
 있으면 멈추고 다른 항목으로 갑니다. 멈춘 것은 재개 조건과 함께 적습니다.
 
-오늘 측정한 실제 점유 현황 (열린 PR 170건 전수):
+실제 점유 현황 (열린 PR 전수 조회 · 2026-11-21 기준):
 
-| 파일 | 잡고 있는 열린 PR |
+| 파일 | 잡고 있는 것 |
 |---|---|
-| `src/lib/engine/orderExecutor.ts` | **21건** |
+| `src/lib/engine/orderExecutor.ts` | **열린 PR 21건** |
 | `src/lib/exchanges/gateFutures.ts` | 7건 — #452 #498 #503 #508 #510 #511 #513 |
 | `src/app/api/cron/reconcile/route.ts` | 5건 — #455 #457 #458 #460 #513 |
+| `package.json` | 4건 — #175 #177 #185 #189 |
+| `src/lib/exchanges/binanceFutures.ts` | 약 10건 |
 | `scripts/check-db-columns.mjs` | #501 |
+| `src/lib/engine/testnetDiagnoseVerdict.ts` + `.test.ts` | **#727** (시계 오차) |
+| `src/app/api/binance/futures/diagnose/route.ts` | **#727** |
+| `scripts/check-testnet-diagnose.mjs` · `scripts/testnet-diagnose-mutations.mjs` | **#727** |
+| `scripts/ai-council*.mjs` · `.github/workflows/ai-council.yml` | **#726** |
+| `src/app/api/orders/reconcile/route.ts` | **없음 — #725가 머지됐습니다** |
 | `src/lib/engine/evaluationRunner.ts` | **0건 — 자유** |
 
 `orderExecutor.ts` 를 21건이 잡고 있다는 것이 지금 가장 큰 병목입니다.
 그 파일을 건드리는 작업은 셋 다 피하고, 그 21건을 줄이는 쪽이 먼저입니다.
+
+### 그래서 지금 막혀 있는 작업과 재개 조건
+
+| 할 일 | 막는 파일 | 재개 조건 |
+|---|---|---|
+| `cron/reconcile`이 `error:null, data:null`을 "대조할 것 없음 · HTTP 200"으로 적는다 | `cron/reconcile/route.ts` (5건) | 그 5건 중 이 파일을 잡은 것이 정리된 뒤 |
+| 같은 사실("장부를 못 읽었다")이 503과 500으로 갈린다 | `orderExecutor.ts` (21건) | 같음 |
+| Gate 3값 판정기 (#724 항목 4의 Gate 쪽) | `gateFutures.ts` (7건) | 같음 |
+| 시계 허용 오차를 `recvWindow` 상수로 내보내기 (지금은 검사기가 두 자리를 값으로 대조) | `binanceFutures.ts` (약 10건) | 같음 |
+| `npm run ai:debate` 한 줄 | `package.json` (4건) | 같음 |
+
+### 오늘 배운 함정 하나 — 조용한 검사기를 통과로 읽지 않는다
+
+#726의 `verify`가 actionlint(shellcheck `SC2016`)에서 멈췄습니다. 그런데
+푸시 전 로컬 `actionlint`는 **조용했습니다** — `shellcheck`가 깔려 있지
+않으면 actionlint가 그 검사를 **건너뜁니다.** 조용한 것이 통과가
+아니었습니다.
+
+워크플로를 건드리는 회차는 `shellcheck`가 실제로 있는지 먼저 확인하고,
+없으면 `apt-get install -y shellcheck` 후에 `actionlint`를 돌립니다.
