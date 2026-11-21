@@ -60,13 +60,29 @@ export async function GET(req: NextRequest) {
 
   try {
     const sb = await db();
-    const { data: keys } = await sb.from('ai_keys')
+    // **조회 실패는 "없음"이 아니다.** supabase-js는 실패를 던지지 않고
+    // `{ error }`로 돌려준다. 예전에는 그걸 버려서, DB가 잠깐 실패하면
+    // "키 0개 · 무료 플랜 · 사용 0 · 남은 한도 전부"를 200으로 그렸다 —
+    // 등록한 키가 사라진 화면이고, 한도도 지어낸 숫자다.
+    const { data: keys, error: keysErr } = await sb.from('ai_keys')
       .select('provider, key_masked, active, last_used_at, created_at').eq('user_id', userId);
+    if (keysErr || !Array.isArray(keys)) {
+      return NextResponse.json({
+        ok: false, error: 'keys_unreadable',
+        message: '등록된 키를 읽지 못했습니다 — 키가 없다는 뜻이 아닙니다',
+      }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
+    }
 
     // 오늘 사용량
     const today = new Date().toISOString().slice(0, 10);
-    const { data: usage } = await sb.from('ai_usage')
+    const { data: usage, error: usageErr } = await sb.from('ai_usage')
       .select('tier, credits, used_own_key, cache_hit').eq('user_id', userId).eq('usage_date', today);
+    if (usageErr || !Array.isArray(usage)) {
+      return NextResponse.json({
+        ok: false, error: 'usage_unreadable',
+        message: '오늘 사용량을 읽지 못했습니다 — 사용량이 0이라는 뜻이 아닙니다',
+      }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
+    }
 
     const rows = Array.isArray(usage) ? usage : [];
     const platformCredits = rows.filter(r => !r.used_own_key).reduce((a, r) => a + (Number(r.credits) || 0), 0);
@@ -79,7 +95,7 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json({
       ok: true,
-      keys: (keys || []).map(k => ({ provider: k.provider, masked: k.key_masked, active: k.active, lastUsedAt: k.last_used_at })),
+      keys: keys.map(k => ({ provider: k.provider, masked: k.key_masked, active: k.active, lastUsedAt: k.last_used_at })),
       usage: {
         date: today,
         callCount: rows.length,
@@ -115,12 +131,22 @@ export async function POST(req: NextRequest) {
   try {
     const sb = await db();
     const { encryptSecret, maskKey } = await import('@/lib/exchanges/crypto');
-    await sb.from('ai_keys').upsert({
+    const { error: saveErr } = await sb.from('ai_keys').upsert({
       user_id: userId, provider,
       key_enc: encryptSecret(String(apiKey)),
       key_masked: maskKey(String(apiKey)),
       active: true,
     }, { onConflict: 'user_id,provider' });
+    // **저장 실패를 "등록되었습니다"로 답하지 않는다.** 예전에는 `error`를
+    // 버리고 성공 문구를 냈다 — 사용자는 개인 키로 쓰는 줄 알지만 실제로는
+    // 기본 플랜 한도 안에서 돈다. DB 오류 원문은 싣지 않는다(키 원문이 섞일
+    // 여지를 두지 않는다).
+    if (saveErr) {
+      return NextResponse.json({
+        ok: false, error: 'save_failed',
+        message: '키를 저장하지 못했습니다 — 등록되지 않았습니다. 잠시 후 다시 시도하세요.',
+      }, { status: 500, headers: { 'Cache-Control': 'no-store' } });
+    }
 
     return NextResponse.json({
       ok: true, provider, masked: maskKey(String(apiKey)),
@@ -141,7 +167,15 @@ export async function DELETE(req: NextRequest) {
 
   try {
     const sb = await db();
-    await sb.from('ai_keys').delete().eq('user_id', userId).eq('provider', provider);
+    const { error: delErr } = await sb.from('ai_keys').delete().eq('user_id', userId).eq('provider', provider);
+    // **삭제 실패를 "삭제되었습니다"로 답하지 않는다.** 키가 남아 있으면
+    // AI 호출이 계속 그 키로 나가고 요금도 계속 그쪽에 청구된다.
+    if (delErr) {
+      return NextResponse.json({
+        ok: false, error: 'delete_failed',
+        message: '키를 삭제하지 못했습니다 — 키가 아직 남아 있을 수 있습니다. 잠시 후 다시 시도하세요.',
+      }, { status: 500, headers: { 'Cache-Control': 'no-store' } });
+    }
     return NextResponse.json({ ok: true, message: '키가 삭제되었습니다. 이후 기본 플랜 한도가 적용됩니다.' });
   } catch (e: any) {
     return NextResponse.json({ ok: false, error: e?.message || '삭제 실패' }, { status: 500 });
