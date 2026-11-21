@@ -181,21 +181,47 @@ export interface GatePosition { contract: string; size: number; entry_price: str
  * 읽히지 않는 응답**과 **수량을 읽을 수 없는 줄**이다.
  */
 export async function getPositionsGateFutures(key: string, secret: string, testnet = true): Promise<GatePosition[]> {
-  const rows = await gateReq<GatePosition[]>('GET', '/api/v4/futures/usdt/positions', { key, secret, testnet });
-  if (!Array.isArray(rows)) {
-    throw new Error('Gate 포지션 응답이 배열이 아닙니다 — 포지션 없음으로 읽지 않습니다');
-  }
+  // ── 이 목록도 쪽으로 나뉜다 ──
+  //
+  // Gate 문서(`GET /futures/{settle}/positions`):
+  //   · `limit` 기본 **100** — "Maximum number of records returned in a single list"
+  //   · `offset` — "List offset, starting from 0"
+  //   · `holding` — "Return only real positions - true, return all - false"
+  //
+  // 예전에는 셋 중 아무것도 보내지 않았다. 그러면 서버 기본값 100건만
+  // 오고, `holding`이 없으니 **수량 0인 계약까지** 섞여 온다. 예전에
+  // 거래한 계약이 쌓이면 그 100칸이 0짜리로 차고 **진짜 열린 포지션이
+  // 둘째 쪽으로 밀린다.** 밀린 포지션은 전체 종료에게 보이지 않는다 —
+  // 닫지 않은 채 '전체 종료 완료'가 적히는 또 하나의 문이다.
+  //
+  // `holding=true`로 줄이는 방법도 있지만, 그러면 **서버가 돌려주는
+  // 집합 자체가 달라진다.** 여기서는 응답 집합을 그대로 두고 쪽만
+  // 넘긴다 — 바꾸는 것이 적을수록 틀릴 자리도 적다.
+  const LIMIT = 100;        // 문서상 기본값과 같다 — 작은 계정은 동작이 그대로다
+  const MAX_PAGES = 20;     // 최대 2,000줄 (0짜리가 섞이므로 넉넉히)
   const out: GatePosition[] = [];
-  for (const p of rows) {
-    // `Number(null)`도 `Number('')`도 **0**이다. 그 0은 아래 `!== 0`
-    // 필터에서 걸러져 **열린 포지션이 목록에서 사라진다.**
-    const size = gateNum((p as any)?.size);
-    if (size == null) {
-      throw new Error('Gate 포지션 수량을 읽지 못했습니다 — 평탄으로 읽지 않습니다');
+  for (let page = 0; page < MAX_PAGES; page += 1) {
+    const rows = await gateReq<GatePosition[]>('GET', '/api/v4/futures/usdt/positions', {
+      key, secret, testnet, qs: `limit=${LIMIT}&offset=${page * LIMIT}`,
+    });
+    if (!Array.isArray(rows)) {
+      throw new Error('Gate 포지션 응답이 배열이 아닙니다 — 포지션 없음으로 읽지 않습니다');
     }
-    if (size !== 0) out.push(p);
+    for (const p of rows) {
+      // `Number(null)`도 `Number('')`도 **0**이다. 그 0은 아래 `!== 0`
+      // 필터에서 걸러져 **열린 포지션이 목록에서 사라진다.**
+      const size = gateNum((p as any)?.size);
+      if (size == null) {
+        throw new Error('Gate 포지션 수량을 읽지 못했습니다 — 평탄으로 읽지 않습니다');
+      }
+      if (size !== 0) out.push(p);
+    }
+    // 쪽이 `limit`보다 짧다 = 목록의 끝이다. 여기까지가 전부다.
+    if (rows.length < LIMIT) return out;
   }
-  return out;
+  // 상한까지 모든 쪽이 가득 찼다 = 아직 남았다. 불완전한 목록을
+  // "열린 포지션은 이게 전부"로 넘기면 전체 종료가 거짓이 된다.
+  throw new Error('Gate 포지션 목록을 끝까지 읽지 못했습니다 — 열린 포지션이 더 있을 수 있습니다');
 }
 
 /**
