@@ -138,8 +138,22 @@ export function challengeProgressPct(i: {
   return Math.max(0, Math.min(100, pct));
 }
 
-/** 남은 기간. 못 읽으면 null — "0일"로 적지 않는다. */
-export function challengeDaysLeft(endsAt: string | null | undefined, nowMs?: number): number | null {
+/**
+ * 남은 기간. 못 읽으면 null — "0일"로 적지 않는다.
+ *
+ * **시작 전·진행 중에만 센다.** 취소·실패선·목표 달성은 기간보다 먼저
+ * 끝나고, 그때 `ends_at`은 여전히 미래다. 상태를 안 보면 "종료 · 27일
+ * 남음"이 한 카드에 같이 뜬다. 정리 중(CLOSING)도 사유가 이미 얼었으므로
+ * 남은 기간이 없다. 모르는 상태에서는 적지 않는다.
+ *
+ * `status`를 선택 인자로 두지 않는다 — 빠뜨리면 다시 그 표시가 된다.
+ */
+export function challengeDaysLeft(
+  endsAt: string | null | undefined,
+  nowMs: number | undefined,
+  status: string | null | undefined,
+): number | null {
+  if (status !== 'READY' && status !== 'RUNNING') return null;
   if (!endsAt) return null;
   const t = Date.parse(String(endsAt));
   if (!Number.isFinite(t)) return null;

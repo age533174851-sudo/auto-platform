@@ -81,32 +81,82 @@ const CLAIMS = [
 const MEASURED = /실측|실제로 확인해/;
 const HAS_DATE = /20\d{2}[-.\/]\d{1,2}[-.\/]\d{1,2}/;
 
+/**
+ * 한 줄에서 **늙는 문장**을 찾는다.
+ *
+ * 루프와 자기 점검이 같은 함수를 쓴다. 규칙이 두 곳에 있으면 언젠가
+ * 갈리고, 그때 갈리는 쪽은 늘 검사기다.
+ */
+export function agingProblems(line) {
+  const out = [];
+  // 이 검사 파일 자체를 설명하는 줄은 예로 든 것이다.
+  if (/check-status-claims/.test(line)) return out;
+
+  for (const m of line.match(SHA) || []) {
+    // 순수 숫자는 SHA가 아니다(연도·개수 등). 글자가 하나는 있어야 한다.
+    if (!/[a-f]/.test(m)) continue;
+    out.push({ what: `커밋 SHA \`${m}\``,
+      why: '적는 순간부터 늙습니다 — 다음 배포에 바로 거짓이 됩니다' });
+  }
+  for (const c of CLAIMS) {
+    if (c.re.test(line)) out.push({ what: '런타임 상태 단정', why: c.why });
+  }
+  if (MEASURED.test(line) && !HAS_DATE.test(line)) {
+    out.push({ what: '언제 쟀는지 없는 실측 주장',
+      why: '언제 잰 값인지 없으면 지금 값으로 읽힙니다 — 날짜를 같이 적으십시오' });
+  }
+  return out;
+}
+
+// ── 규칙이 실제로 걸리는지 매번 확인한다 ──
+// 통과만 하고 아무것도 막지 않는 검사기는 없는 것보다 나쁘다.
+{
+  const must = [
+    ['커밋 220f8001 기준', /SHA/],
+    ['Fly Worker alive', /상태 단정/],
+    ['실측 진입 12건', /언제 쟀는지/],
+  ];
+  const fails = must.filter(([line, want]) => !agingProblems(line).some(p => want.test(p.what)));
+  const quiet = ['PR #170에서 고쳤다', '2026-08-21에 쟀다 — 실측 12건', 'MATCHED가 무슨 뜻인가'];
+  const noisy = quiet.filter(line => agingProblems(line).length > 0);
+  if (fails.length > 0 || noisy.length > 0) {
+    console.error('❌ 자기 점검 실패 — 늙는 문장 판별이 깨졌습니다');
+    for (const [line] of fails) console.error(`   못 잡음: ${line}`);
+    for (const line of noisy) console.error(`   잘못 잡음: ${line}`);
+    process.exit(1);
+  }
+}
+
 const problems = [];
+const missing = [];
 let scanned = 0;
 
 for (const f of FILES) {
-  if (!existsSync(f)) continue;
+  if (!existsSync(f)) { missing.push(f); continue; }
   const lines = readFileSync(f, 'utf8').split('\n');
   scanned++;
   lines.forEach((line, i) => {
-    const n = i + 1;
-    // 이 검사 파일 자체를 설명하는 줄은 예로 든 것이다.
-    if (/check-status-claims/.test(line)) return;
-
-    for (const m of line.match(SHA) || []) {
-      // 순수 숫자는 SHA가 아니다(연도·개수 등). 글자가 하나는 있어야 한다.
-      if (!/[a-f]/.test(m)) continue;
-      problems.push({ f, n, what: `커밋 SHA \`${m}\``,
-        why: '적는 순간부터 늙습니다 — 다음 배포에 바로 거짓이 됩니다', line });
-    }
-    for (const c of CLAIMS) {
-      if (c.re.test(line)) problems.push({ f, n, what: '런타임 상태 단정', why: c.why, line });
-    }
-    if (MEASURED.test(line) && !HAS_DATE.test(line)) {
-      problems.push({ f, n, what: '언제 쟀는지 없는 실측 주장',
-        why: '언제 잰 값인지 없으면 지금 값으로 읽힙니다 — 날짜를 같이 적으십시오', line });
-    }
+    for (const p of agingProblems(line)) problems.push({ f, n: i + 1, ...p, line });
   });
+}
+
+// ── 감시 목록이 조용히 비면 이 검사는 꺼진 것과 같다 ──
+//
+// 실측 RED (2026-11-10, main `220f8001`): `FULL_COMPLETION_STATUS.md`를
+// `STATUS.md`로 **이름만 바꾸고** 그 안에 늙는 문장 5종을 넣었더니
+// `✅ 상태판 0개 · 늙는 문장 0건` · exit 0 이었다. 같은 내용을 원래
+// 이름으로 두면 전부 잡힌다. 즉 지킬 것이 없어진 게 아니라 **감시가
+// 꺼진 것**이다.
+//
+// 0개를 봤다고 적는 것은 정직하지만, 그 상태로 **통과시키는 것**은
+// `CLAUDE.md`의 "확인하지 못한 것은 통과가 아니다"에 걸린다.
+if (missing.length > 0) {
+  console.error('❌ 감시 목록이 낡았습니다 — 적어 둔 상태판이 없습니다\n');
+  for (const f of missing) console.error(`  ${f}`);
+  console.error('\n이름이 바뀌었으면 그 문서는 지금 아무도 안 보고 있습니다.');
+  console.error('문서를 없앴다면 이 검사기의 FILES에서도 지우십시오 —');
+  console.error('감시 목록은 비어 있을 수 있지만 **조용히** 비어서는 안 됩니다.');
+  process.exit(1);
 }
 
 if (problems.length > 0) {

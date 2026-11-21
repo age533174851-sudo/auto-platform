@@ -8,8 +8,9 @@
 
 import { test, eq, assert } from '../../test/harness';
 import {
-  autoMergeGate, gateComment, AUTO_MERGE_LABEL, SELF_CHECK_NAME, REQUIRED_CHECKS,
-  type PrFacts,
+  autoMergeGate, autoMergeTechnicalGate, gateComment,
+  AUTO_MERGE_LABEL, SELF_CHECK_NAME, REQUIRED_CHECKS,
+  type PrFacts, type GateCode,
 } from './autoMergeGate';
 
 /** 모든 조건을 만족하는 상태. 각 테스트는 여기서 하나씩만 망가뜨린다 */
@@ -319,5 +320,91 @@ export function runAutoMergeGateTests() {
   test('통과했을 때는 다른 문구다', () => {
     const c = gateComment({ number: 1, headSha: 'abc1234def5678' }, autoMergeGate(good()));
     assert(c.includes('✅'), c);
+  });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // **스위치와 기술 판정을 가른다.**
+  //
+  // 왜 필요한가: `autoMergeGate`는 라벨이 없으면 거기서 돌아선다. 그게
+  // 맞다 — 라벨이 유일한 스위치다. 그런데 **그래서 열린 PR 100개의
+  // 판정이 전부 `NO_LABEL`이고, 그중 무엇이 기술적으로 올릴 만한지
+  // 아무도 알 수 없다.** 사람은 100개를 하나씩 열어 봐야 한다.
+  //
+  // 그래서 기술 판정부만 따로 부를 수 있게 한다. 이것은 **보고용**이고
+  // 아무것도 합치지 않는다. 스위치는 `autoMergeGate`에만 남는다.
+  //
+  // 이 묶음에서 가장 중요한 테스트는 마지막 것이다 — 두 함수의 판정이
+  // **값으로 같다**는 것을 못 박는다. 로직을 복제하면 언젠가 갈리고,
+  // 갈리면 보고서가 "올려도 된다"고 한 PR을 게이트가 막는다.
+  // ─────────────────────────────────────────────────────────────────────
+
+  console.log('[자동 머지 — 스위치와 기술 판정을 가른다]');
+
+  test('기술 판정은 라벨·초안을 보지 않는다', () => {
+    // 라벨 없고 초안인데 나머지는 완벽한 PR — 사람이 알고 싶은 바로 그 경우
+    const facts = good({ labels: [], draft: true });
+    eq(autoMergeGate(facts).code, 'NO_LABEL', '게이트는 그대로 스위치에서 멈춘다');
+    const t = autoMergeTechnicalGate(facts);
+    eq(t.code, 'OK', t.reason);
+    eq(t.merge, true, '기술적으로는 올릴 수 있다는 뜻이다');
+  });
+
+  test('기술 판정은 NO_LABEL·DRAFT를 절대 돌려주지 않는다', () => {
+    const cases: Partial<PrFacts>[] = [
+      { labels: [] }, { draft: true }, { labels: [], draft: true },
+      { labels: [], draft: true, mergeable: false },
+      { labels: [], draft: true, checks: [], statuses: [] },
+    ];
+    for (const over of cases) {
+      const c = autoMergeTechnicalGate(good(over)).code;
+      assert(c !== 'NO_LABEL' && c !== 'DRAFT',
+        `기술 판정이 스위치를 봤다: ${c} (${JSON.stringify(over)})`);
+    }
+  });
+
+  test('기술 결함은 스위치가 꺼져 있어도 그대로 잡힌다', () => {
+    const off = { labels: [], draft: true };
+    eq(autoMergeTechnicalGate(good({ ...off, baseRef: 'other' })).code, 'STACKED');
+    eq(autoMergeTechnicalGate(good({ ...off, mergeable: false })).code, 'CONFLICT');
+    eq(autoMergeTechnicalGate(good({ ...off, mergeable: null })).code, 'MERGEABILITY_UNKNOWN');
+    eq(autoMergeTechnicalGate(good({ ...off, headContainsBase: false })).code, 'BEHIND_BASE');
+    eq(autoMergeTechnicalGate(good({ ...off, checks: [], statuses: [] })).code, 'CHECKS_MISSING');
+    eq(autoMergeTechnicalGate(good({ ...off, changesRequested: null })).code, 'REVIEW_UNKNOWN');
+    eq(autoMergeTechnicalGate(good({ ...off, unresolvedThreads: null })).code, 'REVIEW_UNKNOWN');
+    eq(autoMergeTechnicalGate(good({ ...off, changesRequested: 1 })).code, 'CHANGES_REQUESTED');
+  });
+
+  test('**두 함수의 판정이 값으로 같다** — 스위치를 켠 게이트와 기술 판정', () => {
+    // 스위치가 켜진 PR에서는 `autoMergeGate`가 곧 기술 판정이어야 한다.
+    // 하나라도 다르면 판단이 두 곳에 갈린 것이다.
+    const defects: Partial<PrFacts>[] = [
+      {},
+      { baseRef: 'release' },
+      { mergeable: false },
+      { mergeableState: 'dirty' },
+      { mergeable: null },
+      { headContainsBase: false },
+      { headContainsBase: null },
+      { checks: [], statuses: [] },
+      { checks: [{ name: 'verify', status: 'completed', conclusion: 'failure', headSha: 'abc1234def5678' }] },
+      { checks: [{ name: 'verify', status: 'in_progress', conclusion: null, headSha: 'abc1234def5678' }] },
+      { checks: [{ name: 'verify', status: 'completed', conclusion: 'cancelled', headSha: 'abc1234def5678' }] },
+      { statuses: [{ context: 'Vercel', state: 'failure' }] },
+      { statuses: [{ context: 'Vercel', state: 'pending' }] },
+      { changesRequested: 1 },
+      { changesRequested: null },
+      { unresolvedThreads: 1 },
+      { unresolvedThreads: null },
+    ];
+    for (const over of defects) {
+      const on = good(over);                                   // 스위치 켜짐
+      const off = good({ ...over, labels: [], draft: true });   // 스위치 꺼짐
+      const a = autoMergeGate(on);
+      const b = autoMergeTechnicalGate(off);
+      eq(b.code, a.code as GateCode,
+        `판정이 갈렸다: 게이트=${a.code} 기술=${b.code} (${JSON.stringify(over)})`);
+      eq(b.merge, a.merge, `merge가 갈렸다 (${JSON.stringify(over)})`);
+      eq(b.reason, a.reason, `이유 문구가 갈렸다 (${JSON.stringify(over)})`);
+    }
   });
 }
