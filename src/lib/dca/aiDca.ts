@@ -55,3 +55,15 @@ export function computeBuyAmount(baseAmount: number, fng: number, tiers: DcaTier
 }
 
 export const FREQ_LABEL: Record<string, string> = { daily: '매일', weekly: '매주', monthly: '매월' };
+
+// `/api/feargreed` 응답에서 지수를 읽는다. 못 읽었으면 **null** — 50(중립)으로
+// 꾸미지 않는다. 그 라우트는 공급원이 실패하면 502와 `{ crypto: null }`로
+// 답하는데, 예전 패널은 이것을 "50 · 중립 · 기본 × 1배"로 바꿔 적었다.
+export function readFearGreedValue(ok: boolean, body: unknown): number | null {
+  if (!ok || !body || typeof body !== 'object') return null;
+  const crypto = (body as { crypto?: unknown }).crypto;
+  if (!crypto || typeof crypto !== 'object') return null;
+  const v = (crypto as { value?: unknown }).value;
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 100) return null;
+  return v;
+}

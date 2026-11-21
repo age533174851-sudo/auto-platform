@@ -52,8 +52,14 @@ export function isUnsafeIntegerLiteral(token: string): boolean {
   const digits = token.replace(/^-/, '');
   // 15자리 이하는 언제나 안전하다(최대 안전 정수는 16자리).
   if (digits.length <= 15) return false;
-  // 16자리 이상은 실제로 왕복이 되는지 본다 — 값으로 확인한다.
-  return String(Number(token)) !== token;
+  // 16자리 이상은 **안전 범위 안인지**를 본다.
+  //
+  // 예전에는 `String(Number(token)) !== token`(왕복 비교)이었다. 그런데
+  // `String`은 그 double의 **가장 짧은** 십진 표기를 돌려줄 뿐 정확한 값이
+  // 아니다 — `2089209928026685400`은 Number로 …685440이 되지만 `String`은
+  // "…685400"을 돌려줘 왕복된 것처럼 보였다. 그렇게 number로 남은 번호는
+  // `venueIdOf`가 안전 범위 밖이라 null로 버린다. 판정을 그 규칙과 같게 둔다.
+  return !Number.isSafeInteger(Number(token));
 }
 
 /**
