@@ -243,6 +243,36 @@ export async function getGateServerTime(testnet = true): Promise<number | null> 
 }
 
 /**
+ * **Gate 목록을 끝까지 읽는다.** 못 읽으면 던진다 — 빈 목록이 아니다.
+ *
+ * `/orders`·`/price_orders`·`/positions`는 전부 같은 규칙이다
+ * (`limit` 기본 100 · `offset` "List offset, starting from 0").
+ * **정렬 순서는 문서에 없다.** 그래서 첫 쪽에 없다고 없는 것이 아니다.
+ *
+ * 끝 판정은 쪽 길이로 한다 — 정렬을 가정하지 않는 유일한 방법이다.
+ *   · 쪽이 `limit`보다 짧으면 목록의 끝이다
+ *   · 상한까지 가득 차 있으면 다 읽지 못한 것이다 → 던진다
+ */
+async function gatePagedList<T>(
+  path: string, baseQs: string,
+  key: string, secret: string, testnet: boolean,
+  limit = 100, maxPages = 10,
+): Promise<T[]> {
+  const out: T[] = [];
+  for (let page = 0; page < maxPages; page += 1) {
+    const qs = [baseQs, `limit=${limit}`, `offset=${page * limit}`]
+      .filter(Boolean).join('&');
+    const rows = await gateReq<T[]>('GET', path, { key, secret, qs, testnet });
+    if (!Array.isArray(rows)) {
+      throw new Error(`Gate 목록 응답이 배열이 아닙니다 (${path}) — 없음으로 읽지 않습니다`);
+    }
+    out.push(...rows);
+    if (rows.length < limit) return out;
+  }
+  throw new Error(`Gate 목록을 끝까지 읽지 못했습니다 (${path}) — 더 남아 있을 수 있습니다`);
+}
+
+/**
  * 미체결 일반 주문. 상태 대조에서 앱 기록과 짝을 맞추는 데 쓴다.
  *
  * contract를 주지 않으면 전체다. Gate는 status=open 필터를 요구한다.
@@ -250,11 +280,12 @@ export async function getGateServerTime(testnet = true): Promise<number | null> 
 export async function getOpenOrdersGateFutures(
   key: string, secret: string, testnet = true, contract?: string,
 ): Promise<GateOrderResult[]> {
-  const qs = contract ? `status=open&contract=${contract}&limit=100` : 'status=open&limit=100';
-  const rows = await gateReq<GateOrderResult[]>('GET', '/api/v4/futures/usdt/orders', {
-    key, secret, qs, testnet,
-  });
-  return Array.isArray(rows) ? rows : [];
+  // 비배열 200을 `[]`로 접지 않는다. `cancelAllOpenOrdersGateFutures`는
+  // 이 함수의 **던짐**을 받아 `success:false`를 돌려주도록 이미 만들어져
+  // 있다 — 빈 배열로 접으면 그 보호가 그냥 지나간다.
+  const base = contract ? `status=open&contract=${contract}` : 'status=open';
+  return gatePagedList<GateOrderResult>(
+    '/api/v4/futures/usdt/orders', base, key, secret, testnet);
 }
 
 /** Read all three Gate TESTNET books for a recovery observation, preserving unknowns. */
@@ -289,17 +320,19 @@ export async function getPriceOrdersGateFutures(
   key: string, secret: string, contract: string, testnet = true,
 ): Promise<any[] | null> {
   try {
-    const rows = await gateReq<any[]>('GET', '/api/v4/futures/usdt/price_orders', {
-      key, secret, qs: `status=open&contract=${contract}`, testnet,
-    });
-    // **200인데 목록이 아니면 `null`이다.** 주석이 처음부터 그렇게 적혀
-    // 있었는데(`못 읽으면 null — 빈 배열과 구분한다`) 구현은 `[]`를
-    // 돌려줬다. 그러면 Gate가 200에 `{label:'ERROR'}`·`null`·빈 본문을
-    // 줄 때 **"기존 보호주문 없음"이 확정되고** 새 보호주문이 나간다.
+    // ★ 위 한 줄(**"못 읽으면 null — 빈 배열과 구분한다"**)이 이 함수의
+    //   계약인데, 예전 코드는 비배열 200에 `[]`를 돌려줬다. 문서와 코드가
+    //   달랐고, 그 `[]`는 호출부에서 "보호주문 없음"이 된다.
     //
-    // 같은 파일의 `getAllPriceOrdersGateFutures`는 이미 비배열을 `null`로
-    // 돌려준다 — 선례가 옆에 있는데 이 함수만 빠져 있었다.
-    return Array.isArray(rows) ? rows : null;
+    // 충돌 해소(2026-11-21): base 쪽은 `gateReq` 한 번 +
+    // `Array.isArray(rows) ? rows : null`이었다. 비배열을 null로 적는
+    // 보장은 같지만 **쪽을 넘기지 않아 101번째부터 조용히 사라진다** —
+    // 그 잘린 목록은 아래 `catch`를 지나 "이게 전부"로 쓰인다.
+    // `gatePagedList`는 비배열에 던지고(→ catch → null), 끝까지 읽지
+    // 못해도 던진다. **두 보장을 다 가진 쪽을 남긴다.**
+    return await gatePagedList<any>(
+      '/api/v4/futures/usdt/price_orders', `status=open&contract=${contract}`,
+      key, secret, testnet);
   } catch { return null; }
 }
 
@@ -328,10 +361,8 @@ export async function getAllPriceOrdersGateFutures(
   key: string, secret: string, testnet = true,
 ): Promise<any[] | null> {
   try {
-    const rows = await gateReq<any[]>('GET', '/api/v4/futures/usdt/price_orders', {
-      key, secret, qs: 'status=open', testnet,
-    });
-    return Array.isArray(rows) ? rows : null;
+    return await gatePagedList<any>(
+      '/api/v4/futures/usdt/price_orders', 'status=open', key, secret, testnet);
   } catch { return null; }
 }
 
@@ -518,7 +549,22 @@ export async function placeStopGateFutures(
       'POST', '/api/v4/futures/usdt/price_orders', { key, secret, body, testnet });
     // **번호를 문자열 그대로 받는다.** 숫자로 읽힌 int64는 이미 망가진
     // 값이라 `venueIdOf`가 null을 준다 — 그 번호로는 취소가 안 된다.
-    return { success: true, orderId: venueIdOf(r?.id) ?? undefined, message: '손절 설정' };
+    // ── 번호를 못 읽은 손절은 **설정된 손절이 아니다** ──
+    //
+    //   바로 위 주석이 이미 적고 있다: 숫자로 읽힌 int64는 망가진 값이라
+    //   `venueIdOf`가 null을 주고, **그 번호로는 취소가 안 된다.** 취소도
+    //   확인도 못 하는 주문을 "손절 설정됨"으로 적으면, 장부에는 보호가
+    //   있고 거래소에는 다룰 수 없는 주문이 있는 상태가 된다.
+    //
+    //   호출부(`orderExecutor`)는 손절 실패 시 방금 연 포지션을 즉시
+    //   닫도록 이미 만들어져 있다 — 그래서 결과는 '보호 없는 포지션'이
+    //   아니라 '포지션 없음 + 실패 보고'다. 그 설계를 그대로 쓴다.
+    const orderId = venueIdOf(r?.id);
+    if (!orderId) {
+      return { success: false,
+        message: '손절 설정 실패: 주문 번호를 읽지 못했습니다 — 취소·확인이 불가능한 주문입니다' };
+    }
+    return { success: true, orderId, message: '손절 설정' };
   } catch (e: any) {
     return { success: false, message: `손절 설정 실패: ${e?.message || e}` };
   }
@@ -861,13 +907,29 @@ export async function cancelAllOpenOrdersGateFutures(
   //
   // 조건부 주문은 `contract` 없이도 전부 조회된다. 계약을 추측하는 대신
   // **거기서도 모은다.**
+  //
+  // ── 그리고 **셋 다 읽혔는지를 기억한다** ──
+  //
+  //   예전에는 조건부 전체 조회가 실패해도(null) `contracts`가 비어
+  //   있을 때만 막았다. 미체결에서 계약이 하나라도 나오면 그대로
+  //   진행하고 `success: true`로 끝났다 — **보지도 않은 계약에 남은
+  //   손절**이 있어도 "전부 취소"가 된다. 이 함수의 맨 위 주석이
+  //   "조회에 실패하면 성공이라고 말하지 않는다"고 적어 둔 그것이다.
+  //
+  //   지우는 범위는 바꾸지 않는다. 바꾸는 것은 **완료라고 말하는
+  //   조건**뿐이다.
+  let readComplete = true;
+  const unread: string[] = [];
   const contracts = new Set<string>();
   for (const o of open) if (o?.contract) contracts.add(String(o.contract));
   try {
     for (const p of await getPositionsGateFutures(key, secret, testnet)) {
       if (p?.contract) contracts.add(String(p.contract));
     }
-  } catch { /* 포지션을 못 읽어도 열린 주문 쪽은 지운다 */ }
+  } catch {
+    // 포지션을 못 읽어도 열린 주문 쪽은 지운다 — 다만 '전부'라고는 못 한다.
+    readComplete = false; unread.push('포지션');
+  }
 
   // **조건부 주문에만 남은 계약.** 여기가 이 함수의 눈먼 자리였다.
   const priceRows = await getAllPriceOrdersGateFutures(key, secret, testnet);
@@ -876,6 +938,8 @@ export async function cancelAllOpenOrdersGateFutures(
       const c = (r as any)?.contract ?? (r as any)?.initial?.contract;
       if (c) contracts.add(String(c));
     }
+  } else {
+    readComplete = false; unread.push('조건부 주문');
   }
 
   if (contracts.size === 0) {
@@ -919,6 +983,12 @@ export async function cancelAllOpenOrdersGateFutures(
     }
   }
 
+  // 지운 것은 지운 대로 세되, **다 보지 못했으면 완료가 아니다.**
+  if (!readComplete) {
+    return { success: false, count, results,
+      message: `${unread.join('·')}을(를) 읽지 못했습니다 — 취소 ${count}건은 보냈지만`
+        + ' 남은 주문이 없다는 뜻이 아닙니다' };
+  }
   return {
     success: ok, count, results,
     message: ok ? `미체결 주문 취소 완료 (${count}건)`
