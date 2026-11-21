@@ -94,17 +94,27 @@ export async function GET(req: NextRequest) {
       .select('id, client_order_id, symbol, side, status, mode, exchange, created_at, error_message')
       .in('status', [...RECONCILE_TARGET_STATUSES]);
     if (scopeUserId) listQ = listQ.eq('user_id', scopeUserId);
-    const { data: pending } = await listQ
-      .order('created_at', { ascending: true })
-      .limit(50);
-
-    const list = Array.isArray(pending) ? pending : [];
-
     if (dryRun || !connectionId) {
+      // ★ **질의를 이 갈래 안에서 한다.**
+      //
+      //   목록은 여기서만 쓴다. 갈래 **밖**에서 미리 읽으면, 실제 대조
+      //   갈래가 `pending`과 `pendingError`를 **둘 다 버린다** — 버린
+      //   error는 아무도 못 보고, 50행 질의는 왕복 한 번을 그냥 쓴다.
+      //   `error`를 잡기 시작한 뒤에는 "잡아 놓고 버리는" 모양이 되므로
+      //   읽는 자리를 쓰는 자리로 옮긴다.
+      const { data: pending, error: pendingError } = await listQ
+        .order('created_at', { ascending: true })
+        .limit(50);
+      if (pendingError || !Array.isArray(pending)) {
+        return NextResponse.json({
+          ok: false, error: 'pending_orders_unreadable',
+          message: '미확정 주문 목록을 읽지 못했습니다',
+        }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
+      }
       return NextResponse.json({
         ok: true, dryRun: true,
-        pendingCount: list.length,
-        pending: list,
+        pendingCount: pending.length,
+        pending,
         hint: connectionId ? undefined : 'connectionId를 주면 실제 대조를 수행합니다',
       }, { headers: { 'Cache-Control': 'no-store' } });
     }
