@@ -1,0 +1,142 @@
+# .github/workflows/ai-council.yml
+#
+# **GPT · Claude · Gemini가 같은 diff를 읽고 2라운드 토론한 결과를
+# PR 코멘트로 남긴다.** 사람이 `/ai-debate` 한 줄만 치면 된다.
+#
+# ── 요금이 새지 않게 하는 세 가지 ──
+#
+#   1. **커밋마다 돌지 않는다.** `issue_comment` 의 `/ai-debate` 또는
+#      라벨 `ai-review` 뿐이다. push·pull_request 트리거는 없다.
+#   2. **봇의 코멘트로는 깨어나지 않는다.** 아래 `if` 가 actor 를 본다.
+#      이게 없으면 이 워크플로가 올린 코멘트가 자기를 다시 깨우고,
+#      그 순환은 사람이 멈출 때까지 돈다.
+#   3. 라운드 수·diff 크기·출력 토큰 상한은 `scripts/ai-council.mjs` 에
+#      **상수**로 있다. 워크플로에서 늘릴 수 있는 입력이 없다.
+#
+# ── 왜 `issue_comment` 인가 (보안) ──
+#
+#   `issue_comment` 로 깨어난 워크플로는 **base 브랜치의 워크플로 파일**로
+#   돈다. PR 쪽에서 이 파일을 고쳐 시크릿을 빼내는 길이 없다는 뜻이다.
+#   `pull_request_target` 도 같은 성질이지만 그쪽은 PR 코드를 체크아웃하면
+#   위험해진다 — 여기서는 애초에 PR 코드를 체크아웃하지 않고 **diff만**
+#   API로 받아 읽는다.
+#
+# ── 이 워크플로가 가질 수 없는 것 ──
+#
+#   `contents: read` 뿐이다. 머지·푸시·배포·릴리스가 토큰 수준에서 막혀
+#   있다. 쓰기는 **코멘트 한 곳**(`issues: write`)뿐이다.
+#   금지를 프롬프트에만 적으면 언젠가 지켜지지 않는다.
+
+name: ai-council
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [labeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: write
+
+# 같은 PR에서 두 번 부르면 앞의 것을 취소한다. 두 토론이 겹쳐 돌면
+# 요금은 두 배인데 결론은 하나만 읽힌다.
+concurrency:
+  group: ai-council-${{ github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  council:
+    # ★ **봇이 단 코멘트로는 돌지 않는다.** 이 줄이 무한 루프를 막는다.
+    if: >-
+      github.actor != 'github-actions[bot]'
+      && !endsWith(github.actor, '[bot]')
+      && (
+        (github.event_name == 'issue_comment'
+          && github.event.issue.pull_request != null
+          && contains(github.event.comment.body, '/ai-debate'))
+        || (github.event_name == 'pull_request_target'
+          && github.event.label.name == 'ai-review')
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # PR 코드를 체크아웃하지 않는다. **base 쪽 스크립트만** 쓴다 —
+      # PR이 스크립트를 바꿔 시크릿에 손대는 길을 없앤다.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 어느 PR인지 정한다
+        id: pick
+        env:
+          FROM_COMMENT: ${{ github.event.issue.number }}
+          FROM_LABEL: ${{ github.event.pull_request.number }}
+        run: |
+          n="${FROM_COMMENT:-$FROM_LABEL}"
+          if [ -z "$n" ]; then
+            echo "::error::PR 번호를 읽지 못했습니다 — 토론을 돌리지 않습니다"
+            exit 1
+          fi
+          echo "pr=$n" >> "$GITHUB_OUTPUT"
+
+      # diff는 GitHub 토큰으로 받는다. 모델 키는 이 단계에 주지 않는다 —
+      # 단계마다 필요한 것만 준다.
+      - name: PR diff를 fixture로 모은다
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ steps.pick.outputs.pr }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$REPO/pulls/$PR" > /tmp/pr.json
+          gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" > /tmp/files.json
+          node -e '
+            const fs = require("node:fs");
+            const pr = JSON.parse(fs.readFileSync("/tmp/pr.json", "utf8"));
+            const raw = JSON.parse(fs.readFileSync("/tmp/files.json", "utf8"));
+            const files = (Array.isArray(raw) ? raw : [raw]).flat()
+              .map((f) => ({ filename: f.filename, changes: f.changes, patch: f.patch }));
+            fs.writeFileSync("/tmp/fixture.json", JSON.stringify({
+              title: `#${pr.number} ${pr.title}`,
+              sha: pr.head && pr.head.sha,
+              description: String(pr.body || "").slice(0, 4000),
+              files,
+            }));
+            console.log(`파일 ${files.length}개를 모았습니다`);
+          '
+
+      - name: 토론 (2라운드 상한은 스크립트 상수)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          AI_COUNCIL_OPENAI_MODEL: ${{ vars.AI_COUNCIL_OPENAI_MODEL }}
+          AI_COUNCIL_ANTHROPIC_MODEL: ${{ vars.AI_COUNCIL_ANTHROPIC_MODEL }}
+          AI_COUNCIL_GEMINI_MODEL: ${{ vars.AI_COUNCIL_GEMINI_MODEL }}
+          AI_COUNCIL_OUTPUT: /tmp/report.md
+        run: node scripts/ai-council.mjs --fixture /tmp/fixture.json
+
+      # 보고서가 없으면 **코멘트를 올리지 않는다.** 빈 코멘트를 올리면
+      # 사람은 "돌았고 할 말이 없었다"로 읽는다 — 그건 거짓이다.
+      - name: 결과를 PR 코멘트로
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ steps.pick.outputs.pr }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ ! -s /tmp/report.md ]; then
+            printf '%s\n' \
+              '## 🤖 AI 합의체' '' \
+              '토론을 끝내지 못했습니다 — 보고서가 생성되지 않았습니다.' \
+              '실행 로그를 보세요. **의견이 없는 것이지 "문제 없음"이 아닙니다.**' \
+              > /tmp/report.md
+          fi
+          gh api "repos/$REPO/issues/$PR/comments" -f body@/tmp/report.md > /dev/null
+          echo "코멘트를 올렸습니다 (PR #$PR)"
