@@ -714,10 +714,16 @@ export async function futuresCancelProtection(
       const isProtective = t.includes('STOP') || t.includes('TAKE_PROFIT');
       return isProtective && (o?.closePosition === true || o?.reduceOnly === true);
     });
+    // ★ **거래소가 받아들인 것만 센다.** `cancelFuturesOrder`는 거절을
+    //   던지지 않고 `{ success: false }`로 돌려준다 — 예전에는 `await` 뒤에
+    //   바로 `n++`를 해서 거절된 취소까지 "취소됨"으로 세었고, 무장된
+    //   손절이 남아 있는데 "남은 보호 주문 N건 취소"라고 적었다.
     let n = 0;
     for (const o of targets) {
-      try { await bf.cancelFuturesOrder(key, secret, symbol, o.orderId, testnet); n++; }
-      catch { /* 개별 실패는 넘긴다 — 아래에서 몇 건 지웠는지 그대로 적는다 */ }
+      try {
+        const r = await bf.cancelFuturesOrder(key, secret, symbol, o.orderId, testnet);
+        if (r?.success === true) n++;
+      } catch { /* 개별 실패는 넘긴다 — 아래에서 몇 건 지웠는지 그대로 적는다 */ }
     }
     return {
       cancelled: n,
