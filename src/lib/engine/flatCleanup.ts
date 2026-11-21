@@ -37,6 +37,14 @@ export type FlatCleanupCode =
   | 'POSITION_UNKNOWN'
   /** 조건부 주문 목록을 못 읽었다. **0건과 다르다** */
   | 'ORDERS_UNKNOWN'
+  /**
+   * 걸어 둔 **소유 번호 목록**을 못 읽었다. 0건과 다르다.
+   *
+   * 1순위 소유 증거가 없는 회차다. 남아 있는 주문이 내 것인지 남의
+   * 것인지 가릴 수 없으므로, 그 위로 신규 진입을 내지 않는다 —
+   * 그리고 모르는 채로 취소도 보내지 않는다.
+   */
+  | 'OWNERSHIP_UNKNOWN'
   /** 포지션 0 · 치울 것 없음 */
   | 'NOTHING_TO_DO'
   /** 내 것을 지웠고 재조회로 확인했다 */
@@ -47,7 +55,8 @@ export type FlatCleanupCode =
   | 'CANCEL_UNKNOWN';
 
 export interface FlatCleanupPlan {
-  code: Extract<FlatCleanupCode, 'NOT_FLAT' | 'POSITION_UNKNOWN' | 'ORDERS_UNKNOWN' | 'NOTHING_TO_DO' | 'CLEAN'>;
+  code: Extract<FlatCleanupCode,
+    'NOT_FLAT' | 'POSITION_UNKNOWN' | 'ORDERS_UNKNOWN' | 'OWNERSHIP_UNKNOWN' | 'NOTHING_TO_DO' | 'CLEAN'>;
   /** 취소할 **정확한** 거래소 주문 번호 */
   cancel: string[];
   /** 손대지 않는 주문들 (FOREIGN · 판별 못 한 것) */
@@ -79,6 +88,14 @@ export function flatCleanupPlan(i: {
    * 결과가 우연히 같은 접두사를 갖는 일을 아예 없앤다.
    */
   ownedOnly?: boolean;
+  /**
+   * 그 **번호 목록을 실제로 읽었는가.** 생략하면 "읽었다"로 본다.
+   *
+   * `false`는 1순위 소유 증거가 없는 회차라는 뜻이다 — 빈 목록(`[]`)과
+   * 다르다. 빈 목록은 "적어 둔 번호가 없다"이고, 이쪽은 "있는지 없는지
+   * 모른다"다.
+   */
+  ownedIdsKnown?: boolean;
 }): FlatCleanupPlan {
   const none: CleanupPlan['keep'] = [];
 
@@ -121,6 +138,30 @@ export function flatCleanupPlan(i: {
     for (const id of dropped) {
       plan.keep.push({ id, class: 'UNKNOWN',
         reason: '적어 둔 주문 번호와 일치하지 않습니다 — 번호로 증명된 것만 취소합니다' });
+    }
+  }
+
+  // ── 소유 번호를 못 읽은 회차 ──
+  //
+  //   이 파일 머리말의 규칙 그대로다: **목록을 못 읽었으면 신규 진입을
+  //   막는다.** 소유 번호 목록도 그 목록이다 — 못 읽으면 내 주문이
+  //   UNKNOWN으로 분류되고, 예전에는 그 상태가 "치울 것 없음"이 되어
+  //   진입이 그 위로 나갔다.
+  //
+  //   ★ **남의 것으로 증명된 주문만 남았으면 막지 않는다.** 그건 소유
+  //     번호와 무관하게 확정이고, 그걸로 막으면 남의 주문 하나가 내
+  //     전략을 영원히 멈춘다.
+  //   ★ 막되 **취소는 보내지 않는다.** 모르는 회차에 지운 손절은
+  //     되돌릴 방법이 없다 — Cancel All 금지가 여기서도 그대로다.
+  if (i.ownedIdsKnown === false) {
+    const unsure = plan.cancel.length > 0 || plan.keep.some(k => k?.class !== 'FOREIGN');
+    if (unsure) {
+      return {
+        code: 'OWNERSHIP_UNKNOWN', cancel: [], keep: plan.keep, blockEntry: true,
+        reason: '걸어 둔 보호주문 번호 목록을 읽지 못했습니다 — 0건과 다릅니다. '
+          + '남아 있는 주문이 내 것인지 가릴 수 없어 취소하지 않고, '
+          + '그 위로 신규 진입도 내지 않습니다',
+      };
     }
   }
 
@@ -174,7 +215,8 @@ export function flatCleanupVerdict(i: {
   const base = { cancelled: [] as string[], stillPresent: [] as string[], unknown: [] as string[],
     kept: plan?.keep ?? [] };
 
-  if (!plan || plan.code === 'POSITION_UNKNOWN' || plan.code === 'ORDERS_UNKNOWN') {
+  if (!plan || plan.code === 'POSITION_UNKNOWN' || plan.code === 'ORDERS_UNKNOWN'
+      || plan.code === 'OWNERSHIP_UNKNOWN') {
     return {
       ...base, code: plan?.code ?? 'POSITION_UNKNOWN', ok: false, blockEntry: true,
       reason: plan?.reason ?? '정리 계획을 세우지 못했습니다',
