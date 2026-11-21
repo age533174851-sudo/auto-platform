@@ -206,6 +206,7 @@ import {
   runPrecisionMatrixTests,
   runAdoptIntentIntegrationTests,
 } from './src/test/integration/orderPathIntegration.test';
+import { runReconcileUnresolvedTests } from './src/test/integration/reconcileUnresolvedIntegration.test';
 import { runReconcileCronAuthIntegrationTests } from './src/test/integration/reconcileCronAuthIntegration.test';
 import { runTenSlotDispatchIntegrationTests } from './src/test/integration/tenSlotDispatchIntegration.test';
 import { runTenSlotLifecycleTests } from './src/test/integration/tenSlotLifecycleIntegration.test';
@@ -213,6 +214,7 @@ import { runSmokeStartRouteTests } from './src/test/integration/smokeStartRouteI
 import { runGateFindOrderTests } from './src/test/integration/gateFindOrderIntegration.test';
 import { runForcedEntryRouteTests } from './src/test/integration/forcedEntryRouteIntegration.test';
 import { runHoldExtensionIntegrationTests } from './src/test/integration/holdExtensionIntegration.test';
+import { runGateLedgerTests } from './src/test/integration/gateLedgerIntegration.test';
 import { runFailureRecoveryTests } from './src/lib/engine/failureRecovery.test';
 import { runMarketTypeTests } from './src/lib/markets/marketType.test';
 import { runWalletTests } from './src/lib/markets/wallets.test';
@@ -349,6 +351,7 @@ import { runKillTargetsTests } from './src/lib/risk/killTargets.test';
 import { runKillClosePlanTests } from './src/lib/risk/killClosePlan.test';
 import { runKillCloseRunTests } from './src/lib/risk/killCloseRun.test';
 import { runKillCloseIntegrationTests } from './src/test/integration/killCloseIntegration.test';
+import { runProtectiveReadFailClosedTests } from './src/test/integration/protectiveReadFailClosedIntegration.test';
 import { runAiKeysRouteIntegrationTests } from './src/test/integration/aiKeysRouteIntegration.test';
 import { runGateCloseTests } from './src/test/integration/gateCloseIntegration.test';
 import { runGateOrderReadTests } from './src/test/integration/gateOrderReadIntegration.test';
@@ -516,6 +519,7 @@ runLifecycleRowsTests(); runPostEntryRiskTests(); runPositionRiskProvenanceTests
   await runNoFixedTpIntegrationTests();
   await runPrecisionIntegrationTests();
   await runPrecisionMatrixTests();
+  await runReconcileUnresolvedTests();
   await runSmokeStartRouteTests();
   await runGateFindOrderTests();
   // smokeStartRoute registers asynchronous tests; finish them before swapping
@@ -525,7 +529,9 @@ runLifecycleRowsTests(); runPostEntryRiskTests(); runPositionRiskProvenanceTests
   await runForcedEntryRouteTests();
   await runRunnerStaleConnectionTests();
   await runHoldExtensionIntegrationTests();
+  await runGateLedgerTests();
   await runKillCloseIntegrationTests();
+  await runProtectiveReadFailClosedTests();
   await runGateCloseTests();
   await runGateOrderReadTests();
   await flushAsync();
