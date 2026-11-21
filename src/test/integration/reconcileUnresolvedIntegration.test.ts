@@ -44,6 +44,8 @@ class ReconcileDb {
     /** true면 그 질의는 error를 돌려준다 */
     private failWhen: (q: Query) => boolean = () => false,
     private nullResult = false,
+    /** true면 `exchange_connections` 조회가 error를 돌려준다 */
+    private connFails = false,
   ) {}
 
   /** 미확정(UNKNOWN) 질의를 몇 번 시도했는가 */
@@ -63,7 +65,10 @@ class ReconcileDb {
       order() { return builder; },
       limit() { return builder; },
       async maybeSingle() {
-        if (table === 'exchange_connections') return { data: db.conn, error: null };
+        if (table === 'exchange_connections') {
+          if (db.connFails) return { data: null, error: { message: '연결 조회 실패' } };
+          return { data: db.conn, error: null };
+        }
         return { data: null, error: null };
       },
       then(resolve: any, reject?: any) {
@@ -234,6 +239,35 @@ async function checkReconcileRealPath(): Promise<void> {
       eq(body.ok, false);
       assert(/미확정 주문 장부 조회 실패/.test(String(body.error || '')),
         `executor가 스스로 막아야 한다: ${String(body.error)}`);
+    });
+    // ── 연결 조회 실패와 "남의 연결"을 가른다 ──
+    //
+    //   Codex가 #724에서 찾은 자리다. `error`를 버리고 `!conn`만 보면
+    //   DB가 답을 못 준 것이 "연결을 찾을 수 없거나 본인의 연결이
+    //   아닙니다"(404)가 된다. 다음 할 일이 다른 둘이 같은 칸에 들어간다.
+    db = new ReconcileDb(conn(), { live_orders: [] }, () => false, false, true);
+    const resConnErr = await GET(new Request(
+      'http://localhost/api/orders/reconcile?connectionId=c-1',
+    ) as Parameters<typeof GET>[0]);
+    const bodyConnErr = await resConnErr.json();
+
+    // 조회는 됐는데 그 사용자의 연결이 아니면 404는 그대로다.
+    db = new ReconcileDb(null, { live_orders: [] }, () => false, false, false);
+    const resNoConn = await GET(new Request(
+      'http://localhost/api/orders/reconcile?connectionId=c-1',
+    ) as Parameters<typeof GET>[0]);
+    const bodyNoConn = await resNoConn.json();
+
+    test('연결 조회 실패는 404가 아니라 503이다', () => {
+      eq(resConnErr.status, 503);
+      eq(bodyConnErr.ok, false);
+      eq(bodyConnErr.error, 'connection_unreadable');
+    });
+    test('조회는 됐고 내 연결이 아니면 404 그대로다', () => {
+      eq(resNoConn.status, 404);
+      eq(bodyNoConn.ok, false);
+      assert(!/connection_unreadable/.test(String(bodyNoConn.error || '')),
+        '읽기 실패와 섞지 않는다');
     });
     test('대조 실행 · 라우트는 쓰지 않을 목록 질의를 하지 않는다', () => {
       eq(routeListCols.length, 0,

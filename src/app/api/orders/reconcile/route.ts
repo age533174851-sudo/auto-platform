@@ -126,7 +126,24 @@ export async function GET(req: NextRequest) {
       .select('user_id, exchange_id, api_key, api_secret_enc, has_withdrawal, is_testnet')
       .eq('id', connectionId);
     if (scopeUserId) connQ = connQ.eq('user_id', scopeUserId);
-    const { data: conn } = await connQ.maybeSingle();
+    const { data: conn, error: connError } = await connQ.maybeSingle();
+
+    // ★ **읽기 실패와 "남의 연결"을 같은 404로 적지 않는다.**
+    //
+    //   예전에는 `error`를 버리고 `!conn`만 봤다. 그러면 DB가 답을 못 준
+    //   것이 "연결을 찾을 수 없거나 본인의 연결이 아닙니다"가 된다. 그
+    //   둘은 **다음 할 일이 다르다** — 404를 본 사람은 연결을 다시 고르거나
+    //   등록하러 가고, 조회가 실패했다는 사실은 아무 데도 남지 않는다.
+    //
+    //   코드(`connection_unreadable`)는 Codex가 #724에서 같은 자리에 쓴
+    //   것을 그대로 쓴다. 같은 사실에 이름이 둘이면 호출부가 둘 다 알아야
+    //   한다.
+    if (connError) {
+      return NextResponse.json({
+        ok: false, error: 'connection_unreadable',
+        message: '거래소 연결을 확인하지 못했습니다',
+      }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
+    }
 
     if (!conn) return NextResponse.json({ ok: false, error: '연결을 찾을 수 없거나 본인의 연결이 아닙니다' }, { status: 404 });
     if (conn.has_withdrawal) {
