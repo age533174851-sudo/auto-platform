@@ -8,6 +8,7 @@
 import { test, assert, eq, close } from '../../test/harness';
 import {
   paperEquityOf, paperTodayPnl, validateSeed, PAPER_SEED_CHOICES,
+  paperReturnVerdict,
 } from './paperAccount';
 
 // **시작한 계좌다.** `started_at`(071)이 없으면 흔적이 없는 이 줄은
@@ -130,5 +131,137 @@ export function runPaperAccountTests() {
   test('너무 크면 막는다 — 수익률이 전부 0에 붙어 비교가 안 된다', () => {
     eq(validateSeed(99_000_000).code, 'TOO_LARGE', '크다');
     eq(validateSeed(10_000_000).code, 'OK', '상한 자체는 통과');
+  });
+
+  // ── 충전액을 수익으로 세지 않는다 (#592) ────────────────────────
+  //
+  // 화면에 실제로 나간 숫자: 시작 10,000 · 총자산 61,258.32 ·
+  // 거래 손익 0 → **+512.58% 수익**. 사용자가 51,258.32를 충전했을 뿐
+  // 거래를 한 번도 안 했는데 그렇게 보였다.
+  //
+  // 기본 모의 장부에는 입출금 원장이 없다(`paper_challenge_cashflows`는
+  // 챌린지 전용). 그래서 ΣF를 표에서 읽을 수는 없다. 다만 **남는 돈으로
+  // 복원할 수 있다**:
+  //
+  //   외부 순입출금 = 총자산 − 시작자본 − (실현손익 + 미실현손익)
+  //
+  // 이 장부는 펀딩을 모델링하지 않으므로 잔차는 외부 입출금뿐이다.
+  // 잔차가 있으면 **수익률은 '계산 불가'가 정답이다** — 0%나 추정치로
+  // 위장하면 안 된다. 금액(순손익)은 거래에서 파생되므로 그대로 정확하다.
+  console.log('[모의 수익률 — 충전을 수익으로 세지 않는다 (#592)]');
+
+  test('★ 충전만 하고 거래가 없으면 수익률은 계산 불가다 (+512.58%가 아니다)', () => {
+    const v = paperReturnVerdict({
+      initialBalance: 10_000, totalEquity: 61_258.32,
+      realizedPnl: 0, unrealizedPnl: 0,
+    });
+    eq(v.code, 'EXTERNAL_FLOW', v.reason);
+    eq(v.returnPct, null, '★ 충전액을 수익률로 적었다');
+    eq(v.netPnl, 0, '거래로 번 돈은 0이다');
+    close(v.externalFlow as number, 51_258.32, 0.01, '충전액을 잔차로 복원한다');
+    assert(v.reason.includes('입출금'), v.reason);
+  });
+
+  test('충전이 없으면 수익률을 정상으로 계산한다', () => {
+    const v = paperReturnVerdict({
+      initialBalance: 10_000, totalEquity: 11_000,
+      realizedPnl: 800, unrealizedPnl: 200,
+    });
+    eq(v.code, 'OK', v.reason);
+    close(v.returnPct as number, 10, 1e-9, '1,000 / 10,000');
+    eq(v.netPnl, 1_000);
+    close(v.externalFlow as number, 0, 0.01);
+  });
+
+  test('손실도 그대로 적는다 — 음수 수익률을 0으로 깎지 않는다', () => {
+    const v = paperReturnVerdict({
+      initialBalance: 10_000, totalEquity: 9_000,
+      realizedPnl: -600, unrealizedPnl: -400,
+    });
+    eq(v.code, 'OK', v.reason);
+    close(v.returnPct as number, -10, 1e-9);
+    eq(v.netPnl, -1_000);
+  });
+
+  test('출금(음의 잔차)도 계산 불가다 — 부호를 가리지 않는다', () => {
+    const v = paperReturnVerdict({
+      initialBalance: 10_000, totalEquity: 4_000,
+      realizedPnl: 0, unrealizedPnl: 0,
+    });
+    eq(v.code, 'EXTERNAL_FLOW', v.reason);
+    eq(v.returnPct, null);
+    close(v.externalFlow as number, -6_000, 0.01);
+  });
+
+  test('반올림 오차는 입출금으로 세지 않는다', () => {
+    const v = paperReturnVerdict({
+      initialBalance: 10_000, totalEquity: 11_000.004,
+      realizedPnl: 1_000, unrealizedPnl: 0,
+    });
+    eq(v.code, 'OK', v.reason);
+    assert(v.returnPct != null, '0.004는 충전이 아니다');
+  });
+
+  // ── 못 읽은 것을 0으로 읽지 않는다 ──
+  test('미실현을 못 구했으면 수익률도 순손익도 적지 않는다', () => {
+    const v = paperReturnVerdict({
+      initialBalance: 10_000, totalEquity: null,
+      realizedPnl: 0, unrealizedPnl: null,
+    });
+    eq(v.code, 'UNKNOWN', v.reason);
+    eq(v.returnPct, null);
+    eq(v.netPnl, null, '★ 모르는 미실현을 0으로 더했다');
+    eq(v.externalFlow, null);
+  });
+
+  test('실현손익을 못 읽었으면 잔차를 충전으로 단정하지 않는다', () => {
+    const v = paperReturnVerdict({
+      initialBalance: 10_000, totalEquity: 61_258.32,
+      realizedPnl: null, unrealizedPnl: 0,
+    });
+    eq(v.code, 'UNKNOWN', v.reason);
+    eq(v.returnPct, null);
+    eq(v.netPnl, null);
+  });
+
+  test('종잣돈이 없거나 0이면 수익률을 만들지 않는다', () => {
+    for (const initial of [null, 0, -1]) {
+      const v = paperReturnVerdict({
+        initialBalance: initial, totalEquity: 1_000, realizedPnl: 0, unrealizedPnl: 0,
+      });
+      eq(v.returnPct, null, `initial=${String(initial)} — ${v.reason}`);
+      eq(v.code, 'NO_SEED', v.reason);
+    }
+  });
+
+  test('빈 입력에서 터지지 않고 UNKNOWN을 준다', () => {
+    eq(paperReturnVerdict(null as never).code, 'UNKNOWN');
+    eq(paperReturnVerdict(undefined as never).returnPct, null);
+  });
+
+  // ── 두 경로가 같은 판정을 쓴다 ──
+  //
+  // 결함이 두 곳에 있었다: `route.ts:118`(현금으로 나눔)과
+  // `paperAccount.ts:265`(총자산으로 나눔). 둘 다 충전을 수익으로 셌다.
+  // 판정을 한 곳에 두고 양쪽이 그것을 쓰는지 여기서 못 박는다.
+  test('paperEquityOf의 수익률이 같은 판정을 통과한다 — 충전이 있으면 null', () => {
+    const e = paperEquityOf({
+      account: { ...ACCT, balance: 61_258.32, initial_balance: 10_000, total_pnl: 0 },
+      positions: [],
+    });
+    eq(e.code, 'READY');
+    close(e.totalEquity as number, 61_258.32, 0.01);
+    eq(e.returnPct, null, '★ paperEquityOf가 충전액을 수익률로 적었다');
+    assert(/입출금|계산 불가/.test(e.note), `왜 없는지 적는다 — ${e.note}`);
+    eq(e.netPnl, 0, '거래로 번 돈은 따로 정확히 적는다');
+  });
+
+  test('충전이 없는 계좌는 paperEquityOf도 수익률을 적는다', () => {
+    const e = paperEquityOf({
+      account: { ...ACCT, balance: 11_000, initial_balance: 10_000, total_pnl: 1_000 },
+      positions: [],
+    });
+    close(e.returnPct as number, 10, 1e-9, e.note);
+    eq(e.netPnl, 1_000);
   });
 }

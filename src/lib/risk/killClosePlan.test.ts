@@ -8,6 +8,7 @@
 // 함께 못박는다. 성능이나 수익과는 무관하다.
 import { test, eq, assert } from '../../test/harness';
 import {
+  countKillLeftover,
   planKillClose, planKillCancelOnly, killProtectionVerdict, clampKillClosePlan,
   KILL_CLOSE_SEQUENCE,
   type KillClosePlan, type KillClosePlanInput, type KillModeVerdictLike,
@@ -466,5 +467,18 @@ export function runKillClosePlanTests() {
     eq(p.code, 'NOTHING_TO_CANCEL');
     eq(p.cancelIds.length, 0);
     eq(p.retainedProtective, 1);
+  });
+
+  // ══════════ 종료 뒤 잔여 — 못 읽은 수량은 0이 아니다 ══════════
+  test('★ countKillLeftover: 수량을 못 읽은 줄은 잔여로 센다 (계획과 같은 판정)', () => {
+    eq(countKillLeftover([{ amount: null }]), 1, '★ null을 0으로 읽었다');
+    eq(countKillLeftover([{ amount: '' as any }]), 1, "★ ''을 0으로 읽었다");
+    eq(countKillLeftover([{ amount: 'x' as any }]), 1);
+    eq(countKillLeftover([{ amount: NaN }]), 1);
+    eq(countKillLeftover([{} as any]), 1, '칸이 없는 줄도 플랫이라고 말할 수 없다');
+    eq(countKillLeftover([{ amount: 0 }, { amount: '0' as any }]), 0, '플랫은 잔여가 아니다');
+    eq(countKillLeftover([{ amount: 0.01 }, { amount: -2 }, { amount: null }]), 3);
+    eq(countKillLeftover([]), 0);
+    eq(countKillLeftover(null), 0);
   });
 }

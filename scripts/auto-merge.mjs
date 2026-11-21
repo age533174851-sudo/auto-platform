@@ -23,6 +23,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { gatherFacts, listOpenPulls } from './lib/pr-facts.mjs';
 
 const TOKEN = process.env.GITHUB_TOKEN;
 const REPO = process.env.GITHUB_REPOSITORY;   // owner/repo
@@ -44,7 +45,7 @@ function loadGate() {
   if (!existsSync(tsc)) throw new Error('typescript를 찾지 못했습니다 — npm ci 먼저');
   execFileSync(process.execPath, [
     tsc, 'src/lib/ci/autoMergeGate.ts', 'src/lib/ci/deployDispatch.ts',
-    'src/lib/ci/autoRebase.ts',
+    'src/lib/ci/autoRebase.ts', 'src/lib/ci/gateBackfill.ts',
     '--outDir', dir, '--module', 'commonjs', '--target', 'es2019',
     '--skipLibCheck', '--esModuleInterop',
   ], { stdio: 'pipe' });
@@ -108,93 +109,61 @@ function assertRequiredChecksWired(required) {
   }
 }
 
+/**
+ * **망 오류는 답이 아니다 — 그런데 던지면 회차 전체가 죽는다.**
+ *
+ * 2026-11-19 run 44543639837: 빈 게이트를 수십 건 메우던 중에
+ * `fetch failed` 한 번으로 실행이 exit 1 로 끝났다. 그 앞까지 메운 것은
+ * 남았지만 나머지 PR 은 그 회차에 아예 보지 못했고, 왜 멈췄는지는
+ * 한 줄짜리 `fetch failed` 뿐이었다.
+ *
+ * 게이트 메우기가 호출 수를 한 회차에 ~100 개 늘렸으니, 일시적 실패를
+ * 만날 확률도 그만큼 커졌다. 그래서 **던지지 않고 `ok: false` 로
+ * 돌려준다** — 부르는 쪽은 이미 전부 `!ok` 를 다루고 있다.
+ *
+ * `status: 0` 은 "HTTP 응답을 받지 못했다"는 뜻이다. 404 와 구별된다 —
+ * 404 는 서버가 없다고 답한 것이고 0 은 **묻지도 못한 것**이다.
+ * 게이트 메우기는 이 둘을 다르게 읽는다: 못 물었으면 적지 않는다.
+ */
 async function api(path, init = {}) {
-  const r = await fetch(`https://api.github.com${path}`, {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${TOKEN}`,
-      Accept: 'application/vnd.github+json',
-      'X-GitHub-Api-Version': '2022-11-28',
-      ...(init.body ? { 'Content-Type': 'application/json' } : {}),
-      ...(init.headers || {}),
-    },
-  });
-  const text = await r.text();
+  let r;
+  try {
+    r = await fetch(`https://api.github.com${path}`, {
+      ...init,
+      headers: {
+        Authorization: `Bearer ${TOKEN}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        ...(init.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(init.headers || {}),
+      },
+    });
+  } catch (e) {
+    return { ok: false, status: 0, body: { message: `fetch 실패: ${e?.message || e}` } };
+  }
+  let text;
+  try { text = await r.text(); } catch (e) {
+    return { ok: false, status: r.status, body: { message: `본문을 읽지 못했습니다: ${e?.message || e}` } };
+  }
   let body = null;
   try { body = text ? JSON.parse(text) : null; } catch { body = { raw: text }; }
   return { ok: r.ok, status: r.status, body };
 }
 
 async function graphql(query, variables) {
-  const r = await fetch('https://api.github.com/graphql', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, variables }),
-  });
+  // api() 와 같은 이유로 던지지 않는다 — 망 오류 하나가 회차를 죽이지 않게.
+  let r;
+  try {
+    r = await fetch('https://api.github.com/graphql', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, variables }),
+    });
+  } catch (e) {
+    return { ok: false, body: { errors: [{ message: `fetch 실패: ${e?.message || e}` }] } };
+  }
   const j = await r.json().catch(() => null);
   return { ok: r.ok && !j?.errors, body: j };
-}
-
-/**
- * 리뷰 상태. **못 읽으면 null이다** — 0으로 두면 미해결 리뷰를 무시하고 합친다.
- */
-async function reviewFacts(number) {
-  const q = `query($o:String!,$n:String!,$p:Int!){
-    repository(owner:$o,name:$n){ pullRequest(number:$p){
-      reviewThreads(first:100){ nodes { isResolved isOutdated } }
-      reviews(first:100, states:CHANGES_REQUESTED){ totalCount }
-    }}}`;
-  const r = await graphql(q, { o: OWNER, n: NAME, p: number });
-  if (!r.ok) return { unresolvedThreads: null, changesRequested: null };
-  const pr = r.body?.data?.repository?.pullRequest;
-  const nodes = pr?.reviewThreads?.nodes;
-  if (!Array.isArray(nodes) || pr?.reviews?.totalCount == null) {
-    return { unresolvedThreads: null, changesRequested: null };
-  }
-  return {
-    // outdated된 스레드는 이미 그 코드가 사라진 것이라 세지 않는다.
-    unresolvedThreads: nodes.filter(t => !t.isResolved && !t.isOutdated).length,
-    changesRequested: pr.reviews.totalCount,
-  };
-}
-
-/**
- * head가 base tip을 조상으로 갖는가. **못 읽으면 null**
- *
- * 2026-08-17에 이 확인이 **네 번 연속 실패**했다. #139는 검사가 전부
- * 초록이고 로컬에서 `a919bd5 → 67bb099`가 ahead임이 확인되는데도
- * `MERGEABILITY_UNKNOWN`으로 계속 막혔다. 그 사이 로그에 남은 것은
- * "확인하지 못했습니다" 한 줄뿐이라 **왜 실패했는지 알 방법이 없었다.**
- *
- * 그래서 둘을 더한다:
- *   · 한 번 실패했다고 포기하지 않는다 — 짧게 재시도한다
- *   · 실패하면 **HTTP 상태와 응답 요약을 로그에 남긴다**
- *
- * **판정 규칙은 그대로다.** 모르면 여전히 null이고, null이면 합치지
- * 않는다. 확인하지 못한 것을 통과로 바꾸는 것이 아니라, 확인을 실제로
- * 할 수 있게 만들고 못 했을 때 이유가 보이게 하는 것이다.
- */
-async function headContainsBase(baseSha, headSha) {
-  const path = `/repos/${REPO}/compare/${baseSha}...${headSha}`;
-  let last = null;
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    const r = await api(path);
-    last = r;
-    if (r.ok) {
-      const s = r.body?.status;
-      // 'ahead' | 'identical' 이면 head가 base를 포함한다.
-      // 'behind' | 'diverged' 이면 아니다.
-      if (s === 'ahead' || s === 'identical') return true;
-      if (s === 'behind' || s === 'diverged') return false;
-      console.log(`compare 응답에 status가 없습니다 (${JSON.stringify(s)}) — ${path}`);
-      return null;
-    }
-    if (attempt < 3) await new Promise(res => setTimeout(res, attempt * 1000));
-  }
-  // **왜 못 읽었는지 남긴다.** 이 한 줄이 없어서 네 번을 헤맸다.
-  console.log(`compare 실패 HTTP ${last?.status} — ${path}`
-    + (last?.body?.message ? ` :: ${String(last.body.message).slice(0, 200)}` : ''));
-  return null;
 }
 
 /** 이 판정 코멘트는 하나만 유지한다 — 매번 새로 달면 PR이 잡음으로 덮인다 */
@@ -219,18 +188,92 @@ async function main() {
     deployDispatchPlan, deployDispatchRequest, dispatchResultNote,
     migrateDispatchPlan, migrateDispatchRequest, migrateResultNote,
   } = await import(`file://${join(outDir, 'deployDispatch.js')}`);
+  const { gateBackfillVerdict, gateBackfillOutput } =
+    await import(`file://${join(outDir, 'gateBackfill.js')}`);
 
   assertSelfCheckWired(SELF_CHECK_NAME);
   assertRequiredChecksWired(REQUIRED_CHECKS);
 
   const only = process.env.PR_NUMBER ? Number(process.env.PR_NUMBER) : null;
 
-  const listed = await api(`/repos/${REPO}/pulls?state=open&per_page=100`);
+  // **30분 안전망은 열린 PR 전부를 훑어야 한다.** 예전에는 첫 장(100개)만
+  // 훑었다 — 열린 PR이 225개일 때 첫 장 밖의 라벨 붙은 PR은 이 그물로는
+  // 영원히 합쳐지지 않고, 왜 안 합쳐지는지 아무 데도 안 남았다.
+  const listed = await listOpenPulls({ api, repo: REPO });
   if (!listed.ok) {
     console.error('PR 목록을 읽지 못했습니다:', listed.status);
     process.exit(1);
   }
-  const prs = listed.body.filter(p => (only == null || p.number === only));
+  // 다 못 읽었으면 **적어 둔다.** 훑지 못한 PR을 "합칠 것 없음"으로 읽지 않는다.
+  if (!listed.complete) {
+    console.log(`⚠ PR 목록을 다 읽지 못했습니다 — ${listed.pages}장까지 ${listed.all.length}개`
+      + (listed.failedPage ? ` (${listed.failedPage}장에서 HTTP ${listed.status})` : ' (장 수 상한)')
+      + '. 이 회차는 열린 PR 전부를 보지 못했습니다.');
+  }
+  const prs = listed.all.filter(p => (only == null || p.number === only));
+
+  // ══════════════ 빈 게이트를 메운다 ══════════════
+  //
+  // `auto-merge-gate`는 **라벨과 무관하게 모든 PR의 필수 검사**다. 그런데
+  // 그 체크는 아무도 PR을 판정해서 만드는 것이 아니라, 이 워크플로의 job이
+  // 그 커밋 위에서 돌았다는 부산물로 생긴다. run이 줄에서 밀리면 체크가
+  // 통째로 안 생기고 — **빨갛지 않고 아예 없어서** — PR이 이유 없이 막힌다.
+  //
+  // 그리고 30분 안전망은 그걸 못 고친다. `schedule` 실행의 `head_sha`는
+  // main이라 그 실행이 만드는 체크는 PR head에 안 붙는다.
+  //
+  // 그래서 여기서 PR head를 직접 보고, 없을 때만 적는다. 판정은
+  // `src/lib/ci/gateBackfill.ts`에 있고 시험이 붙어 있다.
+  //
+  // **라벨 검사보다 앞이다.** 라벨 없는 PR도 이 체크가 있어야 합쳐질 수 있다.
+  const RUN_URL = process.env.GITHUB_SERVER_URL && process.env.GITHUB_REPOSITORY
+    && process.env.GITHUB_RUN_ID
+    ? `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`
+    : null;
+  let filled = 0, unreadable = 0;
+  for (const brief of prs) {
+    const sha = brief?.head?.sha;
+    if (typeof sha !== 'string' || !sha) {
+      unreadable += 1;
+      console.log(`#${brief?.number} 게이트 확인 못 함 — head SHA가 없습니다`);
+      continue;
+    }
+    const got = await api(
+      `/repos/${REPO}/commits/${sha}/check-runs`
+      + `?check_name=${encodeURIComponent(SELF_CHECK_NAME)}&per_page=100`);
+    const runs = got.ok && Array.isArray(got.body?.check_runs) ? got.body.check_runs : null;
+    const v = gateBackfillVerdict({ selfName: SELF_CHECK_NAME, checkRuns: runs });
+    if (v.code === 'UNREADABLE') {
+      unreadable += 1;
+      console.log(`#${brief.number} ${v.reason}${got.ok ? '' : ` (HTTP ${got.status})`}`);
+      continue;
+    }
+    if (!v.publish) continue;
+
+    const out = gateBackfillOutput({ runUrl: RUN_URL });
+    const made = await api(`/repos/${REPO}/check-runs`, {
+      method: 'POST',
+      body: JSON.stringify({
+        name: SELF_CHECK_NAME,
+        head_sha: sha,
+        status: 'completed',
+        conclusion: 'success',
+        output: { title: out.title, summary: out.summary },
+      }),
+    });
+    if (made.ok) {
+      filled += 1;
+      console.log(`#${brief.number} 게이트를 메웠습니다 — ${sha.slice(0, 7)}`);
+    } else {
+      // **포크 PR의 head는 이 저장소에 없다.** 422가 정상이다 — 적고 넘어간다.
+      unreadable += 1;
+      console.log(`#${brief.number} 게이트를 메우지 못했습니다 — HTTP ${made.status}`
+        + ` ${made.body?.message || ''}`);
+    }
+  }
+  if (filled || unreadable) {
+    console.log(`게이트 메움 ${filled}건 · 확인 못 함 ${unreadable}건 (확인 못 한 것은 통과로 적지 않습니다)`);
+  }
 
   let merged = 0;
   for (const brief of prs) {
@@ -241,42 +284,15 @@ async function main() {
       continue;
     }
 
-    // mergeable은 상세 조회에서만 채워진다. 계산 중이면 null이 온다.
-    const detail = await api(`/repos/${REPO}/pulls/${brief.number}`);
-    if (!detail.ok) { console.log(`#${brief.number} 상세 조회 실패`); continue; }
-    const pr = detail.body;
-    const headSha = pr.head.sha;
-
-    const [runs, statuses, review, contains] = await Promise.all([
-      api(`/repos/${REPO}/commits/${headSha}/check-runs?per_page=100`),
-      api(`/repos/${REPO}/commits/${headSha}/status`),
-      reviewFacts(pr.number),
-      headContainsBase(pr.base.sha, headSha),
-    ]);
-
-    const facts = {
-      number: pr.number,
-      draft: !!pr.draft,
-      labels: (pr.labels || []).map(l => l.name),
-      baseRef: pr.base.ref,
-      headSha,
-      baseSha: pr.base.sha,
-      headContainsBase: contains,
-      mergeable: pr.mergeable,
-      mergeableState: pr.mergeable_state || 'unknown',
-      checks: (runs.ok ? (runs.body.check_runs || []) : []).map(c => ({
-        name: c.name, status: c.status, conclusion: c.conclusion, headSha: c.head_sha,
-      })),
-      statuses: (statuses.ok ? (statuses.body.statuses || []) : []).map(s => ({
-        context: s.context, state: s.state,
-      })),
-      unresolvedThreads: review.unresolvedThreads,
-      changesRequested: review.changesRequested,
-    };
-
-    // 검사 목록을 못 읽었으면 **빈 배열로 두지 않는다** — 그러면
-    // '검사가 없다'가 되어 CHECKS_MISSING으로 막힌다. 그게 맞는 결과다.
-    if (!runs.ok) facts.checks = [];
+    // 사실 수집은 `scripts/lib/pr-facts.mjs`가 한다 — **보고기와 같은 파일이다.**
+    // 여기서 따로 만들면 보고서가 "올려도 된다"고 한 PR을 이 러너가 막는다.
+    const facts = await gatherFacts({
+      api, graphql, repo: REPO, owner: OWNER, name: NAME,
+      number: brief.number, log: m => console.log(m),
+    });
+    if (!facts) continue;
+    const pr = { number: facts.number, head: { sha: facts.headSha } };
+    const headSha = facts.headSha;
 
     const v = autoMergeGate(facts);
     console.log(`#${pr.number} ${v.merge ? 'MERGE' : v.code} — ${v.reason}`);

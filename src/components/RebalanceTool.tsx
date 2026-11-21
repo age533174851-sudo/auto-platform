@@ -5,6 +5,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { T } from '@/lib/constants';
 import { cvt } from '@/lib/utils';
 import { Scale, RotateCcw, TrendingUp, TrendingDown } from 'lucide-react';
+import { valueStoredHoldings } from '@/lib/portfolio/storedHoldings';
 
 const PORT_KEY = 'tg_portfolio_v2';
 const TARGET_KEY = 'tg_rebalance_targets_v1';
@@ -19,30 +20,29 @@ const CATS = [
 
 const DEFAULT_TARGET: Record<string, number> = { crypto: 40, us_stock: 30, etf: 20, kr_stock: 0, cash: 10 };
 
-function loadPositions(): any[] { if (typeof window === 'undefined') return []; try { return JSON.parse(localStorage.getItem(PORT_KEY) || '[]'); } catch { return []; } }
+function loadPositions(): unknown { if (typeof window === 'undefined') return []; try { return JSON.parse(localStorage.getItem(PORT_KEY) || '[]'); } catch { return []; } }
 function loadTargets(): Record<string, number> { if (typeof window === 'undefined') return DEFAULT_TARGET; try { const r = localStorage.getItem(TARGET_KEY); return r ? JSON.parse(r) : DEFAULT_TARGET; } catch { return DEFAULT_TARGET; } }
 
-export default function RebalanceTool({ prices = {}, currency = 'KRW' }: { prices?: Record<string, number>; currency?: string }) {
-  const [positions, setPositions] = useState<any[]>([]);
+// prices: page.tsx는 Asset[]를 넘긴다 — 모양 해석은 valueStoredHoldings 한 곳에서
+export default function RebalanceTool({ prices = {}, currency = 'KRW' }: { prices?: unknown; currency?: string }) {
+  const [positions, setPositions] = useState<unknown>([]);
   const [target, setTarget] = useState<Record<string, number>>(DEFAULT_TARGET);
   const [threshold, setThreshold] = useState(5);
   const [saved, setSaved] = useState(false);
 
   useEffect(() => { setPositions(loadPositions()); setTarget(loadTargets()); }, []);
 
-  const { total, current, byCat } = useMemo(() => {
+  const { total, current, unpriced } = useMemo(() => {
     const byCat: Record<string, number> = {};
-    for (const p of positions) {
-      const sym = (p.symbol || p.ticker || p.id || '').toUpperCase();
-      const price = prices[sym] || p.curPrice || p.avgPrice || 0;
-      const mv = price * (p.quantity || p.qty || 0);
-      const cat = p.category || 'crypto';
-      byCat[cat] = (byCat[cat] || 0) + mv;
+    let unpriced = 0;
+    for (const h of valueStoredHoldings(positions, prices)) {
+      if (h.value === null) { unpriced++; continue; }   // 모르는 값은 0으로 섞지 않는다
+      byCat[h.category] = (byCat[h.category] || 0) + h.value;
     }
     const total = Object.values(byCat).reduce((a, b) => a + b, 0);
     const current: Record<string, number> = {};
     for (const c of CATS) current[c.id] = total > 0 ? ((byCat[c.id] || 0) / total) * 100 : 0;
-    return { total, current, byCat };
+    return { total, current, unpriced };
   }, [positions, prices]);
 
   const targetSum = CATS.reduce((s, c) => s + (target[c.id] || 0), 0);
@@ -81,7 +81,7 @@ export default function RebalanceTool({ prices = {}, currency = 'KRW' }: { price
         </div>
         <div>
           <div style={{ color: T.txt, fontWeight: 800, fontSize: 15 }}>자동 리밸런싱</div>
-          <div style={{ color: T.muted, fontSize: 11 }}>총 자산 {cvt(total, currency)}</div>
+          <div style={{ color: T.muted, fontSize: 11 }}>총 자산 {cvt(total, currency)}{unpriced > 0 ? ` · 가격 모름 ${unpriced}종목 제외` : ''}</div>
         </div>
       </div>
 

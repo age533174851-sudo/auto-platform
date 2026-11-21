@@ -20,6 +20,19 @@ export interface CredsResult {
   key?: string;
   secret?: string;
   testnet?: boolean;
+  /**
+   * `exchange_connections.is_testnet`의 **날것 그대로**.
+   *
+   * `testnet`은 `is_testnet !== false`라서 `null`·`undefined`가 `true`가
+   * 된다 — 그 해석은 "모르는 값이 실전이 되면 안 된다"는 뜻이고 전체
+   * 경로에서 맞다.
+   *
+   * 그런데 **주문을 새로 만드는 스모크 경로**는 그보다 좁아야 한다.
+   * 환경이 확인되지 않은 연결에까지 주문을 낼 이유가 없다. 그래서
+   * 해석을 바꾸는 대신 날것을 함께 돌려주고, 더 좁게 볼 곳만 이것을
+   * 본다.
+   */
+  isTestnetRaw?: unknown;
   connectionId?: string;
   /** 어느 거래소인가. `loadFuturesCreds`만 채운다 */
   exchange?: 'binance' | 'gate';
@@ -117,6 +130,7 @@ export async function loadFuturesCreds(
     // 명시적으로 false일 때만 실전이다. null·undefined는 테스트넷으로 본다 —
     // 모르는 값이 실전이 되면 안 된다.
     testnet: conn.is_testnet !== false,
+    isTestnetRaw: conn.is_testnet,
     connectionId,
   };
 }

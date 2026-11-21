@@ -373,7 +373,7 @@ export async function executeKillActions(
   // 누른 사람은 정리됐다고 믿고 손을 뗀다 — 이 앱에서 가장 위험한 실패다.
   const fa = await import('@/lib/exchanges/futuresAdapter');
   const ops = await import('@/lib/engine/venuePositionOps');
-  const { planKillCancelOnly } = await import('./killClosePlan');
+  const { planKillCancelOnly, countKillLeftover } = await import('./killClosePlan');
   const { runKillClose } = await import('./killCloseRun');
   const ex = opts.exchange ?? 'binance';
   const creds = { exchange: ex, apiKey: opts.key, apiSecret: opts.secret, testnet: opts.testnet };
@@ -472,11 +472,8 @@ export async function executeKillActions(
         readLeftover: async () => {
           const p = await readPositions();
           if (p.ok !== true) return { ok: false, positions: null };
-          const n = (p.rows ?? []).filter((r: any) => {
-            const a = Number(r?.amount);
-            return Number.isFinite(a) && Math.abs(a) > 0;
-          }).length;
-          return { ok: true, positions: n };
+          // 수량을 못 읽은 줄도 잔여다 — 계획과 같은 판정을 쓴다.
+          return { ok: true, positions: countKillLeftover(p.rows) };
         },
         stillMine: opts.stillMine,
       },

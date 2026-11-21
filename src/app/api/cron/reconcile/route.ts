@@ -76,7 +76,6 @@ export async function GET(req: NextRequest) {
   }
   const given = req.headers.get('authorization')?.replace(/^Bearer\s+/i, '')
     || req.headers.get('x-admin-secret')
-    || req.nextUrl.searchParams.get('secret')
     || '';
   if (!safeEqual(given, secret)) {
     return NextResponse.json({ ok: false, error: 'unauthorized' },
