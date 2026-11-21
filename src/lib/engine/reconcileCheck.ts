@@ -23,6 +23,23 @@ export interface GatherResult {
    * 지금 대조가 일치하더라도 그 위에 새 주문을 얹으면 안 된다.
    */
   unresolvedOrders: { clientOrderId: string; symbol: string; reason: string; needsAttention: boolean }[];
+  /**
+   * 미확정 주문 **수**. 세지 못했으면 null이다.
+   *
+   * 왜 배열과 따로 두는가
+   * ─────────────────────
+   * `unresolvedOrders`는 빈 배열이 두 가지를 뜻한다 — "세어 봤더니
+   * 없다"와 "못 셌다". 호출부가 `.length`를 그대로 적으면 둘이 똑같이
+   * **0**이 되고, 거래 전 점검은 그 0을 `pass '없음'`으로 쓴다.
+   * 확인하지 못한 것이 통과로 적히는 것이 이 저장소에서 가장 비싼
+   * 거짓말이다.
+   *
+   * 그래서 '못 셌다'를 **배열이 아니라 여기서** 말한다. 호출부는
+   * `reachable`을 다시 보고 삼항으로 가릴 필요 없이 이 값을 그대로
+   * 넘기면 된다 — 가려야 하는 곳이 넷이면 언젠가 한 곳이 빠진다.
+   * 실제로 빠져 있었다(일일 사다리).
+   */
+  unresolvedOrderCount: number | null;
 }
 
 export async function gatherAndReconcile(
@@ -42,7 +59,7 @@ export async function gatherAndReconcile(
    */
   connectionId?: string | null,
 ): Promise<GatherResult> {
-  const empty = { appPositions: [], exchangePositions: [], unresolvedOrders: [] };
+  const empty = { appPositions: [], exchangePositions: [], unresolvedOrders: [], unresolvedOrderCount: null };
 
   let q = sb.from('exchange_connections')
     .select('exchange_id, api_key, api_secret_enc, has_withdrawal')
@@ -97,7 +114,14 @@ export async function gatherAndReconcile(
 
     for (const p of gatePositions) {
       // 변환은 gatePositionToRisk 한 곳에만 둔다 (leverage 0 = 교차 등).
-      const r = gp.gatePositionToRisk(p)!;
+      const r = gp.gatePositionToRisk(p);
+      // 수량을 못 읽은 포지션은 대조할 수 없다. qty 0으로 넣으면 "읽었고
+      // 0이다"가 되어 대조가 성공으로 끝난다 — 확인 못 한 것은 통과가 아니다.
+      if (!r) {
+        return { reachable: false, verdict: null,
+          error: `Gate 포지션 수량을 읽지 못했습니다 (${String(p?.contract || '알 수 없음')}) `
+               + '— 포지션이 없다는 뜻이 아니라 대조하지 않았습니다', ...empty };
+      }
       // 조건부 주문 목록으로 보호주문 유무를 판정한다. 못 읽으면 **있다고
       // 가정하지 않는다** — 없는 것으로 보면 대조가 '손절 소실'을 띄우고
       // 주문이 막히는데, 그게 있다고 보는 것보다 안전하다.
@@ -225,8 +249,26 @@ export async function gatherAndReconcile(
   let { data: unresolvedRows, error: unresolvedErr } =
     await unresolvedQuery('client_order_id, symbol, error_message, needs_attention');
   if (unresolvedErr) {
-    ({ data: unresolvedRows } = await unresolvedQuery('client_order_id, symbol, error_message'));
+    ({ data: unresolvedRows, error: unresolvedErr } =
+      await unresolvedQuery('client_order_id, symbol, error_message'));
   }
+
+  // **폴백까지 실패하면 0건이 아니다.**
+  //
+  // 위 주석은 018 컬럼 하나를 걱정했고 그래서 폴백을 뒀는데, 그 폴백의
+  // error를 버렸다. DB가 통째로 안 되는 날(연결 끊김·RLS·테이블 없음)에는
+  // 둘 다 실패하고 `unresolvedRows`가 null로 와서 `[]`로 접힌다 —
+  // 그러면 관문은 열린다. 막으려던 그 사고가 한 칸 옆에 그대로 남아
+  // 있었다. 못 셌으면 센 척하지 않는다.
+  if (unresolvedErr || !Array.isArray(unresolvedRows)) {
+    return {
+      reachable: false, verdict: null,
+      error: `미확정 주문 목록을 읽지 못해 대조를 끝내지 못했습니다`
+           + `${unresolvedErr?.message ? ` (${unresolvedErr.message})` : ''}`,
+      ...empty,
+    };
+  }
+
   const unresolvedOrders = (Array.isArray(unresolvedRows) ? unresolvedRows : []).map((r: any) => ({
     clientOrderId: String(r.client_order_id || ''),
     symbol: String(r.symbol || ''),
@@ -235,7 +277,8 @@ export async function gatherAndReconcile(
   }));
 
   const verdict = reconcileState({ appPositions, exchangePositions, appOpenOrders, exchangeOpenOrders });
-  return { reachable: true, verdict, appPositions, exchangePositions, unresolvedOrders };
+  return { reachable: true, verdict, appPositions, exchangePositions, unresolvedOrders,
+           unresolvedOrderCount: unresolvedOrders.length };
 }
 
 /**

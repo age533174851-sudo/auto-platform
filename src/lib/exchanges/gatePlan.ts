@@ -155,6 +155,14 @@ export interface GateRiskView {
 export function gatePositionToRisk(pos: any | null | undefined): GateRiskView | null {
   if (!pos) return null;
 
+  // **수량을 못 읽었으면 포지션 전체를 모른다.** 깨진 size(누락·null·
+  // 빈 문자열·'NaN')를 0으로 옮기면 "포지션 없음"이 사실이 되고, 거래 전
+  // 점검의 PROTECTIVE_ORDER가 '붙일 보호 주문이 없다'로 통과한다. 실제로는
+  // 손절 없는 포지션이 열려 있을 수 있다. 명시적인 0('0' 포함)만 0이다.
+  const rawSize = pos.size;
+  const size = rawSize == null || rawSize === '' ? NaN : Number(rawSize);
+  if (!Number.isFinite(size)) return null;
+
   const lev = Number(pos.leverage);
   const liq = Number(pos.liq_price);
   const entry = Number(pos.entry_price);
@@ -164,7 +172,7 @@ export function gatePositionToRisk(pos: any | null | undefined): GateRiskView | 
     // 0은 교차를 뜻하는 표식이라 '배율 0'으로 적지 않는다 — 배율은 모르는 것이다.
     leverage: Number.isFinite(lev) && lev > 0 ? lev : null,
     liquidationPrice: Number.isFinite(liq) && liq > 0 ? liq : null,
-    positionAmt: Number.isFinite(Number(pos.size)) ? Number(pos.size) : 0,
+    positionAmt: size,
     entryPrice: Number.isFinite(entry) && entry > 0 ? entry : null,
   };
 }

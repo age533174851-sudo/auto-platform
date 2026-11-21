@@ -144,6 +144,86 @@ export function runRequestVerdict(body: any, holdMin: number): RunRequestVerdict
   };
 }
 
+// ── 사람 없이 묶음을 시작해도 되는가 ─────────────────
+
+/**
+ * 무인 시작 요청이 적어야 하는 확인 문구.
+ *
+ * TESTNET 가상자금이라도 **나가는 것은 진짜 주문**이다. 스케줄러나
+ * 재시도 루프가 실수로 이 경로를 긁어도, 문구가 없으면 주문은
+ * 나가지 않는다.
+ */
+export const HEADLESS_START_CONFIRM = 'TESTNET-SMOKE-ORDER';
+
+export type HeadlessStartCode =
+  /** 무인 시작을 받아도 된다 */
+  | 'OK'
+  /** 누구의 계좌인지 적지 않았다 */
+  | 'USER_REQUIRED'
+  /** 어느 거래소 연결인지 적지 않았다 */
+  | 'CONNECTION_REQUIRED'
+  /** 확인 문구가 없거나 다르다 */
+  | 'CONFIRM_REQUIRED';
+
+export interface HeadlessStartVerdict {
+  ok: boolean;
+  code: HeadlessStartCode;
+  /** 통과했을 때만 값이 있다. **빈 값을 "전체"로 읽지 않는다.** */
+  userId: string | null;
+  message: string;
+}
+
+/**
+ * `x-admin-secret`으로 들어온 **시작** 요청을 값으로 판정한다.
+ *
+ * 왜 시작만 더 깐깐한가
+ * ─────────────────────
+ * `/advance` · `/settle` · `/cancel`은 **이미 열린 묶음**을 이어 가거나
+ * 닫는다. 대상을 비워 두면 "도는 것 전부"가 되고 그게 맞다 — 워커가
+ * 1분마다 부르는 경로이기 때문이다.
+ *
+ * 시작은 다르다. 대상을 비워 두면 **없던 주문이 생긴다.** 그래서
+ * 사용자와 연결을 반드시 적게 하고, 확인 문구를 요구한다.
+ *
+ * 여기서 하지 않는 판정
+ * ─────────────────────
+ * **TESTNET 여부를 여기서 보지 않는다.** 그것은 거래소 연결을 실제로
+ * 읽는 `startAttempt`가 정한다(`is_testnet !== true`면 403). 같은
+ * 판단을 두 곳에 두면 언젠가 한쪽만 고쳐지고, 그때 느슨한 쪽이
+ * 주문을 내보낸다.
+ *
+ * **연결 소유권도 여기서 보지 않는다.** `loadFuturesCreds`가
+ * `id = connectionId AND user_id = userId`로 읽으므로, 남의 연결
+ * id를 적으면 자격증명 단계에서 비고 거기서 막힌다.
+ */
+export function headlessStartVerdict(body: any): HeadlessStartVerdict {
+  const bad = (code: HeadlessStartCode, message: string): HeadlessStartVerdict =>
+    ({ ok: false, code, userId: null, message });
+
+  const userId = String(body?.userId ?? '').trim();
+  if (!userId) {
+    return bad('USER_REQUIRED',
+      '무인 시작은 누구의 계좌인지 적어야 합니다 — userId가 비면 주문을 내지 않습니다');
+  }
+
+  const connectionId = String(body?.connectionId ?? '').trim();
+  if (!connectionId) {
+    return bad('CONNECTION_REQUIRED',
+      '무인 시작은 어느 거래소 연결인지 적어야 합니다 — connectionId가 필요합니다');
+  }
+
+  if (String(body?.confirm ?? '') !== HEADLESS_START_CONFIRM) {
+    return bad('CONFIRM_REQUIRED',
+      `무인 시작은 확인 문구가 필요합니다 — confirm에 ${HEADLESS_START_CONFIRM}을 적으세요`);
+  }
+
+  return {
+    ok: true, code: 'OK', userId,
+    // **id를 통째로 적지 않는다.** 로그에 남는 줄이다.
+    message: `무인 시작 승인 — 연결 ${connectionId.slice(0, 8)}…`,
+  };
+}
+
 // ── 다음 회차로 가도 되는가 ──────────────────────────
 
 export type AdvanceCode =

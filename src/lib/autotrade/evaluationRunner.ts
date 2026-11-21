@@ -66,6 +66,15 @@ export interface EvaluationRecord {
   /** 실제로 주문이 나갔는가. **'평가했다'와 다르다** */
   executed: boolean;
   raw: any;
+  /**
+   * 경계 있는 사유 코드 (`outcomeOf`의 화이트리스트를 통과한 값).
+   *
+   * 없으면 undefined다. 'UNKNOWN'으로 메우지 않는다 — "코드가 없다"와
+   * "코드가 UNKNOWN이다"는 다른 사실이다.
+   */
+  reasonCode?: string;
+  /** 왜 09:00 강제 진입도 안 났는가 (`outcomeOf` 화이트리스트 통과값) */
+  forcedEntryCode?: string;
 }
 
 /** `mode` → 실행 환경. `is_testnet === false`만 실전이라는 저장소 규칙과 같은 방향이다 */
@@ -164,6 +173,8 @@ export async function evaluateSchedule(
     // 뜨고, 사람은 포지션이 생긴 줄 안다.
     executed: result.outcome === 'ENTERED',
     raw: b?.battle ?? null,
+    ...(result.reasonCode ? { reasonCode: result.reasonCode } : {}),
+    ...(result.forcedEntryCode ? { forcedEntryCode: result.forcedEntryCode } : {}),
   };
 }
 
@@ -191,7 +202,17 @@ function bucketOf(row: ScheduleRow): string {
  */
 export async function recordEvaluation(
   sb: any, scheduleId: string,
-  rec: { outcome: EvaluationOutcome | string; summary: any; raw?: any; source?: DispatchSource },
+  rec: { outcome: EvaluationOutcome | string; summary: any; raw?: any;
+    source?: DispatchSource;
+    /**
+     * 경계 있는 사유 코드. **화이트리스트를 통과한 값만 온다.**
+     *
+     * 없으면 적지 않는다 — 'UNKNOWN'으로 메우면 "코드가 없다"와
+     * "코드가 UNKNOWN이다"가 같은 값이 된다.
+     */
+    reasonCode?: string | null;
+    /** 왜 09:00 강제 진입도 안 났는가. 화이트리스트를 통과한 값만 온다 */
+    forcedEntryCode?: string | null },
 ): Promise<{ saved: boolean; error: string | null }> {
   const base = {
     last_run_at: new Date().toISOString(),
@@ -205,6 +226,15 @@ export async function recordEvaluation(
     // 누가 깨웠는지. **모르면 적지 않는다** — 'MANUAL'로 채우면
     // 사람이 누른 것과 구분이 안 된다.
     ...(rec.source ? { source: rec.source, sourceAt: new Date().toISOString() } : {}),
+    // ★ 사유 코드를 **구조화된 칸으로** 남긴다. 요약 문장 안에만 있으면
+    //   감사가 집계할 수 없고, 그러면 "NO_SIGNAL인데 왜인지 모른다"로
+    //   남는다. 없으면 칸을 만들지 않는다.
+    ...(typeof rec.reasonCode === 'string' && rec.reasonCode.trim()
+      ? { reasonCode: rec.reasonCode.trim() } : {}),
+    // ★ 같은 이유로 강제 진입 판정도 칸으로 남긴다. 이것이 없으면
+    //   감사가 "09:00 창이 왜 안 열렸나"를 집계할 수 없다.
+    ...(typeof rec.forcedEntryCode === 'string' && rec.forcedEntryCode.trim()
+      ? { forcedEntryCode: rec.forcedEntryCode.trim() } : {}),
   };
 
   try {
@@ -285,6 +315,12 @@ export async function evaluateIfDue(
   const due = dueCheck({
     nowMs, enabled: row.enabled, connectionId: row.connection_id ?? '',
     lastRunAtMs: row.last_run_at, intervalMin: row.interval_min,
+    // 워커(`schedulePoll`)와 **같은 값을 같은 판정에 넘긴다.** 한쪽만
+    // 넘기면 어느 실행기가 깨웠느냐에 따라 창이 열리고 닫힌다.
+    strategyId: (row as any).strategy_id,
+    // 워커(`schedulePoll`)와 **같은 값을 같은 판정에** 넘긴다.
+    profileId: row.execution_profile_id,
+    presetId: row.execution_preset_id,
   });
 
   // 연결이 없는 것은 **그 사실을 예약 줄에 남긴다.** 조용히 건너뛰면
@@ -365,6 +401,8 @@ export async function evaluateIfDue(
       executed: false, raw: null,
     };
   }
+  // `record`에 `reasonCode`가 있으면 전개로 그대로 넘어간다 — 여기서
+  // 다시 꺼내 적지 않는다(한쪽만 고치는 실수를 만들지 않는다).
   const save = await recordEvaluation(sb, row.id, { ...record, source: deps.source });
   return { due, record, saveError: save.error };
 }

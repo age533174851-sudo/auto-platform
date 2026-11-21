@@ -142,6 +142,13 @@ export function readbackProtective(i: {
   stop.readOk = true; tp.readOk = true;
   let other = 0;
 
+  // **판별하지 못한 줄은 '무관'이 아니다.** 종류·방향을 못 읽은 줄이 바로
+  // 내 손절일 수 있다. 그 줄을 무관으로 세고 손절을 못 찾았다고 하면
+  // "확인된 없음"이 되어, 진입 경로가 REQUIRED에서 진입을 되돌린다.
+  // 그래서 내 손절·익절 **후보**로 남는 판별 불가 줄을 따로 센다.
+  let maybeStop = 0;
+  let maybeTp = 0;
+
   const binance = i.venue === 'binance';
   for (const row of i.orders) {
     // 손절인지 익절인지의 판별표는 거래소마다 한 곳씩만 있다.
@@ -153,6 +160,17 @@ export function readbackProtective(i: {
     // **번호는 십진 문자열이다.** 숫자로 읽혀 반올림된 int64를 여기서
     // 받아 적으면, 그 번호로 나가는 취소가 전부 "그런 주문 없다"가 된다.
     const id = venueIdOf(binance ? (row?.orderId ?? row?.id) : row?.id);
+
+    // 판별 불가 줄 중 이 포지션을 닫을 수도 있는 것. 트리거가 읽혔는데
+    // 기대값과 다르면 내가 건 그 주문이 아니다.
+    if (cls.kind === 'UNKNOWN' && (cls.closes == null || cls.closes === i.positionSide)) {
+      const couldBe = (expected: number | null | undefined) =>
+        expected == null || trigger == null || triggerMatches(trigger, expected, tol);
+      if (couldBe(i.expectedStop)) maybeStop++;
+      if (couldBe(i.expectedTakeProfit)) maybeTp++;
+      other++;
+      continue;
+    }
 
     // **이 포지션을 닫는 주문만 센다.** 반대 방향을 닫는 주문은 남의
     // 것이거나 옛 포지션의 고아다.
@@ -170,15 +188,29 @@ export function readbackProtective(i: {
         reason: `익절 확인 — 트리거 ${trigger} (${cls.closes} 청산)` };
       continue;
     }
-    // 종류를 못 가른 것(UNKNOWN)이나 가격이 안 맞는 것은 **내 주문이
-    // 아니다.** 있는 것을 내 것으로 세면 없는 보호를 있다고 적게 된다.
+    // 가격이 안 맞는 것은 **내 주문이 아니다.** 있는 것을 내 것으로 세면
+    // 없는 보호를 있다고 적게 된다. (판별 불가 줄은 위에서 후보로 셌다 —
+    // 내 것으로 세지도, 없다는 근거로 쓰지도 않는다.)
     other++;
   }
 
+  // 못 찾았는데 판별 불가 후보가 있으면 '없음'이 아니라 '확인 불가'다.
+  const ambiguous = (n: number, what: string) =>
+    `${what}을 확인하지 못했습니다 — 판별할 수 없는 조건부 주문 ${n}건이 그것일 수 있습니다`
+    + ' (없다고 단정하지 않습니다)';
+  if (!stop.found && maybeStop > 0) stop = { ...stop, readOk: false, reason: ambiguous(maybeStop, '손절') };
+  if (!tp.found && maybeTp > 0) tp = { ...tp, readOk: false, reason: ambiguous(maybeTp, '익절') };
+  const word = (e: ProtectiveEvidence) => (e.found ? '확인' : e.readOk ? '없음' : '확인 불가');
+
   return {
-    readOk: true, stop, takeProfit: tp, otherCount: other,
-    reason: `조건부 주문 ${i.orders.length}건 조회 · 손절 ${stop.found ? '확인' : '없음'}`
-      + ` · 익절 ${tp.found ? '확인' : '없음'}`
+    // 목록은 읽었어도 **물어본 것**(손절, 그리고 기대 익절이 주어졌다면
+    // 익절)이 '확인 불가'면 이 되읽기를 확인된 결과로 내놓지 않는다 —
+    // 받는 쪽(Gate 진입·스모크)이 `readOk && !found`를 "확인된 없음"으로
+    // 쓴다. 묻지 않은 익절의 모호함이 확인된 손절 없음을 가리지는 않는다.
+    readOk: stop.readOk && (i.expectedTakeProfit == null || tp.readOk),
+    stop, takeProfit: tp, otherCount: other,
+    reason: `조건부 주문 ${i.orders.length}건 조회 · 손절 ${word(stop)}`
+      + ` · 익절 ${word(tp)}`
       + (other ? ` · 이 포지션과 무관/판별불가 ${other}건` : ''),
   };
 }

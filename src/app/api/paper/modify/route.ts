@@ -15,17 +15,10 @@
 // 막지 않으면 사용자는 자기가 무엇을 걸었는지 모른 채 청산된다.
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
+import { readTpslEditValue, type TpslEditValue } from '@/lib/trading/tpslEdit';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
-
-/** 값이 왔는가. null은 '지우기', undefined는 '그대로'다 — 둘은 다르다 */
-function readOpt(v: any): number | null | undefined {
-  if (v === undefined) return undefined;
-  if (v === null || v === '') return null;
-  const n = Number(v);
-  return Number.isFinite(n) && n > 0 ? n : undefined;
-}
 
 export async function POST(req: NextRequest) {
   let body: any;
@@ -41,8 +34,24 @@ export async function POST(req: NextRequest) {
   const positionId = String(body?.positionId || '');
   if (!positionId) return NextResponse.json({ ok: false, error: 'missing_params' }, { status: 400 });
 
-  const stopLoss = readOpt(body?.stopLoss);
-  const takeProfit = readOpt(body?.takeProfit);
+  // **이상한 값은 '그대로'가 아니라 거절이다.** 예전에는 0·음수·문자가
+  // 조용히 무시되어, 같이 온 다른 칸만 저장되고 "저장했습니다"가 나갔다.
+  // 판정은 화면과 같은 파일(`lib/trading/tpslEdit.ts`)에 있다.
+  const slIn = readTpslEditValue(body?.stopLoss);
+  const tpIn = readTpslEditValue(body?.takeProfit);
+  for (const [field, label, v] of [['stopLoss', '손절', slIn], ['takeProfit', '익절', tpIn]] as const) {
+    if (v.kind === 'INVALID') {
+      return NextResponse.json({
+        ok: false, error: 'invalid_price', field,
+        message: `${label} 값을 가격으로 읽지 못했습니다 — 아무것도 저장하지 않았습니다 (0보다 큰 숫자만)`,
+      }, { status: 400 });
+    }
+  }
+  /** KEEP → undefined(그대로) · CLEAR → null(지우기) · SET → 값 */
+  const asPatch = (v: TpslEditValue): number | null | undefined =>
+    v.kind === 'SET' ? v.price : v.kind === 'CLEAR' ? null : undefined;
+  const stopLoss = asPatch(slIn);
+  const takeProfit = asPatch(tpIn);
   if (stopLoss === undefined && takeProfit === undefined) {
     return NextResponse.json({
       ok: false, error: 'nothing_to_change',
@@ -51,9 +60,20 @@ export async function POST(req: NextRequest) {
   }
 
   // **소유권 확인.** 없으면 남의 포지션 id로 남의 장부를 고칠 수 있다.
-  const { data: pos } = await sb.from('paper_positions')
-    .select('id, user_id, symbol, side, status, entry_price')
+  // **`market`을 함께 읽는다.** 방향을 볼 가격이 이 칸으로 정해진다.
+  // 생성된 Supabase 타입에는 `market`이 없다(청산 라우트와 같은 이유).
+  const { data: pos, error: posErr } = await (sb as any).from('paper_positions')
+    .select('id, user_id, symbol, side, status, entry_price, market')
     .eq('id', positionId).maybeSingle();
+  // **조회 실패는 "없음"이 아니다.** `/api/paper/close`와 같은 규칙이다 —
+  // 예전 이 자리는 `error`를 버려, DB가 잠깐 실패하면 있는 포지션을 404
+  // `not_found`로 답했다.
+  if (posErr) {
+    return NextResponse.json({
+      ok: false, error: 'position_unreadable',
+      message: '포지션을 읽지 못해 손절·익절을 바꾸지 않았습니다 — 포지션이 없다는 뜻이 아닙니다',
+    }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
+  }
   if (!pos || pos.user_id !== uid) {
     return NextResponse.json({ ok: false, error: 'not_found' }, { status: 404 });
   }
@@ -68,13 +88,16 @@ export async function POST(req: NextRequest) {
   //
   // 기준은 **지금 시세**다. 진입가로 보면, 이미 많이 움직인 포지션에서
   // 지금 당장 발동하는 값이 통과한다.
-  let mark: number | null = null;
-  try {
-    const { getPremiumIndex } = await import('@/lib/exchanges/binanceFutures');
-    const px = await getPremiumIndex(String(pos.symbol), false);
-    const v = Number(px?.markPrice);
-    mark = Number.isFinite(v) && v > 0 ? v : null;
-  } catch { mark = null; }
+  //
+  // **발동과 같은 가격으로 본다.** 손절을 실제로 발동시키는 감시기
+  // (`/api/paper/exit-monitor`)는 `readPaperMarkPrice(p.market, …)`를 쓴다.
+  // 예전 이 자리는 시장을 안 보고 선물 `getPremiumIndex`(만료된 캐시도
+  // 돌려준다)를 불러서, 현물 포지션에서는 감시기가 보는 값과 다른 값으로
+  // "걸자마자 발동하는가"를 물었다.
+  const { readPaperMarkPrice, paperPriceFailed } =
+    await import('@/lib/engine/paperPriceSource');
+  const px = await readPaperMarkPrice(pos.market, String(pos.symbol));
+  const mark: number | null = paperPriceFailed(px) ? null : px.price;
 
   const long = String(pos.side || '').toUpperCase() === 'LONG';
 

@@ -70,6 +70,25 @@ export type SchedulerCode =
   | 'WORKER_PRESENT_BUT_CONFIG_BLOCKED'
   /** 설정은 갖췄는데 폴링이 멈췄거나 오류로 끝났다 */
   | 'WORKER_PRESENT_BUT_RUNTIME_BROKEN'
+  /**
+   * 워커도 폴링도 정상인데 **본 예약이 전부 꺼져 있다.**
+   *
+   * 왜 따로 두는가 (2026-11-10 운영 실측)
+   * ─────────────────────────────────────
+   * `worker_heartbeat` 는 `status=running` · `tick_count=39645` ·
+   * `isMain=true` · `pollCount=1956` · `lastDueCount=0` 이었고,
+   * `autotrade_schedules` 는 **7건 전부 `enabled=false`** 였다.
+   * 그 상태에서 이 판정은 `WORKER_PRIMARY_ACTIVE` —
+   * "주 경로가 돌고 있습니다" 를 돌려줬다.
+   *
+   * 틀린 말은 아니다. 주 경로는 정말로 돈다. 그런데 **앞으로도 영원히
+   * 아무것도 쏘지 않는다.** 읽는 사람은 그 둘을 구분할 수 없었고,
+   * `due 0건` 은 근거 줄에 숫자로만 있었다.
+   *
+   * "지금 때가 아니라 due 0" 과 "꺼져 있어서 due 0" 은 다른 사실이다.
+   * 전자는 정상이고 후자는 **사람이 켜야 하는 일**이다.
+   */
+  | 'WORKER_ACTIVE_BUT_ALL_SCHEDULES_OFF'
   /** 워커가 아직 이 보고를 적은 적이 없다 — 판정하지 않는다 */
   | 'INSUFFICIENT_EVIDENCE';
 
@@ -94,6 +113,18 @@ export interface SchedulerReport {
   lastDueCount: number | null;
   /** 그때 건너뛴 줄 수 */
   lastSkippedCount: number | null;
+  /**
+   * 그중 **꺼져 있어서** 건너뛴 줄 수(`PollSkipCode === 'OFF'`).
+   *
+   * 개수만 담는다 — 종목·id 는 여기를 지나가지 않는다. 이 보고는 로그인
+   * 없이 열리는 경로로 나가고, `lastDueCount`·`lastSkippedCount` 와 같은
+   * 등급의 값이다.
+   *
+   * **모르면 null 이다.** 0 으로 적지 않는다 — "꺼진 것이 0건"과
+   * "몇 건인지 모른다"는 다른 말이고, 후자를 전자로 읽으면 이 판정이
+   * 거짓으로 안심시킨다.
+   */
+  lastOffCount: number | null;
   /**
    * 마지막으로 평가를 실제로 돌린 시각.
    *
@@ -186,6 +217,7 @@ export function parseSchedulerReport(raw: any): SchedulerReport | null {
     pollIntervalMs: num(o.pollIntervalMs),
     lastPollIso: iso(o.lastPollIso),
     lastDueCount: num(o.lastDueCount),
+    lastOffCount: num(o.lastOffCount),
     lastSkippedCount: num(o.lastSkippedCount),
     lastEvalIso: iso(o.lastEvalIso),
     lastErrorIso: iso(o.lastErrorIso),
@@ -202,7 +234,7 @@ export function parseSchedulerReport(raw: any): SchedulerReport | null {
 /** 아직 아무것도 모르는 상태. 워커가 이 값에서 출발한다 */
 export const EMPTY_SCHEDULER_REPORT: SchedulerReport = {
   hasAppUrl: null, hasAdminSecret: null, isMain: null, pollIntervalMs: null,
-  lastPollIso: null, lastDueCount: null, lastSkippedCount: null,
+  lastPollIso: null, lastDueCount: null, lastSkippedCount: null, lastOffCount: null,
   lastEvalIso: null, lastErrorIso: null, lastErrorCode: null,
   pollCount: null, evalCount: null, source: 'FLY_WORKER',
 };
@@ -293,7 +325,8 @@ export function schedulerVerdict(i: {
   evidence.push(`ADMIN_SECRET ${report.hasAdminSecret === true ? '있음' : report.hasAdminSecret === false ? '없음' : '모름'}`);
   evidence.push(`main 락 ${report.isMain === true ? '쥠' : report.isMain === false ? '예비' : '모름'}`);
   evidence.push(`마지막 폴링 ${report.lastPollIso ?? '없음'}`);
-  evidence.push(`due ${report.lastDueCount ?? '모름'}건 · 건너뜀 ${report.lastSkippedCount ?? '모름'}건`);
+  evidence.push(`due ${report.lastDueCount ?? '모름'}건 · 건너뜀 ${report.lastSkippedCount ?? '모름'}건`
+    + ` · 그중 꺼짐 ${report.lastOffCount ?? '모름'}건`);
   evidence.push(report.lastEvalIso ? `마지막 평가 ${report.lastEvalIso}` : '마지막 평가 없음');
   // 근거 줄도 **코드에서만 만든다.** 예외 문구는 여기까지 오지 않는다.
   if (report.lastErrorCode) {
@@ -359,6 +392,28 @@ export function schedulerVerdict(i: {
   if (ageMs > limit) {
     return { code: 'WORKER_PRESENT_BUT_RUNTIME_BROKEN', standbyOnly, evidence,
       reason: `예약 폴링이 ${Math.round(ageMs / 1000)}초째 멈춰 있습니다 (허용 ${Math.round(limit / 1000)}초)` };
+  }
+
+  // ── 돌고 있는데 쏠 것이 없다 ──
+  //
+  // 여기까지 왔으면 주 경로는 정말로 돈다. 그런데 **본 예약이 전부 꺼져
+  // 있으면** due 는 지금만 0 이 아니라 앞으로도 0 이다. 그 둘을 같은 문장
+  // 으로 적으면 읽는 사람이 "되고 있다"로 읽는다.
+  //
+  // 세 값이 **모두** 맞아야 이 판정을 낸다:
+  //   · due 가 0 이다
+  //   · 건너뛴 줄이 1건 이상이다 (아무것도 안 본 것과 구별한다)
+  //   · 건너뛴 줄 **전부**가 꺼짐이다
+  // `lastOffCount` 가 null 이면 **판정하지 않는다** — 모르는 것을 0 으로
+  // 읽으면 거짓으로 안심시킨다.
+  const due = report.lastDueCount;
+  const skipped = report.lastSkippedCount;
+  const off = report.lastOffCount;
+  if (due === 0 && typeof skipped === 'number' && skipped > 0
+      && typeof off === 'number' && off === skipped) {
+    return { code: 'WORKER_ACTIVE_BUT_ALL_SCHEDULES_OFF', standbyOnly, evidence,
+      reason: `워커는 ${Math.round(ageMs / 1000)}초 전에 예약을 확인했지만 `
+        + `본 ${skipped}건이 **전부 꺼져 있습니다** — 지금만이 아니라 앞으로도 아무것도 쏘지 않습니다` };
   }
 
   return { code: 'WORKER_PRIMARY_ACTIVE', standbyOnly, evidence,

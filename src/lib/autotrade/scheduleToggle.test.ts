@@ -10,8 +10,10 @@
 // A~H는 그 고장이 다시 돌아올 수 있는 모든 문을 하나씩 닫는다.
 
 import { test, eq, assert } from '../../test/harness';
+import { readFileSync } from 'fs';
 import {
   toggleRequest, rebindRequest, parseTogglePatch, enabledUpdate,
+  toggleAuditRecord, TOGGLE_AUDIT_DETAIL_KEYS,
   applyToggleResult, toggleFailureNote, isEnabled, SCHEDULE_ROUTE,
 } from './scheduleToggle';
 
@@ -263,4 +265,95 @@ export function runScheduleToggleTests() {
       assert(typeof req.body!.enabled === 'boolean', 'enabled가 boolean이 아니다');
     }
   });
+// ══════════════════════════════════════════════════════════
+// 끈 사실이 **남는가** — 2026-11-10 운영에서 답이 안 나온 질문
+// ══════════════════════════════════════════════════════════
+//
+//   예약 7건이 전부 꺼져 있었는데 **누가 언제 껐는지 어떤 질의로도 답이
+//   안 나왔다.** `autotrade_schedules`에는 그 칸이 없고, `audit_events`에는
+//   예약 토글이 한 줄도 안 들어간다. `040`이 남길 대상으로 "자동매매
+//   ON/OFF"를 적어 뒀는데도 그렇다.
+//
+//   I~N은 그 구멍을 닫고, 다시 열리지 않게 못 박는다.
+
+test('I. 예약을 끈 사실이 감사 기록이 된다', () => {
+  const rec = toggleAuditRecord({ scheduleId: 's1', enabled: false, symbol: 'BTCUSDT', mode: 'TESTNET' });
+  assert(rec !== null, '기록을 만들지 못했다');
+  eq(rec!.action, 'AUTOTRADE_TOGGLE', '040이 정한 어휘를 써야 집계가 된다');
+  eq(rec!.resource, 's1', '어느 예약인지가 없으면 나중에 못 찾는다');
+  eq(rec!.result, 'success');
+  eq(rec!.detail.enabled, false);
+  eq(rec!.detail.symbol, 'BTCUSDT');
+  eq(rec!.detail.mode, 'TESTNET');
+});
+
+test('I-2. 켠 사실도 같은 모양으로 남는다', () => {
+  const rec = toggleAuditRecord({ scheduleId: 's1', enabled: true });
+  eq(rec!.detail.enabled, true);
+  // 값이 없는 칸은 만들지 않는다 — 빈 문자열을 사실로 적지 않는다.
+  eq(rec!.detail.symbol, undefined);
+  eq(rec!.detail.mode, undefined);
+});
+
+test('J. 거래소 연결 토글과 구별된다', () => {
+  // 같은 action을 exchange 라우트가 이미 쓴다. 구분값이 없으면 감사
+  // 로그에서 "연결을 껐다"와 "예약을 껐다"가 한 이름으로 섞인다.
+  eq(toggleAuditRecord({ scheduleId: 's1', enabled: false })!.detail.scope, 'SCHEDULE');
+});
+
+test('K. enabled는 boolean으로 못 박는다', () => {
+  // 'false'·'0'이 true가 되면 **감사 로그가 켰다고 적는다** — 실제로는 끈 것이다.
+  for (const v of ['false', 'true', '0', '1', 1, 0, null, undefined, {}] as any[]) {
+    const rec = toggleAuditRecord({ scheduleId: 's1', enabled: v });
+    eq(typeof rec!.detail.enabled, 'boolean', `${String(v)}가 boolean이 아니다`);
+    if (v !== true) eq(rec!.detail.enabled, false, `${String(v)}를 켜짐으로 읽었다`);
+  }
+});
+
+test('L. id가 없으면 기록을 만들지 않는다', () => {
+  // 빈 resource로 "무엇에 대한 동작인지 모르는" 줄을 남기지 않는다.
+  for (const bad of [null, undefined, '', '   ', 0] as any[]) {
+    eq(toggleAuditRecord({ scheduleId: bad, enabled: false }), null, `${String(bad)}로 기록을 만들었다`);
+  }
+});
+
+test('M. detail은 네 칸으로 닫혀 있다 — 시크릿이 들어갈 자리가 없다', () => {
+  const rec = toggleAuditRecord({
+    scheduleId: 's1', enabled: false, symbol: 'BTCUSDT', mode: 'LIVE',
+    // 호출부가 실수로 더 넘겨도 지나가지 않는다.
+    ...( { apiKey: 'k', userId: 'u', connection_id: 'c', secret: 's' } as any ),
+  } as any);
+  const keys = Object.keys(rec!.detail).sort();
+  eq(keys.join(','), 'enabled,mode,scope,symbol');
+  for (const k of keys) assert((TOGGLE_AUDIT_DETAIL_KEYS as readonly string[]).includes(k), `허용되지 않은 칸: ${k}`);
+});
+
+test('★ N. PATCH가 그 기록을 실제로 적는다 — 배선이 없으면 이 파일은 장식이다', () => {
+  // 이 저장소가 제일 자주 겪은 고장이 **만들어 놓고 배선을 안 함**이다.
+  // `audit_events`도 `'AUTOTRADE_TOGGLE'`도 `recordAudit`도 이미 있었는데
+  // 예약 라우트가 부르지 않아서, 운영에서 "누가 껐나"에 답할 수 없었다.
+  //
+  // **이름이 보이는 것으로는 부족하다.** 처음 쓴 판은 `/toggleAuditRecord/`
+  // 였고, 호출을 지워도 **import 줄과 주석에 이름이 남아서 통과했다** —
+  // 배선을 보는 시험이 배선을 안 보고 있었다. 그래서 주석·문자열을
+  // 걷어내고 **호출 모양**을 본다.
+  const raw = readFileSync('src/app/api/autotrade/schedule/route.ts', 'utf8');
+  const code = raw
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')   // 블록 주석
+    .replace(/^[ \t]*\/\/.*$/gm, ' ');   // 줄 주석
+  // import 줄은 "부른다"가 아니다.
+  const body = code.replace(/^\s*import[\s\S]*?from\s*'[^']*';?$/gm, ' ');
+  const patchAt = body.indexOf('export async function PATCH');
+  assert(patchAt >= 0, 'PATCH 핸들러를 못 찾았다');
+  const patch = body.slice(patchAt);
+
+  assert(/toggleAuditRecord\s*\(\s*\{/.test(patch),
+    'PATCH가 toggleAuditRecord를 호출하지 않는다 — 끈 사실이 또 사라진다');
+  assert(/await\s+recordAuditAsync\s*\(/.test(patch),
+    'await recordAuditAsync가 아니다 — 불 지르고 잊은 insert는 서버리스에서 잘린다');
+  // 끄는 것을 어렵게 만들지 않는다: 기록 실패가 토글을 실패시키면 안 된다.
+  assert(/try\s*\{[\s\S]{0,600}?recordAuditAsync[\s\S]{0,300}?\}\s*catch/.test(patch),
+    '감사 기록이 try/catch 밖에 있다 — 기록 실패가 끄기까지 실패시킨다');
+});
+
 }
