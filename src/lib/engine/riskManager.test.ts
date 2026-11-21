@@ -211,6 +211,31 @@ export function runRiskManagerTests() {
     eq(p.rejectCode, 'DAILY_PNL_UNKNOWN');
   });
 
+  // ── **못 센 노출을 0으로, 못 읽은 한도를 기본값으로 세지 않는다** ──
+  //
+  // `buildRiskContext`의 두 조회가 실패하면 예전에는 조용히
+  // "열린 위험 0" · "한도 미설정 → 기본값"이 됐다. 전자는 전체 위험
+  // 한도를 통째로 비워 보이게 하고, 후자는 좁게 그어 둔 선을 넓힌다.
+  // dailyPnlKnown과 같은 자리, 같은 이유로 막는다.
+  test('열린 위험을 세지 못했으면 진입하지 않는다', () => {
+    const p = planPosition(signal(), cfg({ openRiskKnown: false }));
+    eq(p.approved, false, '열린 위험을 모르는 채로 통과했다');
+    eq(p.rejectCode, 'OPEN_RISK_UNKNOWN');
+  });
+
+  test('위험 한도를 읽지 못했으면 기본값으로 대신 재지 않는다', () => {
+    const p = planPosition(signal(), cfg({ limitsKnown: false }));
+    eq(p.approved, false, '한도를 모르는 채로 통과했다');
+    eq(p.rejectCode, 'RISK_LIMITS_UNKNOWN');
+  });
+
+  // 과잉 차단 방지 — 안 넘기면(undefined) 예전처럼 돈다.
+  test('known 플래그를 안 넘기면 예전처럼 통과한다 (백테스트·시뮬)', () => {
+    const p = planPosition(signal(), cfg({}));
+    assert(p.rejectCode !== 'OPEN_RISK_UNKNOWN' && p.rejectCode !== 'RISK_LIMITS_UNKNOWN',
+      `안 넘긴 것을 실패로 읽었다: ${p.rejectCode}`);
+  });
+
   test('확인했고 0이면 통과한다 — 0 자체는 문제가 아니다', () => {
     const p = planPosition(signal(), cfg({ dailyPnl: 0, dailyPnlKnown: true }));
     assert(p.rejectCode !== 'DAILY_PNL_UNKNOWN', '확인한 0을 막았다');
