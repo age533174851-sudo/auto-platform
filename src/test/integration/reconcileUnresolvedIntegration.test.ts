@@ -179,6 +179,74 @@ async function checkReconcileListRoute(): Promise<void> {
   }
 }
 
+/**
+ * **호출부가 실제로 쓰는 갈래도 본다.**
+ *
+ * 앱에서 이 라우트를 fetch하는 곳은 세 군데이고
+ * (`OrderPane.tsx` · `AutotradeControl.tsx` 두 곳) **전부
+ * `?connectionId=…`를 붙이고 `dry=1`은 쓰지 않는다.** 즉 위
+ * `checkReconcileListRoute`의 다섯 시나리오는 **한 군데도 지나가지
+ * 않는 갈래**를 본다. 그래서 여기서 나머지 절반을 본다.
+ *
+ * 두 가지를 못박는다:
+ *   ① 같은 조회 실패가 이 갈래에서는 **500으로 막힌다** —
+ *      `orderExecutor.reconcilePendingOrders`가 스스로 throw한다.
+ *      이미 fail-closed였고, 그 사실을 시험으로 고정한다.
+ *   ② 라우트가 **이 갈래에서 목록 질의를 하지 않는다.** 하면 그
+ *      결과와 error를 둘 다 버리게 된다. 질의를 갈래 밖으로 되돌리면
+ *      이 시험이 빨개진다.
+ */
+async function checkReconcileRealPath(): Promise<void> {
+  const adminPath = require.resolve('../../lib/supabase/admin');
+  const guardPath = require.resolve('../../lib/auth/isAdmin');
+  const adapterPath = require.resolve('../../lib/exchanges/futuresAdapter');
+  const routePath = require.resolve('../../app/api/orders/reconcile/route');
+  const saved: Record<string, NodeModule | undefined> = {};
+  for (const k of [adminPath, guardPath, adapterPath, routePath]) saved[k] = require.cache[k];
+
+  let db: ReconcileDb;
+  require.cache[adminPath] = { exports: {
+    getSupabaseAdmin: () => db,
+    resolveUserId: async () => 'u1',
+  } } as NodeModule;
+  require.cache[guardPath] = { exports: {
+    requireAdmin: async () => new Response(null, { status: 403 }),
+  } } as NodeModule;
+  // 거래소 어댑터만 가짜로 둔다. **executor는 실제 코드가 돈다** —
+  // 그것이 막는지가 이 시험의 요점이다.
+  require.cache[adapterPath] = { exports: { futuresExchangeOf: () => 'binance' } } as NodeModule;
+  delete require.cache[routePath];
+
+  try {
+    const { GET } = await import('../../app/api/orders/reconcile/route');
+    db = new ReconcileDb(conn(), { live_orders: [] }, () => true);
+    const res = await GET(new Request(
+      'http://localhost/api/orders/reconcile?connectionId=c-1',
+    ) as Parameters<typeof GET>[0]);
+    const body = await res.json();
+    // 라우트 자신의 목록 질의는 이 긴 컬럼 목록으로 식별한다.
+    // executor는 `select('*')`를 쓰므로 섞이지 않는다.
+    const routeListCols = db.queries.filter(
+      (q) => q.cols.includes('client_order_id') && q.cols.includes('error_message'));
+
+    test('대조 실행 · 조회 실패는 이 갈래에서 500으로 막힌다', () => {
+      eq(res.status, 500);
+      eq(body.ok, false);
+      assert(/미확정 주문 장부 조회 실패/.test(String(body.error || '')),
+        `executor가 스스로 막아야 한다: ${String(body.error)}`);
+    });
+    test('대조 실행 · 라우트는 쓰지 않을 목록 질의를 하지 않는다', () => {
+      eq(routeListCols.length, 0,
+        '질의를 갈래 밖에 두면 결과와 error를 둘 다 버린다');
+    });
+  } finally {
+    for (const k of Object.keys(saved)) {
+      if (saved[k]) require.cache[k] = saved[k] as NodeModule;
+      else delete require.cache[k];
+    }
+  }
+}
+
 export async function runReconcileUnresolvedTests(): Promise<void> {
   console.log('[통합 — 미확정 주문 조회 실패 (실제 gatherAndReconcile)]');
 
@@ -253,4 +321,5 @@ export async function runReconcileUnresolvedTests(): Promise<void> {
   }
 
   await checkReconcileListRoute();
+  await checkReconcileRealPath();
 }
