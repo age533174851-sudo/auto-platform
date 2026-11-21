@@ -350,6 +350,7 @@ import { runKillTargetsTests } from './src/lib/risk/killTargets.test';
 import { runKillClosePlanTests } from './src/lib/risk/killClosePlan.test';
 import { runKillCloseRunTests } from './src/lib/risk/killCloseRun.test';
 import { runKillCloseIntegrationTests } from './src/test/integration/killCloseIntegration.test';
+import { runProtectiveReadFailClosedTests } from './src/test/integration/protectiveReadFailClosedIntegration.test';
 import { runAiKeysRouteIntegrationTests } from './src/test/integration/aiKeysRouteIntegration.test';
 import { runGateCloseTests } from './src/test/integration/gateCloseIntegration.test';
 import { runGateOrderReadTests } from './src/test/integration/gateOrderReadIntegration.test';
@@ -528,6 +529,7 @@ runLifecycleRowsTests(); runPostEntryRiskTests(); runPositionRiskProvenanceTests
   await runHoldExtensionIntegrationTests();
   await runGateLedgerTests();
   await runKillCloseIntegrationTests();
+  await runProtectiveReadFailClosedTests();
   await runGateCloseTests();
   await runGateOrderReadTests();
   await flushAsync();
