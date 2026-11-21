@@ -23,6 +23,9 @@ const ok: SchedulerReport = {
   hasAppUrl: true, hasAdminSecret: true, isMain: true,
   pollIntervalMs: 60_000, lastPollIso: at(20_000),
   lastDueCount: 0, lastSkippedCount: 3,
+  // 이 칸을 적지 않는 **예전 워커**를 나타낸다. null 이면 '전부 꺼짐' 판정을
+  // 내지 않아야 하고, 아래 38건이 그걸 확인한다.
+  lastOffCount: null,
   lastEvalIso: at(3_600_000),
   lastErrorIso: null, lastErrorCode: null, pollCount: 400, evalCount: 12,
   source: 'FLY_WORKER',
@@ -283,5 +286,85 @@ export function runSchedulerReportTests() {
     const p = parseSchedulerReport({ ...ok, lastDueCount: null, pollCount: undefined });
     eq(p?.lastDueCount, null);
     eq(p?.pollCount, null);
+  });
+
+  // ── 돌고 있는데 쏠 것이 없다 (2026-11-10 운영 실측에서 나온 묶음) ──
+
+  test('★★ 워커·폴링 정상 + 본 예약 전부 꺼짐 → "돌고 있다"로 적지 않는다', () => {
+    // 2026-11-10 20:32 운영 값 그대로: status=running · tick 39645 ·
+    // isMain=true · pollCount=1956 · lastDueCount=0,
+    // autotrade_schedules 7건 **전부 enabled=false**.
+    // 이 칸이 없던 동안 판정은 `WORKER_PRIMARY_ACTIVE` —
+    // "주 경로가 돌고 있습니다" 였다. 틀린 말은 아니지만 **앞으로도 영원히
+    // 아무것도 쏘지 않는다**는 사실이 한 줄도 없었다.
+    const v = schedulerVerdict({
+      report: { ...ok, lastDueCount: 0, lastSkippedCount: 7, lastOffCount: 7, pollCount: 1956 },
+      workerAlive: true, heartbeatAgeSec: 1, nowMs: NOW,
+    });
+    eq(v.code, 'WORKER_ACTIVE_BUT_ALL_SCHEDULES_OFF',
+      '전부 꺼진 상태를 "주 경로가 돌고 있습니다"로 적었다 — 사람이 되고 있다고 읽는다');
+    assert(/전부 꺼져/.test(v.reason), '무엇이 문제인지 문장에 없다');
+    assert(/앞으로도/.test(v.reason), '"지금만 0"과 "앞으로도 0"을 구분하지 않았다');
+    assert(v.evidence.some(e => /꺼짐 7건/.test(e)), '근거에 꺼진 수가 없다');
+  });
+
+  test('★★ 모르면 판정하지 않는다 — lastOffCount 가 null 이면 예전 판정 그대로', () => {
+    // 이 칸을 적지 않는 예전 워커의 보고다. **모르는 것을 0으로도 전부로도
+    // 읽지 않는다.** 여기서 '전부 꺼짐'을 내면 거짓으로 겁주는 쪽이고,
+    // 거짓으로 안심시키는 것과 똑같이 나쁘다.
+    const v = schedulerVerdict({
+      report: { ...ok, lastDueCount: 0, lastSkippedCount: 7, lastOffCount: null },
+      workerAlive: true, heartbeatAgeSec: 1, nowMs: NOW,
+    });
+    eq(v.code, 'WORKER_PRIMARY_ACTIVE', '모르는 칸으로 "전부 꺼짐"을 단정했다');
+    assert(v.evidence.some(e => /꺼짐 모름건/.test(e)), '근거가 모름을 모름으로 적지 않았다');
+  });
+
+  test('★★ 일부만 꺼진 것은 "전부 꺼짐"이 아니다', () => {
+    // 7건 중 5건만 꺼졌고 2건은 다른 이유(TOO_SOON 등)로 건너뛴 상태.
+    // 그 2건은 때가 되면 쏜다 — 그래서 "앞으로도 0"이 아니다.
+    const v = schedulerVerdict({
+      report: { ...ok, lastDueCount: 0, lastSkippedCount: 7, lastOffCount: 5 },
+      workerAlive: true, heartbeatAgeSec: 1, nowMs: NOW,
+    });
+    eq(v.code, 'WORKER_PRIMARY_ACTIVE', '일부만 꺼진 것을 전부 꺼짐으로 읽었다');
+  });
+
+  test('★ 아무것도 안 본 상태는 "전부 꺼짐"이 아니다 (건너뜀 0)', () => {
+    // 예약이 한 건도 없으면 due 0 · 건너뜀 0 · 꺼짐 0 이다. 이건 "꺼서
+    // 안 쏘는 것"이 아니라 "쏠 예약 자체가 없는 것"이다 — 사람이 할 일이
+    // 다르다(켜기 vs 만들기).
+    const v = schedulerVerdict({
+      report: { ...ok, lastDueCount: 0, lastSkippedCount: 0, lastOffCount: 0 },
+      workerAlive: true, heartbeatAgeSec: 1, nowMs: NOW,
+    });
+    eq(v.code, 'WORKER_PRIMARY_ACTIVE', '예약이 없는 상태를 전부 꺼짐으로 읽었다');
+  });
+
+  test('★ due 가 1건이라도 있으면 전부 꺼짐이 아니다', () => {
+    const v = schedulerVerdict({
+      report: { ...ok, lastDueCount: 1, lastSkippedCount: 6, lastOffCount: 6 },
+      workerAlive: true, heartbeatAgeSec: 1, nowMs: NOW,
+    });
+    eq(v.code, 'WORKER_PRIMARY_ACTIVE', 'due 가 있는데 전부 꺼짐으로 읽었다');
+  });
+
+  test('★★ 더 급한 고장이 먼저다 — 폴링이 멈췄으면 그걸 적는다', () => {
+    // 전부 꺼져 있고 **동시에** 폴링도 멈춘 상태. 켜는 것보다 먼저
+    // 고쳐야 할 것은 멈춘 폴링이다.
+    const v = schedulerVerdict({
+      report: { ...ok, lastPollIso: at(3_600_000), lastDueCount: 0, lastSkippedCount: 7, lastOffCount: 7 },
+      workerAlive: true, heartbeatAgeSec: 1, nowMs: NOW,
+    });
+    eq(v.code, 'WORKER_PRESENT_BUT_RUNTIME_BROKEN',
+      '멈춘 폴링보다 꺼진 예약을 먼저 적었다 — 순서가 뒤집히면 급한 것을 늦게 본다');
+  });
+
+  test('★ 보고에 lastOffCount 가 들어오고 나간다 (parse 왕복)', () => {
+    const r = parseSchedulerReport({ ...ok, lastOffCount: 4 });
+    eq(r.lastOffCount, 4);
+    eq(parseSchedulerReport({ ...ok, lastOffCount: 'x' }).lastOffCount, null,
+      '숫자가 아닌 값을 숫자로 읽었다');
+    eq(EMPTY_SCHEDULER_REPORT.lastOffCount, null, '아무것도 모르는 상태가 0이 아니다');
   });
 }

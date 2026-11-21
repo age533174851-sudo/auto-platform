@@ -9,7 +9,7 @@
 import { test, eq, assert } from '../../test/harness';
 import {
   dueCheck, nextEvaluationAtMs, runtimeStateOf, verdictOfOutcome, resultLineOf,
-  msOf, MIN_GAP_MS, RUNNER_LATE_FACTOR,
+  msOf, MIN_GAP_MS, RUNNER_LATE_FACTOR, dueDiagnostics,
 } from './evaluationLoop';
 import { envOfMode } from './evaluationRunner';
 
@@ -200,5 +200,115 @@ export function runEvaluationLoopTests() {
     eq(envOfMode('TESTNET'), 'TESTNET');
     eq(envOfMode('PAPER'), 'TESTNET');
     eq(envOfMode(null), 'TESTNET');
+  });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // **화면이 보는 상태와 틱을 막는 판정이 달랐다.**
+  //
+  // `runtimeStateOf`는 `dueCheck`를 부르지 않는다. 그래서 화면에는
+  // `WATCHING`(감시 중)이 떠 있는데 실행기의 틱은 매번 `WAITING`으로
+  // 돌아선다 — 2026-11-02~05 사이 `autotrade-tick` 12회차가 전부
+  // `code:"WAITING"`이었고, 그 사실은 워크플로 로그에만 있었다.
+  //
+  // 조회 응답에는 `interval_min`·`last_run_at`·`nextEvaluationAtMs`가
+  // 이미 실린다. 빠진 것은 **"그래서 지금 왜 안 도는가"** 하나다.
+  // `dueDiagnostics`는 그 답을 `dueCheck` 정본에서 그대로 가져온다 —
+  // 판정을 다시 쓰지 않는다 (`CLAUDE.md`: 같은 판단이 두 곳에 있으면
+  // 언젠가 갈린다).
+  // ─────────────────────────────────────────────────────────────────────
+
+  console.log('[자동매매 주기 — 왜 안 도는지가 조회에 보인다]');
+
+  test('진단은 dueCheck의 판정을 그대로 싣는다 — 다시 판단하지 않는다', () => {
+    const row = { enabled: true, connectionId: 'c1',
+      lastRunAtMs: NOW - 10 * MIN, intervalMin: 60 };
+    const d = dueDiagnostics({ nowMs: NOW, ...row });
+    const v = dueCheck({ nowMs: NOW, ...row });
+    eq(d.due.code, v.code, '코드가 갈렸다');
+    eq(d.due.due, v.due, 'due가 갈렸다');
+    eq(d.due.reason, v.reason, '이유 문구가 갈렸다');
+    eq(d.due.leftMin, v.leftMin, 'leftMin이 갈렸다');
+  });
+
+  test('WAITING이면 남은 시간과 이유가 값으로 나온다', () => {
+    const d = dueDiagnostics({ nowMs: NOW, enabled: true,
+      lastRunAtMs: NOW - MIN, intervalMin: 60 });
+    eq(d.due.code, 'WAITING');
+    eq(d.due.due, false);
+    eq(d.due.leftMin, 59);
+    assert(d.due.reason.includes('59분'), d.due.reason);
+  });
+
+  test('네 값이 한 번에 나온다 — interval·마지막·다음·판정', () => {
+    const d = dueDiagnostics({ nowMs: NOW, enabled: true,
+      lastRunAtMs: NOW - 10 * MIN, intervalMin: 60 });
+    eq(d.intervalMin, 60, '적용된 간격');
+    eq(d.lastEvaluationAtMs, NOW - 10 * MIN);
+    eq(d.nextEvaluationAtMs, NOW - 10 * MIN + 60 * MIN);
+    eq(d.due.code, 'WAITING');
+    // 사람이 읽을 ISO 문자열도 같이 — 화면이 ms를 다시 포맷하지 않게
+    eq(d.lastEvaluationAt, new Date(NOW - 10 * MIN).toISOString());
+    eq(d.nextEvaluationAt, new Date(NOW - 10 * MIN + 60 * MIN).toISOString());
+  });
+
+  test('**간격이 비어 있으면 기본값이 적용된 사실이 보인다**', () => {
+    // interval_min이 NULL이면 DEFAULT_INTERVAL_MIN(1440)이 쓰인다.
+    // 표에 적힌 값과 실제로 쓰인 값이 다르면 그 사실이 보여야 한다 —
+    // 안 보이면 "간격 60분으로 해 뒀는데 왜 안 도나"가 영원히 안 풀린다.
+    const d = dueDiagnostics({ nowMs: NOW, enabled: true,
+      lastRunAtMs: NOW - 60 * MIN, intervalMin: null });
+    eq(d.intervalMinRaw, null, '표에 적힌 값은 그대로 보여준다');
+    eq(d.intervalMin, 1440, '실제로 쓰인 값');
+    eq(d.intervalMinDefaulted, true, '기본값이 적용됐다는 사실');
+    eq(d.due.code, 'WAITING', '하루 간격이면 1시간 뒤에도 아직이다');
+  });
+
+  test('0은 유효한 간격이 아니다 — 기본값으로 떨어진 사실이 보인다', () => {
+    const d = dueDiagnostics({ nowMs: NOW, enabled: true,
+      lastRunAtMs: NOW - 60 * MIN, intervalMin: 0 });
+    eq(d.intervalMinRaw, 0);
+    eq(d.intervalMin, 1440);
+    eq(d.intervalMinDefaulted, true);
+  });
+
+  test('한 번도 안 돌았으면 다음 시각은 null이고 FIRST다', () => {
+    const d = dueDiagnostics({ nowMs: NOW, enabled: true,
+      lastRunAtMs: null, intervalMin: 60 });
+    eq(d.lastEvaluationAtMs, null);
+    eq(d.lastEvaluationAt, null);
+    eq(d.nextEvaluationAtMs, null, "'다음'이 아니라 '처음'이다");
+    eq(d.nextEvaluationAt, null);
+    eq(d.due.code, 'FIRST');
+    eq(d.due.due, true);
+  });
+
+  test('꺼져 있으면 OFF이고 간격 계산을 하지 않는다', () => {
+    const d = dueDiagnostics({ nowMs: NOW, enabled: false,
+      lastRunAtMs: NOW - 10 * MIN, intervalMin: 60 });
+    eq(d.due.code, 'OFF');
+    eq(d.due.due, false);
+  });
+
+  test('연결이 빈 문자열이면 NO_CONNECTION이 그대로 보인다', () => {
+    const d = dueDiagnostics({ nowMs: NOW, enabled: true, connectionId: '  ',
+      lastRunAtMs: NOW - 10 * MIN, intervalMin: 60 });
+    eq(d.due.code, 'NO_CONNECTION');
+  });
+
+  test('**시크릿이나 키를 싣지 않는다**', () => {
+    const d: any = dueDiagnostics({ nowMs: NOW, enabled: true,
+      lastRunAtMs: NOW - MIN, intervalMin: 60,
+      // 호출하는 쪽이 행을 통째로 넘겨도 진단은 아는 필드만 돌려준다
+      apiKey: 'AK-should-not-appear', apiSecret: 'SK-should-not-appear',
+      connectionId: 'c1',
+    } as any);
+    const flat = JSON.stringify(d);
+    assert(!flat.includes('AK-should-not-appear'), '키가 응답에 들어갔다: ' + flat);
+    assert(!flat.includes('SK-should-not-appear'), '시크릿이 응답에 들어갔다: ' + flat);
+    // 돌려주는 키 집합이 고정이어야 새 필드가 조용히 새지 않는다
+    eq(Object.keys(d).sort().join(','),
+      ['due','intervalMin','intervalMinDefaulted','intervalMinRaw',
+       'lastEvaluationAt','lastEvaluationAtMs',
+       'nextEvaluationAt','nextEvaluationAtMs'].sort().join(','));
   });
 }

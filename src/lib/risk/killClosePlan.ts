@@ -398,6 +398,26 @@ export interface KillProtectionVerdict {
 }
 
 /**
+ * 종료 뒤 다시 읽은 포지션 줄에서 **잔여 수**를 센다.
+ *
+ * ★ **수량을 못 읽은 줄은 잔여다.** `planKillClose`는 그 줄을 "플랫이라고
+ *   말할 수 없다"며 닫지 않고, `planKillCancelOnly`는 점유로 센다. 잔여를
+ *   세는 쪽만 `Number(null) === 0`으로 읽어 빼면, 읽을 수 있던 줄만 닫힌
+ *   회차가 `CLOSED_VERIFIED`가 된다 — 못 읽은 포지션은 거래소에 그대로인데.
+ *   같은 판정을 한 곳(`num`)에 둔다.
+ */
+export function countKillLeftover(
+  rows: ReadonlyArray<Pick<KillPositionRow, 'amount'> | null | undefined> | null | undefined,
+): number {
+  let n = 0;
+  for (const r of rows ?? []) {
+    const amt = num(r?.amount);
+    if (amt == null || Math.abs(amt) > 0) n += 1;
+  }
+  return n;
+}
+
+/**
  * 긴급 종료가 끝난 뒤 **보호 상태**를 판정한다.
  *
  * `leftoverPositions`가 `null`이면 **못 읽은 것이다.** 0으로 읽지 않는다 —

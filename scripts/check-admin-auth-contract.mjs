@@ -73,10 +73,33 @@ const REQUIRED_CALLERS = [
  *
  * `scheduled-exit`은 `Authorization: Bearer CRON_SECRET`이다. 전체 치환을
  * 하다가 이것까지 바꾸면 다른 것이 죽는다. 그래서 여기에 못 박는다.
+ *
+ * `news-pipeline`은 `NEWS_CRON_SECRET`으로 못 박혀 있었다
+ * ─────────────────────────────────────────────────────────
+ * 이 관문은 제 일을 했다 — 못 박은 계약이 바뀌는 것을 잡았다. 그래서
+ * **규칙을 지우지 않고 못의 값만 옮긴다.** 이유는 실행 로그가 준다:
+ *
+ *     env:
+ *       BASE: ***
+ *       SECRET:          <- 비어 있다. 설정된 비밀은 ***로 가려진다
+ *     HTTP 401 . ***api/cron/news-sync
+ *
+ * `NEWS_CRON_SECRET`이라는 비밀은 **저장소에 없다.** 그래서 빈 문자열이
+ * 나갔고 서버(`CRON_SECRET`과 비교한다)가 거절했다 — `news-pipeline`은
+ * 첫 실행부터 성공이 0회다(#582). 못 박혀 있던 것은 **동작하는 계약이
+ * 아니라 동작한 적 없는 이름**이었다.
+ *
+ * 맞는 값은 이미 저장소에 `CRON_SECRET`으로 있다 — 바로 위 줄의
+ * `scheduled-exit`이 그 이름으로 같은 서버를 불러 계속 성공한다. 그래서
+ * 두 줄은 이제 같은 계약을 가리킨다.
+ *
+ * **관문의 이빨은 그대로다.** 누가 이 파일을 `ADMIN_SECRET`으로 바꾸거나
+ * 세 번째 이름을 만들면 여전히 실패한다. 바뀐 것은 무엇을 맞다고
+ * 보는가 하나다.
  */
 const SEPARATE_CONTRACTS = [
   { file: '.github/workflows/scheduled-exit.yml', secret: 'CRON_SECRET', header: 'Authorization' },
-  { file: '.github/workflows/news-pipeline.yml', secret: 'NEWS_CRON_SECRET', header: 'Authorization' },
+  { file: '.github/workflows/news-pipeline.yml', secret: 'CRON_SECRET', header: 'Authorization' },
 ];
 
 // ── ① x-admin-secret을 보내는 워크플로를 전부 찾는다 ──

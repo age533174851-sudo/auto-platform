@@ -288,6 +288,33 @@ export async function getOpenOrdersGateFutures(
     '/api/v4/futures/usdt/orders', base, key, secret, testnet);
 }
 
+/** Read all three Gate TESTNET books for a recovery observation, preserving unknowns. */
+export async function readGateTestnetExposure(key: string, secret: string, contract: string) {
+  const credentials = { key, secret, testnet: true };
+  const [positions, regularOrders, conditionalOrders] = await Promise.all([
+    gateReq<unknown>('GET', '/api/v4/futures/usdt/positions', { ...credentials, qs: 'holding=true' }).catch(() => null),
+    gateReq<unknown>('GET', '/api/v4/futures/usdt/orders', {
+      ...credentials, qs: new URLSearchParams({ status: 'open', contract }).toString(),
+    }).catch(() => null),
+    getPriceOrdersGateFutures(key, secret, contract, true),
+  ]);
+
+  // Gate returns all held positions when no limit is supplied, including both hedge legs.
+  const positionsReadable = Array.isArray(positions) && positions.every(row => (
+    typeof row?.contract === 'string' && row.contract.length > 0
+    && (typeof row.size === 'number' || (typeof row.size === 'string' && /^-?\d+(\.\d+)?$/.test(row.size)))
+    && Number.isFinite(Number(row.size))
+  ));
+  const openPositions = positionsReadable
+    ? positions.filter(row => row.contract === contract && Number(row.size) !== 0).length
+    : null;
+  return {
+    openPositions,
+    regularOrders: Array.isArray(regularOrders) ? regularOrders.length : null,
+    conditionalOrders: conditionalOrders?.length ?? null,
+  };
+}
+
 /** 걸려 있는 조건부 주문(손절·익절). 못 읽으면 null — 빈 배열과 구분한다 */
 export async function getPriceOrdersGateFutures(
   key: string, secret: string, contract: string, testnet = true,
@@ -296,6 +323,13 @@ export async function getPriceOrdersGateFutures(
     // ★ 위 한 줄(**"못 읽으면 null — 빈 배열과 구분한다"**)이 이 함수의
     //   계약인데, 예전 코드는 비배열 200에 `[]`를 돌려줬다. 문서와 코드가
     //   달랐고, 그 `[]`는 호출부에서 "보호주문 없음"이 된다.
+    //
+    // 충돌 해소(2026-11-21): base 쪽은 `gateReq` 한 번 +
+    // `Array.isArray(rows) ? rows : null`이었다. 비배열을 null로 적는
+    // 보장은 같지만 **쪽을 넘기지 않아 101번째부터 조용히 사라진다** —
+    // 그 잘린 목록은 아래 `catch`를 지나 "이게 전부"로 쓰인다.
+    // `gatePagedList`는 비배열에 던지고(→ catch → null), 끝까지 읽지
+    // 못해도 던진다. **두 보장을 다 가진 쪽을 남긴다.**
     return await gatePagedList<any>(
       '/api/v4/futures/usdt/price_orders', `status=open&contract=${contract}`,
       key, secret, testnet);

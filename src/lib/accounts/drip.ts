@@ -39,8 +39,11 @@ export function simulateDrip(inp: DripInput): DripYear[] {
     } else {
       cashDividends += dividend; // 세후 현금으로 빼둠
     }
-    // 배당 성장 (기업이 배당 인상)
-    curYield = curYield * (1 + divGrowth / 100);
+    // 배당 성장 (기업이 배당 인상). curYield는 '주당 배당 ÷ 주가'라서
+    // 주당 배당이 오른 만큼 커지고 **주가가 오른 만큼 작아진다.** 배당
+    // 성장률만 곱하면 위에서 이미 오른 평가금액에 또 곱해져 주당 배당이
+    // (1+주가)×(1+배당)씩 자란다 — 성장을 두 번 센다.
+    curYield = curYield * (1 + divGrowth / 100) / (1 + priceGrowth / 100);
     out.push({
       year: y,
       value: Math.round(shareValue),

@@ -52,8 +52,14 @@ export function isUnsafeIntegerLiteral(token: string): boolean {
   const digits = token.replace(/^-/, '');
   // 15자리 이하는 언제나 안전하다(최대 안전 정수는 16자리).
   if (digits.length <= 15) return false;
-  // 16자리 이상은 실제로 왕복이 되는지 본다 — 값으로 확인한다.
-  return String(Number(token)) !== token;
+  // 16자리 이상은 **안전 범위 안인지**를 본다.
+  //
+  // 예전에는 `String(Number(token)) !== token`(왕복 비교)이었다. 그런데
+  // `String`은 그 double의 **가장 짧은** 십진 표기를 돌려줄 뿐 정확한 값이
+  // 아니다 — `2089209928026685400`은 Number로 …685440이 되지만 `String`은
+  // "…685400"을 돌려줘 왕복된 것처럼 보였다. 그렇게 number로 남은 번호는
+  // `venueIdOf`가 안전 범위 밖이라 null로 버린다. 판정을 그 규칙과 같게 둔다.
+  return !Number.isSafeInteger(Number(token));
 }
 
 /**
@@ -67,6 +73,26 @@ export function isUnsafeIntegerLiteral(token: string): boolean {
  */
 export function parseLossless<T = any>(text: string): T {
   return JSON.parse(quoteUnsafeIntegers(text)) as T;
+}
+
+/**
+ * **거래소 거절 본문을 읽는다.** 못 읽으면 빈 객체다.
+ *
+ * `parseLossless`는 동기 함수다. 예전 오류 경로는
+ * `parseLossless(await r.text()).catch(() => ({}))`였는데, 반환값에
+ * `.catch`가 없어 거절 사유 대신 TypeError가 던져졌다 — -4046(이미 그
+ * 마진 타입) · -2013(주문 없음)처럼 **사유를 보고 판단하는 분기가 전부
+ * 죽어 있었다.**
+ *
+ * 빈 객체로 떨어지는 것은 **오류 경로에서만** 안전하다: 호출자는 어차피
+ * 던지고, 사유가 없으면 `HTTP <status>`를 적는다. 성공 본문에는 쓰지 않는다
+ * (`parseLossless`가 던지는 것이 맞다).
+ */
+export function parseErrorBody(text: string): any {
+  try {
+    const v = parseLossless<any>(text);
+    return v && typeof v === 'object' ? v : {};
+  } catch { return {}; }
 }
 
 /**

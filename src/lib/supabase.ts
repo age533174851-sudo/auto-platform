@@ -247,50 +247,6 @@ export async function adminGetAllUsers(search?: string): Promise<UserProfile[]> 
   return (data || []).map(rowToProfile);
 }
 
-export async function adminChangePlan(
-  targetUserId: string,
-  plan: PlanType,
-  role: UserRole,
-  adminUserId: string
-): Promise<{ error: string | null }> {
-  const sb = await getClient();
-  if (!sb) return { error: 'Supabase not configured' };
-  if (['lifetime','founder'].includes(plan)) {
-    const { error } = await sb.rpc('admin_grant_lifetime', {
-      target_user_id: targetUserId, admin_user_id: adminUserId, plan_type: plan,
-    });
-    return { error: error?.message || null };
-  }
-  const { error } = await sb.from('profiles').update({
-    plan, role, expires_at: new Date(Date.now() + 365*24*3600*1000).toISOString(),
-    granted_by: adminUserId, updated_at: new Date().toISOString(),
-  }).eq('id', targetUserId);
-  if (!error) {
-    await sb.from('audit_logs').insert({
-      actor_id: adminUserId, action: 'CHANGE_PLAN', target_id: targetUserId,
-      details: `Plan → ${plan} / Role → ${role}`,
-    });
-  }
-  return { error: error?.message || null };
-}
-
-export async function adminBanUser(
-  targetUserId: string, ban: boolean, adminUserId: string
-): Promise<{ error: string | null }> {
-  const sb = await getClient();
-  if (!sb) return { error: 'Supabase not configured' };
-  const { error } = await sb.from('profiles').update({
-    status: ban ? 'banned' : 'active', updated_at: new Date().toISOString(),
-  }).eq('id', targetUserId);
-  if (!error) {
-    await sb.from('audit_logs').insert({
-      actor_id: adminUserId, action: ban ? 'BAN_USER' : 'UNBAN_USER', target_id: targetUserId,
-      details: ban ? '계정 차단' : '차단 해제',
-    });
-  }
-  return { error: error?.message || null };
-}
-
 // ══════════════════════════════════════════════════════════════
 // INVITE CODES
 // ══════════════════════════════════════════════════════════════
@@ -310,20 +266,20 @@ export async function adminGetCodes() {
   return data || [];
 }
 
-export async function adminCreateCode(code: {
-  code: string; plan: PlanType; role: UserRole;
-  uses_max: number | null; note: string; expires_at: string | null;
-}, adminUserId: string): Promise<{ error: string | null }> {
-  const sb = await getClient();
-  if (!sb) return { error: 'Supabase not configured' };
-  const { error } = await sb.from('invite_codes').insert({ ...code, created_by: adminUserId });
-  if (!error) {
-    await sb.from('audit_logs').insert({
-      actor_id: adminUserId, action: 'CREATE_INVITE_CODE', details: `코드 생성: ${code.code}`,
-    });
-  }
-  return { error: error?.message || null };
-}
+// ── 클라이언트 쪽 관리자 보조 4개를 지웠다 ──
+//
+// `adminChangePlan` · `adminBanUser` · `adminCreateCode` · `getAuditLogs`.
+// 넷 다 **저장소 어디에서도 부르지 않았다.** 실제로 쓰이는 길은
+// `/api/admin`(서버, service_role)이고, 화면도 그쪽을 부른다.
+//
+// 그냥 죽은 코드가 아니라 **틀린 채로 죽어 있었다.** 넷 다 `audit_logs`에
+// `actor_id` · `details`로 쓰거나 읽었는데, 실제 DB의 그 표에는 그 칸이
+// 없다(`src/lib/supabase/types.ts` — Management API로 실제 DB에서 뽑은
+// 파일). 게다가 이 파일의 클라이언트는 브라우저 anon 키를 쓰므로 감사
+// 표에 쓸 권한도 없다.
+//
+// 같은 판단이 두 곳에 있으면 언젠가 갈린다. 쓰이는 쪽을 남기고 이쪽을
+// 지운다 — 다시 필요하면 서버 라우트로 만든다.
 
 export async function adminToggleCode(
   codeId: string, active: boolean
@@ -337,11 +293,3 @@ export async function adminToggleCode(
 // ══════════════════════════════════════════════════════════════
 // AUDIT LOGS
 // ══════════════════════════════════════════════════════════════
-
-export async function getAuditLogs(limit = 50) {
-  const sb = await getClient();
-  if (!sb) return [];
-  const { data } = await sb.from('audit_logs').select('*')
-    .order('created_at', { ascending: false }).limit(limit);
-  return data || [];
-}
