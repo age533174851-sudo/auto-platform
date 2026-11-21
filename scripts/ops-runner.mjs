@@ -97,7 +97,7 @@ async function loadLib() {
 }
 
 const {
-  claimDecision, runOutcomeOf, healPlan, healVerdict, deployVerification, runtimeHealthOf,
+  claimDecision, claimUpdateGuardSql, runOutcomeOf, healPlan, healVerdict, deployVerification, runtimeHealthOf,
   observedVercelSha,
 } = await loadLib();
 
@@ -243,10 +243,12 @@ if (d.code !== 'CLAIM') {
   process.exit(0);
 }
 
-// ── 집어 간다. 이미 남이 가져갔으면 0줄이 돌아온다 ──
+// ── 집어 간다. UPDATE WHERE에서 상태·임차·승인을 다시 확인한다 ──
 const claimed = q(`
   UPDATE ops_requests SET status = 'CLAIMED', claimed_by = ${lit(ME)}, claimed_at = now()
-  WHERE id = ${lit(d.row.id)} AND status IN ('PENDING', 'CLAIMED')
+  WHERE id = ${lit(d.row.id)}
+    AND command = ${lit(d.row.command)}
+    AND (${claimUpdateGuardSql()})
   RETURNING id`);
 if (!claimed.ok || claimed.rows.length === 0) {
   console.log('다른 실행기가 먼저 가져갔습니다 — 이번은 아무것도 하지 않습니다');
