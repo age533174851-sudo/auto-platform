@@ -165,8 +165,10 @@ export async function collectChecklistInput(opts: PreflightOptions): Promise<Che
       summary: g.verdict?.summary || g.error,
     };
     // 조회가 안 됐으면 미확정 주문 수도 신뢰할 수 없다 — 0으로 적으면
-    // "없음"이 되고, 그게 중복 체결로 이어진다.
-    if (g.reachable) input.unresolvedOrderCount = g.unresolvedOrders.length;
+    // "없음"이 되고, 그게 중복 체결로 이어진다. 그 가림은 수집기가
+    // 한 번만 한다(`unresolvedOrderCount`) — 여기서 또 가리면 가리는
+    // 곳이 둘이 되고, 둘이 되면 언젠가 갈린다.
+    input.unresolvedOrderCount = g.unresolvedOrderCount;
 
     // ── 서브계좌 한도 ──
     //

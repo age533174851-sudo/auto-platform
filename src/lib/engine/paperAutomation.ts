@@ -101,6 +101,49 @@ export function readBotTimeframe(config: unknown): { timeframe: BarInterval; bad
         bad: `알 수 없는 봉 주기입니다: ${String(raw).slice(0, 40)} (가능: ${BAR_INTERVALS.join(' · ')})` };
 }
 
+/**
+ * 봇이 걸 **배율**. 거래소 선물 한도에 맞춰 1~125배를 받는다.
+ *
+ * 전에는 배율이 계정 설정 하나였다 — `readRunnerConfig(env)`가 읽는
+ * `PAPER_LEVERAGE` 한 값을 모든 봇이 같이 썼다. 그래서 "보수적인 봇과
+ * 공격적인 봇을 나란히 돌려 비교한다"가 되지 않았다.
+ *
+ * **적혀 있는데 범위를 벗어나면 조용히 깎지 않는다.** 깎으면 사용자는
+ * 50배 봇을 켰다고 생각하는데 5배가 돌면서 그 봇의 성적표에 적힌다 —
+ * 전략과 봉 주기에서 이미 같은 판단을 했다. 부르는 쪽이 `bad`를 보고
+ * 멈춘다.
+ */
+/**
+ * 화면이 고를 수 있는 배율 단계. **범위(1~125)와 따로 적지 않는다** —
+ * 여기 없는 값도 `parseBotLeverage`가 받으므로(옛 봇·직접 호출), 이 목록은
+ * 고르기 편한 단계일 뿐 울타리가 아니다.
+ */
+export const BOT_LEVERAGE_CHOICES = [1, 2, 3, 5, 10, 20, 50, 75, 100, 125] as const;
+
+export const BOT_LEVERAGE_MIN = 1;
+export const BOT_LEVERAGE_MAX = 125;
+
+export function readBotLeverage(config: unknown, fallback: number):
+  { leverage: number; bad: string | null } {
+  const raw = config && typeof config === 'object' && !Array.isArray(config)
+    ? (config as Record<string, unknown>).leverage : undefined;
+  if (fieldOmitted(raw)) return { leverage: fallback, bad: null };
+  const got = parseBotLeverage(raw);
+  return got != null
+    ? { leverage: got, bad: null }
+    : { leverage: fallback,
+        bad: `배율은 ${BOT_LEVERAGE_MIN}~${BOT_LEVERAGE_MAX} 사이의 정수여야 합니다: ${String(raw).slice(0, 40)}` };
+}
+
+/** 받아들일 수 있는 배율이면 그 수, 아니면 `null`. **깎아서 돌려주지 않는다.** */
+export function parseBotLeverage(raw: unknown): number | null {
+  if (typeof raw === 'boolean') return null;
+  const v = Number(raw);
+  if (!Number.isFinite(v) || !Number.isInteger(v)) return null;
+  if (v < BOT_LEVERAGE_MIN || v > BOT_LEVERAGE_MAX) return null;
+  return v;
+}
+
 export function parsePaperAutomationControl(body: unknown):
   { enabled: boolean; symbol: string; interval: number; botId: string;
     /**
@@ -117,7 +160,9 @@ export function parsePaperAutomationControl(body: unknown):
      */
     signal: EntrySignalId | null;
     /** 봉 주기. **`null`은 "안 적었다"** — 저장된 값을 지키게 한다 */
-    timeframe: BarInterval | null } | null {
+    timeframe: BarInterval | null;
+    /** 배율. **`null`은 "안 적었다"** — 저장된 값을 지키게 한다 */
+    leverage: number | null } | null {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
   const b = body as Record<string, unknown>;
   // **안 적으면 옛 봇이다.** 이 줄이 없으면 예전 화면이 보내던 요청이
@@ -125,7 +170,7 @@ export function parsePaperAutomationControl(body: unknown):
   const botId = b.botId == null || b.botId === '' ? DEFAULT_PAPER_BOT : String(b.botId);
   if (!PAPER_BOT_ID.test(botId)) return null;
   // 끄는 데는 전략이 필요하지 않다. null은 "안 적었다"다.
-  if (b.action === 'stop') return { enabled: false, symbol: 'BTCUSDT', interval: 60, botId, signal: null, timeframe: null };
+  if (b.action === 'stop') return { enabled: false, symbol: 'BTCUSDT', interval: 60, botId, signal: null, timeframe: null, leverage: null };
   // **화면이 고를 수 있는 종목과 같아야 한다.** #658에서 화면 드롭다운에
   // SOLUSDT를 넣었는데 이 목록에 없어서 400으로 거절됐다 — 고를 수 있는데
   // 눌리지 않는 자리였다.
@@ -140,7 +185,11 @@ export function parsePaperAutomationControl(body: unknown):
   const tfOmitted = fieldOmitted(b.timeframe);
   const timeframe = tfOmitted ? null : parseBarInterval(b.timeframe);
   if (!tfOmitted && !timeframe) return null;
-  return { enabled: true, symbol: b.symbol as string, interval: b.interval as number, botId, signal, timeframe };
+  // 배율도 같다 — 범위를 벗어난 값은 조용히 깎지 않고 400으로 거절한다.
+  const levOmitted = fieldOmitted(b.leverage);
+  const leverage = levOmitted ? null : parseBotLeverage(b.leverage);
+  if (!levOmitted && leverage == null) return null;
+  return { enabled: true, symbol: b.symbol as string, interval: b.interval as number, botId, signal, timeframe, leverage };
 }
 
 const n = (v: unknown): number | null => v == null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v);
@@ -170,6 +219,11 @@ export async function evaluatePaperAutomation(sb: any, run: any,
   // 주기도 모르면 멈춘다 — 모르는 주기로 "일단 일봉" 돌리지 않는다.
   const tf = readBotTimeframe(run.config);
   if (tf.bad) return { code: 'TIMEFRAME_UNKNOWN', message: tf.bad };
+  // 배율도 모르면 멈춘다. `runCfg`가 config를 통째로 펼치므로 검증하지
+  // 않으면 이상한 값이 그대로 `cfg.leverage`가 되어 체결에 적힌다.
+  const lev = readBotLeverage(run.config, DEFAULT_RUNNER.leverage);
+  if (lev.bad) return { code: 'LEVERAGE_UNKNOWN', message: lev.bad };
+  cfg.leverage = lev.leverage;
   const rows = async () => {
     const r = await sb.from('paper_positions').select('*').eq('user_id',run.user_id)
       .eq('paper_account_id',run.paper_account_id).eq('status','open');

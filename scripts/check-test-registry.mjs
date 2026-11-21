@@ -112,10 +112,14 @@ if (notImported.length > 0) {
 
 // 4. 파일은 있는데 등록이 안 된 것 — **써 놓고 배선을 안 한 테스트다**
 const files = ROOTS.flatMap(r => walk(r));
+const fileSet = new Set(files);
+/** 같은 파일을 두 번 읽지 않는다 — 아래 '얹혀 도는 러너' 검사도 이걸 쓴다 */
+const srcByFile = new Map();
 const orphans = [];
 const runnerless = [];
 for (const f of files) {
   const src = readFileSync(f, 'utf8');
+  srcByFile.set(f, src);
   // **`async`를 빠뜨리면 검사가 그 파일을 통째로 건너뛴다.**
   //
   // 원래 이 정규식은 `export function`만 봤다. 그런데 통합시험은 전부
@@ -164,6 +168,69 @@ if (runnerless.length > 0) {
   });
 }
 
+// 6. 시험 파일이 **다른 시험 파일의 러너**를 부른다
+//
+// 실제로 일어난 일: `src/lib/portfolio/returns.test.ts`가
+// `runDripTests()`를 불렀다. 그 자리 주석에 이유까지 적혀 있었다 —
+// "`run-tests.mjs` 등록 목록은 열린 PR 여럿이 같이 고치고 있어, 줄 하나를
+// 더 얹으면 그 PR들과 겹친다".
+//
+// 그 회피는 두 방향으로 깨진다:
+//
+//   · **등록 없이 얹히면** 이 검사는 '미등록'이라 말하지만, 사람 눈에는
+//     시험이 돌고 있으니 아무도 고치지 않는다. 그리고 얹힌 쪽 파일을
+//     나중에 손보면 그 시험 뭉치가 조용히 사라진다
+//   · **등록까지 되면 두 번 돈다.** 그런데 이 검사는 러너 파일만 보므로
+//     `중복 0`이라고 적었다. 실측했다 — drip 5건이 두 번 돌아 8054가
+//     8059가 됐고 검사는 종료 0이었다. **거짓 초록이다**
+//
+// `run-tests.mjs`의 충돌은 집합 합치기로 푸는 것이 이 저장소의 규칙이다.
+// 남의 시험 파일에 얹어서 피하지 않는다.
+function normalizeRel(p) {
+  const out = [];
+  for (const seg of p.split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') out.pop();
+    else out.push(seg);
+  }
+  return out.join('/');
+}
+
+const piggyback = [];
+for (const f of files) {
+  const src = srcByFile.get(f) ?? '';
+  const dir = f.slice(0, f.lastIndexOf('/'));
+  for (const m of src.matchAll(/import\s*\{([^}]+)\}\s*from\s*'([^']+)'/g)) {
+    const [, names, spec] = m;
+    if (!spec.startsWith('.')) continue;            // 패키지 import는 대상이 아니다
+    const target = normalizeRel(`${dir}/${spec}`) + '.ts';
+    if (target === f || !fileSet.has(target)) continue;   // 시험 파일을 부른 것만 본다
+    for (const piece of names.split(',')) {
+      const t = piece.trim();
+      if (!t) continue;
+      const as = /^([A-Za-z0-9_]+)\s+as\s+([A-Za-z0-9_]+)$/.exec(t);
+      const exportName = as ? as[1] : t;
+      const local = as ? as[2] : t;
+      if (!/^run[A-Za-z0-9_]*Tests$/.test(local)) continue;
+      // **가져오기만 한 것은 문제가 아니다.** 실제로 부르는 것만 센다
+      if (!new RegExp(`\\b${local}\\s*\\(\\s*\\)`).test(src)) continue;
+      const registered = imported.has(local)
+        || registeredExports.has(`./${target.replace(/\.ts$/, '')}#${exportName}`);
+      piggyback.push(`${f} → ${local}() (${target})`
+        + (registered
+            ? ' — 러너에도 등록돼 있습니다. **두 번 돕니다**'
+            : ' — 러너에 등록되지 않은 채 여기에 얹혀 돕니다'));
+    }
+  }
+}
+if (piggyback.length > 0) {
+  problems.push({
+    what: '다른 시험 파일에 얹혀 도는 러너',
+    detail: piggyback,
+    why: '등록 목록이 더 이상 무엇이 도는지 말하지 않습니다 — 등록까지 돼 있으면 두 번 돌고, 그때도 CI는 초록입니다',
+  });
+}
+
 if (problems.length > 0) {
   console.error('❌ 테스트 등록이 어긋났습니다\n');
   for (const p of problems) {
@@ -177,4 +244,4 @@ if (problems.length > 0) {
   process.exit(1);
 }
 
-console.log(`✅ 테스트 파일 ${files.length}개 · 등록 ${imported.size}개 · 중복 0 · 미등록 0`);
+console.log(`✅ 테스트 파일 ${files.length}개 · 등록 ${imported.size}개 · 중복 0 · 미등록 0 · 얹혀 도는 러너 0`);

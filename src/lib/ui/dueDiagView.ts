@@ -66,8 +66,32 @@ export interface DueDiagView {
   intervalIsDbDefault: boolean;
   /** 마지막 평가 (KST) 또는 '확인 불가' */
   lastText: string;
-  /** 다음 평가 예정 (KST) 또는 '확인 불가' */
+  /**
+   * 다음 평가 예정 (KST) — **또는 "시각이 없다"는 사실**.
+   *
+   * 2026-11-18 실측. 정지된 예약이 이렇게 보이고 있었다:
+   *
+   *     정지 · 60분     「다음 평가 2026. 11. 18. 오후 1:50 KST」
+   *     정지 · 1440분   「다음 평가 2026. 11. 16. 오후 1:00 KST」 ← **지난 시각**
+   *     연결 없음       「다음 평가 2026. 11. 18. 오후 1:50 KST」
+   *
+   * `dueDiagnostics`의 `nextEvaluationAtMs`는 `last_run_at + interval`을
+   * 더한 값이라 **꺼져 있어도 계산된다.** 그 숫자를 그대로 적으면 영원히
+   * 오지 않을 약속이 되고, 하루 1회짜리 정지 예약에서는 **이미 지난
+   * 시각**이 "다음"으로 나온다.
+   *
+   * 시각은 **그 시각에 평가될 때만** 적는다.
+   */
   nextText: string;
+  /**
+   * 다음 평가가 **예정되어 있지 않은가** (정지 · 연결 없음).
+   *
+   * 화면이 코드로 다시 판단하지 않게 불린으로 준다 — 같은 판단이 두
+   * 곳에 있으면 언젠가 갈린다.
+   */
+  nextBlocked: boolean;
+  /** 예정 시각이 이미 지났는가 — 약속이 아니라 "지금 차례"다 */
+  nextOverdue: boolean;
   /** 판정 이유 — **서버 문구 그대로**. 화면이 다시 쓰지 않는다 */
   reasonText: string;
   /** 판정 코드. 색·배지에만 쓴다 */
@@ -88,6 +112,17 @@ const num = (v: any): number | null => {
   return Number.isFinite(n) ? n : null;
 };
 
+/**
+ * **이 판정에서는 다음 평가가 예정되지 않는다.**
+ *
+ * 코드는 `dueCheck`(정본)가 준다. 여기서 `enabled`를 다시 읽어 판단하면
+ * 같은 규칙이 두 곳이 되고, 그때 한쪽만 고쳐진다.
+ */
+const NO_NEXT_RUN: Record<string, string> = {
+  OFF: '예정 없음 — 정지된 예약입니다',
+  NO_CONNECTION: '예정 없음 — 거래소 연결이 없어 평가하지 않습니다',
+};
+
 /** KST 표기. **못 읽으면 '확인 불가'** — '—'로 적지 않는다 */
 function kstOrUnknown(ms: any): string {
   const n = num(ms);
@@ -98,7 +133,28 @@ function kstOrUnknown(ms: any): string {
   return `${s} KST`;
 }
 
-export function dueDiagView(diag: any): DueDiagView {
+/**
+ * 다음 평가 칸 셋을 한 번에 정한다. **순서가 규칙이다**:
+ * ① 못 돌 예약은 시각이 없다 → ② 못 읽으면 '확인 불가' →
+ * ③ 지난 시각은 약속이 아니다 → ④ 그제서야 시각.
+ */
+function nextView(diag: any, code: string, nowMs: number):
+  { nextText: string; nextBlocked: boolean; nextOverdue: boolean } {
+  const blocked = NO_NEXT_RUN[code];
+  if (blocked) return { nextText: blocked, nextBlocked: true, nextOverdue: false };
+
+  const n = num(diag.nextEvaluationAtMs);
+  if (n == null) return { nextText: UNKNOWN_TEXT, nextBlocked: false, nextOverdue: false };
+
+  // **지난 시각을 "다음"으로 적지 않는다.** 그 시각에 평가되지 않았다는
+  // 뜻이고, 사용자가 알아야 하는 것은 "언제였나"가 아니라 "지금 차례"다.
+  if (n <= nowMs) {
+    return { nextText: '지금 차례 — 다음 실행기 발화에 평가합니다', nextBlocked: false, nextOverdue: true };
+  }
+  return { nextText: kstOrUnknown(n), nextBlocked: false, nextOverdue: false };
+}
+
+export function dueDiagView(diag: any, nowMs: number = Date.now()): DueDiagView {
   // 진단 자체가 없으면 네 칸 모두 모른다. **경고도 아니다** — 경고는
   // '기본값이 끼어들었다'를 아는 경우에만 쓴다
   if (diag == null || typeof diag !== 'object') {
@@ -107,6 +163,8 @@ export function dueDiagView(diag: any): DueDiagView {
       // 모르는 것을 '기본값과 같다'로 적지 않는다
       intervalIsDbDefault: false,
       lastText: UNKNOWN_TEXT, nextText: UNKNOWN_TEXT,
+      // 모르는 것을 '막혔다'로도 '지났다'로도 적지 않는다
+      nextBlocked: false, nextOverdue: false,
       reasonText: UNKNOWN_TEXT, code: '',
     };
   }
@@ -141,7 +199,7 @@ export function dueDiagView(diag: any): DueDiagView {
     intervalDefaulted: used == null ? false : defaulted,
     intervalIsDbDefault: used === DB_DEFAULT_INTERVAL_MIN,
     lastText: kstOrUnknown(diag.lastEvaluationAtMs),
-    nextText: kstOrUnknown(diag.nextEvaluationAtMs),
+    ...nextView(diag, typeof diag?.due?.code === 'string' ? diag.due.code : '', nowMs),
     // 코드만으로 문장을 지어내지 않는다 — 비어 있으면 모르는 것이다
     reasonText: reasonRaw || UNKNOWN_TEXT,
     code: typeof diag?.due?.code === 'string' ? diag.due.code : '',

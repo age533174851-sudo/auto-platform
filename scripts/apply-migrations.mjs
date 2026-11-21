@@ -140,6 +140,8 @@ function sqlLit(v) {
 const report = {
   mode: MODE, ok: false, code: 'UNKNOWN', reason: '',
   required: 0, applied: [], adopted: [], adoptable: [], pending: [], blocked: [], failed: [], verified: [], drift: [],
+  /** 우리가 아닌 경로가 먼저 적용한 흔적 */
+  foreignApplied: [],
   /**
    * 사람이 승인해서 실행한 위험 마이그레이션. 없으면 null.
    *
@@ -238,7 +240,7 @@ if (!url) {
 say(`DB 접속 정보: ${from} (지문 ${fingerprint(url)}, 값은 출력하지 않습니다)`);
 
 const { classifyMigration, migrationIdOf, migrationPlanOf, migrationTargets, migrationDrift,
-        adoptionCandidates } = await loadPlan();
+        adoptionCandidates, foreignApplyVerdict } = await loadPlan();
 
 // 번호가 붙은 파일만 자동 파이프라인 대상이다. 나머지는 사본·구파일이고
 // gen-migration-manifest.mjs의 LEGACY에 이유가 적혀 있다(CI가 검사한다).
@@ -285,35 +287,64 @@ let rows = null;
 // 그렇다고 "아마 적용했겠지"로 적으면 그건 증거 없는 기록이다.
 //
 // **카탈로그에 실제로 있는지 확인하고, 있는 것만 적는다.**
-async function catalogHas(target) {
-  const t = sqlLit(target.table), n = sqlLit(target.name);
-  const sql = {
-    table: `SELECT 1 FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog','information_schema') AND table_name = ${t} LIMIT 1`,
-    column: `SELECT 1 FROM information_schema.columns WHERE table_name = ${t} AND column_name = ${n} LIMIT 1`,
-    index: `SELECT 1 FROM pg_indexes WHERE indexname = ${n} LIMIT 1`,
-    policy: `SELECT 1 FROM pg_policies WHERE tablename = ${t} AND policyname = ${n} LIMIT 1`,
+// 서술어는 **여기 한 곳에만** 적는다.
+// `audit-production-legacy-runtime-schema.yml`이 같은 질문을 SQL로
+// 재현하므로, 여기에서 글자가 갈리면 두 곳이 다른 답을 낸다.
+// (이전 이름: `catalogHas` — 대상 하나씩 물었다)
+function catalogPredicate(kind, t, n) {
+  return {
+    table: `EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog','information_schema') AND table_name = ${t})`,
+    column: `EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = ${t} AND column_name = ${n})`,
+    index: `EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = ${n})`,
+    policy: `EXISTS (SELECT 1 FROM pg_policies WHERE tablename = ${t} AND policyname = ${n})`,
     // 함수는 pg_proc에 있다. 인자 조합이 여럿일 수 있으므로 이름만 본다 —
     // **있는지 없는지**가 여기서 답할 질문이고, 시그니처까지는 SQL 자신이
     // 트랜잭션 안에서 보장한다.
-    function: `SELECT 1 FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
-                WHERE ns.nspname = ${t} AND p.proname = ${n} LIMIT 1`,
-  }[target.kind];
-  if (!sql) return null;
-  const q = query(url, sql);
-  if (!q.ok) return null;              // 못 읽었다 → 없다고 단정하지 않는다
-  return q.rows.length > 0;
+    function: `EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
+                WHERE ns.nspname = ${t} AND p.proname = ${n})`,
+  }[kind] ?? null;
+}
+
+/**
+ * 대상 여러 개의 생사를 **질의 한 번**으로 묻는다.
+ *
+ * 전에는 대상 하나마다 psql 프로세스를 새로 띄워 물었다. 파일 101개에
+ * 대상 476개면 476번이고, 승인 경로 증명은 이 러너를 한 회차에 15번 ·
+ * 뮤테이션 하네스는 그 증명을 12번 돌린다(180번). 그래서 뮤테이션 job이
+ * 40분 상한에 걸려 취소됐다 — run 44462594137, 05:07부터 37분간 출력
+ * 한 줄 없이.
+ *
+ * **묻는 내용은 그대로다** — 서술어를 하나하나 그대로 한 줄에 모아서
+ * 물어본다. 읽지 못한 자리는 UNKNOWN이다. **없다고 단정하지 않는다.**
+ */
+async function catalogHasAll(targets) {
+  const rows = targets.map((t, i) => {
+    const p = catalogPredicate(t.kind, sqlLit(t.table), sqlLit(t.name));
+    // 모르는 종류는 묻지 않는다 — NULL로 두면 아래에서 UNKNOWN으로 읽힌다
+    return `(${i}, ${p ? `(${p})::text` : 'NULL::text'})`;
+  });
+  const q = query(url, `SELECT i, v FROM (VALUES ${rows.join(', ')}) AS q(i, v) ORDER BY i`);
+  if (!q.ok) return targets.map(() => null);   // 못 읽었다 → 없다고 단정하지 않는다
+  const byIdx = new Map(q.rows.map(r => [Number(r[0]), r[1]]));
+  return targets.map((_, i) => {
+    const v = byIdx.get(i);
+    if (v === 'true') return true;
+    if (v === 'false') return false;
+    return null;                               // 칸이 비었거나 못 읽었다
+  });
 }
 
 async function verifyTargets(f) {
   const targets = migrationTargets(f.sql);
   if (targets.length === 0) return { checked: 0, missing: [], unknown: 0, verdict: 'NO_TARGET' };
+  const answers = await catalogHasAll(targets);
   const missing = [];
   let unknown = 0;
-  for (const t of targets) {
-    const has = await catalogHas(t);
+  targets.forEach((t, i) => {
+    const has = answers[i];
     if (has === null) unknown += 1;
     else if (!has) missing.push(`${t.kind} ${t.table}.${t.name}`);
-  }
+  });
   return {
     checked: targets.length, missing, unknown,
     verdict: missing.length ? 'MISSING' : unknown ? 'UNKNOWN' : 'PRESENT',
@@ -381,6 +412,33 @@ say('');
 say(`적용됨 ${plan.applied.length} / 남음 ${plan.pending.length} / 승인 필요 ${plan.blocked.length}`);
 for (const b of plan.blocked) say(`  ⛔ ${b.name} — ${b.risk}: ${b.reasons.join(' · ')}`);
 for (const n of plan.autoApply) say(`  ▶ ${n}`);
+
+// ══════════════ 다른 경로가 먼저 적용했는가 ══════════════
+//
+// 적용 기록이 없는 파일의 대상이 **이미 카탈로그에 있으면**, 우리가 아닌
+// 무언가가 적용한 것이다. 더하기만 하는 것이면 결과는 같다. 승인이
+// 필요한 것이면 **관문이 지나간 것이고, 조용하면 아무도 모른다.**
+//
+// 판정은 `migrationPlan.ts`에 있다 — 여기서 다시 적지 않는다.
+{
+  const blockedNames = new Set(plan.blocked.map(b => b.name));
+  const watch = files.filter(f => plan.pending.includes(f.name) || blockedNames.has(f.name));
+  let fatal = null;
+  for (const f of watch) {
+    const v = await verifyTargets(f);
+    const verdict = foreignApplyVerdict({
+      name: f.name, needsApproval: blockedNames.has(f.name), targets: v.verdict,
+    });
+    if (verdict.code === 'NONE') continue;
+    report.foreignApplied = report.foreignApplied || [];
+    report.foreignApplied.push({ name: f.name, code: verdict.code });
+    if (verdict.fatal) { say(`::error::${verdict.reason}`); fatal = verdict; }
+    else say(`::warning::${verdict.reason}`);
+  }
+  if (fatal) {
+    finish('FOREIGN_APPLIED', '승인 전에 다른 경로가 적용했습니다 — 적용하지 않고 멈춥니다', 1);
+  }
+}
 
 // ══════════════ 승인이 실제로 그 파일에 유효한가 ══════════════
 //
