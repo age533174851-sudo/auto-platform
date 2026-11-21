@@ -43,6 +43,7 @@ class ReconcileDb {
     private rows: Record<string, any[]>,
     /** true면 그 질의는 error를 돌려준다 */
     private failWhen: (q: Query) => boolean = () => false,
+    private nullResult = false,
   ) {}
 
   /** 미확정(UNKNOWN) 질의를 몇 번 시도했는가 */
@@ -72,6 +73,7 @@ class ReconcileDb {
           if (table === 'live_orders') {
             db.queries.push(q);
             if (db.failWhen(q)) return { data: null, error: { message: '조회 실패' } };
+            if (db.nullResult) return { data: null, error: null };
           }
           let out = db.rows[table] ?? [];
           for (const x of filters) out = out.filter((r: any) => x.vals.includes(r[x.col]));
@@ -127,6 +129,54 @@ async function run(
     const g: any = await gatherAndReconcile(db as any, 'u1', true);
     return { g, db };
   } finally { restore(); unenv(); }
+}
+
+async function checkReconcileListRoute(): Promise<void> {
+  const adminPath = require.resolve('../../lib/supabase/admin');
+  const guardPath = require.resolve('../../lib/auth/isAdmin');
+  const routePath = require.resolve('../../app/api/orders/reconcile/route');
+  const savedAdmin = require.cache[adminPath];
+  const savedGuard = require.cache[guardPath];
+  const savedRoute = require.cache[routePath];
+  let db: ReconcileDb;
+  require.cache[adminPath] = { exports: {
+    getSupabaseAdmin: () => db,
+    resolveUserId: async () => 'u1',
+  } } as NodeModule;
+  require.cache[guardPath] = { exports: {
+    requireAdmin: async () => new Response(null, { status: 403 }),
+  } } as NodeModule;
+  delete require.cache[routePath];
+
+  try {
+    const { GET } = await import('../../app/api/orders/reconcile/route');
+    for (const scenario of [
+      { name: '확인된 빈 목록', rows: [], count: 0, status: 200 },
+      { name: '접수만 된 주문', rows: [{ ...unknownRow('c-1'), status: 'ACKED' }], count: 1, status: 200 },
+      { name: '조회 실패', rows: [], fails: true, status: 503 },
+      { name: '잘못된 조회 응답', rows: [], nullResult: true, status: 503 },
+      { name: '연결을 지정하지 않은 조회 실패', rows: [], fails: true, search: '', status: 503 },
+    ] as any[]) {
+      db = new ReconcileDb(null, { live_orders: scenario.rows }, () => scenario.fails === true, scenario.nullResult);
+      const response = await GET(new Request(
+        'http://localhost/api/orders/reconcile' + (scenario.search ?? '?dry=1'),
+      ) as Parameters<typeof GET>[0]);
+      const body = await response.json();
+      test(`대조 목록 · ${scenario.name}`, () => {
+        eq(response.status, scenario.status);
+        eq(body.ok, scenario.status === 200);
+        eq(body.pendingCount, scenario.count);
+        if (scenario.status === 503) eq(body.error, 'pending_orders_unreadable');
+      });
+    }
+  } finally {
+    if (savedAdmin) require.cache[adminPath] = savedAdmin;
+    else delete require.cache[adminPath];
+    if (savedGuard) require.cache[guardPath] = savedGuard;
+    else delete require.cache[guardPath];
+    if (savedRoute) require.cache[routePath] = savedRoute;
+    else delete require.cache[routePath];
+  }
 }
 
 export async function runReconcileUnresolvedTests(): Promise<void> {
@@ -201,4 +251,6 @@ export async function runReconcileUnresolvedTests(): Promise<void> {
       eq(g.unresolvedOrderCount, null, '못 물어봤으면 0건이 아니라 모름이다');
     });
   }
+
+  await checkReconcileListRoute();
 }
