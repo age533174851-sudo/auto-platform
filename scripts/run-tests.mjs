@@ -349,6 +349,7 @@ import { runKillCloseRunTests } from './src/lib/risk/killCloseRun.test';
 import { runKillCloseIntegrationTests } from './src/test/integration/killCloseIntegration.test';
 import { runGateCloseTests } from './src/test/integration/gateCloseIntegration.test';
 import { runGateOrderReadTests } from './src/test/integration/gateOrderReadIntegration.test';
+import { runTpslReplaceTests } from './src/test/integration/tpslReplaceIntegration.test';
 import { runKillAlertTests } from './src/lib/risk/killAlert.test';
 import { runPaperAccountTests } from './src/lib/portfolio/paperAccount.test';
 import { runPaperWiringTests } from './src/lib/portfolio/paperWiring.test';
@@ -524,6 +525,7 @@ runLifecycleRowsTests(); runPostEntryRiskTests(); runPositionRiskProvenanceTests
   await runKillCloseIntegrationTests();
   await runGateCloseTests();
   await runGateOrderReadTests();
+  await runTpslReplaceTests();
   await flushAsync();
   const s = summary();
   console.log('\\n결과: ' + s.passed + ' 통과 / ' + s.failed + ' 실패');
