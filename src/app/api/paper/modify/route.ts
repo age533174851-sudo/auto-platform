@@ -62,9 +62,18 @@ export async function POST(req: NextRequest) {
   // **소유권 확인.** 없으면 남의 포지션 id로 남의 장부를 고칠 수 있다.
   // **`market`을 함께 읽는다.** 방향을 볼 가격이 이 칸으로 정해진다.
   // 생성된 Supabase 타입에는 `market`이 없다(청산 라우트와 같은 이유).
-  const { data: pos } = await (sb as any).from('paper_positions')
+  const { data: pos, error: posErr } = await (sb as any).from('paper_positions')
     .select('id, user_id, symbol, side, status, entry_price, market')
     .eq('id', positionId).maybeSingle();
+  // **조회 실패는 "없음"이 아니다.** `/api/paper/close`와 같은 규칙이다 —
+  // 예전 이 자리는 `error`를 버려, DB가 잠깐 실패하면 있는 포지션을 404
+  // `not_found`로 답했다.
+  if (posErr) {
+    return NextResponse.json({
+      ok: false, error: 'position_unreadable',
+      message: '포지션을 읽지 못해 손절·익절을 바꾸지 않았습니다 — 포지션이 없다는 뜻이 아닙니다',
+    }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
+  }
   if (!pos || pos.user_id !== uid) {
     return NextResponse.json({ ok: false, error: 'not_found' }, { status: 404 });
   }
