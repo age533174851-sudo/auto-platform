@@ -213,6 +213,7 @@ import { runSmokeStartRouteTests } from './src/test/integration/smokeStartRouteI
 import { runGateFindOrderTests } from './src/test/integration/gateFindOrderIntegration.test';
 import { runForcedEntryRouteTests } from './src/test/integration/forcedEntryRouteIntegration.test';
 import { runHoldExtensionIntegrationTests } from './src/test/integration/holdExtensionIntegration.test';
+import { runGateLedgerTests } from './src/test/integration/gateLedgerIntegration.test';
 import { runFailureRecoveryTests } from './src/lib/engine/failureRecovery.test';
 import { runMarketTypeTests } from './src/lib/markets/marketType.test';
 import { runWalletTests } from './src/lib/markets/wallets.test';
@@ -525,6 +526,7 @@ runLifecycleRowsTests(); runPostEntryRiskTests(); runPositionRiskProvenanceTests
   await runForcedEntryRouteTests();
   await runRunnerStaleConnectionTests();
   await runHoldExtensionIntegrationTests();
+  await runGateLedgerTests();
   await runKillCloseIntegrationTests();
   await runGateCloseTests();
   await runGateOrderReadTests();
