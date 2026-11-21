@@ -4,6 +4,7 @@
 'use client';
 
 import { getSupabaseClient, getClientUserId } from './client';
+import { cachedReadVerdict } from './cachedRead';
 
 // ─── localStorage keys ───────────────────────────────────────
 const KEY = {
@@ -133,14 +134,16 @@ export async function loadPortfolio(): Promise<{ positions: any[] }> {
   const sb  = getSupabaseClient();
   if (sb && uid) {
     try {
-      const { data } = await sb
+      const { data, error } = await sb
         .from('portfolio_positions')
         .select('*')
         .eq('user_id', uid)
         .order('created_at', { ascending: false });
-      const positions = data || [];
-      lsSet(KEY.portfolio, positions);
-      return { positions };
+      // **못 읽은 것을 "없음"으로 적지 않고, 캐시도 덮어쓰지 않는다.**
+      const v = cachedReadVerdict<any>({ data, error });
+      if (!v.mayWriteCache) return { positions: lsGet<any[]>(KEY.portfolio, []) };
+      lsSet(KEY.portfolio, v.rows!);
+      return { positions: v.rows! };
     } catch {}
   }
   return { positions: lsGet<any[]>(KEY.portfolio, []) };
@@ -262,15 +265,16 @@ export async function loadOrders(): Promise<any[]> {
   const sb  = getSupabaseClient();
   if (sb && uid) {
     try {
-      const { data } = await sb
+      const { data, error } = await sb
         .from('trade_orders')
         .select('id,symbol,name_kr,side,price,quantity,amount,leverage,fee,slippage,status,pnl,pnl_pct,mode,note,emotion,opened_at,closed_at')
         .eq('user_id', uid)
         .order('opened_at', { ascending: false })
         .limit(200);
-      const orders = data || [];
-      lsSet(KEY.orders, orders);
-      return orders;
+      const v = cachedReadVerdict<any>({ data, error });
+      if (!v.mayWriteCache) return lsGet<any[]>(KEY.orders, []);
+      lsSet(KEY.orders, v.rows!);
+      return v.rows!;
     } catch {}
   }
   return lsGet<any[]>(KEY.orders, []);
@@ -318,12 +322,15 @@ export async function loadPnlReports(): Promise<any[]> {
   const sb  = getSupabaseClient();
   if (sb && uid) {
     try {
-      const { data } = await sb
+      const { data, error } = await sb
         .from('pnl_reports')
         .select('*')
         .eq('user_id', uid)
         .order('period', { ascending: false });
-      return data || [];
+      const v = cachedReadVerdict<any>({ data, error });
+      // 못 읽었으면 **빈 목록이 아니라** 마지막으로 알던 값으로 떨어진다.
+      if (!v.ok) return lsGet<any[]>(KEY.pnl, []);
+      return v.rows!;
     } catch {}
   }
   return lsGet<any[]>(KEY.pnl, []);
@@ -356,14 +363,15 @@ export async function loadAlerts(): Promise<any[]> {
   const sb  = getSupabaseClient();
   if (sb && uid) {
     try {
-      const { data } = await sb
+      const { data, error } = await sb
         .from('alerts')
         .select('id,asset_id,name_kr,condition,value,active,triggered_at,created_at')
         .eq('user_id', uid)
         .order('created_at', { ascending: false });
-      const alerts = data || [];
-      lsSet(KEY.alerts, alerts);
-      return alerts;
+      const v = cachedReadVerdict<any>({ data, error });
+      if (!v.mayWriteCache) return lsGet<any[]>(KEY.alerts, []);
+      lsSet(KEY.alerts, v.rows!);
+      return v.rows!;
     } catch {}
   }
   return lsGet<any[]>(KEY.alerts, []);
@@ -411,13 +419,15 @@ export async function loadBacktestResults(): Promise<any[]> {
   const sb  = getSupabaseClient();
   if (sb && uid) {
     try {
-      const { data } = await sb
+      const { data, error } = await sb
         .from('backtest_results')
         .select('id,strategy_name,asset,timeframe,start_date,end_date,total_trades,win_rate,total_pnl,max_drawdown,sharpe_ratio,params,created_at')
         .eq('user_id', uid)
         .order('created_at', { ascending: false })
         .limit(50);
-      return data || [];
+      const v = cachedReadVerdict<any>({ data, error });
+      if (!v.ok) return lsGet<any[]>(KEY.backtest, []);
+      return v.rows!;
     } catch {}
   }
   return lsGet<any[]>(KEY.backtest, []);
