@@ -53,8 +53,14 @@ export async function GET(req: NextRequest) {
       .order('closed_at', { ascending: true })
       .limit(5000);
     if (error) throw new Error(error.message);
-    trades = (Array.isArray(data) ? data : []).map(paperRowToTrade).filter(Boolean) as ClosedTrade[];
+    const rows = Array.isArray(data) ? data : [];
+    trades = rows.map(paperRowToTrade).filter(Boolean) as ClosedTrade[];
     tradesOk = true;
+    // 손익·청산 시각을 모르는 행은 0원 거래로 세지 않고 뺐다 — 뺐다는 사실은 남긴다.
+    const skipped = rows.length - trades.length;
+    if (skipped > 0) {
+      warnings.push(`청산 기록 ${skipped}건은 손익 또는 청산 시각이 비어 있어 통계에서 제외했습니다 (0원 거래로 세지 않음)`);
+    }
   } catch (e: any) {
     // 조회 실패를 '거래 없음'으로 그리지 않는다. 거래가 없으면 "표본 부족"이
     // 나오는데, 그건 조회 실패와 화면에서 똑같이 보인다.

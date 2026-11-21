@@ -210,7 +210,7 @@ export interface Entry100xReadDeps {
   /**
    * **계정의 실제 수수료율.** 못 읽으면 null → 막는다.
    *
-   * 기본값 표(`lib/fees.ts`)는 등급·할인·프로모션을 모른다. 100배에서
+   * 기본값 표(`lib/fees/index.ts`)는 등급·할인·프로모션을 모른다. 100배에서
    * 왕복 수수료는 청산 여유의 상당 부분이라 추정으로 때울 수 없다.
    */
   commissionRates(): Promise<CommissionRates | null>;
