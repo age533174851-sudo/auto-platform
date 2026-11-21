@@ -14,6 +14,8 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
+// 감사 기록은 한 곳에서만 쓴다 — 표·칸 이름이 호출부마다 따로 있으면 갈린다.
+import { recordAuditAsync } from '@/lib/safety/auditStore';
 import { decryptSecret } from '@/lib/exchanges/crypto';
 import { killSwitchGate } from '@/lib/risk/killSwitch';
 import { placeOrderBinance } from '@/lib/exchanges/binance';
@@ -173,19 +175,38 @@ export async function POST(req: NextRequest) {
   }
 
   // ── 가드 7: 감사 로그 ─────────────────────────────────────
-  try {
-    await (sb.from('audit_logs') as any).insert({
-      actor_id: uid,
-      action:   'LIVE_ORDER',
-      details:  {
-        exchange, symbol, side, type,
-        amount: orderUsdt, quantity,
-        success: result.success, orderId: result.orderId,
-        message: result.message,
-      },
-      result: result.success ? 'success' : 'failure',
-    });
-  } catch { /* best-effort */ }
+  //
+  // **실주문 감사기록이 한 건도 남지 않고 있었다.**
+  //
+  // 여기는 `audit_logs`에 `actor_id` · `details` · `result`로 썼다. 실제
+  // DB의 그 표에는 **그 칸이 하나도 없다**(`user_id` · `entity_type` ·
+  // `entity_id` · `metadata` …). Management API로 실제 DB에서 뽑은
+  // `src/lib/supabase/types.ts`가 그 사실을 보여 준다. 즉 이 insert는
+  // 매번 거절됐고, `catch { best-effort }`가 그것을 지웠다.
+  //
+  // 화면에 감사 로그가 비어 있으면 "아무 일도 없었다"로 읽힌다 —
+  // 확인한 적 없는 사실이다. 그리고 실주문이야말로 나중에 "누가 언제
+  // 왜"를 묻게 되는 것이다.
+  //
+  // 기록은 `recordAuditAsync`에 맡긴다. 표 이름·칸 이름·시크릿 걸러내기가
+  // 한 곳에 있고, **절대 던지지 않는다** — 기록이 안 됐다고 주문 결과가
+  // 달라지면 안 된다는 규칙은 그대로다.
+  //
+  // `recordAudit`(불 지르고 잊기)이 아니라 기다리는 판을 쓴다. 서버리스는
+  // 응답을 돌려주면 그 요청의 실행을 곧 정리하므로, 잊은 insert는 완료
+  // 전에 잘릴 수 있다.
+  await recordAuditAsync(sb, {
+    userId: uid,
+    action: 'LIVE_ORDER',
+    resource: `${exchange}:${symbol}`,
+    result: result.success ? 'success' : 'failed',
+    detail: {
+      exchange, symbol, side, type,
+      amount: orderUsdt, quantity,
+      success: result.success, orderId: result.orderId,
+      message: result.message,
+    },
+  });
 
   if (!result.success) {
     return NextResponse.json({ error: 'order_failed', message: result.message }, { status: 502 });

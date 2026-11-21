@@ -62,6 +62,13 @@ export interface PrFacts {
   behindBy: number | null;
   /** 깨끗하게 재배치되는가. **아직 안 해 봤으면 null** */
   cleanRebase?: boolean | null;
+  /**
+   * base 브랜치 규칙이 "최신 main 위에 있어야 합칠 수 있다"를 요구하는가.
+   *
+   * **읽지 못했으면 null.** 모르는 것을 "요구하지 않는다"로 읽지 않는다 —
+   * 그렇게 읽으면 진짜로 요구하는 저장소에서 PR이 영영 안 합쳐진다.
+   */
+  baseRequiresUpToDate?: boolean | null;
 }
 
 /**
@@ -102,6 +109,38 @@ export function rebaseVerdict(pr: PrFacts, defaultBranch: string): RebaseVerdict
   }
   if (pr.behindBy === 0) {
     return { action: 'UP_TO_DATE', reason: `이미 ${defaultBranch} 위에 있습니다` };
+  }
+  // ── 재배치가 **머지에 필요한가** ──
+  //
+  // 이 저장소의 `Protect main` 규칙은 `strict_required_status_checks_policy`가
+  // **false**다. 즉 브랜치가 main보다 뒤처져 있어도 합쳐진다. 그러면 재배치는
+  // 얻는 것이 없고 잃는 것만 있다:
+  //
+  //   ① 이미 초록이던 SHA의 검사를 **전부 버린다** (새 커밋이므로).
+  //   ② 그 push는 `github-actions[bot]`이 만든다. 2026-11-15 실측으로
+  //      그런 push가 만든 워크플로 런은 **잡 0개**로 끝났다 —
+  //      #654가 `115894c1 → 233f8366 → 0cab4d91`로 세 번 그랬다.
+  //      필수 체크 `verify`가 **빨간 것이 아니라 아예 생기지 않아서**,
+  //      판정기는 (옳게) 영원히 기다린다. 사람이 손대기 전에는 안 풀린다.
+  //
+  // 그래서 **없애야 할 단계는 재배치 자체**다. 체크리스트를 자동으로 눌러
+  // 주는 쪽이 아니라 체크리스트를 지우는 쪽이다.
+  //
+  // **무엇을 잃는가 — 적어 둔다.** 이 파일 맨 위가 말한 "미리 재배치해서
+  // 충돌이 쌓이지 않게 한다"는 이득은 사라진다. 충돌은 합칠 때 가서야
+  // 드러난다. 그래도 바꾸는 이유는, 충돌은 사람이 풀 수 있지만 **생기지도
+  // 않은 필수 체크는 아무도 풀 수 없기 때문**이다. 충돌 자체는 자동 머지
+  // 판정기가 계속 PR에 적는다 — 그 신호가 없어지는 것은 아니다.
+  //
+  // null(못 읽음)은 여기서 멈추지 않는다 — 모르는 것을 "필요 없다"로 읽지
+  // 않는다. 그때는 전처럼 재배치한다.
+  if (pr.baseRequiresUpToDate === false) {
+    return {
+      action: 'SKIP',
+      reason: `${defaultBranch} 규칙이 최신 상태를 요구하지 않습니다 — `
+        + `${pr.behindBy}커밋 뒤처져 있어도 합쳐지므로 재배치하지 않습니다 `
+        + '(재배치는 초록인 검사를 버리고 새 커밋에 필수 체크가 생기지 않는 자리를 만듭니다)',
+    };
   }
   if (pr.cleanRebase === false) {
     return {

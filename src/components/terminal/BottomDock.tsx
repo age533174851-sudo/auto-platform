@@ -40,6 +40,7 @@ import { CreatorLedgerPanel } from './CreatorLedgerPanel';
 import { LoginDiagnosticPanel } from './LoginDiagnosticPanel';
 import { DemoRunner } from './DemoRunner';
 import { splitTabs, groupMoreTabs } from '@/lib/terminal/tabGroups';
+import { tpslEditBody } from '@/lib/trading/tpslEdit';
 
 type Tab = '포지션' | '데모' | '미체결' | '자산' | '자금배분' | '안전장치' | '손절이동' | '시간예약' | '설정' | '증권사' | '상태' | '방송자' | '로그인' | '전략장부' | '방송장부' | '현물전략' | '현물·선물' | '상태대조' | '전략' | '전략계좌';
 const ALL_TABS: Tab[] = ['포지션', '데모', '미체결', '자산', '자금배분', '안전장치', '손절이동', '시간예약', '설정', '증권사', '상태', '방송자', '로그인', '전략장부', '방송장부', '현물전략', '현물·선물', '상태대조', '전략', '전략계좌'];
@@ -359,7 +360,7 @@ function BottomDockInner({ onBalance, flow, stickyTop }: {
         {tab === '로그인' && <LoginDiagnosticPanel/>}
         {tab === '데모' && (
           <div style={{ padding: 12 }}>
-            <DemoRunner symbol={symbol.id} onChanged={paper.reload}/>
+            <DemoRunner auth={auth || null} symbol={symbol.id} onChanged={paper.reload}/>
           </div>
         )}
 
@@ -1662,16 +1663,14 @@ function PaperPositionCard({ p, auth, onClosed, onPick }: {
     } finally { setBusy(false); }
   };
 
-  /** 손절·익절을 고친다. 빈 칸은 **'그대로'가 아니라 '지우기'**다 — 둘을
-      섞으면 지우려던 손절이 남거나, 남기려던 값이 사라진다. */
+  /** 손절·익절을 고친다. 빈 칸은 **보내지 않는다(그대로)**.
+      `Number('65,000')`은 NaN이고 JSON은 NaN을 null('지우기')로 적는다 —
+      그래서 칸을 직접 바꾸지 않고 `tpslEditBody`가 못 읽은 값을 거른다. */
   const saveTpsl = async () => {
     if (!auth) { setMsg({ ok: false, text: '로그인이 필요합니다' }); return; }
-    const body: any = { positionId: p.id };
-    if (slIn.trim() !== '') body.stopLoss = Number(slIn);
-    if (tpIn.trim() !== '') body.takeProfit = Number(tpIn);
-    if (body.stopLoss === undefined && body.takeProfit === undefined) {
-      setMsg({ ok: false, text: '손절 또는 익절 값을 입력하세요' }); return;
-    }
+    const built = tpslEditBody(p.id, slIn, tpIn);
+    if (!built.ok || !built.body) { setMsg({ ok: false, text: built.message }); return; }
+    const body = built.body;
     setBusy(true); setMsg(null);
     try {
       const r = await fetch('/api/paper/modify', {
