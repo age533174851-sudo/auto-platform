@@ -119,32 +119,59 @@ Claude가 추가로 하기로 한 것: **다른 도구가 패치로 잡고 있�
 세 도구 모두, **파일을 고치기 전에 #724 최근 코멘트에서 그 경로를 검색**합니다.
 있으면 멈추고 다른 항목으로 갑니다. 멈춘 것은 재개 조건과 함께 적습니다.
 
-실제 점유 현황 (열린 PR 전수 조회 · 2026-11-21 기준):
+### ⚠ 앞서 퍼뜨린 점유 지도는 **과대계상이었습니다**
 
-| 파일 | 잡고 있는 것 |
-|---|---|
-| `src/lib/engine/orderExecutor.ts` | **열린 PR 21건** |
-| `src/lib/exchanges/gateFutures.ts` | 7건 — #452 #498 #503 #508 #510 #511 #513 |
-| `src/app/api/cron/reconcile/route.ts` | 5건 — #455 #457 #458 #460 #513 |
-| `package.json` | 4건 — #175 #177 #185 #189 |
-| `src/lib/exchanges/binanceFutures.ts` | 약 10건 |
-| `scripts/check-db-columns.mjs` | #501 |
-| `src/lib/engine/testnetDiagnoseVerdict.ts` + `.test.ts` | **#727** (시계 오차) |
-| `src/app/api/binance/futures/diagnose/route.ts` | **#727** |
-| `scripts/check-testnet-diagnose.mjs` · `scripts/testnet-diagnose-mutations.mjs` | **#727** |
-| `scripts/ai-council*.mjs` · `.github/workflows/ai-council.yml` | **#726** |
-| `src/app/api/orders/reconcile/route.ts` | **없음 — #725가 머지됐습니다** |
-| `src/lib/engine/evaluationRunner.ts` | **0건 — 자유** |
+처음에 적은 숫자(`orderExecutor.ts` 21건 등)는 열린 PR의 `/files`를 그대로
+센 것입니다. 그런데 **열린 PR 170건 중 69건은 `base`가 main이 아닙니다** —
+다른 기능 브랜치 위에 쌓인 스택입니다. 그중 네 건이 특히 문제입니다:
 
-`orderExecutor.ts` 를 21건이 잡고 있다는 것이 지금 가장 큰 병목입니다.
-그 파일을 건드리는 작업은 셋 다 피하고, 그 21건을 줄이는 쪽이 먼저입니다.
+| PR | base | 파일 수 | 줄 수 |
+|---|---|---|---|
+| #501 | `fix/gate-stop-reattach-contract-evidence-20261028` | **361** | +42,965 / −1,909 |
+| #502 | `fix/cleanup-null-count-failclosed-20261027` | 270 | +33,306 / −1,276 |
+| #505 | `fix/cleanup-aggregate-verdict-failclosed-20261028` | 268 | +33,050 / −1,256 |
+| #561 | `fix/cleanup-aggregate-verdict-failclosed-20261028` | 269 | +33,094 / −1,263 |
+
+head에는 main이 병합돼 있는데 base 브랜치에는 없어서, **main의 변경이
+전부 그 PR의 diff로 셉니다.** 그래서 이 네 건은 저장소의 거의 모든 파일을
+"잡고 있는" 것처럼 보입니다. 저도 같은 함정에 빠져 `git diff origin/main pr/N`
+으로 다른 PR의 변경 파일을 읽었다가, 공통 조상 기준으로 다시 재고서야
+알았습니다. **PR의 자기 diff는 `git merge-base`부터 잽니다.**
+
+실제 점유 (열린 PR 170건 전수 · base=main 101건 기준 · 2026-11-21):
+
+| 파일 | 전체 | **base=main** | 번호 |
+|---|---|---|---|
+| `src/lib/engine/orderExecutor.ts` | 25 | **11** | #327 #338 #346 #428 #484 #488 #489 #508 #510 #511 #513 |
+| `src/lib/exchanges/binanceFutures.ts` | 14 | **5** | #186 #327 #343 #346 #351 |
+| `src/lib/exchanges/gateFutures.ts` | 11 | **4** | #508 #510 #511 #513 |
+| `package.json` | 9 | **4** | #175 #177 #189 #588 |
+| `src/app/api/cron/reconcile/route.ts` | 9 | **2** | #455 #513 |
+| `scripts/run-tests.mjs` | 90 | **61** | (충돌의 주원인) |
+| `src/lib/engine/testnetDiagnoseVerdict.ts` + `.test.ts` | — | **#727** | 시계 오차 |
+| `src/app/api/binance/futures/diagnose/route.ts` | — | **#727** | |
+| `scripts/check-testnet-diagnose.mjs` · `scripts/testnet-diagnose-mutations.mjs` | — | **#727** | |
+| `scripts/ai-council*.mjs` · `.github/workflows/ai-council.yml` | — | **#726** | |
+| `src/app/api/orders/reconcile/route.ts` | — | **0 — #725 머지됨** | |
+| `src/lib/engine/evaluationRunner.ts` | — | **0 — 자유** | |
+
+`orderExecutor.ts`(11건)와 `scripts/run-tests.mjs`(61건)가 여전히 병목입니다.
+그 파일을 건드리는 작업은 셋 다 피하고, 그 건수를 줄이는 쪽이 먼저입니다.
+
+### 소유자 판단이 필요한 구조 문제
+
+**열린 PR 170건 중 69건이 main을 향하지 않습니다.** 자기 base가 먼저
+들어가지 않으면 영원히 못 들어갑니다. 그중 #501·#502·#505·#561은
+2026-11-16~19 이후 갱신이 없습니다. 이 69건을 ① base를 main으로 바꾸거나
+② 닫거나 ③ 스택째로 순서대로 머지하는 결정이 없으면, 점유 지도는 계속
+실제보다 크게 보이고 세 도구 모두 그만큼 멈춥니다.
 
 ### 그래서 지금 막혀 있는 작업과 재개 조건
 
 | 할 일 | 막는 파일 | 재개 조건 |
 |---|---|---|
-| `cron/reconcile`이 `error:null, data:null`을 "대조할 것 없음 · HTTP 200"으로 적는다 | `cron/reconcile/route.ts` (5건) | 그 5건 중 이 파일을 잡은 것이 정리된 뒤 |
-| 같은 사실("장부를 못 읽었다")이 503과 500으로 갈린다 | `orderExecutor.ts` (21건) | 같음 |
+| `cron/reconcile`이 `error:null, data:null`을 "대조할 것 없음 · HTTP 200"으로 적는다 | `cron/reconcile/route.ts` — **base=main 2건** (#455 · #513) | 그 2건이 정리된 뒤. **가장 먼저 풀릴 항목입니다** |
+| 같은 사실("장부를 못 읽었다")이 503과 500으로 갈린다 | `orderExecutor.ts` — base=main 11건 | 같음 |
 | Gate 3값 판정기 (#724 항목 4의 Gate 쪽) | `gateFutures.ts` (7건) | 같음 |
 | 시계 허용 오차를 `recvWindow` 상수로 내보내기 (지금은 검사기가 두 자리를 값으로 대조) | `binanceFutures.ts` (약 10건) | 같음 |
 | `npm run ai:debate` 한 줄 | `package.json` (4건) | 같음 |
