@@ -206,6 +206,7 @@ import {
   runPrecisionMatrixTests,
   runAdoptIntentIntegrationTests,
 } from './src/test/integration/orderPathIntegration.test';
+import { runReconcileUnresolvedTests } from './src/test/integration/reconcileUnresolvedIntegration.test';
 import { runReconcileCronAuthIntegrationTests } from './src/test/integration/reconcileCronAuthIntegration.test';
 import { runTenSlotDispatchIntegrationTests } from './src/test/integration/tenSlotDispatchIntegration.test';
 import { runTenSlotLifecycleTests } from './src/test/integration/tenSlotLifecycleIntegration.test';
@@ -518,6 +519,7 @@ runLifecycleRowsTests(); runPostEntryRiskTests(); runPositionRiskProvenanceTests
   await runNoFixedTpIntegrationTests();
   await runPrecisionIntegrationTests();
   await runPrecisionMatrixTests();
+  await runReconcileUnresolvedTests();
   await runSmokeStartRouteTests();
   await runGateFindOrderTests();
   // smokeStartRoute registers asynchronous tests; finish them before swapping
