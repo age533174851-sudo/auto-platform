@@ -72,11 +72,15 @@ node scripts/ai-council.mjs --dry-run
 실제 PR의 fixture로 돌려 보려면:
 
 ```bash
-gh api repos/OWNER/REPO/pulls/725       > /tmp/pr.json
-gh api repos/OWNER/REPO/pulls/725/files > /tmp/files.json
-# (워크플로의 'PR diff를 fixture로 모은다' 단계와 같은 모양으로 합칩니다)
+gh api repos/OWNER/REPO/pulls/725                      > /tmp/pr.json
+gh api --paginate repos/OWNER/REPO/pulls/725/files     > /tmp/files.json
+node scripts/ai-council-fixture.mjs /tmp/pr.json /tmp/files.json /tmp/fixture.json
 node scripts/ai-council.mjs --fixture /tmp/fixture.json
 ```
+
+포장은 워크플로가 쓰는 **그 스크립트 그대로**입니다. 목록을 못 읽으면
+빈 fixture를 쓰지 않고 시끄럽게 멈춥니다 — 합의체가 아무 diff도 못 본
+채 "지적 없음" 보고서를 올리는 것이 가장 비싼 거짓말이기 때문입니다.
 
 > `npm run ai:debate` 는 **아직 없습니다.** `package.json` 을 열린 PR
 > 4건(#175 · #177 · #185 · #189)이 잡고 있어 건드리지 않았습니다. 그 PR들이

@@ -13,6 +13,7 @@ import {
   SEATS, HOUSE_RULES, seatAvailability, packDiff, redact,
   runCouncil, buildReport, DRY_RUN_FIXTURE,
 } from './ai-council.mjs';
+import { parseJsonStream, buildFixture } from './ai-council-fixture.mjs';
 
 const KEYS = { OPENAI_API_KEY: 'k-openai', ANTHROPIC_API_KEY: 'k-anthropic', GEMINI_API_KEY: 'k-gemini' };
 
@@ -183,4 +184,72 @@ test('dry-run 고정 입력은 그대로 포장된다', () => {
   assert.equal(p.kept, 1);
   assert.equal(p.omitted.length, 0);
   assert.match(p.body, /pending_orders_unreadable/);
+});
+
+// ══════════════════════════════════════════════════════════
+// fixture 포장 — **목록을 못 읽은 것을 "변경 0건"으로 적지 않는다**
+//
+// 이 묶음이 생긴 이유: 이 포장이 워크플로 안의 인라인 JS였다. 그래서
+// ① shellcheck가 `${…}`를 셸 확장으로 읽어 verify가 빨개졌고
+// ② 시험을 붙일 자리가 없었다. 아래가 그 자리다.
+// ══════════════════════════════════════════════════════════
+
+test('fixture ① 한 덩어리 JSON을 읽는다', () => {
+  assert.deepEqual(parseJsonStream('[{"filename":"a.ts"}]'), [[{ filename: 'a.ts' }]]);
+});
+
+test('★ fixture ② 이어 붙은 배열을 읽는다 — patch 안의 "][" 에 속지 않는다', () => {
+  // `gh api --paginate` 는 페이지가 여럿이면 배열을 이어 붙여 낼 수 있다.
+  // 그리고 diff 본문에는 `][` 가 흔히 들어 있다 — 문자열 밖의 괄호만 센다.
+  const text = '[{"filename":"a.ts","patch":"x][y"}][{"filename":"b.ts","patch":"]["}]';
+  const got = parseJsonStream(text).flat();
+  assert.equal(got.length, 2);
+  assert.equal(got[0].patch, 'x][y');
+  assert.equal(got[1].filename, 'b.ts');
+});
+
+test('★ fixture ③ 빈 응답은 "변경 0건"이 아니다 — 던진다', () => {
+  for (const bad of ['', '   ', null, undefined]) {
+    assert.throws(() => parseJsonStream(bad), /읽지 못했습니다/,
+      `빈 응답(${JSON.stringify(bad)})을 빈 목록으로 만들었다`);
+  }
+});
+
+test('★ fixture ④ 깨진 JSON도 던진다 — 반쪽 응답을 목록으로 적지 않는다', () => {
+  assert.throws(() => parseJsonStream('[{"filename":"a.ts"'), /읽지 못했습니다/);
+});
+
+test('★ fixture ⑤ patch 없는 파일을 버리지 않는다 — 이름이 남아야 보고서에 적힌다', () => {
+  const { fixture } = buildFixture({ number: 7, title: 't' },
+    [[{ filename: 'logo.png', changes: 1 }]]);
+  assert.equal(fixture.files.length, 1);
+  assert.equal(fixture.files[0].filename, 'logo.png');
+  // packDiff 가 이것을 「patch 없음」으로 적는다. 여기서 버리면 사라진다.
+  const p = packDiff(fixture.files);
+  assert.equal(p.kept, 0);
+  assert.match(p.omitted[0].why, /patch 없음/);
+});
+
+test('★ fixture ⑥ 이름을 못 읽은 항목 수를 0으로 뭉개지 않는다', () => {
+  const { fixture, unnamed } = buildFixture({ number: 1 },
+    [[{ filename: 'a.ts' }, { changes: 2 }, null]]);
+  assert.equal(fixture.files.length, 1);
+  assert.equal(unnamed, 2, '빠진 항목 수를 센다');
+});
+
+test('fixture ⑦ 제목·SHA·본문을 포장하고, 본문은 상한에서 자른다', () => {
+  const { fixture } = buildFixture({
+    number: 42, title: '제목', head: { sha: 'deadbeef' }, body: 'x'.repeat(5000),
+  }, []);
+  assert.equal(fixture.title, '#42 제목');
+  assert.equal(fixture.sha, 'deadbeef');
+  assert.equal(fixture.description.length, 4000);
+});
+
+test('fixture ⑧ PR 본문이 비어도 터지지 않는다', () => {
+  const { fixture } = buildFixture(null, null);
+  assert.equal(fixture.sha, null);
+  assert.equal(fixture.description, '');
+  assert.deepEqual(fixture.files, []);
+  assert.match(fixture.title, /^#\?/, '번호를 모르면 ? 로 적는다 — 0이나 1로 지어내지 않는다');
 });

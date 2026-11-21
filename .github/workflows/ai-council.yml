@@ -96,20 +96,10 @@ jobs:
           set -euo pipefail
           gh api "repos/$REPO/pulls/$PR" > /tmp/pr.json
           gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" > /tmp/files.json
-          node -e '
-            const fs = require("node:fs");
-            const pr = JSON.parse(fs.readFileSync("/tmp/pr.json", "utf8"));
-            const raw = JSON.parse(fs.readFileSync("/tmp/files.json", "utf8"));
-            const files = (Array.isArray(raw) ? raw : [raw]).flat()
-              .map((f) => ({ filename: f.filename, changes: f.changes, patch: f.patch }));
-            fs.writeFileSync("/tmp/fixture.json", JSON.stringify({
-              title: `#${pr.number} ${pr.title}`,
-              sha: pr.head && pr.head.sha,
-              description: String(pr.body || "").slice(0, 4000),
-              files,
-            }));
-            console.log(`파일 ${files.length}개를 모았습니다`);
-          '
+          # 포장은 **스크립트 파일**이 한다. 인라인 JS로 두면 shellcheck가
+          # `${…}`를 셸 확장으로 읽어 verify가 빨개지고(SC2016), 무엇보다
+          # 시험을 붙일 자리가 없다 — 조용히 빈 목록을 만들어도 모른다.
+          node scripts/ai-council-fixture.mjs /tmp/pr.json /tmp/files.json /tmp/fixture.json
 
       - name: 토론 (2라운드 상한은 스크립트 상수)
         env:
