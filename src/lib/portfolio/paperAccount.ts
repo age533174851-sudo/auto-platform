@@ -414,10 +414,20 @@ export function paperTodayPnl(i: {
   totalEquity: number | null;
   /** 오늘 첫 스냅샷의 총자산. 없으면 null */
   dayStartEquity: number | null;
+  /**
+   * 스냅샷 조회 자체가 실패했는가. **못 읽은 것은 "없음"이 아니다** —
+   * 이 신호 없이 null만 받으면 "첫 기록이 남은 뒤부터 셉니다"라고 적게
+   * 되고, 기다려도 풀리지 않는 고장이 '아직'으로 보인다.
+   */
+  dayStartUnreadable?: boolean;
 }): { pnl: number | null; pct: number | null; note: string } {
   const now = i?.totalEquity;
   const start = i?.dayStartEquity;
   if (now == null) return { pnl: null, pct: null, note: '총자산을 몰라 오늘 손익을 계산하지 않았습니다' };
+  if (i?.dayStartUnreadable) {
+    return { pnl: null, pct: null,
+      note: '오늘의 기준점을 읽지 못했습니다 — 기준점이 없다는 뜻이 아닙니다' };
+  }
   if (start == null) {
     return { pnl: null, pct: null,
       note: '오늘의 기준점이 없습니다 — 첫 기록이 남은 뒤부터 오늘 손익을 셉니다' };

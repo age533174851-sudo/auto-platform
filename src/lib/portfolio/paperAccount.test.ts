@@ -90,6 +90,22 @@ export function runPaperAccountTests() {
     assert(v.note.includes('기준점'), '이유를 남긴다');
   });
 
+  // **못 읽은 것은 "없음"이 아니다.** 스냅샷 조회가 실패했는데 "첫 기록이
+  // 남은 뒤부터 셉니다"라고 적으면, 이미 기록이 있는 사용자에게 틀린
+  // 이유를 보여 준다 — 기다려도 고쳐지지 않는 고장이 '아직'으로 보인다.
+  test('기준점을 읽지 못했으면 "없다"가 아니라 "읽지 못했다"고 적는다', () => {
+    const v = paperTodayPnl({ totalEquity: 10_500, dayStartEquity: null, dayStartUnreadable: true });
+    eq(v.pnl, null, '모르면 계산하지 않는다');
+    eq(v.pct, null, '수익률도 없다');
+    assert(v.note.includes('읽지 못'), '읽기 실패라고 적는다');
+    assert(!v.note.includes('첫 기록이 남은 뒤'), '"아직 기록 없음"으로 적지 않는다');
+  });
+
+  test('읽기 실패 표시는 값이 함께 와도 계산을 막는다', () => {
+    const v = paperTodayPnl({ totalEquity: 10_500, dayStartEquity: 10_000, dayStartUnreadable: true });
+    eq(v.pnl, null, '읽기 실패 신호가 있으면 반쪽 값으로 계산하지 않는다');
+  });
+
   test('총자산을 모르면 오늘 손익도 없다', () => {
     eq(paperTodayPnl({ totalEquity: null, dayStartEquity: 10_000 }).pnl, null, '모른다');
   });
