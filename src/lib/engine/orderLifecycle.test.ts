@@ -46,6 +46,24 @@ export function runOrderLifecycleTests() {
     eq(applyTransition('APPROVED', 'ACKED').ok, false, '전송 없이 접수됐다');
   });
 
+  test('★ 보내기 전에 우리가 막은 주문은 REJECTED로 확정할 수 있다', () => {
+    // 막혀 있으면 실행기의 `update({status:'REJECTED'})`가 조용히 버려지고
+    // 장부는 INTENT(=APPROVED)로 남는다. 그 줄은 미확정 진입 자리를
+    // 영구히 먹는다 — 보낸 적이 없으니 조회로도 못 지운다.
+    const r = applyTransition('APPROVED', 'REJECTED');
+    eq(r.ok, true, '승인 뒤 전송 전 거부를 장부에 적을 수 없다');
+    eq(r.state, 'REJECTED');
+    assert(isTerminal('REJECTED'), '거부가 종료 상태가 아니면 또 바뀐다');
+  });
+
+  test('★ 그래도 전송을 건너뛴 접수·체결은 여전히 막는다', () => {
+    eq(applyTransition('APPROVED', 'ACKED').ok, false, '전송 없이 접수됐다');
+    eq(applyTransition('APPROVED', 'FILLED').ok, false, '전송 없이 체결됐다');
+    eq(applyTransition('APPROVED', 'PARTIAL').ok, false, '전송 없이 부분 체결됐다');
+    eq(applyTransition('APPROVED', 'UNKNOWN').ok, false,
+      '보내지도 않았는데 "모름"이 됐다 — 모름은 보낸 뒤에만 있다');
+  });
+
   test('같은 상태 재기록은 허용한다 (멱등)', () => {
     const r = applyTransition('ACKED', 'ACKED');
     eq(r.ok, true, '같은 상태를 다시 적는 것을 막으면 재조회마다 오류가 난다');
