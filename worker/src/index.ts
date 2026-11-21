@@ -31,6 +31,10 @@ import { evaluateIfDue } from '../../src/lib/autotrade/evaluationRunner';
 import { selectDueSchedules, shouldPollNow, POLL_INTERVAL_MS, lastEvaluationBrief, offSkipCount } from '../../src/lib/autotrade/schedulePoll';
 import { exitMonitorPlan, exitMonitorOutcome, EXIT_MONITOR_INTERVAL_MS } from '../../src/lib/engine/exitMonitorSchedule';
 import { wakeCadenceHeaders } from '../../src/lib/engine/exitMonitorWake';
+import {
+  killSwitchSelfHealVerdict, connectionScanVerdict,
+  type SelfHealLookup,
+} from '../../src/lib/risk/killSwitchSelfHeal';
 
 // 이 워커가 실행할 수 있는 거래소. 모니터 조회도 이 목록을 쓴다 —
 // 목록이 두 곳에 있으면 하나만 늘어난다.
@@ -336,7 +340,15 @@ async function processPendingJobs() {
       // 잊은 주문이 완전히 다른 시세에서 체결된다.
       //
       // 만료 시각은 적재하는 쪽이 payload.expiresAt에 새긴다
-      // (src/lib/jobs/queueGuard.ts). 시각이 없는 주문 — 이 보호가 들어가기
+      // (src/lib/jobs/queueGuard.ts의 withExpiry). **다만 2026-11-08 현재
+      // 그 적재 경로는 제품 코드에 없다** — `enqueueJob` 호출 0건, 웹훅 셋
+      // 모두 적재하지 않는다. 즉 이 검사는 지금 들어오는 주문이 없어서
+      // 조용한 것이지, 통과시키고 있는 것이 아니다. 그래서 **그대로 둔다**:
+      // 누가 다시 적재를 붙였을 때 시각 없는 주문을 막는 것이 이 줄의
+      // 일이고, 적재 쪽에 가드를 요구하는 것은
+      // `scripts/check-order-guards.mjs`가 한다.
+      //
+      // 시각이 없는 주문 — 이 보호가 들어가기
       // 전에 쌓인 것 — 도 실행하지 않는다. 언제 만든 것인지 알 수 없는 주문을
       // 내보내는 쪽이 더 위험하다.
       //
@@ -425,10 +437,18 @@ async function finalize(job: any, ok: boolean, result: any, error: string | null
 // active여도 워커가 job을 만들어 주지 않았다 — 웹이 job 만드는 데 실패하면
 // 아무도 안 만든다. **자가복구가 있다고 믿는 쪽이 없는 것보다 나쁘다.**
 async function monitorConnections() {
-  const { data: conns } = await sb().from('exchange_connections')
+  const connRes = await sb().from('exchange_connections')
     .select('*').in('exchange_id', SUPPORTED_EXCHANGE_IDS);
-  if (!conns) return;
-  for (const conn of (conns as any[])) {
+  // **못 읽은 것을 '연결 없음'으로 적지 않는다.** 예전에는 `if (!conns) return`
+  // 이었다 — 조회가 한 번 실패하면 그 회차의 자가복구가 통째로 비고,
+  // 아무 흔적도 남지 않았다. 판정은 killSwitchSelfHeal 한 곳에 있다.
+  const scan = connectionScanVerdict({ rows: connRes.data, failed: !!connRes.error });
+  if (!scan.ok) {
+    await alert('system', 'warning', '워커 자가복구: 연결 목록 미확인',
+      { 이유: scan.reason }, 'selfheal_conns_unread');
+    return;
+  }
+  for (const conn of (connRes.data as any[])) {
     if (conn.has_withdrawal === true) continue;
 
     const resolved = resolveExecExchange(conn.exchange_id);
@@ -461,23 +481,46 @@ async function monitorConnections() {
     prevPos[conn.id] = symset;
 
     // 킬스위치 active면 KILL_SWITCH_EXECUTE job 보장 (Vercel이 못 만들었어도 자가복구)
-    const { data: ks } = await sb().from('kill_switch_state').select('active, action_mode').eq('connection_id', conn.id).maybeSingle();
-    if (ks && ks.active) {
-      const { data: existing } = await sb().from('jobs').select('id')
+    //
+    // **조회 실패와 '행이 없다'를 한 모양으로 합치지 않는다.** 예전에는
+    // `if (ks && ks.active)`였다 — 상태 조회가 실패하면 `ks`가 null이 되어
+    // **켜진 킬스위치를 꺼진 것으로 읽고** 아무 job도 보장하지 않았다.
+    // 기존 잡 조회도 같았다: 실패를 '없음'으로 읽어 중복 전송이 났다.
+    //
+    // 모를 때 넣는 것도 답이 아니다 — 킬스위치 실행은 포지션을 닫는다.
+    // 그래서 모르면 **넣지 않고 사람이 보게 남긴다**(판정의 attention).
+    const ksRes = await sb().from('kill_switch_state')
+      .select('active, action_mode').eq('connection_id', conn.id).maybeSingle();
+    const state: SelfHealLookup<{ active?: unknown; action_mode?: unknown }> = ksRes.error
+      ? { ok: false }
+      : { ok: true, rows: ksRes.data ? [ksRes.data as any] : [] };
+
+    // 켜진 것이 확인되기 전에는 잡 조회를 보내지 않는다.
+    let jobsLookup: SelfHealLookup<unknown> | null = null;
+    if (state.ok && state.rows.length > 0 && state.rows[0]?.active === true) {
+      const jr = await sb().from('jobs').select('id')
         .eq('connection_id', conn.id).eq('action', 'KILL_SWITCH_EXECUTE').in('status', ['PENDING', 'PROCESSING']).limit(1);
-      if (!existing || existing.length === 0) {
-        await sb().from('jobs').insert({
-          user_id: conn.user_id, connection_id: conn.id,
-          // **연결의 거래소를 그대로 적는다.** 예전에는 'binance'가 박혀
-          // 있었다. Gate 연결에 그 잡이 붙으면 jobExchangeCheck가 막는다 —
-          // 즉 킬스위치가 영원히 실행되지 않는다.
-          exchange: String(conn.exchange_id),
-          mode, action: 'KILL_SWITCH_EXECUTE',
-          payload: { actionMode: ks.action_mode || 'BC' },
-          status: 'PENDING', priority: 0, max_attempts: 10,
-          created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
-        });
-      }
+      jobsLookup = jr.error || !Array.isArray(jr.data) ? { ok: false } : { ok: true, rows: jr.data };
+    }
+
+    const heal = killSwitchSelfHealVerdict({ state, jobs: jobsLookup });
+    if (heal.attention) {
+      await alert('system', 'warning', '킬스위치 자가복구 미확인',
+        { Connection: String(conn.id), Mode: mode, 이유: heal.reason },
+        `selfheal_unverified:${conn.id}`);
+    }
+    if (heal.insert) {
+      await sb().from('jobs').insert({
+        user_id: conn.user_id, connection_id: conn.id,
+        // **연결의 거래소를 그대로 적는다.** 예전에는 'binance'가 박혀
+        // 있었다. Gate 연결에 그 잡이 붙으면 jobExchangeCheck가 막는다 —
+        // 즉 킬스위치가 영원히 실행되지 않는다.
+        exchange: String(conn.exchange_id),
+        mode, action: 'KILL_SWITCH_EXECUTE',
+        payload: { actionMode: heal.actionMode || 'BC' },
+        status: 'PENDING', priority: 0, max_attempts: 10,
+        created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+      });
     }
   }
 }

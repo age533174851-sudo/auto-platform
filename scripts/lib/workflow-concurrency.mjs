@@ -275,6 +275,135 @@ export function triggerFindings(src, where = '') {
   return out;
 }
 
+// ── base 를 가리는 트리거: run 이 **생성되지 않는다** ──
+//
+// 2026-10/11, `ci.yml` 의 `on:` 이 `pull_request: branches: [main]` 이었다.
+// 그래서 **main 이 아닌 브랜치 위에 쌓은 PR 에서는 이 워크플로가 생성조차
+// 되지 않았다.** 실패한 것도 큐에 걸린 것도 아니고 **없었다** —
+// 그리고 없는 검사는 초록처럼 보인다.
+//
+// 실측(2026-11-20): 열린 PR 185건 중 `verify` 가 없는 것 14건, 그 중
+// 13건이 base 가 main 이 아니다(나머지 1건 #346 은 `dirty` 라서 merge ref
+// 자체가 없는 다른 원인이다). 이 세션에서 그 모양의 PR 7건을 하나씩
+// 되살려야 했다 — #553 · #501 · #512 · #590 · #556 · #605 · #587.
+//
+// `push:` 의 `branches: [main]` 은 **올바른 쓰임이라 잡지 않는다.** 거기서
+// 가리는 것은 "main 에 들어온 것만 돌린다"는 뜻이고, 그건 의도다.
+
+/** base 를 가리면 침묵이 되는 트리거. */
+export const PR_TRIGGERS = ['pull_request', 'pull_request_target'];
+
+/**
+ * `on:` 블록의 트리거 이름 → 그 아래 중첩 줄들.
+ *
+ * YAML 파서를 쓰지 않는 이유는 이 저장소의 다른 판정과 같다 — 의존성을
+ * 늘리지 않고, 읽는 모양을 좁게 고정한다. 못 읽으면 **null 을 돌려주고
+ * 호출부가 그것을 지적으로 바꾼다.** 빈 Map 과 null 은 다르다.
+ */
+export function onBlockTriggers(src) {
+  const lines = String(src ?? '').split('\n');
+  let i = lines.findIndex((l) => /^on:\s*$/.test(l.replace(/\s+$/, '')));
+  if (i < 0) return null;
+  const out = new Map();
+  let cur = null;
+  for (i += 1; i < lines.length; i += 1) {
+    const line = lines[i].replace(/\s+$/, '');
+    if (line === '') continue;
+    if (/^\s*#/.test(line)) continue;      // 주석은 트리거가 아니다
+    if (/^\S/.test(line)) break;           // 0칸 들여쓰기 = `on:` 블록의 끝
+    const mKey = /^ {2}([A-Za-z0-9_.-]+):/.exec(line);
+    if (mKey) { cur = mKey[1]; out.set(cur, []); continue; }
+    if (cur) out.get(cur).push(line.trim());
+  }
+  return out;
+}
+
+/** base 필터 쪽 지적. */
+export function prBaseFilterFindings(src, where = '') {
+  const at = where ? `${where}: ` : '';
+  const trig = onBlockTriggers(src);
+  if (trig == null || trig.size === 0) {
+    return [`${at}\`on:\` 블록을 읽지 못했습니다 — 못 읽은 것을 통과로 적지 않습니다`];
+  }
+  const found = PR_TRIGGERS.filter((t) => trig.has(t));
+  if (found.length === 0) {
+    return [`${at}\`pull_request\`·\`pull_request_target\` 가 하나도 없습니다 — `
+      + 'PR 에서 이 워크플로가 깨어나지 않습니다. 필터보다 조용한 침묵입니다'];
+  }
+  const out = [];
+  for (const name of found) {
+    const hit = (trig.get(name) || []).find((l) => /^branches(-ignore)?:/.test(l));
+    if (!hit) continue;
+    const key = hit.split(':')[0];
+    out.push(`${at}\`${name}.${key}\` 가 있습니다 — base 가 그 목록에 없는 PR 에는 `
+      + 'run 이 **생성되지 않습니다.** 실패도 대기도 아니고 없고, 없는 검사는 '
+      + `초록처럼 보입니다. \`push:\` 에서 가리는 것은 의도지만 \`${name}\` 에서는 `
+      + '그 PR 을 검증 없이 통과처럼 만듭니다');
+  }
+  return out;
+}
+
+// ── 샤드 합산 job: 취소를 실패로 적지 않는다 ──
+//
+// 2026-11-16, `mutation-100x-pr313` 의 합산 job 이 `if: always()` 였다.
+// 새 커밋이 올라와 `concurrency` 가 샤드 8개를 **cancelled** 로 끊었는데,
+// 합산은 `always()` 라서 그대로 돌았다 — 증거 파일이 없으니
+// `ALL SHARDS: 0/8` 로 **실패**를 적었다.
+//
+// 취소는 실패가 아니다. **교체된 SHA 의 결과다.** 그걸 빨간불로 적으면
+// 한 PR 에 커밋을 올릴 때마다 옛 SHA 가 빨간 체크를 하나 남기고,
+// 사람과 자동 판정이 그 빨간불의 정체를 매번 다시 읽어야 한다.
+// 실제로 #556 · #580 · #584 · #605 · #609 · #616 이 그 모양이었다.
+//
+// `!cancelled()` 는 **샤드가 정말 실패한 경우에는 그대로 돈다** —
+// 그때는 증거 누락이 진짜 빨간불이다. 구별이 되는 조건이다.
+
+/** `jobs:` 블록에서 job 이름과 그 job 의 4칸 들여쓴 `needs`·`if` 만 모은다. */
+export function jobsOf(src) {
+  const out = [];
+  let cur = null;
+  for (const raw of String(src ?? '').split('\n')) {
+    const line = raw.replace(/\s+$/, '');
+    if (line === '' || /^\s*#/.test(line)) continue;
+    const mJob = /^ {2}([A-Za-z0-9_.-]+):\s*$/.exec(line);
+    if (mJob) { cur = { name: mJob[1], needs: null, cond: null }; out.push(cur); continue; }
+    if (!cur) continue;
+    // **4칸 정확히.** 스텝의 `if: always()` 는 8칸이고 그건 올바른 쓰임이다
+    // (결과 보관은 실패해도 올려야 한다).
+    const mKey = /^ {4}(needs|if):\s*(.*)$/.exec(line);
+    if (mKey) cur[mKey[1] === 'needs' ? 'needs' : 'cond'] = mKey[2].trim();
+  }
+  return out;
+}
+
+/** 취소를 걸러 내는 조건인가. */
+const CANCEL_AWARE = /![\s(]*cancelled\(\)|success\(\)\s*\|\|\s*failure\(\)/;
+
+/** 합산 job 쪽 지적. */
+export function aggregatorFindings(src, where = '') {
+  const at = where ? `${where}: ` : '';
+  const jobs = jobsOf(src);
+  if (jobs.length === 0) {
+    return [`${at}job 을 하나도 읽지 못했습니다 — 못 읽은 것을 통과로 적지 않습니다`];
+  }
+  const out = [];
+  let seen = 0;
+  for (const j of jobs) {
+    if (!j.needs) continue;            // 앞 job 을 기다리지 않으면 합산이 아니다
+    seen += 1;
+    if (j.cond == null) continue;      // 조건이 없으면 앞이 취소되면 같이 건너뛴다 — 안전한 쪽
+    if (/always\(\)/.test(j.cond) && !CANCEL_AWARE.test(j.cond)) {
+      out.push(`${at}\`${j.name}\` 이 \`if: ${j.cond}\` 입니다 — 실행이 취소되면`
+        + '(새 커밋으로 교체) 샤드 증거가 없는 채로 합산이 돌아 **교체를 실패로 적습니다.** '
+        + '`!cancelled()` 로 바꾸세요 — 샤드가 정말 실패한 경우에는 그대로 돕니다');
+    }
+  }
+  if (seen === 0) {
+    out.push(`${at}\`needs:\` 를 가진 job 이 없습니다 — 합산 job 을 찾지 못했습니다`);
+  }
+  return out;
+}
+
 // ── 자기 점검 ──
 
 const BROKEN = 'auto-merge';
@@ -325,5 +454,59 @@ export function selfTest() {
     failed.push('types 를 못 읽은 것을 통과로 적었습니다');
   }
 
-  return { total: CASES.length + 4 + 3, failed };
+  // 합산 판정
+  const shardYml = 'jobs:\n  shard:\n    name: shard ${{ matrix.shard }}\n'
+    + '    steps:\n      - name: 보관\n        if: always()\n'
+    + '  aggregate:\n    needs: [shard]\n    if: always()\n    runs-on: ubuntu-latest\n';
+  const a1 = aggregatorFindings(shardYml);
+  if (a1.length !== 1 || !a1[0].includes('aggregate')) {
+    failed.push(`합산 job 의 \`always()\` 를 못 잡았습니다 (지적 ${a1.length}건)`);
+  }
+  if (aggregatorFindings(shardYml.replace('\n    if: always()\n', '\n    if: ${{ !cancelled() }}\n')).length !== 0) {
+    failed.push('`!cancelled()` 로 고친 판을 잡았습니다');
+  }
+  if (aggregatorFindings(shardYml.replace('  aggregate:\n    needs: [shard]\n    if: always()\n',
+    '  aggregate:\n    needs: [shard]\n')).length !== 0) {
+    failed.push('조건이 없는 합산 job 을 잡았습니다 — 그쪽은 안전한 모양입니다');
+  }
+  // 스텝의 `if: always()` 는 올바른 쓰임이므로 잡지 않는다.
+  const stepOnly = 'jobs:\n  shard:\n    needs: [prep]\n    steps:\n      - name: 보관\n        if: always()\n';
+  if (aggregatorFindings(stepOnly).length !== 0) {
+    failed.push('스텝의 `if: always()` 를 job 조건으로 잡았습니다');
+  }
+  if (aggregatorFindings('').length !== 1) {
+    failed.push('빈 입력을 통과로 적었습니다');
+  }
+
+  // base 필터 판정 — **없는 검사는 초록처럼 보인다**
+  const mainShape = 'on:\n  pull_request:\n  push:\n    branches: [main]\n';
+  if (prBaseFilterFindings(mainShape).length !== 0) {
+    failed.push('`push:` 의 branches 를 잡았습니다 — 그쪽은 올바른 쓰임입니다');
+  }
+  const filtered = 'on:\n  pull_request:\n    branches: [main]\n  push:\n    branches: [main]\n';
+  const b1 = prBaseFilterFindings(filtered);
+  if (b1.length !== 1 || !b1[0].includes('pull_request')) {
+    failed.push(`\`pull_request.branches\` 를 못 잡았습니다 (지적 ${b1.length}건)`);
+  }
+  const tgt = 'on:\n  pull_request_target:\n    branches: [main]\n    types: [opened]\n';
+  if (prBaseFilterFindings(tgt).length !== 1) {
+    failed.push('`pull_request_target.branches` 를 못 잡았습니다');
+  }
+  const ign = 'on:\n  pull_request:\n    branches-ignore: [wip/**]\n';
+  if (prBaseFilterFindings(ign).length !== 1) {
+    failed.push('`branches-ignore` 를 못 잡았습니다 — 같은 침묵을 만듭니다');
+  }
+  const commented = 'on:\n  # base 를 가리지 않는다\n  pull_request:\n\n  push:\n    branches: [main]\n';
+  if (prBaseFilterFindings(commented).length !== 0) {
+    failed.push('주석·빈 줄이 섞인 올바른 모양을 잡았습니다');
+  }
+  if (prBaseFilterFindings('jobs:\n  a:\n').length !== 1) {
+    failed.push('`on:` 블록을 못 읽은 것을 통과로 적었습니다');
+  }
+  // PR 트리거가 **아예 빠지는** 것도 같은 침묵이다 — 필터보다 조용하다.
+  if (prBaseFilterFindings('on:\n  schedule:\n    - cron: \'0 * * * *\'\n').length !== 1) {
+    failed.push('PR 트리거가 하나도 없는 것을 통과로 적었습니다');
+  }
+
+  return { total: CASES.length + 4 + 3 + 5 + 7, failed };
 }

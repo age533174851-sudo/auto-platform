@@ -16,10 +16,11 @@ import { netTest, withFetch } from '../../test/netStub';
 import {
   resolveExecExchange, jobExchangeCheck, leverageVerdict, unknownResultVerdict, futuresCountOpen,
   reconcileDecision, futuresPlaceOrder, futuresFindOrderByClientId,
-  positionModeVerdict, closeModeVerdict, __clearPositionModeCache,
+  positionModeVerdict, closeModeVerdict, __clearPositionModeCache, futuresSetTpsl,
   UNSUPPORTED_EXCHANGE, EXCHANGE_MISMATCH, type ExecTarget,
 } from './futuresExec';
 import { __clearGateSpecCache } from './gateFutures';
+import { planTrail } from '../engine/trailPlan';
 
 const GATE_TESTNET = 'api-testnet.gateapi.io';
 const GATE_LIVE = 'api.gateio.ws';
@@ -847,5 +848,132 @@ export function runFuturesExecTests() {
       eq(r.success, true);
       eq(r.count, 0);
     });
+  });
+
+  // ── 바이낸스 손절 이동: stopPrice가 호가 단위 위에 있는가 ──
+  //
+  // 트레일링·본전 이동은 `planTrail` → `placeStop` → `futuresSetTpsl`로
+  // 나간다. `planTrail`의 새 손절은 `진입가 ± 1R × R배수`라 생 부동소수다
+  // (예: 3.477979). Gate 갈래는 `gateStopSpec`이 호가에 올리고, 진입 경로는
+  // `roundTrigger`를 지나는데, **바이낸스 갈래만 그대로 보냈다.** 거래소는
+  // 호가 단위 밖의 가격을 거절하고(-4014 · -1111), 손절은 옮겨지지 않는다.
+  //
+  // 이 스텁은 바이낸스처럼 호가 단위 밖의 stopPrice를 거절한다.
+  console.log('[실행기 — 바이낸스 손절 가격을 호가 단위에 올린다]');
+
+  const tickStub = (sym: string, tick: string, sent: string[]) => (url: string) => {
+    if (!url.includes('demo-fapi.binance.com')) return null;
+    if (url.includes('/fapi/v1/exchangeInfo')) {
+      return { body: { symbols: [{ symbol: sym, filters: [
+        { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001' },
+        { filterType: 'MARKET_LOT_SIZE', stepSize: '0.001', minQty: '0.001' },
+        { filterType: 'PRICE_FILTER', tickSize: tick },
+      ] }] } };
+    }
+    if (url.includes('/fapi/v1/order')) {
+      const sp = new URL(url).searchParams.get('stopPrice') || '';
+      sent.push(sp);
+      const t = Number(tick);
+      const k = Number(sp) / t;
+      if (Math.abs(k - Math.round(k)) > 1e-6 || (sp.split('.')[1]?.length ?? 0) > (tick.split('.')[1]?.length ?? 0)) {
+        return { status: 400, body: { code: -4014, msg: 'Price not increased by tick size.' } };
+      }
+      return { body: { orderId: 77, symbol: sym } };
+    }
+    return null;
+  };
+
+  netTest('LONG 트레일링 손절(3.477979)은 호가 0.0001로 **내려서** 나간다 — 거절되지 않는다', async () => {
+    const v = planTrail({ side: 'LONG', entryPrice: 3.4567, initialStop: 3.4444,
+      currentStop: 3.4444, highWaterR: 2.73, lastPrice: 3.49 });
+    eq(v.action, 'MOVE_STOP');
+    const sent: string[] = [];
+    const t: ExecTarget = { exchange: 'binance', key: 'k', secret: 's', testnet: true };
+    await withFetch(tickStub('TRLAUSDT', '0.0001', sent), async () => {
+      const r = await futuresSetTpsl(t, { symbol: 'TRLAUSDT', positionSide: 'LONG',
+        tpPrice: null, slPrice: v.newStop!, refPrice: null });
+      eq(r.ok, true, `손절이 거절됐다: ${r.message}`);
+    });
+    eq(sent.length, 1);
+    // 손절은 진입에서 멀어지는 쪽(LONG은 아래)으로 — 한 틱 일찍 터지지 않게
+    eq(sent[0], '3.4779');
+  });
+
+  netTest('SHORT 트레일링 손절(59162.33399…)은 호가 0.1로 **올려서** 나간다', async () => {
+    const v = planTrail({ side: 'SHORT', entryPrice: 60000.5, initialStop: 60612.3,
+      currentStop: 60612.3, highWaterR: 2.37, lastPrice: 58900 });
+    eq(v.action, 'MOVE_STOP');
+    const sent: string[] = [];
+    const t: ExecTarget = { exchange: 'binance', key: 'k', secret: 's', testnet: true };
+    await withFetch(tickStub('TRLBUSDT', '0.1', sent), async () => {
+      const r = await futuresSetTpsl(t, { symbol: 'TRLBUSDT', positionSide: 'SHORT',
+        tpPrice: null, slPrice: v.newStop!, refPrice: null });
+      eq(r.ok, true, `손절이 거절됐다: ${r.message}`);
+    });
+    eq(sent[0], '59162.4');
+  });
+
+  netTest('익절도 같은 격자 — LONG 익절은 올린다', async () => {
+    const sent: string[] = [];
+    const t: ExecTarget = { exchange: 'binance', key: 'k', secret: 's', testnet: true };
+    await withFetch(tickStub('TRLCUSDT', '0.01', sent), async () => {
+      const r = await futuresSetTpsl(t, { symbol: 'TRLCUSDT', positionSide: 'LONG',
+        tpPrice: 101.123456, slPrice: null, refPrice: null });
+      eq(r.ok, true, `익절이 거절됐다: ${r.message}`);
+    });
+    eq(sent[0], '101.13');
+  });
+
+  netTest('규격을 못 읽으면 가격을 지어내지 않고 그대로 보낸다 — 손절 자체는 막지 않는다', async () => {
+    const sent: string[] = [];
+    const t: ExecTarget = { exchange: 'binance', key: 'k', secret: 's', testnet: true };
+    await withFetch((url) => {
+      if (!url.includes('demo-fapi.binance.com')) return null;
+      if (url.includes('/fapi/v1/exchangeInfo')) return { status: 500, body: {} };
+      if (url.includes('/fapi/v1/order')) {
+        sent.push(new URL(url).searchParams.get('stopPrice') || '');
+        return { body: { orderId: 78, symbol: 'TRLDUSDT' } };
+      }
+      return null;
+    }, async () => {
+      const r = await futuresSetTpsl(t, { symbol: 'TRLDUSDT', positionSide: 'LONG',
+        tpPrice: null, slPrice: 3.477979, refPrice: null });
+      eq(r.ok, true, r.message);
+    });
+    eq(sent.length, 1, '규격 조회 실패로 손절이 아예 안 나갔다');
+    eq(sent[0], '3.477979');
+  });
+
+  // ── 상태 대조: Gate 포지션 수량이 깨졌을 때 ──
+  //
+  // `getPositionsGateFutures`는 `Number(size) !== 0`으로 거른다. 'NaN'은
+  // 거기를 통과한다. 그 행을 대조가 `qty: 0`으로 옮기면 "읽었고, 0이다"가
+  // 되어 대조가 성공으로 끝난다 — 확인하지 못한 것을 통과로 적는 자리다.
+  netTest('Gate 포지션 수량을 못 읽으면 대조는 도달 불가다 — qty 0으로 적지 않는다', async () => {
+    const { gatherAndReconcile } = await import('../engine/reconcileCheck');
+    // 어떤 체인이든 받아 주고, await하면 빈 결과를 주는 가짜 DB
+    const conn = { exchange_id: 'gate', api_key: 'k', api_secret_enc: '', has_withdrawal: false };
+    const chain = (final: any): any => new Proxy(function () {}, {
+      get: (_t, p) => {
+        if (p === 'then') return (res: any) => res(final);
+        if (p === 'maybeSingle') return () => Promise.resolve({ data: conn, error: null });
+        return () => chain(final);
+      },
+      apply: () => chain(final),
+    });
+    const sb = { from: () => chain({ data: [], error: null }) };
+
+    let r: any = null;
+    await withFetch((url) => {
+      if (!url.startsWith(GATE_T)) return null;
+      if (url.includes('/futures/usdt/positions')) {
+        return { body: [{ contract: 'BTC_USDT', size: 'NaN', leverage: '100' }] };
+      }
+      return { body: [] };
+    }, async () => { r = await gatherAndReconcile(sb, 'u1', true, 'c1'); });
+
+    eq(r.reachable, false,
+      `수량을 모르는 포지션을 대조했다 — ${JSON.stringify(r.exchangePositions)}`);
+    assert(/수량/.test(String(r.error || '')), `이유가 수량을 말하지 않는다: ${r.error}`);
   });
 }

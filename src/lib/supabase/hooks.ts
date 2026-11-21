@@ -4,6 +4,7 @@
 'use client';
 
 import { getSupabaseClient, getClientUserId } from './client';
+import { cachedReadVerdict } from './cachedRead';
 
 // ─── localStorage keys ───────────────────────────────────────
 const KEY = {
@@ -133,14 +134,16 @@ export async function loadPortfolio(): Promise<{ positions: any[] }> {
   const sb  = getSupabaseClient();
   if (sb && uid) {
     try {
-      const { data } = await sb
+      const { data, error } = await sb
         .from('portfolio_positions')
         .select('*')
         .eq('user_id', uid)
         .order('created_at', { ascending: false });
-      const positions = data || [];
-      lsSet(KEY.portfolio, positions);
-      return { positions };
+      // **못 읽은 것을 "없음"으로 적지 않고, 캐시도 덮어쓰지 않는다.**
+      const v = cachedReadVerdict<any>({ data, error });
+      if (!v.mayWriteCache) return { positions: lsGet<any[]>(KEY.portfolio, []) };
+      lsSet(KEY.portfolio, v.rows!);
+      return { positions: v.rows! };
     } catch {}
   }
   return { positions: lsGet<any[]>(KEY.portfolio, []) };
@@ -262,15 +265,16 @@ export async function loadOrders(): Promise<any[]> {
   const sb  = getSupabaseClient();
   if (sb && uid) {
     try {
-      const { data } = await sb
+      const { data, error } = await sb
         .from('trade_orders')
         .select('id,symbol,name_kr,side,price,quantity,amount,leverage,fee,slippage,status,pnl,pnl_pct,mode,note,emotion,opened_at,closed_at')
         .eq('user_id', uid)
         .order('opened_at', { ascending: false })
         .limit(200);
-      const orders = data || [];
-      lsSet(KEY.orders, orders);
-      return orders;
+      const v = cachedReadVerdict<any>({ data, error });
+      if (!v.mayWriteCache) return lsGet<any[]>(KEY.orders, []);
+      lsSet(KEY.orders, v.rows!);
+      return v.rows!;
     } catch {}
   }
   return lsGet<any[]>(KEY.orders, []);
@@ -318,12 +322,15 @@ export async function loadPnlReports(): Promise<any[]> {
   const sb  = getSupabaseClient();
   if (sb && uid) {
     try {
-      const { data } = await sb
+      const { data, error } = await sb
         .from('pnl_reports')
         .select('*')
         .eq('user_id', uid)
         .order('period', { ascending: false });
-      return data || [];
+      const v = cachedReadVerdict<any>({ data, error });
+      // 못 읽었으면 **빈 목록이 아니라** 마지막으로 알던 값으로 떨어진다.
+      if (!v.ok) return lsGet<any[]>(KEY.pnl, []);
+      return v.rows!;
     } catch {}
   }
   return lsGet<any[]>(KEY.pnl, []);
@@ -356,14 +363,15 @@ export async function loadAlerts(): Promise<any[]> {
   const sb  = getSupabaseClient();
   if (sb && uid) {
     try {
-      const { data } = await sb
+      const { data, error } = await sb
         .from('alerts')
         .select('id,asset_id,name_kr,condition,value,active,triggered_at,created_at')
         .eq('user_id', uid)
         .order('created_at', { ascending: false });
-      const alerts = data || [];
-      lsSet(KEY.alerts, alerts);
-      return alerts;
+      const v = cachedReadVerdict<any>({ data, error });
+      if (!v.mayWriteCache) return lsGet<any[]>(KEY.alerts, []);
+      lsSet(KEY.alerts, v.rows!);
+      return v.rows!;
     } catch {}
   }
   return lsGet<any[]>(KEY.alerts, []);
@@ -411,13 +419,15 @@ export async function loadBacktestResults(): Promise<any[]> {
   const sb  = getSupabaseClient();
   if (sb && uid) {
     try {
-      const { data } = await sb
+      const { data, error } = await sb
         .from('backtest_results')
         .select('id,strategy_name,asset,timeframe,start_date,end_date,total_trades,win_rate,total_pnl,max_drawdown,sharpe_ratio,params,created_at')
         .eq('user_id', uid)
         .order('created_at', { ascending: false })
         .limit(50);
-      return data || [];
+      const v = cachedReadVerdict<any>({ data, error });
+      if (!v.ok) return lsGet<any[]>(KEY.backtest, []);
+      return v.rows!;
     } catch {}
   }
   return lsGet<any[]>(KEY.backtest, []);
@@ -440,16 +450,21 @@ export async function saveBacktestResult(result: {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// 10. AUDIT LOGS  (insert-only from client)
+// 10. AUDIT LOGS — **지웠다**
 // ═══════════════════════════════════════════════════════════════
-export async function logClientAudit(action: string, detail: Record<string, unknown>): Promise<void> {
-  const uid = await getClientUserId();
-  const sb  = getSupabaseClient();
-  if (!sb || !uid) return;
-  try {
-    await sb.from('audit_logs').insert({ actor_id: uid, action, details: detail, result: 'client' });
-  } catch {}
-}
+//
+// `logClientAudit`이 있었다. 세 가지가 동시에 틀렸다:
+//
+//  1. **부르는 곳이 한 곳도 없었다.**
+//  2. `audit_logs`에 `actor_id` · `details` · `result`로 썼는데 실제 DB의
+//     그 표에는 그 칸이 하나도 없다(`src/lib/supabase/types.ts` 참고 —
+//     Management API로 실제 DB에서 뽑은 파일이다).
+//  3. 브라우저 anon 키로는 감사 표에 쓸 수 없다. 쓸 수 있으면 사용자가
+//     제 감사 기록을 지어낼 수 있다는 뜻이므로, **막히는 것이 맞다.**
+//
+// 감사 기록은 서버에서 `recordAudit`(`lib/safety/auditStore`)이 남긴다.
+// 화면에서 남겨야 할 것이 생기면 서버 라우트를 하나 지나게 한다 —
+// 브라우저에서 직접 쓰는 길을 다시 만들지 않는다.
 
 // ═══════════════════════════════════════════════════════════════
 // HEALTH CHECK

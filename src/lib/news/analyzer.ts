@@ -25,7 +25,10 @@ export function loadCachedAnalysis(id: string): NewsAnalysis | null {
       window.sessionStorage.removeItem(CACHE_KEY_PREFIX + id);
       return null;
     }
-    return { ...entry.analysis, source: 'cache' };
+    // **출처를 덮어쓰지 않는다.** 이 줄이 `source: 'mock'` 을 `'cache'` 로
+    // 바꾸고 있었고, 그래서 키워드 기반 값이 캐시를 한 번 거치면
+    // "캐시된 분석"으로 보였다. 캐시 여부는 따로 적는다.
+    return { ...entry.analysis, cached: true };
   } catch {
     return null;
   }
