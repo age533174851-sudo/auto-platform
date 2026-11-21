@@ -210,6 +210,7 @@ import { runReconcileCronAuthIntegrationTests } from './src/test/integration/rec
 import { runTenSlotDispatchIntegrationTests } from './src/test/integration/tenSlotDispatchIntegration.test';
 import { runTenSlotLifecycleTests } from './src/test/integration/tenSlotLifecycleIntegration.test';
 import { runSmokeStartRouteTests } from './src/test/integration/smokeStartRouteIntegration.test';
+import { runGateFindOrderTests } from './src/test/integration/gateFindOrderIntegration.test';
 import { runForcedEntryRouteTests } from './src/test/integration/forcedEntryRouteIntegration.test';
 import { runHoldExtensionIntegrationTests } from './src/test/integration/holdExtensionIntegration.test';
 import { runFailureRecoveryTests } from './src/lib/engine/failureRecovery.test';
@@ -516,6 +517,7 @@ runLifecycleRowsTests(); runPostEntryRiskTests(); runPositionRiskProvenanceTests
   await runPrecisionIntegrationTests();
   await runPrecisionMatrixTests();
   await runSmokeStartRouteTests();
+  await runGateFindOrderTests();
   // smokeStartRoute registers asynchronous tests; finish them before swapping
   // the Supabase module cache and fetch boundary for the cron auth cases.
   await flushAsync();
