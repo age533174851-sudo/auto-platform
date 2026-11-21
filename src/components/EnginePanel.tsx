@@ -46,7 +46,8 @@ export default function EnginePanel() {
           <div style={{ color: T.muted, fontSize: 11 }}>신호 → 검증 → 위험 → 실행 파이프라인</div>
         </div>
       </div>
-      <div style={{ color: T.muted, fontSize: 10, marginBottom: 14, lineHeight: 1.4 }}>파인스크립트는 신호만 보냅니다. 주문 크기·레버리지는 백엔드가 위험 기준으로 결정합니다.</div>
+      <div style={{ color: '#F59E0B', fontSize: 10, fontWeight: 800, marginBottom: 6 }}>데모 — 아래 숫자는 고정된 예시 신호로 계산한 것이며 실제 주문·실측 성과가 아닙니다</div>
+      <div style={{ color: T.muted, fontSize: 10, marginBottom: 14, lineHeight: 1.4 }}>파인스크립트는 신호만 보냅니다. 주문 크기·레버리지는 백엔드가 위험 기준으로 결정합니다. 이 화면은 파이프라인 **동작**을 보여 주는 데모입니다 — 거래소에서 받아온 값이 아닙니다.</div>
 
       {/* Stage 1: Signal Gateway */}
       <Stage icon={ShieldCheck} title="① Signal Gateway" color="#0EA5E9">
@@ -57,7 +58,7 @@ export default function EnginePanel() {
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <CheckCircle2 size={13} color={T.grn} />
-          <span style={{ color: T.grn, fontSize: 11.5, fontWeight: 700 }}>검증 통과</span>
+          <span style={{ color: T.grn, fontSize: 11.5, fontWeight: 700 }}>검증 통과 (예시 신호)</span>
           <span style={{ color: T.muted, fontSize: 10 }}>· 전략군: {validation.signal?.bucket}</span>
         </div>
       </Stage>
