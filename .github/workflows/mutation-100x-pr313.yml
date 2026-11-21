@@ -99,7 +99,17 @@ jobs:
   aggregate:
     name: 100X 전수 합산 · 누락 0 증명
     needs: [shard]
-    if: always()
+    # **`always()` 가 아니다.** 새 커밋이 올라와 `concurrency` 가 샤드를
+    # `cancelled` 로 끊으면, `always()` 는 증거 없는 채로 합산을 돌려
+    # `ALL SHARDS: 0/8` 을 **실패**로 적는다. 취소는 실패가 아니라
+    # 교체된 SHA 의 결과다 — #556 · #580 · #584 · #605 · #609 · #616 이
+    # 그 모양이었다.
+    #
+    # `!cancelled()` 는 **샤드가 정말 실패한 경우에는 그대로 돈다.**
+    # 그때는 증거 누락이 진짜 빨간불이다. 둘을 구별하는 조건이다.
+    #
+    # `scripts/check-required-check-workflow.mjs` 가 이 줄을 센다.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

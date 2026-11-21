@@ -114,7 +114,14 @@ export async function gatherAndReconcile(
 
     for (const p of gatePositions) {
       // 변환은 gatePositionToRisk 한 곳에만 둔다 (leverage 0 = 교차 등).
-      const r = gp.gatePositionToRisk(p)!;
+      const r = gp.gatePositionToRisk(p);
+      // 수량을 못 읽은 포지션은 대조할 수 없다. qty 0으로 넣으면 "읽었고
+      // 0이다"가 되어 대조가 성공으로 끝난다 — 확인 못 한 것은 통과가 아니다.
+      if (!r) {
+        return { reachable: false, verdict: null,
+          error: `Gate 포지션 수량을 읽지 못했습니다 (${String(p?.contract || '알 수 없음')}) `
+               + '— 포지션이 없다는 뜻이 아니라 대조하지 않았습니다', ...empty };
+      }
       // 조건부 주문 목록으로 보호주문 유무를 판정한다. 못 읽으면 **있다고
       // 가정하지 않는다** — 없는 것으로 보면 대조가 '손절 소실'을 띄우고
       // 주문이 막히는데, 그게 있다고 보는 것보다 안전하다.

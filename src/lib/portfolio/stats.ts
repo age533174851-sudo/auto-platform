@@ -207,7 +207,11 @@ export function sharpeOf(
 
 /** paper_positions 행 → ClosedTrade. 컬럼 이름이 바뀌면 여기 한 곳만 고친다 */
 export function paperRowToTrade(r: any): ClosedTrade | null {
-  const pnl = Number(r?.realized_pnl);
+  // Number(null)·Number('')는 0이다 — 손익을 모르는 행이 "본전 거래"가 되어
+  // 거래 수(점수의 표본)를 부풀린다. 비어 있으면 버린다.
+  const raw = r?.realized_pnl;
+  if (raw == null || (typeof raw === 'string' && raw.trim() === '')) return null;
+  const pnl = Number(raw);
   const at = r?.closed_at ? new Date(r.closed_at).getTime() : NaN;
   if (!Number.isFinite(pnl) || !Number.isFinite(at)) return null;
   return {

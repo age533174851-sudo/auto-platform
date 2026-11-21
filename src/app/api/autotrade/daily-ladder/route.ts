@@ -22,6 +22,7 @@ import { ledgerFillQty } from '@/lib/engine/ledgerFillQty';
 import { HOLDING_EVIDENCE_STATUSES } from '@/lib/engine/holdingEvidence';
 import { timingSafeEqual } from 'crypto';
 import { tagStrategy } from '@/lib/strategies/ledger';
+import { scheduleReadSummary } from '@/lib/autotrade/scheduleReadSummary';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -467,8 +468,20 @@ export async function POST(req: NextRequest) {
   }
 
   // ── 주문 ──
-  const { releaseReservation, confirmReservation } = await import('@/lib/strategies/ladderGate');
+  const { releaseReservation, confirmReservation, reservationOutcome, holdReservationForReconcile } = await import('@/lib/strategies/ladderGate');
   const reservationId = result.ladder?.reservationId;
+
+  // **주문을 보내기 시작했는가.**
+  //
+  // 아래 catch는 예약을 지운다. 주문을 보내기 **전**에 막힌 것이라면
+  // 옳다 — 주문이 없으니 하루를 돌려주는 것이 맞다. 보낸 **뒤**라면
+  // 정반대다: 지우는 순간 하루 1회 잠금이 열리고, 앞 주문이 체결돼
+  // 있었다면 다음 주기에 포지션이 두 배가 된다.
+  //
+  // `executeOrder`는 응답을 못 받아도 던지지 않고 `UNKNOWN`을 돌려주지만,
+  // 그 **뒤의 코드**(장부 기록·응답 조립)가 던질 수 있다. 그때 주문은
+  // 이미 거래소에 있다.
+  let orderSent = false;
 
   try {
     if (!body.connectionId) throw new Error('connectionId가 없어 주문할 수 없습니다');
@@ -632,7 +645,11 @@ export async function POST(req: NextRequest) {
       }, { status: 400 });
     }
     const tradeDate = result.ladder?.tradeDate || new Date().toISOString().slice(0, 10);
-    const clientOrderId = `LD${tradeDate.replace(/-/g, '')}${symbol}`.slice(0, 36);
+    // **식별자를 여기서 조립하지 않는다.** 청산 감시가 손절을 옮길 때
+    // 같은 문자열을 다시 만들어야 하는데, 두 곳에 적으면 한쪽만 바뀐다.
+    // 그때 옮긴 손절이 고아가 되어도 "내 것"이라고 증명하지 못한다.
+    const { ladderEntryClientOrderId } = await import('@/lib/strategies/ladderIds');
+    const clientOrderId = ladderEntryClientOrderId({ tradeDate, symbol });
 
     // 손절가는 파이프라인이 쓴 것과 같은 기준(마지막 종가 ± 손절거리)으로
     // 되돌려 계산한다. plan에는 거리(%)만 있고 가격이 없다.
@@ -1025,6 +1042,9 @@ export async function POST(req: NextRequest) {
       }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
     }
 
+    // **보내기 직전에 표시한다.** 보낸 뒤에 표시하면 그 사이에 죽었을 때
+    // 주문은 나갔는데 표시는 안 된 상태가 된다 — 막으려던 바로 그 창이다.
+    orderSent = true;
     const exec = await executeOrder(sb, {
       userId,
       connectionId: body.connectionId,
@@ -1041,15 +1061,30 @@ export async function POST(req: NextRequest) {
       apiSecret: decryptSecret(conn.api_secret_enc ?? ''),
     });
 
-    if (exec.ok) {
+    // **판정은 ladderGate 한 곳에 있다.** `exec.ok` 하나로 가르면
+    // UNKNOWN(나갔는지 모름)이 "안 나갔다"로 접힌다.
+    const outcome = reservationOutcome(exec);
+    if (outcome === 'CONFIRM') {
       await confirmReservation(sb, reservationId, {
         leverage: result.plan!.leverage,
         entryPrice: exec.avgPrice,
+        // **장부에도 손절을 적는다.** 여기 없으면 `stop_loss`가 NULL로
+        // 남고, `exitMonitor`가 `if (!entry || !stop) continue`로 이 줄을
+        // 버린다 — 트레일링도 시간청산도 청산가 점검도 돌지 않는다.
+        // 거래소에 거는 값(`executeOrder`의 `stopLoss`)과 **같은 값**이다.
+        stopLoss,
         liquidationPrice: result.plan!.liquidationPrice,
       });
-    } else {
-      // 주문이 나가지 않았으면 오늘 하루를 돌려준다
+    } else if (outcome === 'RELEASE') {
+      // 거래소가 거부했거나 보내지 못했다 — 주문이 **없으므로** 하루를 돌려준다
       await releaseReservation(sb, reservationId);
+    } else {
+      // **나갔는지 모른다.** 지우면 하루 1회 잠금이 열리고 다음 주기에
+      // 두 번째 주문이 나간다 — 앞 주문이 체결돼 있었으면 포지션이 두 배다.
+      // 하루를 손해 보는 쪽이 싸다.
+      await holdReservationForReconcile(sb, reservationId,
+        `주문 응답을 확인하지 못했습니다(status=${exec.status ?? '없음'}) — `
+        + '나갔는지 확인될 때까지 하루를 돌려주지 않습니다');
     }
 
     return NextResponse.json({
@@ -1085,9 +1120,20 @@ export async function POST(req: NextRequest) {
       },
     }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (e: any) {
-    await releaseReservation(sb, reservationId);
+    if (orderSent) {
+      // 주문은 이미 나갔을 수 있다. **지우지 않는다.**
+      await holdReservationForReconcile(sb, reservationId,
+        `주문을 보낸 뒤 처리 중 오류(${String(e?.message || e).slice(0, 160)}) — `
+        + '나갔는지 확인될 때까지 하루를 돌려주지 않습니다');
+    } else {
+      // 보내기 전에 막혔다 — 주문이 없으므로 하루를 돌려준다
+      await releaseReservation(sb, reservationId);
+    }
     return NextResponse.json({
       ...base, executed: false, error: e?.message || '주문 실패',
+      // **하루를 돌려줬는지**를 응답에 남긴다. 이게 없으면 사용자는
+      // 오늘 다시 시도할 수 있는지 알 수 없다.
+      dayReturned: !orderSent,
     }, { status: 502, headers: { 'Cache-Control': 'no-store' } });
   }
 }
@@ -1178,13 +1224,58 @@ export async function GET(req: NextRequest) {
       : msg;
   }
 
+  // ── 예약이 가리키는 연결이 아직 있는가 ──
+  //
+  // 이 판정은 목록 API에만 있었고 **실행기에는 없었다.** 실행기가 보는
+  // 것은 `evaluationLoop`의 `NO_CONNECTION`뿐인데, 그건 연결 id가 비어
+  // 있을 때만 난다. id가 적혀 있는데 그 행이 사라진 경우는 그냥 통과하고,
+  // 간격이 안 됐으면 '건너뜀'이 되어 **ok로 집계된다.**
+  //
+  // 그래서 화면 위에는 "4개 중 2개가 막혀 있습니다", 아래에는 "4건 확인 ·
+  // 실패 0건"이 같이 떴다(2026-11-14). 같은 4줄을 두고 두 문장이 갈렸다.
+  //
+  // 판정은 `scheduleConnState` 한 곳에 있다. 여기서 다시 쓰지 않고 부른다.
+  // **못 읽으면 null이다** — 빈 배열로 두면 모든 예약이 막힘으로 뜬다.
+  let connRows: any[] | null = null;
+  if (!readError && rows.length > 0) {
+    try {
+      const uids = [...new Set(rows.map((r: any) => String(r.user_id || '')).filter(Boolean))];
+      if (uids.length === 0) {
+        connRows = [];
+      } else {
+        const { data, error } = await (sb as any).from('exchange_connections')
+          .select('id, user_id, exchange_id, label, is_testnet').in('user_id', uids);
+        if (!error) connRows = Array.isArray(data) ? data : [];
+      }
+    } catch { /* null 그대로 — 막혔다고 적지 않는다 */ }
+  }
+
   const results: any[] = [];
   if (!readError) {
     const origin = new URL(req.url).origin;
     const { evaluateIfDue } = await import('@/lib/autotrade/evaluationRunner');
+    const { scheduleConnState } = await import('@/lib/engine/schedulePlan');
+    const { blockedByConnection } = await import('@/lib/autotrade/runSummary');
     const nowMs = Date.now();
 
     for (const r of rows) {
+      // ── 돌 수 없는 줄은 '건너뜀'이 아니다 ──
+      //
+      // 간격을 보기 전에 본다. 연결이 사라진 예약은 간격이 됐든 안 됐든
+      // 주문을 낼 수 없다. 간격 검사에 맡기면 '아직 때가 아님'으로 묻힌다.
+      const mineConns = connRows === null
+        ? null
+        : connRows.filter((c: any) => String(c.user_id) === String(r.user_id));
+      const cv = scheduleConnState(r.connection_id, mineConns as any);
+      const blk = blockedByConnection(cv.state);
+      if (blk) {
+        results.push({
+          symbol: r.symbol, mode: r.mode,
+          ok: false, blocked: true, code: blk.code, detail: cv.message,
+        });
+        continue;
+      }
+
       // ── 예약 줄이 고른 전략으로 부른다 ──
       //
       // 예전에는 이 자리에서 **daily-ladder POST를 직접** 불렀다. 그래서
@@ -1205,12 +1296,27 @@ export async function GET(req: NextRequest) {
       }, nowMs);
 
       if (!record) {
+        // ── 건너뛸 때도 **마지막 판단을 같이 적는다** ──
+        //
+        // 2026-11-02에 "데모 자동매수가 안 나간다"를 쫓으면서 이 로그를
+        // 25시간 분량 읽었더니 전부 `WAITING · 다음 평가까지 N분
+        // 남았습니다`뿐이었다. cron은 예비 실행기이고 주 실행기는 Fly
+        // Worker이니 그 자체는 정상인데, **그 로그로는 왜 진입하지
+        // 않았는지 알 수 없다.** 답은 워커의 판단에 있고 그걸 보려면 Fly
+        // 로그나 운영 DB를 열어야 한다 — `CLAUDE.md`가 금지한 그 문장이다.
+        //
+        // 그 판단은 이미 이 줄(`select('*')`)에 실려 와 있다. 적지
+        // 않았을 뿐이다.
+        const { lastEvaluationNote } = await import('@/lib/autotrade/schedulePoll');
+        const lastEval = lastEvaluationNote(r as any);
         results.push({
           symbol: r.symbol, mode: r.mode,
           // 건너뛴 것은 실패가 아니다. 간격이 안 됐거나 꺼져 있는 것이다.
           ok: due.code !== 'NO_CONNECTION',
           skipped: due.code !== 'NO_CONNECTION',
           code: due.code, detail: due.reason,
+          // **이 한 줄이 "왜 안 나갔나"에 답한다.**
+          lastEval,
           ...(saveError ? { saveError } : {}),
         });
         continue;
@@ -1239,22 +1345,29 @@ export async function GET(req: NextRequest) {
       readError ? 'failed' : rows.length === 0 ? 'skipped' : 'ok',
       // 확인한 줄 수 · 실제 진입 · 실패를 나눠 적는다. '성공 N건'만 적으면
       // 진입하지 않은 날도 매매가 일어난 것처럼 읽힌다.
-      readError || `${rows.length}건 확인 · 진입 ${results.filter(x => x.executed).length}건`
-        + ` · 실패 ${results.filter(x => !x.ok).length}건`,
+      readError || (await import('@/lib/autotrade/runSummary')).runSummary(results, rows.length).text,
       startedAt);
     cronLogError = lg.error;
   } catch (e: any) { cronLogError = String(e?.message || e); }
 
+  // **0건도 결과다.** 켜 놓은 것이 없으면 그렇게 말한다 — 조용히
+  // 아무것도 안 하면 지금까지와 똑같아진다.
+  //
+  // 그런데 **못 읽은 것은 0건이 아니다.** 읽기에 실패하면 `rows`가 빈
+  // 배열로 남고, 그 길이를 그대로 적으면 "사용자가 자동매매를 꺼 두었다"와
+  // "DB를 못 읽는다"가 같은 0으로 나간다. 2026-10-20부터 Supabase가
+  // egress 할당량 초과로 제한됐을 때 이 응답이 매번 `scheduled: 0`이었고,
+  // 예약은 그동안 두 건 다 켜져 있었다. 판정은 한 곳에 둔다.
+  const summary = scheduleReadSummary({ rows, readError });
+
   return NextResponse.json({
-    ok: !readError,
+    ok: summary.ok,
     error: readError,
-    // **0건도 결과다.** 켜 놓은 것이 없으면 그렇게 말한다 — 조용히
-    // 아무것도 안 하면 지금까지와 똑같아진다.
-    scheduled: rows.length,
-    note: readError ? readError
-      : rows.length === 0
-        ? '켜져 있는 자동매매 설정이 없습니다 — autotrade_schedules에 enabled=true 줄이 필요합니다'
-        : `${rows.length}건 실행했습니다`,
+    /** 읽지 못했으면 **null이다 — 0이 아니다** */
+    scheduled: summary.scheduled,
+    /** `scheduled`가 null인 이유를 0과 구분해 읽게 한다 */
+    scheduledUnknown: summary.unknown,
+    note: summary.note,
     results,
     cronLogError,
     liveTradingLocked: !(await import('@/lib/engine/liveTradingGate')).liveTradingGate().allowed,

@@ -17,6 +17,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { C, FS, NUM, fmtPrice, pnlColor, tabStyle } from './theme';
 import type { TerminalSymbol } from './TerminalContext';
+import { fmtCompact } from '@/lib/trading/marketStats';
 
 export interface MarketRow {
   id: string;          // BTCUSDT
@@ -28,13 +29,15 @@ export interface MarketRow {
   fundingPct: number | null;
 }
 
-/** 거래량을 사람이 읽는 단위로 */
+/**
+ * 거래량을 사람이 읽는 단위로.
+ *
+ * **규칙은 `fmtCompact` 한 곳에 있다.** 여기 사본이 따로 있을 때는
+ * 단위를 반올림 전에 골라서 999,999를 `1000.00K`로 적었다 — 시세 칸은
+ * #642에서 고쳐졌는데 이 목록만 남아 있었다.
+ */
 export function fmtVol(v: number | null): string {
-  if (v == null || !Number.isFinite(v)) return '—';
-  if (v >= 1e9) return `${(v / 1e9).toFixed(2)}B`;
-  if (v >= 1e6) return `${(v / 1e6).toFixed(2)}M`;
-  if (v >= 1e3) return `${(v / 1e3).toFixed(2)}K`;
-  return v.toFixed(0);
+  return fmtCompact(v);
 }
 
 const FAV_KEY = 'tg_terminal_favorites';
