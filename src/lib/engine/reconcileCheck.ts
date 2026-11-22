@@ -62,7 +62,7 @@ export async function gatherAndReconcile(
   const empty = { appPositions: [], exchangePositions: [], unresolvedOrders: [], unresolvedOrderCount: null };
 
   let q = sb.from('exchange_connections')
-    .select('exchange_id, api_key, api_secret_enc, has_withdrawal')
+    .select('id, exchange_id, api_key, api_secret_enc, has_withdrawal')
     .eq('user_id', userId).eq('is_active', true).eq('is_testnet', testnet);
   if (connectionId) q = q.eq('id', connectionId);
   const { data: conn } = await q.limit(1).maybeSingle();
@@ -70,6 +70,10 @@ export async function gatherAndReconcile(
   if (!conn) return { reachable: false, verdict: null, error: '요청한 거래 모드의 활성 거래소 연결이 없습니다', ...empty };
   if ((conn as any).has_withdrawal) {
     return { reachable: false, verdict: null, error: '출금 권한 키는 사용할 수 없습니다', ...empty };
+  }
+  const ledgerConnectionId = connectionId || conn.id;
+  if (typeof ledgerConnectionId !== 'string' || !ledgerConnectionId.trim()) {
+    return { reachable: false, verdict: null, error: '대조할 거래소 연결 ID를 확인하지 못했습니다', ...empty };
   }
 
   const { decryptSecret } = await import('@/lib/exchanges/crypto');
@@ -208,10 +212,8 @@ export async function gatherAndReconcile(
   // 실전 연결 대조를 막고 있었고, [미확정 주문 확정]을 눌러도 안 풀렸다.
   // 없는 것을 찾고 있었으니까.
   //
-  // 연결이 곧 거래소이자 망이다. 연결을 알면 그 연결 것만 본다.
-  // **모르면 좁히지 않는다** — 안 거르는 쪽이 과하게 막는 쪽이고,
-  // 과하게 막는 것은 놓치는 것보다 낫다.
-  const scope = (q: any) => (connectionId ? q.eq('connection_id', connectionId) : q);
+  // 연결을 자동 선택한 경우에도 거래소와 앱 장부의 범위를 맞춘다.
+  const scope = (q: any) => q.eq('connection_id', ledgerConnectionId);
 
   const appQuery = (cols: string) => scope(sb.from('live_orders')
     .select(cols)

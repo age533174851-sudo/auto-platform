@@ -104,6 +104,7 @@ class ReconcileDb {
 }
 
 const conn = () => ({
+  id: 'fixture-connection',
   exchange_id: 'binance',
   api_key: 'K'.repeat(64),
   api_secret_enc: encryptSecret('S'.repeat(64)),
@@ -117,6 +118,7 @@ function quietVenue(): FakeVenue {
 
 const unknownRow = (id: string) => ({
   user_id: 'u1', client_order_id: id, symbol: 'BTCUSDT', status: 'UNKNOWN',
+  connection_id: 'fixture-connection',
   error_message: '응답 없음', needs_attention: true,
 });
 
@@ -351,6 +353,17 @@ export async function runReconcileUnresolvedTests(): Promise<void> {
     test('④ 거래소에 못 닿으면 미확정 수를 0으로 적지 않는다', () => {
       eq(g.reachable, false, '거래소 조회 실패는 판정 불가다');
       eq(g.unresolvedOrderCount, null, '못 물어봤으면 0건이 아니라 모름이다');
+    });
+  }
+
+  {
+    const sibling = { ...unknownRow('sibling'), connection_id: 'other-connection' };
+    const { g } = await run(quietVenue(), { live_orders: [unknownRow('selected'), sibling] });
+
+    test('연결 ID를 생략해도 선택한 연결의 미확정 주문만 센다', () => {
+      eq(g.reachable, true);
+      eq(g.unresolvedOrderCount, 1);
+      eq(g.unresolvedOrders[0]?.clientOrderId, 'selected');
     });
   }
 
