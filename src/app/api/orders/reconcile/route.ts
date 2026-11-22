@@ -102,6 +102,7 @@ export async function GET(req: NextRequest) {
       //   error는 아무도 못 보고, 50행 질의는 왕복 한 번을 그냥 쓴다.
       //   `error`를 잡기 시작한 뒤에는 "잡아 놓고 버리는" 모양이 되므로
       //   읽는 자리를 쓰는 자리로 옮긴다.
+      if (connectionId) listQ = listQ.eq('connection_id', connectionId);
       const { data: pending, error: pendingError } = await listQ
         .order('created_at', { ascending: true })
         .limit(50);

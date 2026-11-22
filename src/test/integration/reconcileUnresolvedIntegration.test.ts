@@ -157,9 +157,26 @@ async function checkReconcileListRoute(): Promise<void> {
 
   try {
     const { GET } = await import('../../app/api/orders/reconcile/route');
+    const ordersByConnection = [
+      unknownRow('selected'),
+      { ...unknownRow('other-connection'), connection_id: 'other-connection' },
+      { ...unknownRow('unassigned'), connection_id: null },
+      { ...unknownRow('other-user'), user_id: 'u2' },
+    ];
     for (const scenario of [
       { name: '확인된 빈 목록', rows: [], count: 0, status: 200 },
       { name: '접수만 된 주문', rows: [{ ...unknownRow('c-1'), status: 'ACKED' }], count: 1, status: 200 },
+      {
+        name: '미리보기는 선택한 연결의 주문만 표시',
+        rows: ordersByConnection, search: '?dry=1&connectionId=fixture-connection',
+        count: 1, status: 200, orderId: 'selected',
+      },
+      {
+        name: '선택한 연결에 대조할 주문이 없으면 0건',
+        rows: ordersByConnection, search: '?dry=1&connectionId=empty-connection',
+        count: 0, status: 200,
+      },
+      { name: '연결을 지정하지 않으면 본인 주문 전체', rows: ordersByConnection, count: 3, status: 200 },
       { name: '조회 실패', rows: [], fails: true, status: 503 },
       { name: '잘못된 조회 응답', rows: [], nullResult: true, status: 503 },
       { name: '연결을 지정하지 않은 조회 실패', rows: [], fails: true, search: '', status: 503 },
@@ -173,6 +190,7 @@ async function checkReconcileListRoute(): Promise<void> {
         eq(response.status, scenario.status);
         eq(body.ok, scenario.status === 200);
         eq(body.pendingCount, scenario.count);
+        if (scenario.orderId) eq(body.pending[0]?.client_order_id, scenario.orderId);
         if (scenario.status === 503) eq(body.error, 'pending_orders_unreadable');
       });
     }
@@ -192,7 +210,7 @@ async function checkReconcileListRoute(): Promise<void> {
  * 앱에서 이 라우트를 fetch하는 곳은 세 군데이고
  * (`OrderPane.tsx` · `AutotradeControl.tsx` 두 곳) **전부
  * `?connectionId=…`를 붙이고 `dry=1`은 쓰지 않는다.** 즉 위
- * `checkReconcileListRoute`의 다섯 시나리오는 **한 군데도 지나가지
+ * `checkReconcileListRoute`의 목록 시나리오는 **한 군데도 지나가지
  * 않는 갈래**를 본다. 그래서 여기서 나머지 절반을 본다.
  *
  * 두 가지를 못박는다:
