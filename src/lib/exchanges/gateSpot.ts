@@ -49,7 +49,7 @@ export interface GateSpotPairInfo {
   minBaseAmount: number | null;
   /** 최소 주문 **금액**(quote) */
   minQuoteAmount: number | null;
-  /** 거래 가능한 상태인가. 'tradable'이 아니면 주문이 거절된다 */
+  /** 'tradable'은 양방향, 'buyable'은 매수, 'sellable'은 매도만 가능하다. */
   tradeStatus: string | null;
 }
 
@@ -106,8 +106,11 @@ export async function placeGateSpotOrder(
 
   // 규격을 먼저 읽는다. 못 읽으면 정밀도 없이 진행한다 (거래소가 판단).
   const info = await getGateSpotPair(p.pair, testnet);
-  if (info?.tradeStatus && info.tradeStatus !== 'tradable') {
-    return { success: false, message: `${p.pair}는 지금 거래할 수 없는 상태입니다 (${info.tradeStatus})` };
+  const status = info?.tradeStatus;
+  const sideAllowed = (status === 'buyable' && input.side === 'BUY')
+    || (status === 'sellable' && input.side === 'SELL');
+  if (status && status !== 'tradable' && !sideAllowed) {
+    return { success: false, message: `${p.pair}는 지금 요청한 방향으로 거래할 수 없습니다 (${status})` };
   }
 
   const plan = planGateSpotOrder({
