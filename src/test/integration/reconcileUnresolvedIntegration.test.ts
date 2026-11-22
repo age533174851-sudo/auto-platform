@@ -46,6 +46,7 @@ class ReconcileDb {
     private nullResult = false,
     /** true면 `exchange_connections` 조회가 error를 돌려준다 */
     private connFails = false,
+    private omitCount = false,
   ) {}
 
   /** 미확정(UNKNOWN) 질의를 몇 번 시도했는가 */
@@ -56,14 +57,20 @@ class ReconcileDb {
   from(table: string): any {
     const db = this;
     let cols = '';
+    let countRequested = false;
+    let maxRows: number | undefined;
     const filters: { col: string; vals: any[] }[] = [];
 
     const builder: any = {
-      select(c?: string) { cols = String(c ?? ''); return builder; },
+      select(c?: string, options?: { count?: 'exact' }) {
+        cols = String(c ?? '');
+        countRequested = options?.count === 'exact';
+        return builder;
+      },
       eq(col: string, val: any) { filters.push({ col, vals: [val] }); return builder; },
       in(col: string, vals: any[]) { filters.push({ col, vals: [...vals] }); return builder; },
       order() { return builder; },
-      limit() { return builder; },
+      limit(max: number) { maxRows = max; return builder; },
       async maybeSingle() {
         if (table === 'exchange_connections') {
           if (db.connFails) return { data: null, error: { message: '연결 조회 실패' } };
@@ -87,7 +94,8 @@ class ReconcileDb {
           // 이 시험의 절반이다.
           const want = q.cols.split(',').map((c) => c.trim()).filter(Boolean);
           return {
-            data: out.map((r: any) => {
+            count: countRequested && !db.omitCount ? out.length : null,
+            data: out.slice(0, maxRows).map((r: any) => {
               if (want.length === 0) return { ...r };
               const o: any = {};
               for (const c of want) if (c in r) o[c] = r[c];
@@ -157,14 +165,46 @@ async function checkReconcileListRoute(): Promise<void> {
 
   try {
     const { GET } = await import('../../app/api/orders/reconcile/route');
+    const ordersByConnection = [
+      unknownRow('selected'),
+      { ...unknownRow('other-connection'), connection_id: 'other-connection' },
+      { ...unknownRow('unassigned'), connection_id: null },
+      { ...unknownRow('other-user'), user_id: 'u2' },
+    ];
+    const firstPage = Array.from({ length: 50 }, (_, i) => unknownRow(`pending-${i}`));
+    const moreOrders = [
+      ...firstPage,
+      unknownRow('pending-50'),
+      { ...unknownRow('other-connection'), connection_id: 'other-connection' },
+      { ...unknownRow('other-user'), user_id: 'u2' },
+    ];
     for (const scenario of [
       { name: '확인된 빈 목록', rows: [], count: 0, status: 200 },
       { name: '접수만 된 주문', rows: [{ ...unknownRow('c-1'), status: 'ACKED' }], count: 1, status: 200 },
+      {
+        name: '미리보기는 선택한 연결의 주문만 표시',
+        rows: ordersByConnection, search: '?dry=1&connectionId=fixture-connection',
+        count: 1, status: 200, orderId: 'selected',
+      },
+      {
+        name: '선택한 연결에 대조할 주문이 없으면 0건',
+        rows: ordersByConnection, search: '?dry=1&connectionId=empty-connection',
+        count: 0, status: 200,
+      },
+      { name: '연결을 지정하지 않으면 본인 주문 전체', rows: ordersByConnection, count: 3, status: 200 },
+      { name: '정확히 50건이면 목록이 전부', rows: firstPage, count: 50, status: 200, shown: 50, truncated: false },
+      {
+        name: '50건 초과 시 선택한 연결의 전체 건수를 별도로 표시',
+        rows: moreOrders, search: '?dry=1&connectionId=fixture-connection',
+        count: 51, status: 200, shown: 50, truncated: true,
+      },
+      { name: '전체 건수를 읽지 못한 조회', rows: firstPage, omitCount: true, status: 503 },
       { name: '조회 실패', rows: [], fails: true, status: 503 },
       { name: '잘못된 조회 응답', rows: [], nullResult: true, status: 503 },
       { name: '연결을 지정하지 않은 조회 실패', rows: [], fails: true, search: '', status: 503 },
     ] as any[]) {
-      db = new ReconcileDb(null, { live_orders: scenario.rows }, () => scenario.fails === true, scenario.nullResult);
+      db = new ReconcileDb(null, { live_orders: scenario.rows }, () => scenario.fails === true,
+        scenario.nullResult, false, scenario.omitCount);
       const response = await GET(new Request(
         'http://localhost/api/orders/reconcile' + (scenario.search ?? '?dry=1'),
       ) as Parameters<typeof GET>[0]);
@@ -173,6 +213,11 @@ async function checkReconcileListRoute(): Promise<void> {
         eq(response.status, scenario.status);
         eq(body.ok, scenario.status === 200);
         eq(body.pendingCount, scenario.count);
+        if (scenario.orderId) eq(body.pending[0]?.client_order_id, scenario.orderId);
+        if (scenario.status === 200) {
+          eq(body.pending.length, scenario.shown ?? scenario.count);
+          if (scenario.truncated != null) eq(body.pendingTruncated, scenario.truncated);
+        }
         if (scenario.status === 503) eq(body.error, 'pending_orders_unreadable');
       });
     }
@@ -192,7 +237,7 @@ async function checkReconcileListRoute(): Promise<void> {
  * 앱에서 이 라우트를 fetch하는 곳은 세 군데이고
  * (`OrderPane.tsx` · `AutotradeControl.tsx` 두 곳) **전부
  * `?connectionId=…`를 붙이고 `dry=1`은 쓰지 않는다.** 즉 위
- * `checkReconcileListRoute`의 다섯 시나리오는 **한 군데도 지나가지
+ * `checkReconcileListRoute`의 목록 시나리오는 **한 군데도 지나가지
  * 않는 갈래**를 본다. 그래서 여기서 나머지 절반을 본다.
  *
  * 두 가지를 못박는다:

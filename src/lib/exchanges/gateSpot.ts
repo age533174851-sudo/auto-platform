@@ -12,6 +12,7 @@
 //
 // `gateFutures.ts`의 `gateReq`는 이미 testnet 분기·서명·시각 보정을 갖고
 // 있다. 그걸 쓴다 — 서명 코드를 두 벌 두면 한쪽만 고쳐지는 날이 온다.
+import { venueIdOf } from './losslessJson';
 import { gateReq, toGateText } from './gateFutures';
 import { planGateSpotOrder, gateSpotFillOf, toGatePair, type GateSpotPlanInput } from './gateSpotPlan';
 import { gatePriceDecimals, type GateSpotPrecision } from './gateSpotPrecision';
@@ -152,29 +153,33 @@ export async function placeGateSpotOrder(
   });
   if (!plan.ok) return { success: false, message: plan.reason || '주문을 만들지 못했습니다' };
 
+  let response: { id?: unknown };
   try {
-    const d = await gateReq<any>('POST', '/api/v4/spot/orders', { key, secret, body: plan.body, testnet });
-    const fill = gateSpotFillOf(d);
-    return {
-      success: true,
-      orderId: d?.id != null ? String(d.id) : undefined,
-      filledQty: fill.filledQty,
-      avgPrice: fill.avgPrice,
-      status: fill.status,
-      unfilled: fill.unfilled,
-      raw: d,
-      // **맞췄는지를 값으로 내보낸다.** 응답에서 빼면 맞춘 것과 못 맞춘 것이
-      // 화면에서 똑같이 보인다.
-      precision: plan.precision,
-      message: fill.unfilled
-        ? '주문이 체결되지 않고 취소되었습니다 (시장가 IOC)'
-        : plan.note
-          ? `주문 접수 · ${plan.note}`
-          : '주문 접수',
-    };
+    response = await gateReq('POST', '/api/v4/spot/orders', { key, secret, body: plan.body, testnet });
   } catch (e: any) {
     return { success: false, message: `Gate 현물 주문 실패: ${e?.message || e}` };
   }
+
+  // 전송 뒤 식별자를 확인하지 못하면 실행기가 주문을 미확정으로 기록한다.
+  const orderId = venueIdOf(response?.id);
+  if (!orderId) throw new Error('Gate 현물 주문 응답에서 주문 ID를 확인하지 못했습니다');
+
+  const fill = gateSpotFillOf(response);
+  return {
+    success: true,
+    orderId,
+    filledQty: fill.filledQty,
+    avgPrice: fill.avgPrice,
+    status: fill.status,
+    unfilled: fill.unfilled,
+    raw: response,
+    precision: plan.precision,
+    message: fill.unfilled
+      ? '주문이 체결되지 않고 취소되었습니다 (시장가 IOC)'
+      : plan.note
+        ? `주문 접수 · ${plan.note}`
+        : '주문 접수',
+  };
 }
 
 /**
@@ -191,10 +196,13 @@ export async function findGateSpotOrderByText(
   if (!text) return { ok: true, order: null };
   try {
     // Gate는 text로 단건 조회를 지원한다 (order_id 자리에 text를 넣는다).
-    const d = await gateReq<any>(
+    const d = await gateReq<{ id?: unknown }>(
       'GET', `/api/v4/spot/orders/${encodeURIComponent(text)}`,
       { key, secret, qs: `currency_pair=${encodeURIComponent(pair)}`, testnet });
-    return { ok: true, order: d ?? null };
+    if (!d || typeof d !== 'object' || Array.isArray(d) || !venueIdOf(d.id)) {
+      return { ok: false, order: null, error: 'Gate 현물 주문 조회 응답에서 주문 ID를 확인하지 못했습니다' };
+    }
+    return { ok: true, order: d };
   } catch (e: any) {
     const msg = String(e?.message || e);
     // 404 / ORDER_NOT_FOUND는 **정말로 없는 것**이다. 나머지는 모르는 것.
