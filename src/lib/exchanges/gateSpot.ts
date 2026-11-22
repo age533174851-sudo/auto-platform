@@ -14,7 +14,7 @@
 // 있다. 그걸 쓴다 — 서명 코드를 두 벌 두면 한쪽만 고쳐지는 날이 온다.
 import { gateReq, toGateText } from './gateFutures';
 import { planGateSpotOrder, gateSpotFillOf, toGatePair, type GateSpotPlanInput } from './gateSpotPlan';
-import type { GateSpotPrecision } from './gateSpotPrecision';
+import { gatePriceDecimals, type GateSpotPrecision } from './gateSpotPrecision';
 
 export interface GateSpotBalance {
   currency: string;
@@ -63,15 +63,20 @@ export async function getGateSpotPair(
   try {
     const d = await gateReq<any>('GET', `/api/v4/spot/currency_pairs/${encodeURIComponent(pair)}`, { testnet });
     if (!d) return null;
-    const n = (v: any) => (v == null || v === '' ? null : (Number.isFinite(Number(v)) ? Number(v) : null));
+    const numberOf = (value: unknown): number | null => {
+      if (typeof value === 'string' && /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(value.trim())) {
+        value = Number(value);
+      }
+      return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+    };
     return {
       pair: String(d.id ?? pair),
-      amountPrecision: n(d.amount_precision),
+      amountPrecision: gatePriceDecimals(numberOf(d.amount_precision)),
       // Gate는 수량 자릿수를 `amount_precision`, 가격 자릿수를 `precision`으로
       // 준다. **둘 중 하나로 다른 하나를 채우지 않는다** — 없으면 null이다.
-      pricePrecision: n(d.precision),
-      minBaseAmount: n(d.min_base_amount),
-      minQuoteAmount: n(d.min_quote_amount),
+      pricePrecision: gatePriceDecimals(numberOf(d.precision)),
+      minBaseAmount: numberOf(d.min_base_amount),
+      minQuoteAmount: numberOf(d.min_quote_amount),
       tradeStatus: d.trade_status != null ? String(d.trade_status) : null,
     };
   } catch { return null; }
