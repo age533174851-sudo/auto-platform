@@ -49,7 +49,7 @@ export async function gatherAndReconcile(
   /**
    * **이 주문이 쓰는 연결.** 주면 그 연결만 본다.
    *
-   * 안 주면 예전처럼 활성 연결 중 아무거나 하나를 집는데, 연결이 여럿이면
+   * 안 주면 요청한 거래 모드의 활성 연결 중 하나를 고른다. 연결이 여럿이면
    * 그건 **주문과 상관없는 거래소**일 수 있다. 실제로 그랬다 — 바이낸스
    * 실전 진입이 "Gate 401: Invalid key provided"로 막혔다. Gate 키가 죽은
    * 것과 바이낸스 주문은 아무 관계가 없다.
@@ -63,11 +63,11 @@ export async function gatherAndReconcile(
 
   let q = sb.from('exchange_connections')
     .select('exchange_id, api_key, api_secret_enc, has_withdrawal')
-    .eq('user_id', userId).eq('is_active', true);
+    .eq('user_id', userId).eq('is_active', true).eq('is_testnet', testnet);
   if (connectionId) q = q.eq('id', connectionId);
   const { data: conn } = await q.limit(1).maybeSingle();
 
-  if (!conn) return { reachable: false, verdict: null, error: '활성 거래소 연결이 없습니다', ...empty };
+  if (!conn) return { reachable: false, verdict: null, error: '요청한 거래 모드의 활성 거래소 연결이 없습니다', ...empty };
   if ((conn as any).has_withdrawal) {
     return { reachable: false, verdict: null, error: '출금 권한 키는 사용할 수 없습니다', ...empty };
   }
