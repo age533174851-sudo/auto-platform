@@ -2,6 +2,7 @@
 import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { notifyError, notifyInfo } from '@/lib/notify/center';
+import { taxReportSourceNotice } from '@/lib/ui/reportSource';
 import type { LucideIcon } from 'lucide-react';
 import {
   Link2, CalendarDays, Mic, Wallet, Receipt, Dice5, Users, Bot,
@@ -363,6 +364,15 @@ function TaxTab({ currency }: { currency?: string }) {
         ))}
       </div>
       {data && <>
+        {/* 출처 고지 — 지어낸 손익을 내 기록처럼 그리지 않는다 */}
+        {(() => {
+          const notice = taxReportSourceNotice(data?.source);
+          return notice ? (
+            <div role="note" style={{ background:'#F59E0B0A', border:`1px solid ${A(T.ylw,'25')}`, borderRadius:8, padding:'8px 10px', color:T.ylw, fontSize:11, fontWeight:700, marginBottom:8 }}>
+              {notice}
+            </div>
+          ) : null;
+        })()}
         {/* Summary */}
         <Card c={<>
           <div style={{ display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:8, marginBottom:8 }}>
