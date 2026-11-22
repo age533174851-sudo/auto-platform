@@ -301,6 +301,23 @@ export function runGateSpotPlanTests() {
     eq(roundGatePrice(100.129, 2).price, 100.13);
   });
 
+  test('Gate 지정가는 규격 적용 후 주문 금액이 최소 금액보다 작으면 막는다', () => {
+    const r = planGateSpotOrder({
+      symbol: 'BTCUSDT', side: 'BUY', type: 'LIMIT', quantity: 0.499, price: 10.04,
+      amountPrecision: 2, pricePrecision: 2, minQuoteAmount: 5,
+    });
+    assert(!r.ok, '수량 내림 후 최소 주문 금액을 밑도는 주문이 통과했다');
+    assert(/최소 주문 금액/.test(r.reason || ''), String(r.reason));
+  });
+
+  test('Gate 지정가의 확인된 최소 금액은 경곗값을 포함한다', () => {
+    const r = planGateSpotOrder({
+      symbol: 'BTCUSDT', side: 'BUY', type: 'LIMIT', quantity: 3, price: 0.3,
+      amountPrecision: 3, pricePrecision: 2, minQuoteAmount: 0.9,
+    });
+    assert(r.ok, String(r.reason));
+  });
+
   // ══════════ 자릿수 → 증분 변환 ══════════
 
   test('가격 자릿수를 확정하는 곳은 한 곳뿐이다', () => {

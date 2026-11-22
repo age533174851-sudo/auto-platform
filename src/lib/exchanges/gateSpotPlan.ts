@@ -245,8 +245,17 @@ export function planGateSpotOrder(i: GateSpotPlanInput): GateSpotPlan {
     sentPrice = r.price;
     // 자릿수에 맞추니 0이 된 경우. `String(null)`은 `'null'`이고 그 문자열이
     // 그대로 거래소로 나간다 — 값이 없으면 본문을 만들지 않는다.
-    if (!(Number(sentPrice) > 0)) {
+    if (sentPrice == null || !(sentPrice > 0)) {
       return bad(`지정가 ${price}를 이 종목의 가격 자릿수에 맞추면 0이 됩니다`);
+    }
+    const notional = qty * sentPrice;
+    if (!Number.isFinite(notional) || notional <= 0) {
+      return bad('지정가 주문 금액이 올바르지 않습니다');
+    }
+    const minQuote = i.minQuoteAmount;
+    // 보낼 수량과 가격을 비교한다. 부동소수점 곱셈의 오차만 허용한다.
+    if (minQuote != null && minQuote - notional > minQuote * Number.EPSILON) {
+      return bad(`최소 주문 금액(${minQuote} ${p.quote})보다 적습니다`);
     }
     body.price = String(sentPrice);
     body.time_in_force = 'gtc';
