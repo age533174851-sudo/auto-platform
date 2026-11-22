@@ -153,29 +153,33 @@ export async function placeGateSpotOrder(
   });
   if (!plan.ok) return { success: false, message: plan.reason || '주문을 만들지 못했습니다' };
 
+  let response: { id?: unknown };
   try {
-    const d = await gateReq<any>('POST', '/api/v4/spot/orders', { key, secret, body: plan.body, testnet });
-    const fill = gateSpotFillOf(d);
-    return {
-      success: true,
-      orderId: d?.id != null ? String(d.id) : undefined,
-      filledQty: fill.filledQty,
-      avgPrice: fill.avgPrice,
-      status: fill.status,
-      unfilled: fill.unfilled,
-      raw: d,
-      // **맞췄는지를 값으로 내보낸다.** 응답에서 빼면 맞춘 것과 못 맞춘 것이
-      // 화면에서 똑같이 보인다.
-      precision: plan.precision,
-      message: fill.unfilled
-        ? '주문이 체결되지 않고 취소되었습니다 (시장가 IOC)'
-        : plan.note
-          ? `주문 접수 · ${plan.note}`
-          : '주문 접수',
-    };
+    response = await gateReq('POST', '/api/v4/spot/orders', { key, secret, body: plan.body, testnet });
   } catch (e: any) {
     return { success: false, message: `Gate 현물 주문 실패: ${e?.message || e}` };
   }
+
+  // 전송 뒤 식별자를 확인하지 못하면 실행기가 주문을 미확정으로 기록한다.
+  const orderId = venueIdOf(response?.id);
+  if (!orderId) throw new Error('Gate 현물 주문 응답에서 주문 ID를 확인하지 못했습니다');
+
+  const fill = gateSpotFillOf(response);
+  return {
+    success: true,
+    orderId,
+    filledQty: fill.filledQty,
+    avgPrice: fill.avgPrice,
+    status: fill.status,
+    unfilled: fill.unfilled,
+    raw: response,
+    precision: plan.precision,
+    message: fill.unfilled
+      ? '주문이 체결되지 않고 취소되었습니다 (시장가 IOC)'
+      : plan.note
+        ? `주문 접수 · ${plan.note}`
+        : '주문 접수',
+  };
 }
 
 /**
