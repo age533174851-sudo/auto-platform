@@ -577,11 +577,11 @@ async function placeGateSpot(
       clientOrderId,
     }, ctx.testnet);
   } catch (e: any) {
-    // 응답을 못 받았다. 나갔는지 안 나갔는지 **모른다** — 재시도하지 않는다.
-    await patch({ status: 'UNKNOWN', error_message: `응답 없음: ${e?.message || e}` });
+    // 전송 후 결과를 확인하지 못했다. 기존 주문을 대조할 때까지 재시도를 보류한다.
+    await patch({ status: 'UNKNOWN', error_message: `결과 확인 실패: ${e?.message || e}` });
     return {
       ok: false, status: 'UNKNOWN', clientOrderId,
-      message: '주문 전송 후 응답을 받지 못했습니다. 재시도하지 말고 Gate 현물 내역을 확인하세요.',
+      message: '주문 전송 후 결과를 확인하지 못했습니다. 재시도하지 말고 Gate 현물 내역을 확인하세요.',
     };
   }
 
