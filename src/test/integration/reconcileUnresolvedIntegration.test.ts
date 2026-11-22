@@ -367,6 +367,53 @@ export async function runReconcileUnresolvedTests(): Promise<void> {
     });
   }
 
+  // ══════════ ⑤ 연결이 기록되지 않은 미확정 주문 ══════════
+  //
+  // `live_orders.connection_id`는 012에서 nullable이고 백필 마이그레이션이
+  // 없다. `orderExecutor.ts`는 지금도 `args.connectionId || null`로 **NULL을
+  // 쓴다.** 그런 행은 "다른 연결 것"이 아니라 **어느 연결 것인지 모르는
+  // 것**이다.
+  //
+  // 주문 직전 관문(`preflight.ts`)은 connectionId 없이 이 함수를 부른다.
+  // 여기서 NULL 행을 빼면 미확정이 0건으로 보이고, `reachable`이 true이므로
+  // 호출부에는 **"확인했고 없음"**으로 읽힌다 — 그 위로 새 주문이 나간다.
+  {
+    const unknownConn = { ...unknownRow('conn-unknown'), connection_id: null };
+    const { g } = await run(quietVenue(), { live_orders: [unknownConn] });
+
+    test('⑤ 연결이 기록되지 않은 미확정 주문을 0건으로 적지 않는다', () => {
+      eq(g.reachable, true, '정상 조회다');
+      eq(g.unresolvedOrderCount, 1, '어느 연결 것인지 모르는 것은 "없음"이 아니다');
+      eq(g.unresolvedOrders[0]?.clientOrderId, 'conn-unknown');
+    });
+  }
+
+  // 그래도 **다른 연결의** 미확정은 세지 않는다 — 좁히기를 되돌리지 않는다.
+  {
+    const other = { ...unknownRow('others'), connection_id: 'other-connection' };
+    const nul = { ...unknownRow('conn-unknown-2'), connection_id: null };
+    const mine = unknownRow('mine');
+    const { g } = await run(quietVenue(), { live_orders: [other, nul, mine] });
+
+    test('⑤-2 NULL과 고른 연결만 세고 다른 연결은 빼놓는다', () => {
+      eq(g.unresolvedOrderCount, 2, 'NULL 1건 + 고른 연결 1건');
+      const ids = (g.unresolvedOrders as any[]).map((o: any) => o.clientOrderId).sort();
+      eq(ids.join('·'), ['conn-unknown-2', 'mine'].sort().join('·'), ids.join('·'));
+    });
+  }
+
+  // 한도까지 읽혔으면 더 있는지 모른다 — 건수를 적지 않는다.
+  {
+    const many = Array.from({ length: 60 }, (_, i) =>
+      ({ ...unknownRow('bulk-' + i), connection_id: 'other-connection' }));
+    const { g } = await run(quietVenue(), { live_orders: many });
+
+    test('⑤-3 미확정이 한도만큼 읽히면 건수가 아니라 "모름"이다', () => {
+      eq(g.reachable, false, '전부 세지 못했으면 판정하지 않는다');
+      eq(g.unresolvedOrderCount, null, '못 센 것을 숫자로 적지 않는다');
+    });
+  }
+
   await checkReconcileListRoute();
   await checkReconcileRealPath();
 }
