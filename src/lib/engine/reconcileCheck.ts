@@ -141,11 +141,17 @@ export async function gatherAndReconcile(
     // Gate 미체결 주문. clientOrderId는 't-' 접두사가 붙어 저장되므로 떼어낸다.
     try {
       const rows = await gf.getOpenOrdersGateFutures(key, secret, testnet);
+      if (!Array.isArray(rows) || rows.some(o => typeof o?.contract !== 'string' || !o.contract.trim())) {
+        throw new Error('invalid_gate_open_orders');
+      }
       exchangeOpenOrders = rows.map(o => ({
         clientOrderId: String(o.text || '').replace(/^t-/, ''),
-        symbol: String(o.contract || '').replace('_', ''),
+        symbol: o.contract.replace('_', ''),
       }));
-    } catch { exchangeOpenOrders = undefined; }
+    } catch {
+      return { reachable: false, verdict: null,
+        error: 'Gate 미체결 주문 목록을 읽지 못했습니다', ...empty };
+    }
 
   } else {
     const bf = await import('@/lib/exchanges/binanceFutures');
