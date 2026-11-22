@@ -12,6 +12,7 @@
 //
 // `gateFutures.ts`의 `gateReq`는 이미 testnet 분기·서명·시각 보정을 갖고
 // 있다. 그걸 쓴다 — 서명 코드를 두 벌 두면 한쪽만 고쳐지는 날이 온다.
+import { venueIdOf } from './losslessJson';
 import { gateReq, toGateText } from './gateFutures';
 import { planGateSpotOrder, gateSpotFillOf, toGatePair, type GateSpotPlanInput } from './gateSpotPlan';
 import { gatePriceDecimals, type GateSpotPrecision } from './gateSpotPrecision';
@@ -191,10 +192,13 @@ export async function findGateSpotOrderByText(
   if (!text) return { ok: true, order: null };
   try {
     // Gate는 text로 단건 조회를 지원한다 (order_id 자리에 text를 넣는다).
-    const d = await gateReq<any>(
+    const d = await gateReq<{ id?: unknown }>(
       'GET', `/api/v4/spot/orders/${encodeURIComponent(text)}`,
       { key, secret, qs: `currency_pair=${encodeURIComponent(pair)}`, testnet });
-    return { ok: true, order: d ?? null };
+    if (!d || typeof d !== 'object' || Array.isArray(d) || !venueIdOf(d.id)) {
+      return { ok: false, order: null, error: 'Gate 현물 주문 조회 응답에서 주문 ID를 확인하지 못했습니다' };
+    }
+    return { ok: true, order: d };
   } catch (e: any) {
     const msg = String(e?.message || e);
     // 404 / ORDER_NOT_FOUND는 **정말로 없는 것**이다. 나머지는 모르는 것.
