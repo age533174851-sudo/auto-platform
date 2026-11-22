@@ -16,6 +16,9 @@
 //      상태를 잡는다 — 그 상태에서 단위 시험은 그대로 초록이다.
 //   ⑤ **요구 배율이 두 곳에 있지 않다.** 라우트가 100을 적지 않고
 //      프리셋 정본에서 읽는다.
+//   ⑥ **시계 오차를 재고, 못 재면 0으로 적지 않는다.** 서명 요청은
+//      `recvWindow` 밖이면 -1021로 거부되고, 그 모양은 "키가 틀렸다"와
+//      거의 같다. 허용 오차가 서명에 싣는 값과 **갈리면** 빨개진다.
 //
 // 실주문·DB 변경·거래소 조회를 하지 않는다. 소스 읽기와 순수 함수 호출뿐이다.
 
@@ -31,6 +34,18 @@ const FUT = 'src/lib/exchanges/binanceFutures.ts';
 const errors = [];
 const err = (m) => errors.push(m);
 const read = (f) => { try { return readFileSync(f, 'utf8'); } catch { return null; } };
+
+/**
+ * 서명 요청이 실제로 싣는 `recvWindow`(ms). **허용 오차의 정본이다.**
+ * 라우트가 이 값과 다른 숫자로 시계를 판정하면 두 자리가 갈린 것이고,
+ * 그때는 진단이 "통과"라고 적어도 거래소는 -1021로 거부한다.
+ */
+const recvWindowMs = (() => {
+  const src = read(FUT);
+  if (src == null) return null;
+  const m = /recvWindow\s*=\s*['"](\d+)['"]/.exec(src);
+  return m ? Number(m[1]) : null;
+})();
 
 /** 주석을 벗긴 소스. **자기 설명 주석을 근거로 통과하면 안 된다** */
 const code = (s) => s
@@ -116,11 +131,84 @@ let mod = null;
 // ══════════════════════════════════════════════════════════
 if (mod) {
   const { positionModeVerdict: pm, isolationVerdict: iv,
-    withdrawalEvidence: we, overallDiagnoseVerdict: ov, statusToOk: ok } = mod;
+    withdrawalEvidence: we, clockSkewVerdict: cs,
+    overallDiagnoseVerdict: ov, statusToOk: ok } = mod;
 
   for (const [n, f] of [['positionModeVerdict', pm], ['isolationVerdict', iv],
-    ['withdrawalEvidence', we], ['overallDiagnoseVerdict', ov], ['statusToOk', ok]]) {
+    ['withdrawalEvidence', we], ['clockSkewVerdict', cs],
+    ['overallDiagnoseVerdict', ov], ['statusToOk', ok]]) {
     if (typeof f !== 'function') err(`${V}: ${n}을(를) 찾지 못했습니다`);
+  }
+
+  // ── 시계 오차: 못 잰 것을 0으로 적지 않는다 ──
+  if (typeof cs === 'function') {
+    // 허용선은 **검사기가 넘긴다.** 정본은 서명의 recvWindow다.
+    const tol = recvWindowMs ?? 5000;
+    const T = 1_700_000_000_000;
+
+    // ① 서버 시각을 못 읽었으면 UNKNOWN이다. 오차 0이 아니다.
+    for (const [label, st] of [['null', null], ['undefined', undefined],
+      ['0', 0], ['NaN', NaN], ['음수', -1]]) {
+      const v = cs({ serverTimeMs: st, sentAtMs: T, receivedAtMs: T + 5, toleranceMs: tol });
+      if (v?.status !== 'UNKNOWN') {
+        err(`시계 오차: 서버 시각 ${label}에서 UNKNOWN이 아닙니다 (${v?.status})`
+          + ' — 읽지 못한 시각을 오차 0으로 적습니다');
+      }
+      if (v?.rangeMs != null) {
+        err(`시계 오차: 서버 시각 ${label}인데 오차 구간을 적습니다 — 재지 못한 값을 지어냅니다`);
+      }
+    }
+
+    // ② 허용 오차를 받지 못하면 비교하지 않는다 (오차가 분명한 입력이다).
+    for (const [label, t] of [['없음', undefined], ['null', null],
+      ['0', 0], ['음수', -1], ['NaN', NaN]]) {
+      const v = cs({ serverTimeMs: T + 500, sentAtMs: T, receivedAtMs: T, toleranceMs: t });
+      if (v?.status !== 'UNKNOWN') {
+        err(`시계 오차: 허용 오차 ${label}에서 UNKNOWN이 아닙니다 (${v?.status})`
+          + ' — 허용선을 모르는데 통과·실패를 적습니다');
+      }
+    }
+
+    // ③ 받은 시각이 보낸 시각보다 앞이면 측정이 성립하지 않는다.
+    if (cs({ serverTimeMs: T, sentAtMs: T + 10, receivedAtMs: T, toleranceMs: tol })?.status
+      !== 'UNKNOWN') {
+      err('시계 오차: 받은 시각이 보낸 시각보다 앞인데 판정합니다');
+    }
+
+    // ④ 구간이 전부 허용선 안이면 통과다.
+    const good = cs({ serverTimeMs: T, sentAtMs: T - 10, receivedAtMs: T + 10, toleranceMs: tol });
+    if (good?.status !== 'PASS') {
+      err(`시계 오차: 오차가 작은데 PASS가 아닙니다 (${good?.status})`);
+    }
+
+    // ⑤ 구간이 전부 허용선 밖이면 실패다. 그리고 **왜**를 적는다.
+    const bad = cs({ serverTimeMs: T + tol * 4, sentAtMs: T, receivedAtMs: T + 30, toleranceMs: tol });
+    if (bad?.status !== 'FAIL') {
+      err(`시계 오차: 허용선을 크게 넘는데 FAIL이 아닙니다 (${bad?.status})`);
+    } else if (!/-1021/.test(String(bad.reason))) {
+      err('시계 오차: 실패 이유에 -1021을 적지 않습니다 — 사람이 키 문제로 읽습니다');
+    }
+
+    // ★ ⑥ **왕복이 길어 구간이 허용선을 걸치면 UNKNOWN이다.**
+    //   이것이 이 판정의 핵심이다. 여기서 PASS가 나오면 느린 회선에서
+    //   "시계가 맞다"가 공짜로 나오고, FAIL이 나오면 멀쩡한 시계를
+    //   틀렸다고 적는다. 둘 다 거짓이다.
+    const slow = cs({
+      serverTimeMs: T, sentAtMs: T - tol * 2, receivedAtMs: T + tol * 2, toleranceMs: tol,
+    });
+    if (slow?.status !== 'UNKNOWN') {
+      err(`시계 오차: 왕복이 허용선보다 긴데 ${slow?.status}입니다`
+        + ' — 결론이 나지 않은 측정을 통과·실패로 적습니다');
+    }
+    if (slow?.rangeMs == null) {
+      err('시계 오차: 결론이 안 난 측정의 구간을 적지 않습니다 — 사람이 다시 잴 수 없습니다');
+    }
+
+    // ⑦ 전체 판정에 섞이면 READY가 아니다.
+    if (typeof ov === 'function'
+      && ov([{ status: 'PASS' }, cs(null)])?.verdict === 'READY') {
+      err('시계 오차: 모르는 오차가 섞였는데 전체 판정이 READY입니다');
+    }
   }
 
   if (typeof pm === 'function') {
@@ -244,6 +332,7 @@ if (mod) {
     const firstCall = Math.min(...[
       'testFuturesConnection(', 'getFuturesPositionMode(', 'getFuturesSymbolSettings(',
       'diagnoseFutures(', 'getFuturesBalance(', 'getFuturesOpenOrders(',
+      'getFuturesServerTime(',
     ].map(n => { const at = c.indexOf(n); return at < 0 ? Number.MAX_SAFE_INTEGER : at; }));
     if (gateAt < 0) err(`${ROUTE}: TESTNET 전용 관문(binanceTestnetDiagnoseGate)이 없습니다`);
     else {
@@ -290,7 +379,7 @@ if (mod) {
 
     // ── ④ 판정 정본을 **부른다** (import만 하고 안 부르는 상태를 잡는다) ──
     for (const fn of ['positionModeVerdict', 'isolationVerdict',
-      'withdrawalEvidence', 'overallDiagnoseVerdict']) {
+      'withdrawalEvidence', 'clockSkewVerdict', 'overallDiagnoseVerdict']) {
       const args = callArgsOf(c, fn);
       if (args == null) {
         err(`${ROUTE}: ${fn}을(를) 부르지 않습니다 — import만 남으면 단위 시험은 그대로 초록입니다`);
@@ -348,6 +437,43 @@ if (mod) {
     const ovArgs = callArgsOf(c, 'overrideOf') || '';
     if (!/EXACT_100X/.test(ovArgs)) {
       err(`${ROUTE}: overrideOf가 EXACT_100X 프리셋을 보지 않습니다 (${ovArgs.trim().slice(0, 60)})`);
+    }
+
+    // ── ⑥ 시계 허용 오차가 **서명에 싣는 값과 같다** ──
+    //
+    //   같은 숫자가 두 곳에 있다. 하나는 서명의 `recvWindow`, 하나는
+    //   진단의 허용선이다. 갈리면 진단이 "통과"라고 적은 뒤 거래소가
+    //   -1021로 거부한다 — 가장 비싼 모양이다. 그래서 값으로 대조한다.
+    if (recvWindowMs == null) {
+      err(`${FUT}: 서명에 싣는 recvWindow 값을 찾지 못했습니다`
+        + ' — 진단 허용 오차의 정본입니다');
+    }
+    const tolDecl = /SIGNED_RECV_WINDOW_MS\s*=\s*(\d+)/.exec(c);
+    if (!tolDecl) {
+      err(`${ROUTE}: 시계 허용 오차(SIGNED_RECV_WINDOW_MS)를 적지 않습니다`);
+    } else if (recvWindowMs != null && Number(tolDecl[1]) !== recvWindowMs) {
+      err(`${ROUTE}: 시계 허용 오차 ${tolDecl[1]}ms가 서명 recvWindow ${recvWindowMs}ms와 다릅니다`
+        + ' — 진단이 통과로 적은 요청이 거래소에서 -1021로 거부됩니다');
+    }
+    const csArgs = callArgsOf(c, 'clockSkewVerdict') || '';
+    if (/toleranceMs\s*:\s*\d/.test(csArgs)) {
+      err(`${ROUTE}: 허용 오차를 숫자로 직접 적었습니다 — 서명값과 갈립니다`);
+    }
+    if (!/toleranceMs\s*:\s*SIGNED_RECV_WINDOW_MS/.test(csArgs)) {
+      err(`${ROUTE}: 시계 판정에 서명 허용 오차를 넘기지 않습니다 (${csArgs.trim().slice(0, 80)})`);
+    }
+    // 서버 시각을 **실제로 조회**해서 넘기는가. 지어낸 숫자를 넘기면
+    // 형태는 맞지만 거래소 시각을 본 적이 없는 판정이 된다.
+    if (!c.includes('getFuturesServerTime(')) {
+      err(`${ROUTE}: getFuturesServerTime을 부르지 않습니다 — 오차를 잴 근거가 없습니다`);
+    }
+    if (!/sentAtMs\s*,\s*receivedAtMs|receivedAtMs/.test(csArgs)) {
+      err(`${ROUTE}: 보낸 시각·받은 시각을 둘 다 넘기지 않습니다`
+        + ' — 왕복이 오차에 섞여 느린 회선이 "시계가 틀렸다"로 적힙니다');
+    }
+    // 진단이 시계를 **맞추지 않는다.**
+    for (const bad of ['setSystemTime', 'execSync', 'ntpdate', 'timedatectl']) {
+      if (c.includes(bad)) err(`${ROUTE}: 시계를 고치는 수단이 보입니다 (${bad}) — 진단은 읽기만 합니다`);
     }
   }
 }
