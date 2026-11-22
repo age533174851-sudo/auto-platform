@@ -8,7 +8,7 @@
 //  3. 못 읽은 배율을 '맞다'나 '다르다'로 읽는 것 — 둘 다 틀린 행동을 만든다
 //  4. 거래소 오류 원문을 뭉개는 것
 import { test, assert, eq } from '../../test/harness';
-import { ensureLeverage, leverageSyncSummary } from './leverageSync';
+import { ensureLeverage, leverageSyncSummary, gateIsolateLeverage } from './leverageSync';
 
 /** 읽기·쓰기를 흉내내는 가짜 거래소 */
 function fakeExchange(start: number | null, opts: {
@@ -163,6 +163,41 @@ export function runLeverageSyncTests() {
     const ex = fakeExchange(0);
     const r = await ensureLeverage(0, ex.deps);
     eq(r.code, 'BAD_INTENDED');
+  });
+
+  console.log('[Gate 격리 전환 — 못 읽은 배율을 지어내 쓰지 않는다]');
+
+  // 막으려는 것: `/api/binance/futures/margin-type` POST(Gate)가 포지션 조회에
+  // 실패하면(`getPositionGateFutures`는 오류를 삼키고 null을 준다) 배율을
+  // **1배로 지어내** `POST …/positions/{contract}/leverage?leverage=1`을 보냈다.
+  // 100배로 열린 포지션이면 그 쓰기가 사용자가 고른 배율을 1배로 낮춘다.
+  test('포지션을 못 읽었으면(null) 배율을 정하지 않는다', () => {
+    const r = gateIsolateLeverage(null);
+    eq(r.ok, false);
+    eq(r.leverage, null);
+    assert(r.reason.length > 0, '이유가 비어 있다');
+  });
+
+  test('배율 칸이 비었거나 깨졌으면 1배로 채우지 않는다', () => {
+    for (const bad of [undefined, null, '', 'abc', 'NaN', -5, 0.5]) {
+      const r = gateIsolateLeverage({ leverage: bad });
+      eq(r.ok, false, `leverage=${String(bad)}`);
+      eq(r.leverage, null, `leverage=${String(bad)}`);
+    }
+  });
+
+  test('지금 격리 배율을 그대로 다시 건다 (100배는 100배)', () => {
+    const r = gateIsolateLeverage({ leverage: '100' });
+    eq(r.ok, true);
+    eq(r.leverage, 100);
+    eq(gateIsolateLeverage({ leverage: 7 }).leverage, 7);
+  });
+
+  test('확인된 교차(leverage=0)는 예전처럼 1배 격리로 돌린다', () => {
+    // 0은 '모름'이 아니라 Gate가 말한 '교차'다. 이 동작은 바꾸지 않는다.
+    const r = gateIsolateLeverage({ leverage: '0' });
+    eq(r.ok, true);
+    eq(r.leverage, 1);
   });
 
   console.log('[배율 맞추기 — 요약]');

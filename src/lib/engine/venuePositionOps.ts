@@ -17,6 +17,9 @@
 // 이 구분이 무너지면 살아 있는 포지션 위로 신규 진입이 나간다.
 
 import { openPositionOf, type OpenPosition } from './positionLifecycle';
+// **주문 번호를 읽는 일은 한 곳에서만 한다.** 여기서 다시 짜면
+// 취소 확인이 장부(`cancelLedger`)와 다른 번호로 비교하게 된다.
+import { orderIdOf } from './protectionLedger';
 
 export interface VenueCreds {
   exchange: 'binance' | 'gate';
@@ -390,6 +393,23 @@ export async function sendSymbolClose(
  * **null은 '못 읽음'이고 `[]`는 '없음'이다.** 이 둘을 섞으면 조회 실패가
  * "보호주문 0건"으로 그려진다.
  */
+/**
+ * Failing GET /fapi/v1/openOrders is NOT evidence of an empty order book.
+ *
+ * Binance's adapter returns `{success:false,orders:[]}` after a rejected
+ * request or network error. Checking only Array.isArray(r.orders) used to turn
+ * that failure into [] -> PREFLIGHT PASS -> potentially overlapping orders.
+ *
+ * Only an explicitly successful Binance read with an array can prove zero.
+ * The caller's existing preflightVerdict maps null to UNKNOWN/block.
+ */
+export function confirmedBinanceOpenOrders(
+  result: { success?: unknown; orders?: unknown } | null | undefined,
+): any[] | null {
+  return result?.success === true && Array.isArray(result.orders)
+    ? result.orders : null;
+}
+
 export async function readProtectiveOrders(c: VenueCreds, symbol: string): Promise<any[] | null> {
   try {
     if (c.exchange === 'gate') {
@@ -401,10 +421,52 @@ export async function readProtectiveOrders(c: VenueCreds, symbol: string): Promi
     }
     const bf = await import('../exchanges/binanceFutures');
     const r: any = await bf.getFuturesOpenOrders(c.apiKey, c.apiSecret, c.testnet, symbol);
-    if (Array.isArray(r)) return r;
-    if (Array.isArray(r?.orders)) return r.orders;
-    return null;
+    return confirmedBinanceOpenOrders(r);
   } catch { return null; }
+}
+
+/**
+ * Smoke ENTRY preflight only. Do not use this flattened view to CANCEL
+ * orders: the Algo Service uses algoId + a different DELETE endpoint,
+ * while ordinary orders use orderId. A combined list is for COUNTING
+ * existing exposure, never determining cancellation ownership.
+ *
+ * Both Binance books must return success:true and arrays. A failed read
+ * of either book means UNKNOWN, not "no existing orders".
+ */
+export function combinedSmokeOpenOrderEvidence(
+  regular: { success?: unknown; orders?: unknown } | null | undefined,
+  conditional: { success?: unknown; orders?: unknown } | null | undefined,
+): any[] | null {
+  const r = confirmedBinanceOpenOrders(regular);
+  const a = confirmedBinanceOpenOrders(conditional);
+  if (r == null || a == null) return null;
+  return [
+    ...r.map((order: any) => ({ kind: 'REGULAR', symbol: order?.symbol ?? null })),
+    ...a.map((order: any) => ({ kind: 'ALGO', symbol: order?.symbol ?? null })),
+  ];
+}
+
+/**
+ * For Binance smoke preflight, inspect regular AND conditional order books.
+ * Reuses the existing Gate protection listing without fabricating a
+ * Binance-specific Algo API there.
+ */
+export async function readAllOpenOrdersForSmoke(
+  c: VenueCreds, symbol: string,
+): Promise<any[] | null> {
+  if (c.exchange !== 'binance') return readProtectiveOrders(c, symbol);
+  if (c.testnet !== true) return null;
+  try {
+    const bf = await import('../exchanges/binanceFutures');
+    const [regular, conditional] = await Promise.all([
+      bf.getFuturesOpenOrders(c.apiKey, c.apiSecret, true, symbol),
+      bf.getFuturesOpenAlgoOrders(c.apiKey, c.apiSecret, true, symbol),
+    ]);
+    return combinedSmokeOpenOrderEvidence(regular, conditional);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -455,6 +517,31 @@ export async function cancelProtectiveOrders(
  * `cancelAll`은 쓰지 않는다. 같은 계좌의 다른 전략이 걸어 둔 손절까지
  * 지운다 — 호출부가 내 것이라고 확인한 id만 온다.
  */
+/**
+ * 재조회한 목록에서 **지금 거래소에 남아 있는 주문 번호**를 뽑는다.
+ *
+ * 원래 `cancelExact` 안에 이렇게 있었다:
+ *
+ *     String(row?.id ?? row?.orderId ?? '')
+ *
+ * 그런데 같은 저장소의 `orderIdOf`는 **같은 값을 거부한다** — 안전 정수
+ * 범위를 넘은 `number`는 이미 반올림됐으니 문자열로 만드는 것은
+ * "복구가 아니라 위조"라고 그 파일이 적어 뒀다. 한쪽은 거부하고 한쪽은
+ * 만들어 쓰고 있었다 — 상습 고장 ② "경로가 둘인데 한쪽만 고침".
+ *
+ * 위조된 번호는 요청한 진짜 번호와 영원히 같아지지 않는다. 그래서
+ * `pending`에서 빠지지 않고 취소를 끝까지 다시 보내다 `STILL_PRESENT`가
+ * 된다. 반대로 위조된 값이 다른 주문의 번호와 우연히 같아지면
+ * **남아 있는 주문을 사라진 것으로 센다.**
+ *
+ * 그래서 **번호를 읽는 일은 `orderIdOf` 한 곳에서만 한다.**
+ * 못 읽은 줄은 번호가 없는 줄이다 — 없는 주문으로 세지 않는다.
+ * 그 줄이 요청한 주문일 수 있다는 판정은 `cancelLedger`가 한다.
+ */
+export function presentIdsOf(rows: any[]): string[] {
+  return (Array.isArray(rows) ? rows : []).map(orderIdOf).filter(Boolean);
+}
+
 export async function cancelExact(
   c: VenueCreds, symbol: string, ids: string[],
   opts: { attempts?: number } = {},
@@ -499,7 +586,7 @@ export async function cancelExact(
     // **여기가 핵심이다.** 요청 결과가 아니라 목록을 다시 읽어 확인한다.
     leftover = await readProtectiveOrders(c, symbol);
     if (leftover == null) break;   // 못 읽었다 — 더 지워도 확인할 수 없다
-    const present = leftover.map(row => String((row as any)?.id ?? (row as any)?.orderId ?? '')).filter(Boolean);
+    const present = presentIdsOf(leftover);
     pending = pending.filter(id => present.includes(id));
   }
 

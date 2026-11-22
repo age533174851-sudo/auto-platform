@@ -94,17 +94,27 @@ export async function GET(req: NextRequest) {
       .select('id, client_order_id, symbol, side, status, mode, exchange, created_at, error_message')
       .in('status', [...RECONCILE_TARGET_STATUSES]);
     if (scopeUserId) listQ = listQ.eq('user_id', scopeUserId);
-    const { data: pending } = await listQ
-      .order('created_at', { ascending: true })
-      .limit(50);
-
-    const list = Array.isArray(pending) ? pending : [];
-
     if (dryRun || !connectionId) {
+      // ★ **질의를 이 갈래 안에서 한다.**
+      //
+      //   목록은 여기서만 쓴다. 갈래 **밖**에서 미리 읽으면, 실제 대조
+      //   갈래가 `pending`과 `pendingError`를 **둘 다 버린다** — 버린
+      //   error는 아무도 못 보고, 50행 질의는 왕복 한 번을 그냥 쓴다.
+      //   `error`를 잡기 시작한 뒤에는 "잡아 놓고 버리는" 모양이 되므로
+      //   읽는 자리를 쓰는 자리로 옮긴다.
+      const { data: pending, error: pendingError } = await listQ
+        .order('created_at', { ascending: true })
+        .limit(50);
+      if (pendingError || !Array.isArray(pending)) {
+        return NextResponse.json({
+          ok: false, error: 'pending_orders_unreadable',
+          message: '미확정 주문 목록을 읽지 못했습니다',
+        }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
+      }
       return NextResponse.json({
         ok: true, dryRun: true,
-        pendingCount: list.length,
-        pending: list,
+        pendingCount: pending.length,
+        pending,
         hint: connectionId ? undefined : 'connectionId를 주면 실제 대조를 수행합니다',
       }, { headers: { 'Cache-Control': 'no-store' } });
     }
@@ -116,7 +126,24 @@ export async function GET(req: NextRequest) {
       .select('user_id, exchange_id, api_key, api_secret_enc, has_withdrawal, is_testnet')
       .eq('id', connectionId);
     if (scopeUserId) connQ = connQ.eq('user_id', scopeUserId);
-    const { data: conn } = await connQ.maybeSingle();
+    const { data: conn, error: connError } = await connQ.maybeSingle();
+
+    // ★ **읽기 실패와 "남의 연결"을 같은 404로 적지 않는다.**
+    //
+    //   예전에는 `error`를 버리고 `!conn`만 봤다. 그러면 DB가 답을 못 준
+    //   것이 "연결을 찾을 수 없거나 본인의 연결이 아닙니다"가 된다. 그
+    //   둘은 **다음 할 일이 다르다** — 404를 본 사람은 연결을 다시 고르거나
+    //   등록하러 가고, 조회가 실패했다는 사실은 아무 데도 남지 않는다.
+    //
+    //   코드(`connection_unreadable`)는 Codex가 #724에서 같은 자리에 쓴
+    //   것을 그대로 쓴다. 같은 사실에 이름이 둘이면 호출부가 둘 다 알아야
+    //   한다.
+    if (connError) {
+      return NextResponse.json({
+        ok: false, error: 'connection_unreadable',
+        message: '거래소 연결을 확인하지 못했습니다',
+      }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
+    }
 
     if (!conn) return NextResponse.json({ ok: false, error: '연결을 찾을 수 없거나 본인의 연결이 아닙니다' }, { status: 404 });
     if (conn.has_withdrawal) {

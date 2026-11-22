@@ -23,6 +23,7 @@ export type MismatchCode =
   | 'POSITION_MISSING_IN_APP'        // 거래소엔 있는데 앱엔 없음
   | 'POSITION_SIDE_DIFFERS'
   | 'POSITION_QTY_DIFFERS'
+  | 'POSITION_QTY_UNKNOWN'           // 한쪽 수량을 읽지 못함 — 일치가 아니다
   | 'LEVERAGE_DIFFERS'
   | 'MARGIN_TYPE_DIFFERS'
   | 'PROTECTIVE_ORDER_MISSING'
@@ -106,7 +107,32 @@ export function reconcileState(input: ReconcileInput): ReconcileVerdict {
       continue;
     }
 
-    if (app.side !== ex.side) {
+    // ── **못 읽은 수량은 일치가 아니다** ──
+    //
+    //   `getFuturesPositions`는 읽을 수 없는 positionAmt를 버리지 않고
+    //   `NaN`으로 남긴다("있다·모른다"). 그런데 아래 비교는
+    //   `NaN > 허용오차`가 false라서 **조용히 일치가 됐다** — 노출을
+    //   모르는 채로 "앱과 거래소 상태가 일치합니다"를 적고 신규 주문을
+    //   열어 뒀다.
+    //
+    //   수량을 모르면 방향도 모른다(호출부가 'FLAT'을 'LONG'으로 접는다).
+    //   그래서 방향·수량 비교는 건너뛰고 **모름 하나만** 적는다. 마진
+    //   모드·손절 유무는 수량과 독립된 관측이라 그대로 본다.
+    //   `POSITION_QTY_DIFFERS`로 적지 않는 이유: 그 코드는 복구 규칙이
+    //   거래소 값을 **자동으로 들여온다** — 들여올 값이 NaN이다.
+    const qtyKnown = Number.isFinite(app.qty) && Number.isFinite(ex.qty);
+    if (!qtyKnown) {
+      m.push({
+        code: 'POSITION_QTY_UNKNOWN', severity: 'critical', symbol: app.symbol,
+        detail: `${app.symbol} 수량을 확인하지 못했습니다 — 앱 `
+          + `${Number.isFinite(app.qty) ? app.qty : '모름'} / 거래소 `
+          + `${Number.isFinite(ex.qty) ? ex.qty : '모름'}. 일치로 보지 않습니다`,
+        app: Number.isFinite(app.qty) ? app.qty : null,
+        exchange: Number.isFinite(ex.qty) ? ex.qty : null,
+      });
+    }
+
+    if (qtyKnown && app.side !== ex.side) {
       m.push({
         code: 'POSITION_SIDE_DIFFERS', severity: 'critical', symbol: app.symbol,
         detail: `${app.symbol} 방향 불일치 — 앱 ${app.side} / 거래소 ${ex.side}`,
@@ -115,7 +141,7 @@ export function reconcileState(input: ReconcileInput): ReconcileVerdict {
     }
 
     const base = Math.max(Math.abs(app.qty), Math.abs(ex.qty), 1e-12);
-    if (Math.abs(app.qty - ex.qty) / base > qtyTol) {
+    if (qtyKnown && Math.abs(app.qty - ex.qty) / base > qtyTol) {
       m.push({
         code: 'POSITION_QTY_DIFFERS', severity: 'warn', symbol: app.symbol,
         detail: `${app.symbol} 수량 불일치 — 앱 ${app.qty} / 거래소 ${ex.qty}`,

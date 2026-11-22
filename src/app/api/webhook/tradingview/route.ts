@@ -248,16 +248,27 @@ export async function POST(req: NextRequest) {
         .select('*').eq('id', body.connectionId).eq('user_id', body.userId).single();
       if (!conn) throw new Error('거래소 연결을 찾을 수 없거나 그 사용자의 연결이 아닙니다');
       if (conn.has_withdrawal) throw new Error('출금 권한 키는 자동매매 불가');
-      // 킬스위치 가드: active면 신규 진입 차단 (reduce-only 종료는 허용)
+      // ── 이 신호가 청산인가 — 한 번만 정하고 아래 전부가 이 값을 쓴다 ──
+      //
+      // 예전에는 킬스위치 판정은 `!body.reduceOnly`(truthy)로, 주문 분류는
+      // 이 식으로 **따로** 답했다. 그래서 reduceOnly 칸이 없는
+      // `orderType: 'closeLong'` 청산 신호가 킬스위치가 켜진 계좌에서
+      // 신규 진입으로 버려졌고, 문자열 `"false"`는 킬스위치 판정에선 청산,
+      // 주문 분류에선 진입이었다.
+      const isExit = body.reduceOnly === true
+        || /^close/i.test(String(body.orderType || ''))
+        || /^(close|exit)/i.test(String(body.action || ''));
+
+      // 킬스위치 가드: active면 신규 진입 차단 (청산은 허용)
       const { isKillSwitchActive } = await import('@/lib/risk/killSwitch');
       const ks = await isKillSwitchActive(sb, body.connectionId);
-      // **상태를 못 읽었으면 꺼진 것으로 치지 않는다.** 청산(reduceOnly)은
+      // **상태를 못 읽었으면 꺼진 것으로 치지 않는다.** 청산은
       // 계속 허용한다 — 못 여는 것은 불편이고 못 닫는 것은 사고다.
-      if (!ks.readOk && !body.reduceOnly) {
+      if (!ks.readOk && !isExit) {
         throw new Error('킬스위치 상태를 확인하지 못해 신규 진입을 막았습니다 —'
           + ' 확인하지 못한 것은 꺼진 것이 아닙니다');
       }
-      if (ks.active && !body.reduceOnly) {
+      if (ks.active && !isExit) {
         entry.status = 'blocked_killswitch';
         signalLog.unshift(entry); if (signalLog.length > 200) signalLog.pop();
         try {
@@ -323,9 +334,7 @@ export async function POST(req: NextRequest) {
       //
       // 이제 수동 주문과 같은 경로를 쓴다 — 거래 전 점검 → 수동 계획 검사 →
       // executeOrder. 생명주기 기록·멱등 키·ISOLATED 강제가 따라온다.
-      const isExit = body.reduceOnly === true
-        || /^close/i.test(String(body.orderType || ''))
-        || /^(close|exit)/i.test(String(body.action || ''));
+      // isExit는 위(킬스위치 가드 앞)에서 정했다 — 같은 질문을 두 번 답하지 않는다.
 
       // ── 자동 진입 관문 ──
       //
@@ -523,7 +532,7 @@ export async function POST(req: NextRequest) {
           blockNewOrders: !!gate.verdict?.blockNewOrders,
           summary: gate.reason || gate.verdict?.summary,
         },
-        unresolvedOrderCount: gate.gather.reachable ? gate.gather.unresolvedOrders.length : null,
+        unresolvedOrderCount: gate.gather.unresolvedOrderCount,
         marginType: risk?.marginType ?? null,
         leverage: (risk?.leverage != null && levNum > 0)
           ? { actual: risk.leverage, intended: levNum } : null,

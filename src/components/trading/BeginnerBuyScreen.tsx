@@ -32,6 +32,7 @@ import {
   percentFromNotional, percentFromQuantity, BUY_PERCENTS,
 } from '@/lib/trading/positionSizing';
 import { formatMoneyForScope, type MoneyScope } from '@/lib/trading/gameMoney';
+import { ProtectionControls } from './OrderControls';
 import type { TradeForm } from '@/lib/trading/useTradeForm';
 
 /** 무엇으로 정하는가. `Preferences.unit`과 **같은 축**이다 */
@@ -96,6 +97,8 @@ export function BeginnerBuyScreen({
   const money = (v: number | null | undefined) =>
     formatMoneyForScope(v == null ? null : Number(v), scope);
 
+  const actionLabel = market === 'SPOT' ? '매수' : form.side === 'SHORT' ? '숏 진입' : '롱 진입';
+  const actionColor = form.side === 'SHORT' ? C.down : C.up;
   const ready = form.gate.ready;
   const unitLabel = unit === 'QUOTE' ? '얼마어치' : '몇 개';
 
@@ -110,7 +113,7 @@ export function BeginnerBuyScreen({
       display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0,
       background: C.bg, color: C.text,
     }}>
-      <Head title={`${name || symbol} 구매`}
+      <Head title={`${name || symbol} ${actionLabel}`}
         sub={`${symbol} · ${market === 'SPOT' ? '코인 현물' : '코인 USDT-M'}`}
         onBack={onBack}
         right={onPro ? <LevelSwitch to="프로" onClick={onPro}/> : null}/>
@@ -120,6 +123,7 @@ export function BeginnerBuyScreen({
           testid="buy-price"/>
         <Row k="주문 가능" v={availableBalance == null ? '확인 불가' : money(availableBalance)}
           warn={availableBalance == null} testid="buy-available"/>
+        {market === 'USDM' && <Row k="배율 · 마진" v={`${form.lev}x · ${form.marginMode === 'ISOLATED' ? '격리' : '교차'}`}/>}
 
         {/* ── 무엇으로 정하는가 ── */}
         <div style={{ display: 'flex', gap: 6 }}>
@@ -131,7 +135,7 @@ export function BeginnerBuyScreen({
                 border: `1px solid ${u === unit ? C.accent : C.hair}`,
                 background: u === unit ? C.accentBg : C.raised,
                 color: C.text, fontSize: FS.lead, fontWeight: 700,
-              }}>{u === 'QUOTE' ? '얼마어치 살까요?' : '몇 개 살까요?'}</button>
+              }}>{u === 'QUOTE' ? '주문 금액' : '주문 수량'}</button>
           ))}
         </div>
 
@@ -176,6 +180,8 @@ export function BeginnerBuyScreen({
           */}
         </div>
 
+        <ProtectionControls form={form}/>
+
         {form.message && (
           <div data-testid="buy-message" style={{
             fontSize: FS.body, padding: '8px 10px', borderRadius: 8,
@@ -196,14 +202,14 @@ export function BeginnerBuyScreen({
           <div style={{ display: 'grid', gap: 8 }}>
             <div data-testid="buy-confirm-text" style={{ fontSize: FS.body, color: C.dim }}>
               {form.quantity == null ? '수량을 확인하지 못했습니다' :
-                `${symbol} ${trim(form.quantity)}개를 ${money(form.plan?.ok ? form.plan.notional : null)}에 삽니다. 진행할까요?`}
+                `${symbol} ${trim(form.quantity)}개를 ${money(form.plan?.ok ? form.plan.notional : null)}에 ${actionLabel}합니다. 진행할까요?`}
             </div>
             <div style={{ display: 'flex', gap: 8 }}>
               <button type="button" data-testid="buy-cancel" onClick={() => setConfirming(false)}
                 style={btn(C.raised, C.text)}>돌아가기</button>
               <button type="button" data-testid="buy-confirm" disabled={form.busy}
                 onClick={() => { setConfirming(false); void form.submit(); }}
-                style={btn(C.up, '#fff', form.busy)}>{form.busy ? '보내는 중…' : '구매'}</button>
+                style={btn(actionColor, '#fff', form.busy)}>{form.busy ? '보내는 중…' : `${actionLabel} 확인`}</button>
             </div>
           </div>
         ) : (
@@ -211,11 +217,11 @@ export function BeginnerBuyScreen({
             onClick={() => {
               // 방향을 **실제로 누른 것**으로 만든다. `useTradeForm`은
               // 누른 적 없는 방향으로는 주문을 내보내지 않는다.
-              form.chooseSide('LONG');
+              form.chooseSide(form.side);
               setConfirming(true);
             }}
-            style={btn(ready ? C.up : C.raised, ready ? '#fff' : C.faint, !ready || form.busy)}>
-            {ready ? '구매하기' : form.submitText}
+            style={btn(ready ? actionColor : C.raised, ready ? '#fff' : C.faint, !ready || form.busy)}>
+            {ready ? `${actionLabel}하기` : form.submitText}
           </button>
         )}
       </div>

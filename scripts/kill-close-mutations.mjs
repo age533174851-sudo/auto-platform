@@ -100,9 +100,12 @@ const M = [
     s => s.replace('  if (plan.mayClose !== true) {', '  if (false) {')],
 
   // 배선
+  // 앵커는 **모듈 경로**다. 옛 앵커는 import 줄 전체였고, 정본에 구조분해
+  // 이름 하나(countKillLeftover)가 늘자 "적용 불가"가 되어 자기점검이 깨졌다.
+  // 이름 목록은 늘어나지만 경로는 그대로다 — 따라가야 하는 쪽을 덜 잡는다.
   ['KC-23 킬스위치가 계좌 전체 취소로 되돌아간다', P.sw,
-    s => s.replace("  const { planKillCancelOnly } = await import('./killClosePlan');",
-      "  const { planKillCancelOnly } = await import('./killClosePlan');\n  const { futuresCancelAll } = await import('@/lib/exchanges/futuresAdapter');\n  void futuresCancelAll;")],
+    s => s.replace("await import('./killClosePlan');",
+      "await import('./killClosePlan');\n  const { futuresCancelAll } = await import('@/lib/exchanges/futuresAdapter');\n  void futuresCancelAll;")],
   ['KC-24 킬스위치가 side를 넘기지 않는다', P.sw,
     s => s.replace("        side: (p?.side === 'SHORT' ? 'SHORT'\n          : p?.side === 'LONG' ? 'LONG' : null) as 'LONG' | 'SHORT' | null })) };",
       '        side: null as any })) };')],

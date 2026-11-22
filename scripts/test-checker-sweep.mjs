@@ -1,0 +1,133 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { SWEEP_EXCLUSIONS, sweepPlan, sweepFindings, baseName } from './lib/checker-sweep.mjs';
+import { inlineSweepFindings, allFindings } from './check-checker-sweep.mjs';
+import { checkerFiles } from './run-all-checkers.mjs';
+
+/** 디스크 없이 판정하기 위한 가짜 파일계 */
+const fsOf = (map) => ({
+  exists: (p) => Object.prototype.hasOwnProperty.call(map, p),
+  read: (p) => (Object.prototype.hasOwnProperty.call(map, p) ? map[p] : null),
+});
+
+const OK = [{
+  file: 'scripts/check-a.mjs', why: '인자가 필요하다',
+  runWith: null, coveredBy: '.github/workflows/w.yml',
+}];
+const OK_FS = fsOf({
+  'scripts/check-a.mjs': '',
+  '.github/workflows/w.yml': 'run: node scripts/check-a.mjs "$body"',
+});
+
+test('이유와 "대신 도는 곳"이 둘 다 있으면 통과한다', () => {
+  assert.deepEqual(sweepFindings({ exclusions: OK, ...OK_FS }), []);
+});
+
+test('둘 다 없으면 조용히 버려지는 것이므로 실패한다', () => {
+  const f = sweepFindings({
+    exclusions: [{ file: 'scripts/check-a.mjs', why: '그냥', runWith: null, coveredBy: null }],
+    ...OK_FS,
+  });
+  assert.equal(f.length, 1);
+  assert.match(f[0], /조용히 버려집니다/);
+});
+
+test('덮는다고 적은 파일이 그 검사기를 부르지 않으면 실패한다 — 주장만으로는 못 지나간다', () => {
+  const f = sweepFindings({
+    exclusions: OK,
+    ...fsOf({ 'scripts/check-a.mjs': '', '.github/workflows/w.yml': 'run: echo 아무것도 안 함' }),
+  });
+  assert.equal(f.length, 1);
+  assert.match(f[0], /사실이 아닙니다/);
+});
+
+test('없는 파일을 빼 두면 썩은 선언으로 실패한다', () => {
+  const f = sweepFindings({ exclusions: OK, ...fsOf({ '.github/workflows/w.yml': 'check-a.mjs' }) });
+  assert.equal(f.length, 1);
+  assert.match(f[0], /선언이 썩었습니다/);
+});
+
+test('이유가 비어 있으면 실패한다', () => {
+  const f = sweepFindings({
+    exclusions: [{ ...OK[0], why: '  ' }], ...OK_FS,
+  });
+  assert.ok(f.some((x) => /왜 뺐는지가 비어 있습니다/.test(x)));
+});
+
+test('runWith 와 coveredBy 가 둘 다 있으면 어디서 도는지가 갈린다', () => {
+  const f = sweepFindings({
+    exclusions: [{ ...OK[0], runWith: ['--self-test'] }], ...OK_FS,
+  });
+  assert.ok(f.some((x) => /둘 다 있습니다/.test(x)));
+});
+
+test('같은 파일을 두 번 빼면 실패한다', () => {
+  const f = sweepFindings({ exclusions: [OK[0], OK[0]], ...OK_FS });
+  assert.ok(f.some((x) => /두 번 적혀 있습니다/.test(x)));
+});
+
+test('계획은 제외 목록만 따른다 — 러너가 제 분기를 갖지 않는다', () => {
+  const p = sweepPlan({
+    files: ['scripts/check-a.mjs', 'scripts/check-b.mjs', 'scripts/check-c.mjs'],
+    exclusions: [
+      { file: 'scripts/check-a.mjs', why: 'x', runWith: ['--self-test'], coveredBy: null },
+      { file: 'scripts/check-b.mjs', why: 'y', runWith: null, coveredBy: '.github/workflows/w.yml' },
+    ],
+  });
+  assert.deepEqual(p.bare, ['scripts/check-c.mjs']);
+  assert.deepEqual(p.withArgs, [{ file: 'scripts/check-a.mjs', args: ['--self-test'] }]);
+  assert.deepEqual(p.deferred, [{ file: 'scripts/check-b.mjs', coveredBy: '.github/workflows/w.yml' }]);
+  // 모든 파일이 정확히 한 갈래에 들어간다 — 조용히 사라지는 것이 없다.
+  assert.equal(p.bare.length + p.withArgs.length + p.deferred.length, 3);
+});
+
+test('YAML 에 전수 루프가 돌아오면 실패한다', () => {
+  const f = inlineSweepFindings(
+    'run: |\n  for f in scripts/check-*.mjs; do node "$f"; done\n  node scripts/run-all-checkers.mjs\n', 'w.yml');
+  assert.equal(f.length, 1);
+  assert.match(f[0], /전수 루프가 다시 있습니다/);
+});
+
+test('"러너를 부르는가"는 여기서 보지 않는다 — 소유자가 하나여야 한다', () => {
+  // 그 질문은 `check-claude-hourly` 가 `|| fail=1` 까지 함께 못 박는다.
+  // 두 곳이 같은 것을 보면 언젠가 갈린다.
+  assert.deepEqual(inlineSweepFindings('run: echo 아무것도 안 함\n', 'w.yml'), []);
+});
+
+test('그 핀이 check-claude-hourly 에 실제로 있다 — 소유자가 비어 있지 않다', () => {
+  const src = readFileSync('scripts/check-claude-hourly.mjs', 'utf8');
+  assert.match(src, /node scripts\\\/run-all-checkers\\\.mjs \\\|\\\| fail=1/);
+});
+
+test('**주석에 적힌 설명을 계약으로 읽지 않는다**', () => {
+  // 이 시험이 없으면 "전에는 for f in scripts/check-* 루프가 있었다"는
+  // 설명 주석만으로 빨간불이 켜진다. 실제로 처음 쓸 때 그렇게 걸렸다.
+  const f = inlineSweepFindings(
+    '# 전에는 여기에 `for f in scripts/check-*.mjs` 루프가 있었다\nrun: node scripts/run-all-checkers.mjs\n', 'w.yml');
+  assert.deepEqual(f, []);
+});
+
+test('실제 저장소 상태에서 통과한다 — 목록이 사실과 같다', () => {
+  assert.deepEqual(allFindings(), []);
+});
+
+test('실제 전수 계획이 모든 검사기를 덮는다 — 합이 전체와 같다', () => {
+  const files = checkerFiles();
+  const p = sweepPlan({ files, exclusions: SWEEP_EXCLUSIONS });
+  assert.equal(p.bare.length + p.withArgs.length + p.deferred.length, files.length);
+  assert.ok(files.length > 80, `검사기가 ${files.length}개뿐입니다 — 글롭이 깨졌을 수 있습니다`);
+  // 자기 자신이 전수에 들어 있어야 한다. 빠지면 이 관문이 안 돈다.
+  assert.ok(p.bare.includes('scripts/check-checker-sweep.mjs'));
+});
+
+test('baseName 은 경로를 벗긴다', () => {
+  assert.equal(baseName('scripts/check-a.mjs'), 'check-a.mjs');
+  assert.equal(baseName('check-a.mjs'), 'check-a.mjs');
+  assert.equal(baseName(null), '');
+});
+
+test('워크플로가 러너를 실제로 부른다 — 배선 확인', () => {
+  const y = readFileSync('.github/workflows/claude-hourly-trading.yml', 'utf8');
+  assert.match(y, /node scripts\/run-all-checkers\.mjs \|\| fail=1/);
+});

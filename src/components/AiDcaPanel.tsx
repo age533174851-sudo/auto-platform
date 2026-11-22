@@ -6,7 +6,7 @@ import { cvt } from '@/lib/utils';
 import { Brain, TrendingDown, Check } from 'lucide-react';
 import { notifySuccess } from '@/lib/notify/center';
 import {
-  loadAiDcaCfg, saveAiDcaCfg, tierForFng, computeBuyAmount, FREQ_LABEL,
+  loadAiDcaCfg, saveAiDcaCfg, tierForFng, computeBuyAmount, readFearGreedValue, FREQ_LABEL,
   DEFAULT_TIERS, DEFAULT_CFG, type AiDcaConfig,
 } from '@/lib/dca/aiDca';
 import { DefaultHint } from '@/components/ui/SettingField';
@@ -25,18 +25,20 @@ export default function AiDcaPanel({ currency = 'KRW' }: { currency?: string }) 
     (async () => {
       try {
         const r = await fetch('/api/feargreed', { cache: 'no-store' });
-        const d = await r.json();
-        const v = d?.crypto?.value ?? d?.value ?? 50;
-        if (alive) { setFng(v); setFngLabel(d?.crypto?.label || d?.label || ''); }
-      } catch { if (alive) setFng(50); }
+        const d = await r.json().catch(() => null);
+        // 못 읽은 지수는 null이다. 50(중립)으로 꾸며 매수액을 보여 주지 않는다.
+        const v = readFearGreedValue(r.ok, d);
+        if (alive) { setFng(v); setFngLabel(v == null ? '' : (d?.crypto?.label || '')); }
+      } catch { if (alive) setFng(null); }
       finally { if (alive) setLoading(false); }
     })();
     return () => { alive = false; };
   }, []);
 
-  const curFng = fng ?? 50;
-  const tier = tierForFng(curFng, cfg.tiers);
-  const buyAmount = computeBuyAmount(cfg.baseAmount, curFng, cfg.tiers);
+  // 지수를 모르면 구간도 매수액도 모른다 — 화면은 "확인 불가"를 적는다.
+  const tier = fng == null ? null : tierForFng(fng, cfg.tiers);
+  const buyAmount = fng == null ? null : computeBuyAmount(cfg.baseAmount, fng, cfg.tiers);
+  const tone = tier?.color ?? T.muted;
 
   const setBase = (v: number) => { setCfg(c => ({ ...c, baseAmount: Math.max(1000, v) })); setSaved(false); };
   const save = () => { saveAiDcaCfg(cfg); setSaved(true); notifySuccess('AI DCA 설정 저장됨', `${FREQ_LABEL[cfg.frequency]} 기본 ${cvt(cfg.baseAmount, currency)} · 공포지수 연동`); setTimeout(() => setSaved(false), 1800); };
@@ -60,15 +62,15 @@ export default function AiDcaPanel({ currency = 'KRW' }: { currency?: string }) 
           <div style={{ color: T.muted, fontSize: 10, marginBottom: 4 }}>현재 공포·탐욕 지수</div>
           {loading ? <div style={{ color: T.muted, fontSize: 13 }}>로딩…</div> : (
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
-              <span style={{ color: tier.color, fontSize: 24, fontWeight: 900 }}>{curFng}</span>
-              <span style={{ color: tier.color, fontSize: 11, fontWeight: 700 }}>{tier.label}</span>
+              <span style={{ color: tone, fontSize: 24, fontWeight: 900 }}>{fng ?? '—'}</span>
+              <span style={{ color: tone, fontSize: 11, fontWeight: 700 }}>{tier?.label ?? '확인 불가'}</span>
             </div>
           )}
         </div>
-        <div style={{ flex: 1, background: tier.color + '18', borderRadius: 12, padding: '12px 14px', border: `1px solid ${tier.color}40` }}>
+        <div style={{ flex: 1, background: tier ? tier.color + '18' : T.card, borderRadius: 12, padding: '12px 14px', border: `1px solid ${tier ? tier.color + '40' : T.border2}` }}>
           <div style={{ color: T.muted, fontSize: 10, marginBottom: 4 }}>이번 회차 매수액</div>
-          <div style={{ color: tier.color, fontSize: 20, fontWeight: 900, fontFamily: 'Inter,monospace' }}>{cvt(buyAmount, currency)}</div>
-          <div style={{ color: T.muted, fontSize: 9, marginTop: 2 }}>기본 × {tier.mult}배</div>
+          <div style={{ color: tone, fontSize: 20, fontWeight: 900, fontFamily: 'Inter,monospace' }}>{loading ? '…' : buyAmount == null ? '—' : cvt(buyAmount, currency)}</div>
+          <div style={{ color: T.muted, fontSize: 9, marginTop: 2 }}>{tier ? `기본 × ${tier.mult}배` : loading ? '' : '지수를 확인하지 못해 계산하지 않음'}</div>
         </div>
       </div>
 
@@ -104,7 +106,7 @@ export default function AiDcaPanel({ currency = 'KRW' }: { currency?: string }) 
       <div style={{ background: T.card, borderRadius: 12, padding: '12px 14px', marginBottom: 12 }}>
         <div style={{ color: T.muted, fontSize: 11, fontWeight: 700, marginBottom: 10 }}>공포지수별 매수 배수</div>
         {DEFAULT_TIERS.map((t, i) => {
-          const active = tier.label === t.label;
+          const active = tier?.label === t.label;
           const lo = i === 0 ? 0 : DEFAULT_TIERS[i - 1].max + 1;
           return (
             <div key={t.label} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 0', opacity: active ? 1 : 0.6 }}>

@@ -1,11 +1,22 @@
 'use client';
 // src/components/terminal/DemoRunner.tsx
 //
-// 데모(모의) 자동매매 스위치.
+// 데모(모의) 자동매매 스위치. **두 화면이 이 컴포넌트를 함께 쓴다.**
+//
+//   터미널 하단 독   스위치 + 주기(1·5·15분) + 수동 2버튼
+//   모의투자 탭      `manualOnly` — **수동 2버튼만**
 //
 // 이 스위치가 켜져 있는 동안 브라우저가 주기적으로 `/api/paper/run`을
 // 부른다. 한 번 부를 때마다 한 사이클이 돈다: 청산 점검 → 손실 한도 →
 // 진입.
+//
+// 인증을 **prop으로 받는 이유**
+// ─────────────────────────────
+// 전에는 `useTerminal()`로 토큰을 꺼냈다. 그 훅은 provider 밖에서
+// **예외를 던진다**(TerminalContext). 그래서 이 컴포넌트를 모의투자 탭에
+// 그대로 올리면 그 탭이 렌더에서 터졌다. 컴포넌트를 복제하는 대신
+// 인증만 주입받는다 — 터미널은 context에서, 모의투자 탭은 자기 토큰을
+// 넣어 준다. 호출 경로(`/api/paper/run`)와 서버 장부는 하나로 남는다.
 //
 // **이 창을 닫으면 멈춘다.** 이건 한계지 기능이 아니다. 그래서 화면에
 // 그대로 적는다 — "돌고 있는 줄 알았는데 안 돌고 있었다"가 자동매매에서
@@ -20,7 +31,10 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { errorTextOf } from '@/lib/http/errorText';
 import { C, FS, NUM, ghostBtn } from './theme';
-import { useTerminal } from './TerminalContext';
+// 어느 컨트롤을 보여 줄지·타이머를 돌려도 되는지는 **한 곳**에서 정한다.
+import {
+  paperRunnerControls, mayStartTimer, paperRunRequest, paperRunOutcome, MANUAL_ONLY_NOTE,
+} from '@/lib/ui/paperRunnerMode';
 
 const INTERVALS: Array<[number, string]> = [[60, '1분'], [300, '5분'], [900, '15분']];
 
@@ -31,12 +45,15 @@ interface RunLog {
   dryRun?: boolean;
 }
 
-export function DemoRunner({ dense, symbol, onChanged }: {
+export function DemoRunner({ auth, dense, symbol, onChanged, manualOnly }: {
+  /** 주입받는다. 없으면(로그인 전) 호출하지 않고 그 이유를 적는다. */
+  auth: string | null;
   dense?: boolean;
   symbol?: string;
   onChanged?: () => void;
+  /** 모의투자 탭 — 수동 2버튼만. 주기 타이머를 만들지도 보여 주지도 않는다 */
+  manualOnly?: boolean;
 }) {
-  const { auth } = useTerminal();
   const [on, setOn] = useState(false);
   const [everySec, setEverySec] = useState(60);
   const [busy, setBusy] = useState(false);
@@ -51,26 +68,22 @@ export function DemoRunner({ dense, symbol, onChanged }: {
   const push = (l: RunLog) => setLogs(prev => [l, ...prev].slice(0, 6));
 
   const run = useCallback(async (dryRun: boolean) => {
-    if (!auth) { push({ at: Date.now(), ok: false, text: '로그인이 필요합니다' }); return; }
+    // 요청 모양과 결과 판정은 `paperRunnerMode`가 정한다 — 렌더러 없이
+    // 401·500·dry-run 무쓰기·갱신 여부를 시험할 수 있어야 한다.
+    const req = paperRunRequest({ dryRun, symbol, auth });
+    if (!req) { push({ at: Date.now(), ok: false, text: '로그인이 필요합니다' }); return; }
     if (running.current) return;
     running.current = true;
     setBusy(true);
     try {
-      const qs = symbol ? `?symbols=${encodeURIComponent(symbol)}` : '';
-      const r = dryRun
-        ? await fetch(`/api/paper/run${qs}`, { headers: { Authorization: auth } })
-        : await fetch('/api/paper/run', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: auth },
-            body: JSON.stringify(symbol ? { symbols: symbol } : {}),
-          });
+      const r = await fetch(req.url, req.init);
       const j = await r.json().catch(() => null);
-      const ok = r.ok && !!j?.ok;
+      const verdict = paperRunOutcome({ httpOk: r.ok, body: j, dryRun });
       push({
-        at: Date.now(), ok, dryRun,
+        at: Date.now(), ok: verdict.ok, dryRun,
         text: errorTextOf(j, `응답 없음 (${r.status})`),
       });
-      if (ok && !dryRun && (j?.closed?.length || j?.entered)) onChanged?.();
+      if (verdict.shouldReload) onChanged?.();
     } catch (e: any) {
       // 네트워크가 끊긴 것을 '아무 일 없음'으로 그리지 않는다.
       push({ at: Date.now(), ok: false, dryRun, text: `호출 실패 — ${e?.message || e}` });
@@ -81,7 +94,9 @@ export function DemoRunner({ dense, symbol, onChanged }: {
   }, [auth, symbol, onChanged]);
 
   useEffect(() => {
-    if (!on) { setNextAt(null); return; }
+    // **수동 전용이면 상태가 어떻게 들어와도 타이머를 만들지 않는다.**
+    // 스위치를 숨기는 것만으로는 모자라다.
+    if (!mayStartTimer({ manualOnly, on })) { setNextAt(null); return; }
     let alive = true;
     const cycle = async () => {
       if (!alive) return;
@@ -91,14 +106,14 @@ export function DemoRunner({ dense, symbol, onChanged }: {
     cycle();
     const t = setInterval(cycle, everySec * 1000);
     return () => { alive = false; clearInterval(t); };
-  }, [on, everySec, run]);
+  }, [on, everySec, run, manualOnly]);
 
   // 남은 시간 표시용 — 켜져 있을 때만 돈다
   useEffect(() => {
-    if (!on) return;
+    if (!mayStartTimer({ manualOnly, on })) return;
     const t = setInterval(() => setTick(v => v + 1), 1000);
     return () => clearInterval(t);
-  }, [on]);
+  }, [on, manualOnly]);
 
   const left = nextAt ? Math.max(0, Math.round((nextAt - Date.now()) / 1000)) : null;
 
@@ -106,7 +121,8 @@ export function DemoRunner({ dense, symbol, onChanged }: {
   // 그만큼이 아래 포지션 칸에서 빠졌다. 접어도 **상태 한 줄과 시작/정지는
   // 항상 보인다** — 돌고 있는지 아닌지는 접어서 감출 값이 아니다.
   const [more, setMore] = useState(false);
-  const showDetail = !dense || more;
+  const ctl = paperRunnerControls({ manualOnly, dense, more });
+  const showDetail = ctl.showDetail;
 
   return (
     <div style={{
@@ -116,12 +132,15 @@ export function DemoRunner({ dense, symbol, onChanged }: {
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
         <span style={{ color: C.faint, fontSize: FS.micro, fontWeight: 700, whiteSpace: 'nowrap' }}>
-          데모 자동
+          {manualOnly ? 'PAPER 수동 실행' : '데모 자동'}
         </span>
         <span style={{ ...NUM, fontSize: FS.micro, color: on ? C.accent : C.faint,
                        flex: 1, minWidth: 0, textAlign: 'right' }}>
-          {on ? (busy ? '실행 중…' : left != null ? `${left}초 뒤` : '대기') : '꺼짐'}
+          {manualOnly
+            ? (busy ? '실행 중…' : '버튼을 누를 때만 돕니다')
+            : (on ? (busy ? '실행 중…' : left != null ? `${left}초 뒤` : '대기') : '꺼짐')}
         </span>
+        {ctl.showSwitch && (
         <button onClick={() => setOn(v => !v)} style={{
           minWidth: 52, minHeight: 26, borderRadius: 7, cursor: 'pointer', flexShrink: 0,
           background: on ? C.downBg : C.accentBg,
@@ -129,7 +148,8 @@ export function DemoRunner({ dense, symbol, onChanged }: {
           border: `1px solid ${on ? `${C.down}55` : `${C.accent}55`}`,
           fontSize: FS.micro, fontWeight: 700,
         }}>{on ? '정지' : '시작'}</button>
-        {dense && (
+        )}
+        {ctl.showCollapseToggle && (
           <button onClick={() => setMore(v => !v)} title="설정 · 기록"
             style={{
               width: 26, height: 26, borderRadius: 7, flexShrink: 0, lineHeight: 1,
@@ -141,28 +161,28 @@ export function DemoRunner({ dense, symbol, onChanged }: {
         )}
       </div>
 
-      {showDetail && (
-        <>
-          <div style={{ display: 'flex', gap: 5, marginTop: 7 }}>
-            <button onClick={() => run(false)} disabled={busy}
-              style={{ ...ghostBtn(), flex: 1, minHeight: 28, fontSize: FS.micro, opacity: busy ? 0.5 : 1 }}>
-              지금 한 번
-            </button>
-            <button onClick={() => run(true)} disabled={busy}
-              style={{ ...ghostBtn(), flex: 1, minHeight: 28, fontSize: FS.micro, opacity: busy ? 0.5 : 1 }}>
-              미리보기
-            </button>
-          </div>
+      {ctl.showManualButtons && (
+        <div style={{ display: 'flex', gap: 5, marginTop: 7 }}>
+          <button onClick={() => run(false)} disabled={busy}
+            style={{ ...ghostBtn(), flex: 1, minHeight: manualOnly ? 40 : 28, fontSize: FS.micro, opacity: busy ? 0.5 : 1 }}>
+            {manualOnly ? 'PAPER 1회 실행' : '지금 한 번'}
+          </button>
+          <button onClick={() => run(true)} disabled={busy}
+            style={{ ...ghostBtn(), flex: 1, minHeight: manualOnly ? 40 : 28, fontSize: FS.micro, opacity: busy ? 0.5 : 1 }}>
+            {manualOnly ? '진입·차단 사유 보기' : '미리보기'}
+          </button>
+        </div>
+      )}
 
-          <div style={{ display: 'flex', gap: 4, marginTop: 5 }}>
-            {INTERVALS.map(([sec, label]) => (
-              <button key={sec} onClick={() => setEverySec(sec)}
-                style={{ ...ghostBtn(everySec === sec), flex: 1, minHeight: 24, fontSize: FS.micro }}>
-                {label}
-              </button>
-            ))}
-          </div>
-        </>
+      {ctl.showIntervals && (
+        <div style={{ display: 'flex', gap: 4, marginTop: 5 }}>
+          {INTERVALS.map(([sec, label]) => (
+            <button key={sec} onClick={() => setEverySec(sec)}
+              style={{ ...ghostBtn(everySec === sec), flex: 1, minHeight: 24, fontSize: FS.micro }}>
+              {label}
+            </button>
+          ))}
+        </div>
       )}
 
       {/* 기록. 접혀 있어도 **가장 최근 한 줄은 남긴다** — 아무 일도 안
@@ -193,9 +213,13 @@ export function DemoRunner({ dense, symbol, onChanged }: {
           좁은 화면에서는 펼쳤을 때만 — 대신 위 상태 표시가 늘 보인다. */}
       {showDetail && (
         <div style={{ color: C.faint, fontSize: FS.micro, marginTop: 7, lineHeight: 1.5 }}>
-          가상 자금입니다. 거래소로 아무것도 나가지 않습니다.<br />
-          <b>이 창을 닫으면 멈춥니다.</b> 새로고침해도 자동으로 다시 켜지지
-          않습니다 — 켠 적 없는 자동매매가 도는 일은 없어야 하니까요.
+          {manualOnly ? MANUAL_ONLY_NOTE : (
+            <>
+              가상 자금입니다. 거래소로 아무것도 나가지 않습니다.<br />
+              <b>이 창을 닫으면 멈춥니다.</b> 새로고침해도 자동으로 다시 켜지지
+              않습니다 — 켠 적 없는 자동매매가 도는 일은 없어야 하니까요.
+            </>
+          )}
         </div>
       )}
     </div>

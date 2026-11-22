@@ -17,30 +17,23 @@
 // 규칙도 새로 쓰지 않는다 — SL/TP 판정은 `exitRules.exitOnMark`이고
 // 백테스트·`/api/paper/run`과 같은 함수다.
 import { NextRequest, NextResponse } from 'next/server';
-import { timingSafeEqual } from 'crypto';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { paperExitPlan } from '@/lib/engine/paperExitSweep';
+import { wakeAuthFromEnv } from '@/lib/system/cronAuth';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 export const maxDuration = 60;
 
-function safeEqual(provided: string | null, expected: string): boolean {
-  if (!expected || !provided) return false;
-  const a = Buffer.from(provided, 'utf8'); const b = Buffer.from(expected, 'utf8');
-  if (a.length !== b.length) return false;
-  try { return timingSafeEqual(a, b); } catch { return false; }
-}
 
-export async function POST(req: NextRequest) {
-  // 워커가 자기 ADMIN_SECRET으로 부른다 — **새 비밀을 만들지 않는다.**
-  const admin = safeEqual(req.headers.get('x-admin-secret'), process.env.ADMIN_SECRET || '');
-  const uid = admin ? null : await resolveUserId(
-    req.headers.get('authorization'), req.headers.get('x-user-id'), req.headers.get('x-dev-token'));
-  if (!admin && !uid) {
-    return NextResponse.json({ ok: false, error: 'auth_required' }, { status: 401 });
-  }
 
+/**
+ * 실제 일을 하는 몸통. 입구가 둘(POST·GET)이라 여기 한 번만 적는다.
+ *
+ * `uid`가 null이면 **모든 사용자**를 훑는다(관리자·cron 경로). 값이 있으면
+ * 그 사용자만 — 화면에서 자기 포지션을 점검하는 경로다.
+ */
+async function sweep(uid: string | null) {
   const sb = getSupabaseAdmin();
   if (!sb) return NextResponse.json({ ok: false, error: 'supabase_not_configured' }, { status: 503 });
 
@@ -161,6 +154,19 @@ export async function POST(req: NextRequest) {
       realizedPnl: r.realizedPnl ?? null, error: r.ok ? null : r.error });
   }
 
+  // Existing PAPER-only worker wakeup, after protective exits. JWT polling never
+  // advances automation, and unknown/failed exits block new entries this tick.
+  let automation: { ok: boolean; code: string } | null = null;
+  // **깨우기 경로에서만 회차를 돌린다.** `uid === null`이 그 경로다
+  // (cron·관리자). 사용자 토큰으로 들어온 화면 조회가 회차를 전진시키면
+  // 브라우저를 열어 둔 사람만 봇이 도는 셈이 된다.
+  if (uid === null && failed === 0 && plan.unknownMarks === 0) {
+    try {
+      const { runDuePaperAutomation } = await import('@/lib/engine/paperAutomation');
+      automation = await runDuePaperAutomation(sb);
+    } catch { automation = { ok: false, code: 'AUTOMATION_UNAVAILABLE' }; }
+  }
+
   return NextResponse.json({
     ok: failed === 0,
     scanned: plan.scanned,
@@ -175,6 +181,62 @@ export async function POST(req: NextRequest) {
     // 시간청산은 켜져 있지 않다. 그 사실을 값으로 남긴다.
     timeExit: 'DISABLED_NO_EXPLICIT_POLICY',
     results,
+    automation,
     checkedAt: nowMs,
   }, { status: failed === 0 ? 200 : 500, headers: { 'Cache-Control': 'no-store' } });
+}
+
+// ── 입구 ──
+//
+// **깨우는 길을 둘 둔다.** 전에는 깨우는 곳이 Fly 워커 하나뿐이었다 —
+// 워커가 꺼져 있으면 모의매매는 한 건도 돌지 않고, 걸어 둔 손절이 걸리지
+// 않는다. 진입을 놓치는 것과 손절이 안 걸리는 것은 잃는 것이 다르다.
+//
+// 두 번째 길은 **GitHub Actions 15분**이다(`.github/workflows/paper-tick.yml`).
+// `vercel.json`이 **아닌** 이유: Vercel Hobby 크론은 하루 한 번만 허용하고,
+// 더 잦게 적으면 **배포가 실패한다** — 그 라우트 하나가 아니라 전부가 안
+// 올라간다(`api/cron/reconcile/route.ts`가 실제로 겪은 기록). `watch/tick`이
+// 같은 이유로 이미 GitHub Actions를 쓴다.
+//
+// 그래서 **GET도 받는다.** 예약·외부 스케줄러가 보내는 모양이 GET이고,
+// `/api/autotrade/exit-monitor`도 GET이다. 전에는 `POST`만 내보내서, 어떤
+// 예약을 붙여도 405로 조용히 한 번도 돌지 않았다.
+//
+// 인증 판정은 `system/cronAuth` **한 곳**에 있다. 전에는 이 라우트와
+// 자동매매 라우트에 각자 적혀 있었고 받는 경로가 서로 달랐다 — 경로가
+// 둘인데 한쪽만 고친 상태였다.
+//
+// 겹쳐 깨워도 회차는 하나만 돈다: `paper_auto_claim()`이 토큰 하나만
+// 내주고, PG 시험이 동시 8회 × 30라운드로 그것을 고정한다.
+
+/** 사용자 화면·워커가 부른다. 사용자 토큰이면 그 사용자만 훑는다 */
+export async function POST(req: NextRequest) {
+  const wake = wakeAuthFromEnv({
+    authorization: req.headers.get('authorization'),
+    adminHeader: req.headers.get('x-admin-secret'),
+  });
+  const uid = wake.ok ? null : await resolveUserId(
+    req.headers.get('authorization'), req.headers.get('x-user-id'), req.headers.get('x-dev-token'));
+  if (!wake.ok && !uid) {
+    return NextResponse.json({ ok: false, error: 'auth_required' }, { status: 401 });
+  }
+  return sweep(uid);
+}
+
+/**
+ * 예약이 부른다 — GitHub Actions(`x-admin-secret`)와, 요금제가 허용하면
+ * Vercel Cron(`Bearer CRON_SECRET`). 판정은 둘 다 `cronAuth`가 한다.
+ *
+ * 여기서는 **사용자 토큰 경로를 열지 않는다.** 브라우저의 선행 조회
+ * 하나로 전체 훑기가 돌아가면 안 된다. 예약·관리자만이다.
+ */
+export async function GET(req: NextRequest) {
+  const wake = wakeAuthFromEnv({
+    authorization: req.headers.get('authorization'),
+    adminHeader: req.headers.get('x-admin-secret'),
+  });
+  if (!wake.ok) {
+    return NextResponse.json({ ok: false, error: 'auth_required' }, { status: 401 });
+  }
+  return sweep(null);
 }
