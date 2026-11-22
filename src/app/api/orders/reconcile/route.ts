@@ -91,7 +91,7 @@ export async function GET(req: NextRequest) {
     // 없다고 읽고 누르지 않았다. 목록은 대조 대상 정본과 같아야 한다.
     const { RECONCILE_TARGET_STATUSES } = await import('@/lib/engine/pendingReconcile');
     let listQ = sb.from('live_orders')
-      .select('id, client_order_id, symbol, side, status, mode, exchange, created_at, error_message')
+      .select('id, client_order_id, symbol, side, status, mode, exchange, created_at, error_message', { count: 'exact' })
       .in('status', [...RECONCILE_TARGET_STATUSES]);
     if (scopeUserId) listQ = listQ.eq('user_id', scopeUserId);
     if (dryRun || !connectionId) {
@@ -103,10 +103,11 @@ export async function GET(req: NextRequest) {
       //   `error`를 잡기 시작한 뒤에는 "잡아 놓고 버리는" 모양이 되므로
       //   읽는 자리를 쓰는 자리로 옮긴다.
       if (connectionId) listQ = listQ.eq('connection_id', connectionId);
-      const { data: pending, error: pendingError } = await listQ
+      const { data: pending, error: pendingError, count: pendingCount } = await listQ
         .order('created_at', { ascending: true })
         .limit(50);
-      if (pendingError || !Array.isArray(pending)) {
+      if (pendingError || !Array.isArray(pending)
+        || pendingCount == null || !Number.isSafeInteger(pendingCount) || pendingCount < pending.length) {
         return NextResponse.json({
           ok: false, error: 'pending_orders_unreadable',
           message: '미확정 주문 목록을 읽지 못했습니다',
@@ -114,7 +115,8 @@ export async function GET(req: NextRequest) {
       }
       return NextResponse.json({
         ok: true, dryRun: true,
-        pendingCount: pending.length,
+        pendingCount,
+        pendingTruncated: pendingCount > pending.length,
         pending,
         hint: connectionId ? undefined : 'connectionId를 주면 실제 대조를 수행합니다',
       }, { headers: { 'Cache-Control': 'no-store' } });
