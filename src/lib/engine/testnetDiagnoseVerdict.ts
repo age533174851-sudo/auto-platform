@@ -211,10 +211,8 @@ export function withdrawalEvidence(
 //   줄줄이 빨개지고, 사람은 멀쩡한 키를 다시 발급한다. 원인이 시계라면
 //   그렇게 적어야 한다.
 //
-//   ★ 허용 오차를 **이 파일에 적지 않는다.** 정본은 서명이 실제로 싣는
-//     `recvWindow`이고, 부르는 쪽이 그 값을 넘긴다 —
-//     `isolationVerdict`의 `expectedLeverage`와 같은 모양이다. 같은
-//     숫자를 두 곳에 두면 언젠가 갈린다.
+//   ★ 로컬 시계가 늦을 때는 서명이 실제로 싣는 `recvWindow`를 쓴다.
+//     로컬 시계가 앞설 때는 거래소가 정한 별도 한도를 적용한다.
 //
 //   ★ **왕복 시간을 오차에서 빼내 한 점으로 만들지 않는다.** 서버 시각
 //     한 번으로는 오차를 한 점으로 정할 수 없다. 서버가 시각을 찍은
@@ -249,16 +247,19 @@ export interface ClockFacts {
   sentAtMs?: number | null;
   /** 응답을 받은 **직후**의 로컬 시각(ms) */
   receivedAtMs?: number | null;
-  /** 허용 오차(ms). **부르는 쪽이 넘긴다 — 여기에 숫자를 적지 않는다** */
+  /** 서명 요청의 recvWindow(ms). 로컬 시계가 늦을 때의 허용 한도 */
   toleranceMs?: number | null;
 }
 
 export interface ClockSkewReading extends DiagnoseItemVerdict<ClockSkewCode> {
-  /** 오차가 들어갈 수 있는 구간 `[최소, 최대]`(ms). 못 재면 null */
+  /** 거래소 시각 - 로컬 시각의 구간 `[최소, 최대]`(ms). 못 재면 null */
   rangeMs: readonly [number, number] | null;
   /** 왕복 시간(ms). 못 재면 null */
   roundTripMs: number | null;
 }
+
+// Binance USDⓈ-M Timing Security: timestamp < serverTime + 1000.
+const BINANCE_TIMESTAMP_LEAD_LIMIT_MS = 1_000;
 
 /**
  * 로컬 시계가 거래소 서버 시각에서 **얼마나 벗어나 있는가.**
@@ -300,29 +301,26 @@ export function clockSkewVerdict(
   const low = st - recv;
   const high = st - sent;
   const rangeMs = [low, high] as const;
-  const worst = Math.max(Math.abs(low), Math.abs(high));
-  // 구간이 0을 품으면 오차가 0일 수도 있다 — 그때 최선은 0이다.
-  const best = low <= 0 && high >= 0 ? 0 : Math.min(Math.abs(low), Math.abs(high));
+  const minExclusive = -BINANCE_TIMESTAMP_LEAD_LIMIT_MS;
+  const measurement = `시각 차이(거래소 − 로컬) ${low}~${high}ms · 허용 ${minExclusive}ms 초과, ${tol}ms 이하 (왕복 ${rtt}ms)`;
 
-  if (worst <= tol) {
+  if (low > minExclusive && high <= tol) {
     return {
       status: 'PASS', code: 'IN_TOLERANCE',
-      reason: `오차는 최대 ${worst}ms입니다 — 허용 ${tol}ms 안입니다 (왕복 ${rtt}ms)`,
+      reason: `${measurement} · 허용 범위 안입니다`,
       rangeMs, roundTripMs: rtt,
     };
   }
-  if (best > tol) {
+  if (high <= minExclusive || low > tol) {
     return {
       status: 'FAIL', code: 'SKEW_OUT_OF_TOLERANCE',
-      reason: `오차가 적어도 ${best}ms입니다 — 허용 ${tol}ms를 넘습니다.`
-        + ' 서명 요청이 -1021로 거부됩니다 (키 문제가 아닙니다)',
+      reason: `${measurement} · 서명 요청이 시각 차이로 거부될 수 있습니다 (-1021, 키 문제가 아닙니다)`,
       rangeMs, roundTripMs: rtt,
     };
   }
   return {
     status: 'UNKNOWN', code: 'MEASUREMENT_INCONCLUSIVE',
-    reason: `오차 구간이 ${low}~${high}ms이고 허용은 ${tol}ms입니다`
-      + ` — 왕복 ${rtt}ms가 길어 통과로도 실패로도 적을 수 없습니다. 다시 재세요`,
+    reason: `${measurement} · 측정 구간이 허용 경계를 걸칩니다. 다시 재세요`,
     rangeMs, roundTripMs: rtt,
   };
 }
