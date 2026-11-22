@@ -191,6 +191,19 @@ export interface ReconcileOutcome {
   error?: string;
 }
 
+/**
+ * 연결 조회의 성공 여부. 데이터 없음(null)은 실제 연결 부재일 수 있지만,
+ * Supabase error나 비정상 응답은 '연결 없음'으로 바꿔서는 안 된다.
+ * 오류 세부/자격증명은 HTTP 응답에 노출하지 않는다.
+ */
+export function connectionLookupOutcome(
+  connectionId: string,
+  lookup: { data?: ConnectionLike | null; error?: unknown } | null | undefined,
+): ReconcileOutcome | null {
+  if (lookup && lookup.data !== undefined && lookup.error == null) return null;
+  return { connectionId, ok: false, error: 'connection_lookup_failed' };
+}
+
 /** 여러 연결의 결과를 사람이 읽을 한 줄로 */
 export function summarizeOutcomes(list: ReconcileOutcome[]): string {
   const arr = Array.isArray(list) ? list : [];
