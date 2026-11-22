@@ -456,15 +456,13 @@ const VENUE_PRECISION: Partial<Record<ProductId, VenuePrecision[]>> = {
       // `precision`을 읽어(`gateSpot.ts:71`) 맞춘 뒤
       // `POST /api/v4/spot/orders` 본문에 그 값이 들어간다.
       //
-      // **그래도 SUPPORTED로 올리지 않는다.** Gate는 최대 주문 수량·금액
-      // (`max_base_amount` / `max_quote_amount`)도 고시하는데 우리는 그
-      // 둘을 읽지 않는다. 축 하나가 비어 있으면 "이 주문이 venue 규칙
-      // 안에 있다"고 말할 수 없다.
+      // 종목의 수량·금액 한도는 주문 계획에서 확인할 수 있는 값에 적용한다.
+      // 시장가의 반대 단위 금액·수량은 체결 전 알 수 없고, 별도 시장가 수량
+      // 한도(`market_order_max_stock`)도 아직 적용하지 않는다.
       venue: 'GATE_SPOT', verdict: 'VENUE_GAP',
       evidence: 'src/lib/exchanges/gateSpotPlan.ts:220',
-      note: '수량 자릿수·최소 수량·최소 금액에 더해 지정가 가격 자릿수까지 '
-        + '적용합니다(4B-2B-1). 남은 축은 최대 주문 수량·금액'
-        + '(max_base_amount / max_quote_amount)이고 아직 읽지 않습니다',
+      note: '수량·지정가 자릿수와 계산 가능한 수량·금액의 최소·최대 한도를 적용합니다. '
+        + '시장가 수량 전용 한도(market_order_max_stock)는 별도 검증이 필요합니다',
     },
   ],
   PERP_CRYPTO: [

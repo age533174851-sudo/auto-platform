@@ -318,6 +318,32 @@ export function runGateSpotPlanTests() {
     assert(r.ok, String(r.reason));
   });
 
+  test('Gate 지정가는 호가 반올림 후 최대 주문 금액을 검사한다', () => {
+    const r = buyLimit({ quantity: 1, price: 1.006, maxQuoteAmount: 1.007 });
+    eq(r.ok, false);
+    assert(r.reason?.includes('최대 주문 금액') === true, r.reason);
+  });
+
+  test('Gate 지정가의 수량·금액이 각각 최대 경곗값과 같으면 주문을 만든다', () => {
+    const r = buyLimit({
+      quantity: 3.001, price: 0.1, amountPrecision: 2, maxBaseAmount: 3, maxQuoteAmount: 0.3,
+    });
+    assert(r.ok, r.reason);
+    eq(r.body?.amount, '3');
+    eq(r.body?.price, '0.1');
+  });
+
+  test('Gate 시장가 매수는 금액으로, 매도는 수량으로 최대 한도를 검사한다', () => {
+    const buy = planGateSpotOrder({
+      symbol: 'BTCUSDT', side: 'BUY', type: 'MARKET', quoteAmount: 6, maxQuoteAmount: 5,
+    });
+    assert(!buy.ok && buy.reason?.includes('최대 주문 금액') === true, buy.reason);
+    const sell = planGateSpotOrder({
+      symbol: 'BTCUSDT', side: 'SELL', type: 'MARKET', quantity: 2, maxBaseAmount: 1,
+    });
+    assert(!sell.ok && sell.reason?.includes('최대 주문 수량') === true, sell.reason);
+  });
+
   // ══════════ 자릿수 → 증분 변환 ══════════
 
   test('가격 자릿수를 확정하는 곳은 한 곳뿐이다', () => {

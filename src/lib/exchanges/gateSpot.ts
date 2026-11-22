@@ -49,6 +49,8 @@ export interface GateSpotPairInfo {
   minBaseAmount: number | null;
   /** 최소 주문 **금액**(quote) */
   minQuoteAmount: number | null;
+  maxBaseAmount: number | null;
+  maxQuoteAmount: number | null;
   /** 'tradable'은 양방향, 'buyable'은 매수, 'sellable'은 매도만 가능하다. */
   tradeStatus: string | null;
 }
@@ -77,6 +79,8 @@ export async function getGateSpotPair(
       pricePrecision: gatePriceDecimals(numberOf(d.precision)),
       minBaseAmount: numberOf(d.min_base_amount),
       minQuoteAmount: numberOf(d.min_quote_amount),
+      maxBaseAmount: numberOf(d.max_base_amount),
+      maxQuoteAmount: numberOf(d.max_quote_amount),
       tradeStatus: d.trade_status != null ? String(d.trade_status) : null,
     };
   } catch { return null; }
@@ -98,7 +102,7 @@ export interface GateSpotOrderResult {
 
 export async function placeGateSpotOrder(
   key: string, secret: string,
-  input: Omit<GateSpotPlanInput, 'text'> & { clientOrderId?: string },
+  input: Omit<GateSpotPlanInput, 'text' | 'maxBaseAmount' | 'maxQuoteAmount'> & { clientOrderId?: string },
   testnet = false,
 ): Promise<GateSpotOrderResult> {
   const p = toGatePair(input.symbol);
@@ -116,11 +120,13 @@ export async function placeGateSpotOrder(
   const plan = planGateSpotOrder({
     ...input,
     text: toGateText(input.clientOrderId),
-    // 네 축을 **각각** 넘긴다. 하나로 뭉쳐 넘기면 판정도 하나가 된다.
+    // 자릿수, 최소값, 최대값은 수량과 금액의 규격을 각각 넘긴다.
     amountPrecision: input.amountPrecision ?? info?.amountPrecision ?? null,
     pricePrecision: input.pricePrecision ?? info?.pricePrecision ?? null,
     minBaseAmount: input.minBaseAmount ?? info?.minBaseAmount ?? null,
     minQuoteAmount: input.minQuoteAmount ?? info?.minQuoteAmount ?? null,
+    maxBaseAmount: info?.maxBaseAmount ?? null,
+    maxQuoteAmount: info?.maxQuoteAmount ?? null,
   });
   if (!plan.ok) return { success: false, message: plan.reason || '주문을 만들지 못했습니다' };
 

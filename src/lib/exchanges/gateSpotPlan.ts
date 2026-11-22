@@ -91,6 +91,10 @@ export interface GateSpotPlanInput {
   minBaseAmount?: number | null;
   /** 최소 주문 **금액** (quote) */
   minQuoteAmount?: number | null;
+  /** 최대 주문 **수량** (base) */
+  maxBaseAmount?: number | null;
+  /** 최대 주문 **금액** (quote) */
+  maxQuoteAmount?: number | null;
   /**
    * 이 주문이 청산인가(현물 매도).
    *
@@ -160,6 +164,9 @@ export function planGateSpotOrder(i: GateSpotPlanInput): GateSpotPlan {
     if (i.minQuoteAmount != null && amt < Number(i.minQuoteAmount)) {
       return bad(`최소 주문 금액(${i.minQuoteAmount} ${p.quote})보다 적습니다`);
     }
+    if (i.maxQuoteAmount != null && amt > i.maxQuoteAmount) {
+      return bad(`최대 주문 금액(${i.maxQuoteAmount} ${p.quote})을 초과합니다`);
+    }
     body.time_in_force = 'ioc';
     body.amount = String(amt);
     // ★ **금액에는 수량 자릿수를 대지 않는다.** 이 주문에는 수량이라는 값이
@@ -187,6 +194,9 @@ export function planGateSpotOrder(i: GateSpotPlanInput): GateSpotPlan {
   }
   if (i.minBaseAmount != null && qty < Number(i.minBaseAmount)) {
     return bad(`최소 주문 수량(${i.minBaseAmount} ${p.base})보다 적습니다`);
+  }
+  if (i.maxBaseAmount != null && qty > i.maxBaseAmount) {
+    return bad(`최대 주문 수량(${i.maxBaseAmount} ${p.base})을 초과합니다`);
   }
   const note = qty !== rawQty
     ? `수량을 ${rawQty} → ${qty}로 내림했습니다 (최소 단위)`
@@ -256,6 +266,10 @@ export function planGateSpotOrder(i: GateSpotPlanInput): GateSpotPlan {
     // 보낼 수량과 가격을 비교한다. 부동소수점 곱셈의 오차만 허용한다.
     if (minQuote != null && minQuote - notional > minQuote * Number.EPSILON) {
       return bad(`최소 주문 금액(${minQuote} ${p.quote})보다 적습니다`);
+    }
+    const maxQuote = i.maxQuoteAmount;
+    if (maxQuote != null && notional - maxQuote > maxQuote * Number.EPSILON) {
+      return bad(`최대 주문 금액(${maxQuote} ${p.quote})을 초과합니다`);
     }
     body.price = String(sentPrice);
     body.time_in_force = 'gtc';
