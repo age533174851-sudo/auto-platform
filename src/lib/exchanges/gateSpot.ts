@@ -73,12 +73,26 @@ export async function getGateSpotPair(
       }
       return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
     };
+    /**
+     * **자릿수 축 전용 읽기.** 금액 축에는 쓰지 않는다.
+     *
+     * `gatePriceDecimals`는 음수·비정수·100 초과를 null로 돌린다. 자릿수는
+     * 그래야 맞지만 **금액은 그러면 안 된다** — `min_base_amount`는
+     * `0.0001` 같은 비정수이고, 그걸 자릿수 검증에 넣으면 상한이 통째로
+     * null이 되어 "상한 없음"처럼 읽힌다.
+     *
+     * ★ **이름을 바꾸지 않는다.** `scripts/check-gate-spot-precision.mjs`가
+     *   `pricePrecision: n(d.precision)` 철자로 "가격 자릿수를 거래소에서
+     *   읽는가"를 본다. 개명하면 그 검사기가 빨강이 되고, 그건 검사기가
+     *   틀린 것이 아니라 이 줄이 정본에서 벗어난 것이다.
+     */
+    const n = (value: unknown): number | null => gatePriceDecimals(numberOf(value));
     return {
       pair: String(d.id ?? pair),
-      amountPrecision: gatePriceDecimals(numberOf(d.amount_precision)),
+      amountPrecision: n(d.amount_precision),
       // Gate는 수량 자릿수를 `amount_precision`, 가격 자릿수를 `precision`으로
       // 준다. **둘 중 하나로 다른 하나를 채우지 않는다** — 없으면 null이다.
-      pricePrecision: gatePriceDecimals(numberOf(d.precision)),
+      pricePrecision: n(d.precision),
       minBaseAmount: numberOf(d.min_base_amount),
       minQuoteAmount: numberOf(d.min_quote_amount),
       maxBaseAmount: numberOf(d.max_base_amount),
