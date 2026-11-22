@@ -9,8 +9,9 @@
 import { test, assert, eq } from '../../test/harness';
 import {
   positionModeVerdict, isolationVerdict, withdrawalEvidence,
-  overallDiagnoseVerdict, statusToOk,
+  clockSkewVerdict, overallDiagnoseVerdict, statusToOk,
 } from './testnetDiagnoseVerdict';
+import { summarizeTestnetOpenOrders, summarizeTestnetOpenPositions } from './testnetVenueEvidence';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -214,6 +215,142 @@ export function runTestnetDiagnoseVerdictTests() {
       resolve(process.cwd(), 'src/lib/engine/testnetDiagnoseVerdict.ts'), 'utf8');
     eq(/^import /m.test(src), false, 'import이 생기면 탐침 컴파일 사슬이 꺼진다');
     eq(src.includes('process.env'), false, '주변 상태를 직접 집지 않는다');
+  });
+
+  // ── ⑥ 실제 거래소 조회와 낡은 DB 미결 장부를 혼동하지 않는가 ──
+  test('★ Binance 미체결 조회 실패는 0건이 아니라 UNKNOWN', () => {
+    const v = summarizeTestnetOpenOrders({ success: false, orders: [] });
+    eq(v.code, 'UNKNOWN');
+    eq(v.openOrderCount, null);
+    eq(v.openCloseIntentCount, null);
+    eq(summarizeTestnetOpenOrders(null).code, 'UNKNOWN');
+    eq(summarizeTestnetOpenOrders({ success: true, orders: null }).code, 'UNKNOWN');
+  });
+
+  test('★ Binance 미체결 주문 성공·빈 배열은 검증된 0건', () => {
+    const v = summarizeTestnetOpenOrders({ success: true, orders: [] });
+    eq(v.code, 'VERIFIED');
+    eq(v.openOrderCount, 0);
+    eq(v.openCloseIntentCount, 0);
+    eq(v.bySymbol.length, 0);
+    eq(v.source, 'BINANCE_TESTNET_OPEN_ORDERS');
+  });
+
+  test('★ reduceOnly/closePosition 둘 중 하나라도 참이면 청산 의도 후보', () => {
+    const snapshot = summarizeTestnetOpenOrders({ success: true, orders: [
+      { symbol: 'BTCUSDT', reduceOnly: true, closePosition: false, orderId: 'secret-one' },
+      { symbol: 'BTCUSDT', reduceOnly: false, closePosition: true, orderId: 'secret-two' },
+      { symbol: 'BTCUSDT', reduceOnly: false, closePosition: false, orderId: 'secret-three' },
+      { symbol: 'ETHUSDT', reduceOnly: true, closePosition: true, orderId: 'secret-four' },
+    ] });
+    eq(snapshot.code, 'VERIFIED');
+    eq(snapshot.openOrderCount, 4);
+    eq(snapshot.openCloseIntentCount, 3);
+    eq(snapshot.bySymbol.length, 2);
+    eq(snapshot.bySymbol[0].symbol, 'BTCUSDT');
+    eq(snapshot.bySymbol[0].closeIntents, 2);
+    eq(snapshot.bySymbol[1].symbol, 'ETHUSDT');
+    eq(snapshot.bySymbol[1].closeIntents, 1);
+    assert(!JSON.stringify(snapshot).includes('secret-one'),
+      '주문 ID는 진단 응답에 출력하지 않는다');
+  });
+
+  test('★ Binance 알 수 없는 주문/포지션 응답은 추측하지 않는다', () => {
+    eq(summarizeTestnetOpenOrders({ success: true,
+      orders: [{ symbol: 'BTCUSDT', reduceOnly: null, closePosition: false }] }).code,
+    'UNKNOWN');
+    eq(summarizeTestnetOpenPositions({ success: false, positions: [] }).openPositionCount, null);
+    eq(summarizeTestnetOpenPositions({ success: true, positions: [] }).openPositionCount, 0);
+    const p = summarizeTestnetOpenPositions({ success: true, positions: [
+      { symbol: 'BTCUSDT', amount: 0.01 }, { symbol: 'BTCUSDT', amount: 0.02 },
+      { symbol: 'ETHUSDT', amount: 0.03 },
+    ] });
+    eq(p.openPositionCount, 3);
+    eq(p.symbols.join(','), 'BTCUSDT,ETHUSDT');
+    eq(p.source, 'BINANCE_TESTNET_POSITION_RISK');
+  });
+
+  // ── ④ 서버 시각 오차 ──
+  //
+  //   여기서 지키는 것: 서버 시각을 못 읽은 것을 **오차 0으로 적지
+  //   않는다**, 왕복이 길어 결론이 안 나는 것을 **통과로 적지 않는다**,
+  //   허용 오차를 받지 못하면 **비교 자체를 하지 않는다**.
+
+  const T0 = 1_700_000_000_000;
+  const TOL = 5_000;
+
+  test('시계 ① 왕복이 짧고 오차가 작으면 통과다 — 구간을 함께 적는다', () => {
+    const v = clockSkewVerdict({
+      serverTimeMs: T0, sentAtMs: T0 - 10, receivedAtMs: T0 + 10, toleranceMs: TOL,
+    });
+    eq(v.status, 'PASS'); eq(v.code, 'IN_TOLERANCE');
+    eq(v.roundTripMs, 20);
+    assert(v.rangeMs?.[0] === -10 && v.rangeMs?.[1] === 10,
+      '오차가 들어갈 수 있는 구간을 적는다 — 한 점으로 단정하지 않는다');
+  });
+
+  test('★ 시계 ② 서버 시각을 못 읽으면 오차 0이 아니라 UNKNOWN이다', () => {
+    for (const st of [null, undefined, 0, NaN, -1] as any[]) {
+      const v = clockSkewVerdict({
+        serverTimeMs: st, sentAtMs: T0, receivedAtMs: T0 + 5, toleranceMs: TOL,
+      });
+      eq(v.status, 'UNKNOWN', `서버 시각 ${String(st)}`);
+      eq(v.code, 'SERVER_TIME_UNREAD');
+      eq(v.rangeMs, null, '재지 못한 구간을 지어내지 않는다');
+      eq(v.roundTripMs, 5, '왕복은 쟀으므로 그것은 남긴다');
+    }
+  });
+
+  test('★ 시계 ③ 허용 오차를 받지 못하면 비교하지 않는다', () => {
+    for (const t of [undefined, null, 0, -1, NaN] as any[]) {
+      const v = clockSkewVerdict({
+        // 오차가 분명히 있는 입력이다. 그래도 허용선을 모르면 판정하지 않는다.
+        serverTimeMs: T0 + 500, sentAtMs: T0, receivedAtMs: T0, toleranceMs: t,
+      });
+      eq(v.status, 'UNKNOWN', `허용 오차 ${String(t)}`);
+      eq(v.code, 'TOLERANCE_UNUSABLE');
+    }
+  });
+
+  test('시계 ④ 구간이 전부 허용선 밖이면 실패다 — 키 문제가 아니라고 적는다', () => {
+    const v = clockSkewVerdict({
+      serverTimeMs: T0 + 20_000, sentAtMs: T0, receivedAtMs: T0 + 30, toleranceMs: TOL,
+    });
+    eq(v.status, 'FAIL'); eq(v.code, 'SKEW_OUT_OF_TOLERANCE');
+    assert(/-1021/.test(v.reason), '거부 코드를 적는다');
+    assert(/키 문제가 아닙니다/.test(v.reason),
+      '멀쩡한 키를 다시 발급하게 만들지 않는다');
+  });
+
+  test('★ 시계 ⑤ 왕복이 길어 허용선을 걸치면 통과도 실패도 아니다', () => {
+    const v = clockSkewVerdict({
+      serverTimeMs: T0, sentAtMs: T0 - 12_000, receivedAtMs: T0 + 12_000, toleranceMs: TOL,
+    });
+    eq(v.status, 'UNKNOWN', '느린 회선에서 "시계가 맞다"가 공짜로 나오지 않는다');
+    eq(v.code, 'MEASUREMENT_INCONCLUSIVE');
+    assert(v.rangeMs != null, '구간은 적는다 — 사람이 다시 잴 수 있게');
+    assert(/다시 재세요/.test(v.reason), '다음 할 일을 적는다');
+  });
+
+  test('★ 시계 ⑥ 받은 시각이 보낸 시각보다 앞이면 측정이 성립하지 않는다', () => {
+    const v = clockSkewVerdict({
+      serverTimeMs: T0, sentAtMs: T0 + 10, receivedAtMs: T0, toleranceMs: TOL,
+    });
+    eq(v.status, 'UNKNOWN'); eq(v.code, 'LOCAL_WINDOW_UNUSABLE');
+  });
+
+  test('★ 시계 ⑦ 모르는 오차가 섞이면 전체 판정이 READY가 아니다', () => {
+    const r = overallDiagnoseVerdict([{ status: 'PASS' }, clockSkewVerdict(null)]);
+    eq(r.verdict, 'UNKNOWN'); eq(r.unknown, 1);
+    eq(statusToOk(clockSkewVerdict(null).status), false);
+  });
+
+  test('★ 시계 ⑧ 판정은 시계를 맞추지도 거래소를 부르지도 않는다', () => {
+    const src = readFileSync(
+      resolve(process.cwd(), 'src/lib/engine/testnetDiagnoseVerdict.ts'), 'utf8');
+    for (const bad of ['fetch(', 'Date.now', 'setSystemTime', 'execSync']) {
+      eq(src.includes(bad), false, `${bad}가 판정 정본에 있다 — 입력은 이미 재어 온 숫자뿐이다`);
+    }
   });
 
   test('★ 판정 정본은 기대 배율을 스스로 적지 않는다', () => {
