@@ -181,6 +181,22 @@ if (mod) {
       err(`시계 오차: 오차가 작은데 PASS가 아닙니다 (${good?.status})`);
     }
 
+    // Binance USDⓈ-M: timestamp < serverTime + 1000, serverTime - timestamp <= recvWindow.
+    for (const [label, low, high, expected] of [
+      ['로컬이 약 2초 앞섬', -2000, -1990, 'FAIL'],
+      ['로컬이 정확히 1초 앞섬', -1000, -1000, 'FAIL'],
+      ['로컬이 999ms 앞섬', -999, -999, 'PASS'],
+      ['앞서는 쪽 경계를 걸침', -1001, -999, 'UNKNOWN'],
+      ['로컬이 정확히 recvWindow만큼 늦음', tol, tol, 'PASS'],
+      ['로컬이 recvWindow보다 1ms 더 늦음', tol + 1, tol + 1, 'FAIL'],
+      ['늦는 쪽 경계를 걸침', tol - 1, tol + 1, 'UNKNOWN'],
+    ]) {
+      const v = cs({ serverTimeMs: T, sentAtMs: T - high, receivedAtMs: T - low, toleranceMs: tol });
+      if (v?.status !== expected) {
+        err(`시계 오차: ${label}에서 ${expected}가 필요합니다 (${v?.status})`);
+      }
+    }
+
     // ⑤ 구간이 전부 허용선 밖이면 실패다. 그리고 **왜**를 적는다.
     const bad = cs({ serverTimeMs: T + tol * 4, sentAtMs: T, receivedAtMs: T + 30, toleranceMs: tol });
     if (bad?.status !== 'FAIL') {
