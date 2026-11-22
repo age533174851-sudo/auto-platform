@@ -30,7 +30,8 @@ const readiness = load(compile('src/lib/engine/testnetReadiness.ts'), {
 const verdict = load(compile('src/lib/engine/testnetDiagnoseVerdict.ts'));
 const evidence = load(compile('src/lib/engine/testnetVenueEvidence.ts'));
 
-function diagnose(storedPermission, testFuturesConnection) {
+function diagnose(storedPermission, testFuturesConnection, getFuturesBalance =
+  async () => ({ success: true, balances: [], message: '0개 자산' })) {
   const connection = {
     exchange_id: 'binance', is_testnet: true, is_active: true, has_withdrawal: false,
     api_key: 'fixture-key', api_secret_enc: 'fixture-ciphertext', perm_trading: storedPermission,
@@ -56,7 +57,7 @@ function diagnose(storedPermission, testFuturesConnection) {
         assert.equal(testnet, true);
         return testFuturesConnection();
       },
-      getFuturesBalance: async () => ({ success: true, message: 'Fixture' }),
+      getFuturesBalance,
       getFuturesPositions: async () => ({ success: true, positions: [] }),
       getFuturesOpenOrders: async () => ({ success: true, orders: [] }),
       getFuturesTicker: async () => 90000,
@@ -72,6 +73,40 @@ function diagnose(storedPermission, testFuturesConnection) {
   return POST(new Request('http://localhost/api/binance/futures/diagnose', {
     method: 'POST', body: JSON.stringify({ connectionId: 'fixture-connection' }),
   }));
+}
+
+const balance = { asset: 'USDT', balance: 12, availableBalance: 5 };
+const balanceRead = (balances) => ({ success: true, balances, message: '조회 성공' });
+for (const [name, snapshot, expected, expectedCode] of [
+  ['금액 누락으로 NaN이 된 잔고는 미확인이다',
+    balanceRead([{ ...balance, availableBalance: NaN }]), 'UNKNOWN', 'BALANCE_UNREADABLE'],
+  ['무한대 잔고는 미확인이다',
+    balanceRead([{ ...balance, balance: Infinity }]), 'UNKNOWN', 'BALANCE_UNREADABLE'],
+  ['자산 식별자가 누락된 잔고는 미확인이다',
+    balanceRead([{ ...balance, asset: undefined }]), 'UNKNOWN', 'BALANCE_UNREADABLE'],
+  ['잔고 목록이 없는 성공 응답은 미확인이다',
+    balanceRead(undefined), 'UNKNOWN', 'BALANCE_UNREADABLE'],
+  ['잔고 목록에 판독 불가 항목이 섞이면 미확인이다',
+    balanceRead([balance, null]), 'UNKNOWN', 'BALANCE_UNREADABLE'],
+  ['0 잔고가 생략돼 빈 목록이면 조회 성공이다',
+    balanceRead([]), 'PASS', null],
+  ['잔고와 사용 가능 잔고가 판독되면 사용 가능 잔고 0도 조회 성공이다',
+    balanceRead([{ ...balance, availableBalance: 0 }]), 'PASS', null],
+  ['거래소 조회 실패는 실패 사유를 보여 준다',
+    { success: false, message: '모의 잔고 조회 실패' }, 'FAIL', null],
+]) {
+  test(name, async () => {
+    const result = await diagnose(true, () => ({ success: true, canTrade: true }), async () => snapshot);
+    assert.equal(result.status, 200);
+    const body = await result.json();
+    const check = body.checks.find(item => item.name === '잔고 조회');
+    assert.equal(check?.status, expected);
+    assert.equal(check.ok, expected === 'PASS');
+    assert.equal(check.code ?? null, expectedCode);
+    assert.equal(body.itemCodes.find(item => item.name === '잔고 조회')?.status, expected);
+    if (expected === 'UNKNOWN') assert.match(check.detail, /잔고 응답.*확인하지 못/);
+    else assert.equal(check.detail, snapshot.message);
+  });
 }
 
 for (const [name, stored, response, apiStatus, permission, detail] of [

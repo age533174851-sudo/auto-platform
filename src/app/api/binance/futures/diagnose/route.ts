@@ -78,11 +78,11 @@ export async function POST(req: NextRequest) {
   const testnet = true; // TESTNET 외에는 위 게이트에서 거부했다.
 
   const checks: Check[] = [];
-  const run = async (name: string, fn: () => Promise<{ ok: boolean; detail: string }>) => {
+  const run = async (name: string, fn: () => Promise<Omit<Check, 'name' | 'ms'>>) => {
     const t0 = Date.now();
     try {
       const r = await fn();
-      checks.push({ name, ...r, ms: Date.now() - t0, status: r.ok ? 'PASS' : 'FAIL' });
+      checks.push({ name, ...r, ms: Date.now() - t0, status: r.status ?? (r.ok ? 'PASS' : 'FAIL') });
     }
     catch (e: any) {
       // **던진 것은 답을 못 받은 것이다.** 거래소가 거절한 것(FAIL)과
@@ -123,7 +123,18 @@ export async function POST(req: NextRequest) {
   // 2. 잔고 조회
   await run('잔고 조회', async () => {
     const r = await getFuturesBalance(apiKey, secret, testnet);
-    return { ok: r.success, detail: r.message };
+    if (!r.success) return { ok: false, detail: r.message };
+    // 어댑터가 0 잔고를 생략한 빈 배열은 유효하다. 남은 행의 자산과 금액을 확인한다.
+    if (!Array.isArray(r.balances) || r.balances.some(row =>
+      typeof row?.asset !== 'string' || !row.asset.trim()
+      || !Number.isFinite(row.balance) || !Number.isFinite(row.availableBalance),
+    )) {
+      return {
+        ok: false, status: 'UNKNOWN', code: 'BALANCE_UNREADABLE',
+        detail: '거래소 잔고 응답에서 자산 또는 금액을 확인하지 못했습니다',
+      };
+    }
+    return { ok: true, detail: r.message };
   });
   // 3. 포지션 조회 — 성공적으로 조회된 계좌의 실제 노출만 증거다.
   // 장부에 후보 0건이어도 이 값으로 "거래소에 포지션 0"이라 단정하지 않는다.
