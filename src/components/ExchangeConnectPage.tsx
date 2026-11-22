@@ -3,7 +3,7 @@ import { A } from '@/lib/theme/colors';
 import { errorTextOf } from '@/lib/http/errorText';
 import React, { useState, useEffect, useCallback } from 'react';
 import { confirmDialog } from '@/lib/confirm/dialog';
-import { EXCHANGE_META } from '@/lib/exchanges/types';
+import { EXCHANGE_META, exchangePermissionLabel } from '@/lib/exchanges/types';
 import type { ExchangeId, ConnectedExchange } from '@/lib/exchanges/types';
 import { showBinanceTestnetDiagnosis } from '@/lib/ui/binanceDiagnosisGate';
 
@@ -666,7 +666,7 @@ export default function ExchangeConnectPage() {
               }}>
                 <div style={{ fontSize:14 }}>{k==='read'?'👁':k==='trading'?'':'⚠️'}</div>
                 <div style={{ color: selConn.permissions[k] ? c : T.muted, fontSize:9, fontWeight:700 }}>{l}</div>
-                <div style={{ color: selConn.permissions[k] ? c : T.muted, fontSize:8 }}>{selConn.permissions[k]?'허용':'없음'}</div>
+                <div style={{ color: selConn.permissions[k] ? c : T.muted, fontSize:8 }}>{exchangePermissionLabel(selConn, k)}</div>
               </div>
             ))}
           </div>

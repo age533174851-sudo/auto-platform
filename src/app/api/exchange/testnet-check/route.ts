@@ -3,7 +3,8 @@
 // 서버 전용. 키는 환경변수에서만 읽고 응답에 절대 포함하지 않는다.
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/auth/isAdmin';
-import { envHealthProbeVerdict } from '@/lib/exchanges/testnetHealthGate';
+import { envHealthProbeVerdict, envHealthPriceText, gateEnvHealthEvidence } from '@/lib/exchanges/testnetHealthGate';
+import { usdtFromFuturesBalances } from '@/lib/markets/wallets';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -29,20 +30,29 @@ async function checkBinanceFutures(testnet: boolean): Promise<CheckResult> {
   const base = testnet ? 'https://demo-fapi.binance.com' : 'https://fapi.binance.com';
   try {
     const r = await fetch(`${base}/fapi/v1/ticker/price?symbol=BTCUSDT`, { cache: 'no-store', signal: AbortSignal.timeout(8000) });
-    if (r.ok) { const d = await r.json(); out.publicOk = true; out.lastPrice = d?.price; }
-    else out.error = `시세 ${r.status}`;
+    if (r.ok) {
+      out.lastPrice = envHealthPriceText((await r.json())?.price);
+      out.publicOk = out.lastPrice !== undefined;
+      if (!out.publicOk) out.error = '시세 응답에 유효한 현재가가 없습니다';
+    } else out.error = `시세 ${r.status}`;
   } catch (e: any) { out.error = `시세 실패: ${e?.message || e}`; }
 
   if (out.configured && out.publicOk) {
     try {
       const { getFuturesBalance } = await import('@/lib/exchanges/binanceFutures');
-      const res: any = await getFuturesBalance(key!, secret!, testnet);
-      if (res?.success) {
+      const response = await getFuturesBalance(key!, secret!, testnet);
+      const balance = usdtFromFuturesBalances(response);
+      // A malformed asset row cannot prove that a wallet has no USDT.
+      const malformed = Array.isArray(response.balances) && response.balances.some(row =>
+        typeof row?.asset !== 'string' || !row.asset.trim()
+          || !Number.isFinite(row.balance) || !Number.isFinite(row.availableBalance));
+      if (malformed) {
+        out.error = '계좌 응답에 유효하지 않은 잔고 항목이 있습니다';
+      } else if (balance.ok) {
         out.privateOk = true;
-        const usdt = (res.balances || []).find((b: any) => b.asset === 'USDT');
-        out.balance = usdt ? String(usdt.availableBalance) : '0';
+        out.balance = String(balance.availableMargin);
       } else {
-        out.error = `계좌 실패: ${res?.message || '알 수 없음'}`;
+        out.error = `계좌 실패: ${balance.error || '잔고를 확인하지 못했습니다'}`;
       }
     } catch (e: any) { out.error = `계좌 실패: ${e?.message || e}`; }
   }
@@ -55,11 +65,12 @@ async function checkGateFutures(testnet: boolean): Promise<CheckResult> {
   const secret = process.env.GATE_API_SECRET;
   const { checkGateFuturesConnection } = await import('@/lib/exchanges/gateFutures');
   const r = await checkGateFuturesConnection(key, secret, 'BTC_USDT', testnet);
+  const configured = !!(key && secret);
   return {
     exchange: `gate-futures(${testnet ? 'testnet' : 'live'})`,
-    configured: !!(key && secret),
-    publicOk: r.publicOk, privateOk: r.privateOk,
-    lastPrice: r.lastPrice, balance: r.balance, latencyMs: r.latencyMs, error: r.error,
+    configured,
+    ...gateEnvHealthEvidence(r, configured),
+    latencyMs: r.latencyMs,
   };
 }
 
