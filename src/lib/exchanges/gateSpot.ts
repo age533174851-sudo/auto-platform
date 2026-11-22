@@ -51,6 +51,8 @@ export interface GateSpotPairInfo {
   minQuoteAmount: number | null;
   maxBaseAmount: number | null;
   maxQuoteAmount: number | null;
+  marketMaxBaseAmount: number | null;
+  marketMaxQuoteAmount: number | null;
   /** 'tradable'은 양방향, 'buyable'은 매수, 'sellable'은 매도만 가능하다. */
   tradeStatus: string | null;
 }
@@ -81,6 +83,8 @@ export async function getGateSpotPair(
       minQuoteAmount: numberOf(d.min_quote_amount),
       maxBaseAmount: numberOf(d.max_base_amount),
       maxQuoteAmount: numberOf(d.max_quote_amount),
+      marketMaxBaseAmount: numberOf(d.market_order_max_stock),
+      marketMaxQuoteAmount: numberOf(d.market_order_max_money),
       tradeStatus: d.trade_status != null ? String(d.trade_status) : null,
     };
   } catch { return null; }
@@ -102,7 +106,9 @@ export interface GateSpotOrderResult {
 
 export async function placeGateSpotOrder(
   key: string, secret: string,
-  input: Omit<GateSpotPlanInput, 'text' | 'maxBaseAmount' | 'maxQuoteAmount'> & { clientOrderId?: string },
+  input: Omit<GateSpotPlanInput,
+    'text' | 'maxBaseAmount' | 'maxQuoteAmount' | 'marketMaxBaseAmount' | 'marketMaxQuoteAmount'
+  > & { clientOrderId?: string },
   testnet = false,
 ): Promise<GateSpotOrderResult> {
   const p = toGatePair(input.symbol);
@@ -127,6 +133,8 @@ export async function placeGateSpotOrder(
     minQuoteAmount: input.minQuoteAmount ?? info?.minQuoteAmount ?? null,
     maxBaseAmount: info?.maxBaseAmount ?? null,
     maxQuoteAmount: info?.maxQuoteAmount ?? null,
+    marketMaxBaseAmount: info?.marketMaxBaseAmount ?? null,
+    marketMaxQuoteAmount: info?.marketMaxQuoteAmount ?? null,
   });
   if (!plan.ok) return { success: false, message: plan.reason || '주문을 만들지 못했습니다' };
 

@@ -95,6 +95,10 @@ export interface GateSpotPlanInput {
   maxBaseAmount?: number | null;
   /** 최대 주문 **금액** (quote) */
   maxQuoteAmount?: number | null;
+  /** 시장가 매도 수량 한도. 거래소의 0 또는 null은 한도 없음이다. */
+  marketMaxBaseAmount?: number | null;
+  /** 시장가 매수 금액 한도. 거래소의 0 또는 null은 한도 없음이다. */
+  marketMaxQuoteAmount?: number | null;
   /**
    * 이 주문이 청산인가(현물 매도).
    *
@@ -164,8 +168,9 @@ export function planGateSpotOrder(i: GateSpotPlanInput): GateSpotPlan {
     if (i.minQuoteAmount != null && amt < Number(i.minQuoteAmount)) {
       return bad(`최소 주문 금액(${i.minQuoteAmount} ${p.quote})보다 적습니다`);
     }
-    if (i.maxQuoteAmount != null && amt > i.maxQuoteAmount) {
-      return bad(`최대 주문 금액(${i.maxQuoteAmount} ${p.quote})을 초과합니다`);
+    const maxQuote = Math.min(i.maxQuoteAmount ?? Infinity, i.marketMaxQuoteAmount || Infinity);
+    if (amt > maxQuote) {
+      return bad(`최대 주문 금액(${maxQuote} ${p.quote})을 초과합니다`);
     }
     body.time_in_force = 'ioc';
     body.amount = String(amt);
@@ -195,8 +200,10 @@ export function planGateSpotOrder(i: GateSpotPlanInput): GateSpotPlan {
   if (i.minBaseAmount != null && qty < Number(i.minBaseAmount)) {
     return bad(`최소 주문 수량(${i.minBaseAmount} ${p.base})보다 적습니다`);
   }
-  if (i.maxBaseAmount != null && qty > i.maxBaseAmount) {
-    return bad(`최대 주문 수량(${i.maxBaseAmount} ${p.base})을 초과합니다`);
+  const marketMaxBase = i.type === 'MARKET' ? i.marketMaxBaseAmount : null;
+  const maxBase = Math.min(i.maxBaseAmount ?? Infinity, marketMaxBase || Infinity);
+  if (qty > maxBase) {
+    return bad(`최대 주문 수량(${maxBase} ${p.base})을 초과합니다`);
   }
   const note = qty !== rawQty
     ? `수량을 ${rawQty} → ${qty}로 내림했습니다 (최소 단위)`

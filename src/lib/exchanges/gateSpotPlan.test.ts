@@ -344,6 +344,37 @@ export function runGateSpotPlanTests() {
     assert(!sell.ok && sell.reason?.includes('최대 주문 수량') === true, sell.reason);
   });
 
+  test('Gate 시장가 매수는 종목 한도와 시장가 금액 한도 중 더 작은 값을 적용한다', () => {
+    const r = planGateSpotOrder({
+      symbol: 'BTCUSDT', side: 'BUY', type: 'MARKET', quoteAmount: 6,
+      maxQuoteAmount: 9, marketMaxQuoteAmount: 5,
+    });
+    assert(!r.ok && r.reason?.includes('최대 주문 금액(5 USDT)') === true, r.reason);
+  });
+
+  test('Gate 시장가 매도는 전송할 수량을 시장가 한도와 비교한다', () => {
+    const input = {
+      symbol: 'BTCUSDT', side: 'SELL', type: 'MARKET', quantity: 1.239,
+      amountPrecision: 2, maxBaseAmount: 5,
+    } as const;
+    const atCap = planGateSpotOrder({ ...input, marketMaxBaseAmount: 1.23 });
+    assert(atCap.ok, atCap.reason);
+    eq(atCap.body?.amount, '1.23');
+    const aboveCap = planGateSpotOrder({ ...input, marketMaxBaseAmount: 1.22 });
+    assert(!aboveCap.ok && aboveCap.reason?.includes('최대 주문 수량(1.22 BTC)') === true, aboveCap.reason);
+  });
+
+  test('Gate 지정가와 시장가 전용 한도가 0인 주문은 종목 한도를 적용한다', () => {
+    const limit = buyLimit({ marketMaxBaseAmount: 0.1, marketMaxQuoteAmount: 1 });
+    assert(limit.ok, limit.reason);
+    const market = planGateSpotOrder({
+      symbol: 'BTCUSDT', side: 'BUY', type: 'MARKET', quoteAmount: 6,
+      maxQuoteAmount: 6, marketMaxQuoteAmount: 0,
+    });
+    assert(market.ok, market.reason);
+    eq(market.body?.amount, '6');
+  });
+
   // ══════════ 자릿수 → 증분 변환 ══════════
 
   test('가격 자릿수를 확정하는 곳은 한 곳뿐이다', () => {

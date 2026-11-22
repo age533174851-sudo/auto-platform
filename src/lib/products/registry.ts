@@ -457,12 +457,12 @@ const VENUE_PRECISION: Partial<Record<ProductId, VenuePrecision[]>> = {
       // `POST /api/v4/spot/orders` 본문에 그 값이 들어간다.
       //
       // 종목의 수량·금액 한도는 주문 계획에서 확인할 수 있는 값에 적용한다.
-      // 시장가의 반대 단위 금액·수량은 체결 전 알 수 없고, 별도 시장가 수량
-      // 한도(`market_order_max_stock`)도 아직 적용하지 않는다.
+      // 시장가의 반대 단위 금액·수량은 체결 전 알 수 없다.
       venue: 'GATE_SPOT', verdict: 'VENUE_GAP',
       evidence: 'src/lib/exchanges/gateSpotPlan.ts:220',
-      note: '수량·지정가 자릿수와 계산 가능한 수량·금액의 최소·최대 한도를 적용합니다. '
-        + '시장가 수량 전용 한도(market_order_max_stock)는 별도 검증이 필요합니다',
+      note: '수량·지정가 자릿수와 확인 가능한 최소·최대 한도를 적용합니다. '
+        + '시장가 매수는 금액 한도, 매도는 수량 한도까지 검사합니다. '
+        + '시장가 체결 수량·금액과 슬리피지는 거래소에서 결정됩니다',
     },
   ],
   PERP_CRYPTO: [
