@@ -12,10 +12,46 @@ import {
   clockSkewVerdict, overallDiagnoseVerdict, statusToOk,
 } from './testnetDiagnoseVerdict';
 import { summarizeTestnetOpenOrders, summarizeTestnetOpenPositions } from './testnetVenueEvidence';
+import { envHealthPriceText, gateEnvHealthEvidence } from '../exchanges/testnetHealthGate';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 export function runTestnetDiagnoseVerdictTests() {
+  const gateRead = { publicOk: true, privateOk: true, lastPrice: '123.45', balance: '0' };
+  test('Gate 환경 진단 · 확인된 0 잔고는 정상 조회다', () => {
+    const r = gateEnvHealthEvidence(gateRead, true);
+    eq(r.publicOk, true);
+    eq(r.privateOk, true);
+    eq(r.balance, '0');
+  });
+  test('Gate 환경 진단 · 계좌에 잔고 값이 없으면 확인 실패다', () => {
+    for (const balance of [undefined, null, ' ', 'NaN', '0x20', false, []]) {
+      const r = gateEnvHealthEvidence({ ...gateRead, balance }, true);
+      eq(r.privateOk, false);
+      eq(r.balance, undefined);
+      assert(r.error?.includes('잔고') === true);
+    }
+  });
+  test('Gate 환경 진단 · 시세 누락과 정상 계좌는 독립적으로 기록한다', () => {
+    const r = gateEnvHealthEvidence({ ...gateRead, lastPrice: undefined }, true);
+    eq(r.publicOk, false);
+    eq(r.lastPrice, undefined);
+    eq(r.privateOk, true);
+    eq(r.balance, '0');
+  });
+  test('Gate 환경 진단 · 실패한 계좌에서 수치가 딸려 와도 표시하지 않는다', () => {
+    const r = gateEnvHealthEvidence({ ...gateRead, privateOk: false, error: 'fixture auth error' }, true);
+    eq(r.privateOk, false);
+    eq(r.balance, undefined);
+    eq(r.error, 'fixture auth error');
+    eq(gateEnvHealthEvidence(gateRead, false).privateOk, false);
+  });
+  test('환경 진단 · 현재가는 유한한 양수여야 한다', () => {
+    for (const price of [null, '', '0', '-1', 'NaN', '0x20', '1e309', true]) {
+      eq(envHealthPriceText(price), undefined);
+    }
+    eq(envHealthPriceText(' 123.45 '), '123.45');
+  });
 
   // ── ① 포지션 모드 ──
 
