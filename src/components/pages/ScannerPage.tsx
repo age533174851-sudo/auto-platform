@@ -66,7 +66,7 @@ function ScannerPage({ prices, currency, onOpenAsset }: {
                 {cvt(a.p, currency)}
               </div>
               <div style={{ color: a.c >= 0 ? T.grn : T.red, fontSize: 11, fontWeight: 700 }}>
-                {a.c >= 0 ? '+' : ''}{fmtPct(a.c)}
+                {fmtPct(a.c)}
               </div>
             </div>
           </div>
