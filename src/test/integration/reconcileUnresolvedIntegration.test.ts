@@ -46,6 +46,7 @@ class ReconcileDb {
     private nullResult = false,
     /** true면 `exchange_connections` 조회가 error를 돌려준다 */
     private connFails = false,
+    private omitCount = false,
   ) {}
 
   /** 미확정(UNKNOWN) 질의를 몇 번 시도했는가 */
@@ -56,14 +57,20 @@ class ReconcileDb {
   from(table: string): any {
     const db = this;
     let cols = '';
+    let countRequested = false;
+    let maxRows: number | undefined;
     const filters: { col: string; vals: any[] }[] = [];
 
     const builder: any = {
-      select(c?: string) { cols = String(c ?? ''); return builder; },
+      select(c?: string, options?: { count?: 'exact' }) {
+        cols = String(c ?? '');
+        countRequested = options?.count === 'exact';
+        return builder;
+      },
       eq(col: string, val: any) { filters.push({ col, vals: [val] }); return builder; },
       in(col: string, vals: any[]) { filters.push({ col, vals: [...vals] }); return builder; },
       order() { return builder; },
-      limit() { return builder; },
+      limit(max: number) { maxRows = max; return builder; },
       async maybeSingle() {
         if (table === 'exchange_connections') {
           if (db.connFails) return { data: null, error: { message: '연결 조회 실패' } };
@@ -87,7 +94,8 @@ class ReconcileDb {
           // 이 시험의 절반이다.
           const want = q.cols.split(',').map((c) => c.trim()).filter(Boolean);
           return {
-            data: out.map((r: any) => {
+            count: countRequested && !db.omitCount ? out.length : null,
+            data: out.slice(0, maxRows).map((r: any) => {
               if (want.length === 0) return { ...r };
               const o: any = {};
               for (const c of want) if (c in r) o[c] = r[c];
@@ -104,6 +112,7 @@ class ReconcileDb {
 }
 
 const conn = () => ({
+  id: 'fixture-connection',
   exchange_id: 'binance',
   api_key: 'K'.repeat(64),
   api_secret_enc: encryptSecret('S'.repeat(64)),
@@ -117,6 +126,7 @@ function quietVenue(): FakeVenue {
 
 const unknownRow = (id: string) => ({
   user_id: 'u1', client_order_id: id, symbol: 'BTCUSDT', status: 'UNKNOWN',
+  connection_id: 'fixture-connection',
   error_message: '응답 없음', needs_attention: true,
 });
 
@@ -155,14 +165,46 @@ async function checkReconcileListRoute(): Promise<void> {
 
   try {
     const { GET } = await import('../../app/api/orders/reconcile/route');
+    const ordersByConnection = [
+      unknownRow('selected'),
+      { ...unknownRow('other-connection'), connection_id: 'other-connection' },
+      { ...unknownRow('unassigned'), connection_id: null },
+      { ...unknownRow('other-user'), user_id: 'u2' },
+    ];
+    const firstPage = Array.from({ length: 50 }, (_, i) => unknownRow(`pending-${i}`));
+    const moreOrders = [
+      ...firstPage,
+      unknownRow('pending-50'),
+      { ...unknownRow('other-connection'), connection_id: 'other-connection' },
+      { ...unknownRow('other-user'), user_id: 'u2' },
+    ];
     for (const scenario of [
       { name: '확인된 빈 목록', rows: [], count: 0, status: 200 },
       { name: '접수만 된 주문', rows: [{ ...unknownRow('c-1'), status: 'ACKED' }], count: 1, status: 200 },
+      {
+        name: '미리보기는 선택한 연결의 주문만 표시',
+        rows: ordersByConnection, search: '?dry=1&connectionId=fixture-connection',
+        count: 1, status: 200, orderId: 'selected',
+      },
+      {
+        name: '선택한 연결에 대조할 주문이 없으면 0건',
+        rows: ordersByConnection, search: '?dry=1&connectionId=empty-connection',
+        count: 0, status: 200,
+      },
+      { name: '연결을 지정하지 않으면 본인 주문 전체', rows: ordersByConnection, count: 3, status: 200 },
+      { name: '정확히 50건이면 목록이 전부', rows: firstPage, count: 50, status: 200, shown: 50, truncated: false },
+      {
+        name: '50건 초과 시 선택한 연결의 전체 건수를 별도로 표시',
+        rows: moreOrders, search: '?dry=1&connectionId=fixture-connection',
+        count: 51, status: 200, shown: 50, truncated: true,
+      },
+      { name: '전체 건수를 읽지 못한 조회', rows: firstPage, omitCount: true, status: 503 },
       { name: '조회 실패', rows: [], fails: true, status: 503 },
       { name: '잘못된 조회 응답', rows: [], nullResult: true, status: 503 },
       { name: '연결을 지정하지 않은 조회 실패', rows: [], fails: true, search: '', status: 503 },
     ] as any[]) {
-      db = new ReconcileDb(null, { live_orders: scenario.rows }, () => scenario.fails === true, scenario.nullResult);
+      db = new ReconcileDb(null, { live_orders: scenario.rows }, () => scenario.fails === true,
+        scenario.nullResult, false, scenario.omitCount);
       const response = await GET(new Request(
         'http://localhost/api/orders/reconcile' + (scenario.search ?? '?dry=1'),
       ) as Parameters<typeof GET>[0]);
@@ -171,6 +213,11 @@ async function checkReconcileListRoute(): Promise<void> {
         eq(response.status, scenario.status);
         eq(body.ok, scenario.status === 200);
         eq(body.pendingCount, scenario.count);
+        if (scenario.orderId) eq(body.pending[0]?.client_order_id, scenario.orderId);
+        if (scenario.status === 200) {
+          eq(body.pending.length, scenario.shown ?? scenario.count);
+          if (scenario.truncated != null) eq(body.pendingTruncated, scenario.truncated);
+        }
         if (scenario.status === 503) eq(body.error, 'pending_orders_unreadable');
       });
     }
@@ -190,7 +237,7 @@ async function checkReconcileListRoute(): Promise<void> {
  * 앱에서 이 라우트를 fetch하는 곳은 세 군데이고
  * (`OrderPane.tsx` · `AutotradeControl.tsx` 두 곳) **전부
  * `?connectionId=…`를 붙이고 `dry=1`은 쓰지 않는다.** 즉 위
- * `checkReconcileListRoute`의 다섯 시나리오는 **한 군데도 지나가지
+ * `checkReconcileListRoute`의 목록 시나리오는 **한 군데도 지나가지
  * 않는 갈래**를 본다. 그래서 여기서 나머지 절반을 본다.
  *
  * 두 가지를 못박는다:
@@ -351,6 +398,64 @@ export async function runReconcileUnresolvedTests(): Promise<void> {
     test('④ 거래소에 못 닿으면 미확정 수를 0으로 적지 않는다', () => {
       eq(g.reachable, false, '거래소 조회 실패는 판정 불가다');
       eq(g.unresolvedOrderCount, null, '못 물어봤으면 0건이 아니라 모름이다');
+    });
+  }
+
+  {
+    const sibling = { ...unknownRow('sibling'), connection_id: 'other-connection' };
+    const { g } = await run(quietVenue(), { live_orders: [unknownRow('selected'), sibling] });
+
+    test('연결 ID를 생략해도 선택한 연결의 미확정 주문만 센다', () => {
+      eq(g.reachable, true);
+      eq(g.unresolvedOrderCount, 1);
+      eq(g.unresolvedOrders[0]?.clientOrderId, 'selected');
+    });
+  }
+
+  // ══════════ ⑤ 연결이 기록되지 않은 미확정 주문 ══════════
+  //
+  // `live_orders.connection_id`는 012에서 nullable이고 백필 마이그레이션이
+  // 없다. `orderExecutor.ts`는 지금도 `args.connectionId || null`로 **NULL을
+  // 쓴다.** 그런 행은 "다른 연결 것"이 아니라 **어느 연결 것인지 모르는
+  // 것**이다.
+  //
+  // 주문 직전 관문(`preflight.ts`)은 connectionId 없이 이 함수를 부른다.
+  // 여기서 NULL 행을 빼면 미확정이 0건으로 보이고, `reachable`이 true이므로
+  // 호출부에는 **"확인했고 없음"**으로 읽힌다 — 그 위로 새 주문이 나간다.
+  {
+    const unknownConn = { ...unknownRow('conn-unknown'), connection_id: null };
+    const { g } = await run(quietVenue(), { live_orders: [unknownConn] });
+
+    test('⑤ 연결이 기록되지 않은 미확정 주문을 0건으로 적지 않는다', () => {
+      eq(g.reachable, true, '정상 조회다');
+      eq(g.unresolvedOrderCount, 1, '어느 연결 것인지 모르는 것은 "없음"이 아니다');
+      eq(g.unresolvedOrders[0]?.clientOrderId, 'conn-unknown');
+    });
+  }
+
+  // 그래도 **다른 연결의** 미확정은 세지 않는다 — 좁히기를 되돌리지 않는다.
+  {
+    const other = { ...unknownRow('others'), connection_id: 'other-connection' };
+    const nul = { ...unknownRow('conn-unknown-2'), connection_id: null };
+    const mine = unknownRow('mine');
+    const { g } = await run(quietVenue(), { live_orders: [other, nul, mine] });
+
+    test('⑤-2 NULL과 고른 연결만 세고 다른 연결은 빼놓는다', () => {
+      eq(g.unresolvedOrderCount, 2, 'NULL 1건 + 고른 연결 1건');
+      const ids = (g.unresolvedOrders as any[]).map((o: any) => o.clientOrderId).sort();
+      eq(ids.join('·'), ['conn-unknown-2', 'mine'].sort().join('·'), ids.join('·'));
+    });
+  }
+
+  // 한도까지 읽혔으면 더 있는지 모른다 — 건수를 적지 않는다.
+  {
+    const many = Array.from({ length: 60 }, (_, i) =>
+      ({ ...unknownRow('bulk-' + i), connection_id: 'other-connection' }));
+    const { g } = await run(quietVenue(), { live_orders: many });
+
+    test('⑤-3 미확정이 한도만큼 읽히면 건수가 아니라 "모름"이다', () => {
+      eq(g.reachable, false, '전부 세지 못했으면 판정하지 않는다');
+      eq(g.unresolvedOrderCount, null, '못 센 것을 숫자로 적지 않는다');
     });
   }
 

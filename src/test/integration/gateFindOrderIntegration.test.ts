@@ -16,10 +16,12 @@
 // 주석이 막겠다고 적어 둔 바로 그 사고다:
 // "레이트리밋이나 일시적 오류 한 번이 그대로 중복 체결이 될 수 있었다."
 
-import { test, eq, assert } from '../harness';
-import { FakeVenue } from './venueHarness';
+import { test, eq, assert, flushAsync } from '../harness';
+import { FakeDb, FakeVenue, type VenueReply } from './venueHarness';
 // 정적 import — 러너가 이 사슬을 컴파일 대상에 넣어야 한다.
 import { findOrderByClientIdGateFutures } from '../../lib/exchanges/gateFutures';
+import { encryptSecret } from '../../lib/exchanges/crypto';
+import { placeSpotOrder } from '../../lib/exchanges/spotOrderExecutor';
 
 const ORDERS = '/api/v4/futures/usdt/orders';
 const KEY = 'K'.repeat(32);
@@ -44,6 +46,83 @@ function filler(n: number) {
 async function on<T>(v: FakeVenue, fn: () => Promise<T>): Promise<T> {
   const restore = v.install();
   try { return await fn(); } finally { restore(); }
+}
+
+const SPOT_ORDERS = '/api/v4/spot/orders';
+
+async function gateSpotAttempt(lookup: VenueReply, submit: VenueReply) {
+  const venue = new FakeVenue()
+    .on(`${SPOT_ORDERS}/t-`, lookup, 'GET')
+    .on('/api/v4/spot/currency_pairs/BTC_USDT', { json: {
+      id: 'BTC_USDT', trade_status: 'tradable', amount_precision: 5,
+      precision: 2, min_base_amount: '0.0001', min_quote_amount: '1',
+    } }, 'GET')
+    .on(SPOT_ORDERS, submit, 'POST');
+  const previousKey = process.env.EXCHANGE_ENCRYPTION_KEY;
+  process.env.EXCHANGE_ENCRYPTION_KEY = 'gate-spot-order-integration-test-key';
+  try {
+    const db = new FakeDb().seed('exchange_connections', [{
+      id: 'gate-spot-fixture', user_id: 'fixture-user', exchange_id: 'gate',
+      api_key: KEY, api_secret_enc: encryptSecret(SECRET),
+      has_withdrawal: false, is_testnet: true,
+    }]);
+    const result = await on(venue, () => placeSpotOrder(db, {
+      userId: 'fixture-user', connectionId: 'gate-spot-fixture', symbol: 'BTCUSDT',
+      side: 'BUY', type: 'LIMIT', quantity: 0.002, price: 90000,
+    }));
+    const statuses = db.writes
+      .filter(w => w.table === 'live_orders' && w.patch.status)
+      .map(w => w.patch.status);
+    return { result, venue, statuses, row: db.table('live_orders')[0] };
+  } finally {
+    if (previousKey === undefined) delete process.env.EXCHANGE_ENCRYPTION_KEY;
+    else process.env.EXCHANGE_ENCRYPTION_KEY = previousKey;
+  }
+}
+
+async function runGateSpotOrderIdentityChecks() {
+  const absent = { status: 404, json: { label: 'ORDER_NOT_FOUND' } };
+  const filled = { status: 'closed', amount: '0.002', left: '0', filled_amount: '0.002' };
+  const valid = { status: 201, json: { ...filled, id: '7100' } };
+
+  const unreadableLookup = await gateSpotAttempt({ json: false }, valid);
+  test('Gate 현물 중복 조회 응답이 판독 불가이면 주문 전송과 SENT 기록을 막는다', () => {
+    const { result, venue, statuses, row } = unreadableLookup;
+    eq(venue.countOf(`${SPOT_ORDERS}/t-`, 'GET'), 1);
+    eq(venue.countOf(SPOT_ORDERS, 'POST'), 0);
+    eq(result.code, 'dup_check_failed');
+    eq(result.status, 'BLOCKED');
+    eq(row?.status, 'FAILED');
+    eq(statuses.join(','), 'INTENT,FAILED');
+  });
+
+  const missingId = await gateSpotAttempt(absent, { status: 201, json: filled });
+  test('Gate 현물 주문 전송 뒤 응답에 ID가 없으면 장부와 반환에 미확정을 남긴다', () => {
+    const { result, venue, statuses, row } = missingId;
+    eq(venue.countOf(SPOT_ORDERS, 'POST'), 1);
+    eq(result.status, 'UNKNOWN');
+    eq(result.ok, false);
+    eq(result.orderId, undefined);
+    eq(result.filledQty, undefined);
+    eq(row?.status, 'UNKNOWN');
+    eq(statuses.join(','), 'INTENT,SENT,UNKNOWN');
+    assert(row.acked_at == null && row.exchange_order_id == null && row.filled_qty == null);
+  });
+
+  const confirmed = await gateSpotAttempt(absent, valid);
+  test('Gate 현물 주문 없음이 확인되면 한 번 전송하고 유효한 ID와 체결량을 기록한다', () => {
+    const { result, venue, statuses, row } = confirmed;
+    eq(venue.countOf(SPOT_ORDERS, 'POST'), 1);
+    eq(result.status, 'FILLED');
+    eq(result.ok, true);
+    eq(result.orderId, '7100');
+    eq(result.filledQty, 0.002);
+    eq(row?.status, 'FILLED');
+    eq(row.exchange_order_id, '7100');
+    eq(row.filled_qty, 0.002);
+    assert(typeof row.acked_at === 'string');
+    eq(statuses.join(','), 'INTENT,SENT,FILLED');
+  });
 }
 
 export async function runGateFindOrderTests() {
@@ -204,4 +283,8 @@ export async function runGateFindOrderTests() {
       assert(n > 2 && n <= 20, `요청이 ${n}번 나갔다 — 상한이 없거나 쪽을 안 넘긴다`);
     });
   }
+
+  // 앞에서 등록된 비동기 테스트가 가짜 암호화 키를 바꾸기 전에 끝나야 한다.
+  await flushAsync();
+  await runGateSpotOrderIdentityChecks();
 }

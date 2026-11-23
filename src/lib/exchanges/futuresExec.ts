@@ -1095,9 +1095,40 @@ export async function futuresCountOpen(
             : null,
       };
     }
+    // ── 바이낸스: 조회 실패를 0건으로 세지 않는다 ──
+    //
+    // 예전에는 `bf.countOpen`을 그대로 돌려줬다. 그 함수는 두 조회의
+    // `success`를 보지 않고 `(positions || []).length`를 셌다 — 둘 다
+    // 실패해도 `{ 0, 0 }`이고, 킬스위치가 그것을 "잔여 없음"으로 읽어
+    // **완료**를 적었다. 수량을 못 읽은 줄(`amount: NaN`)도
+    // `Math.abs(NaN || 0)`에서 0이 되어 사라졌다.
+    //
+    // 두 조회는 이미 실패를 `success: false`로 돌려준다. 여기서 그 값을
+    // 읽기만 한다. 한쪽만 실패하면 그쪽만 null이다.
     const bf = await import('./binanceFutures');
-    const r = await bf.countOpen(t.key, t.secret, t.testnet);
-    return { positions: r.positions, orders: r.orders, error: null };
+    const [pr, or] = await Promise.all([
+      bf.getFuturesPositions(t.key, t.secret, t.testnet),
+      bf.getFuturesOpenOrders(t.key, t.secret, t.testnet),
+    ]);
+    const errs: string[] = [];
+    let positions: number | null = null;
+    if (pr?.success === true && Array.isArray((pr as any).positions)) {
+      const rows = (pr as any).positions as any[];
+      if (rows.some((p: any) => !Number.isFinite(Number(p?.amount)))) {
+        errs.push('수량을 읽지 못한 포지션이 있습니다 — 포지션 수를 확정할 수 없습니다');
+      } else {
+        positions = rows.filter((p: any) => Math.abs(Number(p.amount)) > 0).length;
+      }
+    } else {
+      errs.push(`포지션 조회 실패 (${pr?.message || '사유 미상'}) — 포지션이 없다는 뜻이 아닙니다`);
+    }
+    let orders: number | null = null;
+    if (or?.success === true && Array.isArray(or.orders)) {
+      orders = or.orders.length;
+    } else {
+      errs.push(`미체결 조회 실패 (${(or as any)?.message || '사유 미상'}) — 주문이 없다는 뜻이 아닙니다`);
+    }
+    return { positions, orders, error: errs.length ? errs.join(' · ') : null };
   } catch (e: any) {
     return { positions: null, orders: null, error: String(e?.message || e) };
   }

@@ -27,7 +27,7 @@ export default function StrategyFactoryPanel({ strategies = [] }: { strategies?:
     const base = strategies.length ? strategies : [{ id: 's1', name: 'BTC EMA 추세 추종', type: 'ema_cross', params: {} }];
     const found: StrategyProposal[] = [];
     for (const s of base) {
-      const p = diagnoseAndPropose({ strategyId: s.id, name: s.name, type: s.type, params: s.params || {}, regimeStats: DEMO_STATS });
+      const p = diagnoseAndPropose({ strategyId: s.id, name: s.name, type: s.type, params: s.params || {}, regimeStats: DEMO_STATS, evidence: 'DEMO' });
       if (p && !proposals.some(x => x.baseName === p.baseName)) found.push(p);
     }
     if (found.length) { setProposals(prev => [...found, ...prev]); notifySuccess('AI 개선안 생성', `${found.length}개 전략의 개선안을 제안했어요`); }
@@ -36,7 +36,9 @@ export default function StrategyFactoryPanel({ strategies = [] }: { strategies?:
 
   const startShadow = (id: string) => {
     setProposals(prev => prev.map(p => p.id === id ? { ...p, status: 'shadow', shadowDays: 1 } : p));
-    notifyInfo('Shadow Trading 시작', '2주간 실시간 병렬 검증을 시작해요 (실주문 없음)');
+    // 전에는 "2주간 실시간 병렬 검증을 시작해요"라고 적었다. 이 화면은
+    // 실시간 검증을 하지 않는다 — 데모 흐름을 보여 준다.
+    notifyInfo('Shadow 검증 흐름 (데모)', '데모 데이터로 검증 흐름만 보여줍니다 — 실주문·실측 성과 없음');
   };
 
   // 데모: 검증 완료 시뮬 (실배포 시 실제 섀도우 성과 누적)
@@ -46,11 +48,17 @@ export default function StrategyFactoryPanel({ strategies = [] }: { strategies?:
       // 개선안이 원본보다 나은 케이스 (거래량 필터로 승률↑)
       const base = pnlSeries(20, 45, 3);
       const shadow = pnlSeries(20, 63, 7);
-      return updateShadow(p, base, shadow, p.shadowTarget);
+      return updateShadow(p, base, shadow, p.shadowTarget, 'DEMO');
     }));
   };
 
   const promote = (id: string) => {
+    // 이 화면의 성과는 전부 데모다. 실전 투입이라고 적으면 거짓이 된다.
+    const target = proposals.find(p => p.id === id);
+    if (!target || target.evidence !== 'MEASURED') {
+      notifyInfo('데모에서는 승격하지 않습니다', '실측 성과가 쌓인 뒤에만 승격할 수 있어요 (이 화면은 데모)');
+      return;
+    }
     setProposals(prev => prev.map(p => p.id === id ? { ...p, status: 'promoted' } : p));
     notifySuccess('전략 승격', '검증을 통과한 개선안이 실전에 투입됩니다');
   };
@@ -73,7 +81,8 @@ export default function StrategyFactoryPanel({ strategies = [] }: { strategies?:
           <div style={{ color: T.muted, fontSize: 11 }}>개선안 제안 → Shadow 검증 → 우위일 때만 승격</div>
         </div>
       </div>
-      <div style={{ color: T.muted, fontSize: 10, marginBottom: 12, lineHeight: 1.4 }}>AI가 만든 전략도 반드시 2주 실시간 검증을 거쳐야 실전에 투입됩니다.</div>
+      <div style={{ color: '#F59E0B', fontSize: 10, fontWeight: 800, marginBottom: 6 }}>데모 — 이 화면의 성과 숫자는 실측이 아닙니다</div>
+      <div style={{ color: T.muted, fontSize: 10, marginBottom: 12, lineHeight: 1.4 }}>실전 투입 전 2주 실시간 검증이 원칙이며, <b>이 화면은 그 검증을 수행하지 않습니다</b> — 하드코딩된 데모 데이터로 흐름만 보여줍니다.</div>
 
       <button onClick={generate}
         style={{ width: '100%', minHeight: 44, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7, background: 'linear-gradient(135deg,#06B6D4,#0891B2)', color: '#fff', border: 'none', borderRadius: 12, fontWeight: 800, fontSize: 13, cursor: 'pointer', marginBottom: 14 }}>

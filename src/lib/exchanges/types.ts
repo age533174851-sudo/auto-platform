@@ -91,6 +91,18 @@ export interface ExchangeBalance {
   valueKRW?: number;
 }
 
+export function exchangePermissionLabel(
+  connection: Pick<ConnectedExchange, 'exchange' | 'isPaper' | 'permissions'>,
+  permission: keyof ConnectedExchange['permissions'],
+): '허용' | '없음' | '미확인' {
+  if (connection.permissions[permission]) return '허용';
+  // Gate 연결 테스트는 현물 잔고 조회만 검증한다. 거래 권한은 별도 확인이 필요하다.
+  if (permission === 'trading' && connection.exchange === 'gate' && !connection.isPaper) {
+    return '미확인';
+  }
+  return '없음';
+}
+
 export interface ConnectPayload {
   exchange:   ExchangeId;
   apiKey:     string;

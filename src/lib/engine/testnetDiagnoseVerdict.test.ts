@@ -9,13 +9,49 @@
 import { test, assert, eq } from '../../test/harness';
 import {
   positionModeVerdict, isolationVerdict, withdrawalEvidence,
-  overallDiagnoseVerdict, statusToOk,
+  clockSkewVerdict, overallDiagnoseVerdict, statusToOk,
 } from './testnetDiagnoseVerdict';
 import { summarizeTestnetOpenOrders, summarizeTestnetOpenPositions } from './testnetVenueEvidence';
+import { envHealthPriceText, gateEnvHealthEvidence } from '../exchanges/testnetHealthGate';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 export function runTestnetDiagnoseVerdictTests() {
+  const gateRead = { publicOk: true, privateOk: true, lastPrice: '123.45', balance: '0' };
+  test('Gate 환경 진단 · 확인된 0 잔고는 정상 조회다', () => {
+    const r = gateEnvHealthEvidence(gateRead, true);
+    eq(r.publicOk, true);
+    eq(r.privateOk, true);
+    eq(r.balance, '0');
+  });
+  test('Gate 환경 진단 · 계좌에 잔고 값이 없으면 확인 실패다', () => {
+    for (const balance of [undefined, null, ' ', 'NaN', '0x20', false, []]) {
+      const r = gateEnvHealthEvidence({ ...gateRead, balance }, true);
+      eq(r.privateOk, false);
+      eq(r.balance, undefined);
+      assert(r.error?.includes('잔고') === true);
+    }
+  });
+  test('Gate 환경 진단 · 시세 누락과 정상 계좌는 독립적으로 기록한다', () => {
+    const r = gateEnvHealthEvidence({ ...gateRead, lastPrice: undefined }, true);
+    eq(r.publicOk, false);
+    eq(r.lastPrice, undefined);
+    eq(r.privateOk, true);
+    eq(r.balance, '0');
+  });
+  test('Gate 환경 진단 · 실패한 계좌에서 수치가 딸려 와도 표시하지 않는다', () => {
+    const r = gateEnvHealthEvidence({ ...gateRead, privateOk: false, error: 'fixture auth error' }, true);
+    eq(r.privateOk, false);
+    eq(r.balance, undefined);
+    eq(r.error, 'fixture auth error');
+    eq(gateEnvHealthEvidence(gateRead, false).privateOk, false);
+  });
+  test('환경 진단 · 현재가는 유한한 양수여야 한다', () => {
+    for (const price of [null, '', '0', '-1', 'NaN', '0x20', '1e309', true]) {
+      eq(envHealthPriceText(price), undefined);
+    }
+    eq(envHealthPriceText(' 123.45 '), '123.45');
+  });
 
   // ── ① 포지션 모드 ──
 
@@ -268,6 +304,89 @@ export function runTestnetDiagnoseVerdictTests() {
     eq(p.openPositionCount, 3);
     eq(p.symbols.join(','), 'BTCUSDT,ETHUSDT');
     eq(p.source, 'BINANCE_TESTNET_POSITION_RISK');
+  });
+
+  // ── ④ 서버 시각 오차 ──
+  //
+  //   여기서 지키는 것: 서버 시각을 못 읽은 것을 **오차 0으로 적지
+  //   않는다**, 왕복이 길어 결론이 안 나는 것을 **통과로 적지 않는다**,
+  //   허용 오차를 받지 못하면 **비교 자체를 하지 않는다**.
+
+  const T0 = 1_700_000_000_000;
+  const TOL = 5_000;
+
+  test('시계 ① 왕복이 짧고 오차가 작으면 통과다 — 구간을 함께 적는다', () => {
+    const v = clockSkewVerdict({
+      serverTimeMs: T0, sentAtMs: T0 - 10, receivedAtMs: T0 + 10, toleranceMs: TOL,
+    });
+    eq(v.status, 'PASS'); eq(v.code, 'IN_TOLERANCE');
+    eq(v.roundTripMs, 20);
+    assert(v.rangeMs?.[0] === -10 && v.rangeMs?.[1] === 10,
+      '오차가 들어갈 수 있는 구간을 적는다 — 한 점으로 단정하지 않는다');
+  });
+
+  test('★ 시계 ② 서버 시각을 못 읽으면 오차 0이 아니라 UNKNOWN이다', () => {
+    for (const st of [null, undefined, 0, NaN, -1] as any[]) {
+      const v = clockSkewVerdict({
+        serverTimeMs: st, sentAtMs: T0, receivedAtMs: T0 + 5, toleranceMs: TOL,
+      });
+      eq(v.status, 'UNKNOWN', `서버 시각 ${String(st)}`);
+      eq(v.code, 'SERVER_TIME_UNREAD');
+      eq(v.rangeMs, null, '재지 못한 구간을 지어내지 않는다');
+      eq(v.roundTripMs, 5, '왕복은 쟀으므로 그것은 남긴다');
+    }
+  });
+
+  test('★ 시계 ③ 허용 오차를 받지 못하면 비교하지 않는다', () => {
+    for (const t of [undefined, null, 0, -1, NaN] as any[]) {
+      const v = clockSkewVerdict({
+        // 오차가 분명히 있는 입력이다. 그래도 허용선을 모르면 판정하지 않는다.
+        serverTimeMs: T0 + 500, sentAtMs: T0, receivedAtMs: T0, toleranceMs: t,
+      });
+      eq(v.status, 'UNKNOWN', `허용 오차 ${String(t)}`);
+      eq(v.code, 'TOLERANCE_UNUSABLE');
+    }
+  });
+
+  test('시계 ④ 구간이 전부 허용선 밖이면 실패다 — 키 문제가 아니라고 적는다', () => {
+    const v = clockSkewVerdict({
+      serverTimeMs: T0 + 20_000, sentAtMs: T0, receivedAtMs: T0 + 30, toleranceMs: TOL,
+    });
+    eq(v.status, 'FAIL'); eq(v.code, 'SKEW_OUT_OF_TOLERANCE');
+    assert(/-1021/.test(v.reason), '거부 코드를 적는다');
+    assert(/키 문제가 아닙니다/.test(v.reason),
+      '멀쩡한 키를 다시 발급하게 만들지 않는다');
+  });
+
+  test('★ 시계 ⑤ 왕복이 길어 허용선을 걸치면 통과도 실패도 아니다', () => {
+    const v = clockSkewVerdict({
+      serverTimeMs: T0, sentAtMs: T0 - 12_000, receivedAtMs: T0 + 12_000, toleranceMs: TOL,
+    });
+    eq(v.status, 'UNKNOWN', '느린 회선에서 "시계가 맞다"가 공짜로 나오지 않는다');
+    eq(v.code, 'MEASUREMENT_INCONCLUSIVE');
+    assert(v.rangeMs != null, '구간은 적는다 — 사람이 다시 잴 수 있게');
+    assert(/다시 재세요/.test(v.reason), '다음 할 일을 적는다');
+  });
+
+  test('★ 시계 ⑥ 받은 시각이 보낸 시각보다 앞이면 측정이 성립하지 않는다', () => {
+    const v = clockSkewVerdict({
+      serverTimeMs: T0, sentAtMs: T0 + 10, receivedAtMs: T0, toleranceMs: TOL,
+    });
+    eq(v.status, 'UNKNOWN'); eq(v.code, 'LOCAL_WINDOW_UNUSABLE');
+  });
+
+  test('★ 시계 ⑦ 모르는 오차가 섞이면 전체 판정이 READY가 아니다', () => {
+    const r = overallDiagnoseVerdict([{ status: 'PASS' }, clockSkewVerdict(null)]);
+    eq(r.verdict, 'UNKNOWN'); eq(r.unknown, 1);
+    eq(statusToOk(clockSkewVerdict(null).status), false);
+  });
+
+  test('★ 시계 ⑧ 판정은 시계를 맞추지도 거래소를 부르지도 않는다', () => {
+    const src = readFileSync(
+      resolve(process.cwd(), 'src/lib/engine/testnetDiagnoseVerdict.ts'), 'utf8');
+    for (const bad of ['fetch(', 'Date.now', 'setSystemTime', 'execSync']) {
+      eq(src.includes(bad), false, `${bad}가 판정 정본에 있다 — 입력은 이미 재어 온 숫자뿐이다`);
+    }
   });
 
   test('★ 판정 정본은 기대 배율을 스스로 적지 않는다', () => {
