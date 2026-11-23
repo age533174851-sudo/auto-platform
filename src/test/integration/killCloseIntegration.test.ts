@@ -570,4 +570,78 @@ export async function runKillCloseIntegrationTests() {
       eq(p.cancelIds.length, 0);
     }
   });
+
+  await runCancelProtectionCountTests();
+}
+
+// ══════════ 전량 청산 뒤 보호주문 정리 — 거절된 취소를 "취소됨"으로 세지 않는다 ══════════
+//
+// 실제로 도는 것: `futuresCancelProtection` → `getFuturesOpenOrders` →
+//   `cancelFuturesOrder` → 서명 생성 · 응답 파싱. 가짜는 `fetch` 한 겹.
+//
+// `cancelFuturesOrder`는 **던지지 않는다** — 거래소 거절을 받으면
+// `{ success: false }`를 돌려준다. 그런데 정리 루프는
+// `try { await cancel(); n++ } catch {}`였다. catch는 한 번도 발동하지
+// 않으므로 **거절된 취소가 전부 "취소됨"으로 세어졌다.** 결과는
+// `cancelled: 1 · " · 남은 보호 주문 1건 취소"` — 평탄해진 포지션 위에
+// 손절이 무장된 채 남아 있는데(트리거에 닿으면 반대 포지션이 열린다)
+// 화면은 "정리했다"고 말한다.
+const CP_STOP = {
+  orderId: 8801, symbol: 'BTCUSDT', type: 'STOP_MARKET', side: 'SELL',
+  stopPrice: '99000', closePosition: true, reduceOnly: false,
+  origQty: '0', price: '0', workingType: 'MARK_PRICE', status: 'NEW',
+};
+const CP_TP = { ...CP_STOP, orderId: 8802, type: 'TAKE_PROFIT_MARKET', stopPrice: '120000' };
+
+async function runCancelProtectionCountTests() {
+  const { futuresCancelProtection } = await import('../../lib/exchanges/futuresAdapter');
+  const run = async (v: FakeVenue) => {
+    const restore = v.install();
+    try { return await futuresCancelProtection('binance', KEY, SECRET, true, 'BTCUSDT'); }
+    finally { restore(); }
+  };
+
+  // ── ⑭ 거래소가 취소를 거절하면 0건이다 ──
+  {
+    const v = new FakeVenue()
+      .on(OPEN, { json: [CP_STOP] })
+      .on(ORDER, { status: 500, json: { code: -1000, msg: 'Internal error' } }, 'DELETE');
+    const r = await run(v);
+    test('★ ⑭ 거절된 취소를 "취소됨"으로 세지 않는다', () => {
+      eq(v.countOf(ORDER, 'DELETE'), 1, '취소 시도는 실제로 나가야 한다');
+      eq(r.cancelled, 0, '거래소가 거절했는데 1건 취소로 적었다');
+      assert(r.note.includes('⚠'),
+        `남은 손절을 사람에게 알리지 않았다: ${JSON.stringify(r.note)}`);
+      assert(!/^ · 남은 보호 주문 \d+건 취소$/.test(r.note), '성공 문구가 나갔다');
+    });
+  }
+
+  // ── ⑮ 둘 중 하나만 거절되면 "1건만"이다 ──
+  {
+    const v = new FakeVenue()
+      .on(OPEN, { json: [CP_STOP, CP_TP] })
+      .onParams(ORDER, 'DELETE', { orderId: '8801' },
+        { json: { orderId: 8801, status: 'CANCELED' } })
+      .onParams(ORDER, 'DELETE', { orderId: '8802' },
+        { status: 400, json: { code: -1003, msg: 'Too many requests' } });
+    const r = await run(v);
+    test('★ ⑮ 일부만 취소되면 실제로 취소된 수만 센다', () => {
+      eq(v.countOf(ORDER, 'DELETE'), 2);
+      eq(r.cancelled, 1);
+      assert(r.note.includes('⚠') && r.note.includes('2건 중 1건'),
+        `부분 실패 문구가 아니다: ${JSON.stringify(r.note)}`);
+    });
+  }
+
+  // ── ⑯ 받아들여진 취소는 그대로 센다 (⑭가 공허하지 않다) ──
+  {
+    const v = new FakeVenue()
+      .on(OPEN, { json: [CP_STOP] })
+      .on(ORDER, { json: { orderId: 8801, status: 'CANCELED' } }, 'DELETE');
+    const r = await run(v);
+    test('★ ⑯ 받아들여진 취소는 1건으로 센다', () => {
+      eq(r.cancelled, 1);
+      eq(r.note, ' · 남은 보호 주문 1건 취소');
+    });
+  }
 }
