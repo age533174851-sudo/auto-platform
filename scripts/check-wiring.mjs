@@ -175,6 +175,15 @@ const ALLOW = new Map([
     + 'score가 null이면 막으므로 지금 배선하면 모든 주문이 멎는다. '
     + '진입 신호에 점수를 매기는 스코어러가 먼저 필요하다 '
     + '(tradesToday·recentEntryMs는 risk/tradingHistory가 이미 만든다)'],
+  ['src/lib/strategies/nineKstMonitorPolicy.ts',
+    '막는 것: 포지션별 청산 신호(exitSignal)와 감시 생사(monitorHealthy)를 '
+    + '만드는 곳이 저장소에 없다. decideMonitoredExit은 둘 중 하나라도 모르면 '
+    + 'UNVERIFIED를 돌려주므로 지금 배선하면 09시 창의 모든 포지션이 '
+    + '"확인 불가"로만 찍힌다. 그리고 배선 자체가 청산 권한 변경이라 '
+    + '승인이 필요하다 — 모듈 머리글도 "실제 청산 권한은 별도 감사·테스트 '
+    + '후 연결한다"고 적어 두었다. 09시 창 키(kstNineEntryWindowKey)는 '
+    + '이미 순수 함수로 증명돼 있다 — 끊긴 것은 신호 생산자뿐이다'],
+
   // 챌린지 도메인 모듈의 면제는 **지웠다.** PR3의 스윕(paperChallengeSweep.ts)이
   // transitionAllowed·terminalStatusFor를 실제로 부르면서 배선됐다 —
   // 면제 목록이 낡으면 다음에 진짜로 끊긴 것을 덮는다.

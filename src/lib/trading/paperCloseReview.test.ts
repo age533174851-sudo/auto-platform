@@ -294,6 +294,7 @@ async function hitCloseRoute(read: { data: any; error: any }, uid = 'u-1') {
 
 async function hitPaperRoute(
   route: 'close' | 'modify', body: any, read: { data: any; error: any }, uid = 'u-1',
+  opts: { write?: { data: any; error: any } } = {},
 ) {
   const serverPath = require.resolve('../supabase/server');
   const adminPath = require.resolve('../supabase/admin');
@@ -303,12 +304,19 @@ async function hitPaperRoute(
   let selects = 0;
   let rpcs = 0;
   let updates = 0;
+  /** UPDATE에 붙은 조건. `status='open'`이 붙었는지 본다. */
+  const writeEqs: Array<[string, unknown]> = [];
   const db = {
     from: (_t: string) => {
+      let writing = false;
       const q: any = {
-        select: () => { selects++; return q; },
-        update: () => { updates++; return q; },
-        eq: () => q,
+        // UPDATE 뒤의 `.select()`는 **맞은 행**을 돌려준다(PostgREST).
+        select: () => {
+          if (writing) return Promise.resolve(opts.write ?? { data: [{ id: 'p1' }], error: null });
+          selects++; return q;
+        },
+        update: () => { updates++; writing = true; return q; },
+        eq: (k: string, v: unknown) => { if (writing) writeEqs.push([k, v]); return q; },
         maybeSingle: async () => read,
       };
       return q;
@@ -339,7 +347,7 @@ async function hitPaperRoute(
     headers: { get: () => null },
   };
   const res = await POST!(req);
-  return { status: res.status as number, json: await res.json(), selects, rpcs, updates };
+  return { status: res.status as number, json: await res.json(), selects, rpcs, updates, writeEqs };
 }
 
 function closeRouteFacts() {
@@ -406,5 +414,55 @@ function modifyRouteFacts() {
     eq(r.status, 404);
     eq(r.json.error, 'not_found');
     eq(r.updates, 0);
+  });
+
+  // ── 읽은 뒤에 닫힌 포지션 ──
+  //
+  // 포지션을 읽은 순간에는 열려 있었는데, 시세를 읽는 사이 감시기가 손절로
+  // 닫았다(정산은 `status='open'`일 때만 바뀌는 조건부 UPDATE다 — 072).
+  // 예전 수정 UPDATE는 `id`·`user_id`만 보고 **맞은 행 수를 보지 않았다.**
+  // 그래서 닫힌 포지션의 손절 칸을 덮어쓰고 "저장했습니다"를 답했다 —
+  // 사용자는 손절을 옮겼다고 믿는데 포지션은 이미 옛 손절로 닫혀 있다.
+  //
+  // 시세 조회는 네트워크로 가므로 시험에서는 **모르는 시장**을 준다 —
+  // `readPaperMarkPrice`가 그 자리에서 UNSUPPORTED_MARKET으로 돌아오고,
+  // 라우트는 진입가(3000)로 방향을 본다. 여기서 보려는 것은 그 뒤의 쓰기다.
+  // (비동기 시험이 동시에 돌아 `require.cache` 스텁은 서로 새어 나간다.)
+  const openPos = {
+    id: 'p1', user_id: 'u-1', symbol: 'ETHUSDT', side: 'LONG',
+    status: 'open', entry_price: 3000, market: 'TEST_OFFLINE',
+  };
+
+  test('★ 수정: UPDATE는 열린 포지션에만 맞는다 (status=open 조건)', async () => {
+    const r = await hitPaperRoute('modify', body, { data: openPos, error: null }, 'u-1');
+    eq(r.status, 200, JSON.stringify(r.json));
+    eq(r.updates, 1);
+    assert(r.writeEqs.some(([k, v]) => k === 'status' && v === 'open'),
+      `UPDATE에 status='open' 조건이 없다: ${JSON.stringify(r.writeEqs)}`);
+    assert(r.writeEqs.some(([k, v]) => k === 'user_id' && v === 'u-1'), '소유자 조건이 빠졌다');
+  });
+
+  test('★ 수정: 읽은 뒤 청산돼 0행이 바뀌면 409 already_closed — "저장했습니다"라 하지 않는다', async () => {
+    const r = await hitPaperRoute('modify', body, { data: openPos, error: null }, 'u-1',
+      { write: { data: [], error: null } });
+    eq(r.status, 409, JSON.stringify(r.json));
+    eq(r.json.ok, false);
+    eq(r.json.error, 'already_closed');
+    assert(!String(r.json.message).includes('저장했습니다'), `저장했다고 답했다: ${r.json.message}`);
+  });
+
+  test('★ 수정: 바뀐 행을 확인하지 못하면 성공으로 적지 않는다 (503)', async () => {
+    const r = await hitPaperRoute('modify', body, { data: openPos, error: null }, 'u-1',
+      { write: { data: null, error: null } });
+    eq(r.status, 503, JSON.stringify(r.json));
+    eq(r.json.ok, false);
+    eq(r.json.error, 'update_unconfirmed');
+  });
+
+  test('수정: UPDATE 오류는 그대로 500 update_failed', async () => {
+    const r = await hitPaperRoute('modify', body, { data: openPos, error: null }, 'u-1',
+      { write: { data: null, error: { message: 'boom' } } });
+    eq(r.status, 500);
+    eq(r.json.error, 'update_failed');
   });
 }
