@@ -86,6 +86,7 @@ import { runInventoryTests } from './src/lib/ui/inventory.test';
 import { runPracticeEnvTests } from './src/lib/autotrade/practiceEnv.test';
 import { runDisplayTests } from './src/lib/ui/display.test';
 import { runDemoDisclosureTests } from './src/lib/ui/demoDisclosure.test';
+import { runReportSourceTests } from './src/lib/ui/reportSource.test';
 import { runStatusTests } from './src/lib/ui/status.test';
 import { runPaperRunnerModeTests } from './src/lib/ui/paperRunnerMode.test';
 import { runDueDiagViewTests } from './src/lib/ui/dueDiagView.test';
@@ -486,6 +487,7 @@ runTradeModeTests(); runPaperPlanTests(); runDailyLossTests(); runRegimeGateTest
 runStoredHoldingsTests(); runStatsTests(); runRoutingTests(); runGateSpotPlanTests(); runLossStreakTests(); runTradeVetoTests(); runCalibrationTests(); runRecordPredictionTests();
 runSubAccountTests(); runExitRulesTests(); runSafetyLogTests(); runFredTests(); runEventGuardTests(); runStopVerifyTests(); runManualOverrideTests(); runGateRecoveryTests();
 runDemoDisclosureTests();
+runReportSourceTests();
 runWebhookAuthTests();
 runShortGuardTests();
 runEmergencyLevelTests();
