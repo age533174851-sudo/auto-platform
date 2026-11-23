@@ -134,10 +134,29 @@ export async function POST(req: NextRequest) {
   if (stopLoss !== undefined) patch.stop_loss = stopLoss;
   if (takeProfit !== undefined) patch.take_profit = takeProfit;
 
-  const { error } = await (sb.from('paper_positions') as any)
-    .update(patch).eq('id', positionId).eq('user_id', uid);
+  // **열린 포지션에만 쓰고, 맞은 행을 센다.** 위에서 읽은 뒤 시세를 읽는
+  // 사이에 감시기가 이 포지션을 닫을 수 있다(정산은 `status='open'`일 때만
+  // 바뀌는 조건부 UPDATE다 — 072). 예전에는 `id`·`user_id`만 보고 결과
+  // 행 수를 보지 않아서, 닫힌 포지션의 손절 칸을 덮어쓰고 "저장했습니다"를
+  // 답했다 — 사용자는 손절을 옮겼다고 믿는데 포지션은 이미 옛 손절로 닫혀 있다.
+  const { data: written, error } = await (sb.from('paper_positions') as any)
+    .update(patch).eq('id', positionId).eq('user_id', uid).eq('status', 'open')
+    .select('id');
   if (error) {
     return NextResponse.json({ ok: false, error: 'update_failed', message: error.message }, { status: 500 });
+  }
+  // 바뀐 행을 확인하지 못했으면 성공이 아니다 — 모름을 "저장했습니다"로 적지 않는다.
+  if (!Array.isArray(written)) {
+    return NextResponse.json({
+      ok: false, error: 'update_unconfirmed',
+      message: '저장됐는지 확인하지 못했습니다 — 포지션을 새로 고쳐 손절·익절을 확인하세요',
+    }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
+  }
+  if (written.length === 0) {
+    return NextResponse.json({
+      ok: false, error: 'already_closed',
+      message: '그사이 포지션이 청산되어 손절·익절을 바꾸지 않았습니다',
+    }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
   }
 
   return NextResponse.json({
