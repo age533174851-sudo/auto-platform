@@ -12,9 +12,17 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
 
-const GEMINI_MODEL = (process.env.GEMINI_MODEL || "gemini-2.5-flash").trim();
+const rawGeminiModel = (process.env.GEMINI_MODEL || "").trim();
+let geminiModel =
+  !rawGeminiModel || rawGeminiModel === "gemini-2.5-flash"
+    ? "gemini-3.8-flash"
+    : rawGeminiModel;
+
 const OPENAI_MODEL = (process.env.OPENAI_MODEL || "gpt-4.1-mini").trim();
-const ANTHROPIC_MODEL = (process.env.ANTHROPIC_MODEL || "claude-sonnet-4-20250514").trim();
+
+const rawAnthropicModel = (process.env.ANTHROPIC_MODEL || "").trim();
+let anthropicModel =
+  rawAnthropicModel === "claude-sonnet-4-20250514" ? "" : rawAnthropicModel;
 
 const SECRET_VALUES = [GITHUB_TOKEN, GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY]
   .filter((v) => v && v.length >= 8);
@@ -30,6 +38,8 @@ function redact(text) {
     .replace(/\bgh[pousr]_[0-9A-Za-z]{20,}\b/g, "[REDACTED_TOKEN]")
     .replace(/\bgithub_pat_[0-9A-Za-z_]{20,}\b/g, "[REDACTED_TOKEN]");
 }
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function fetchJson(url, options = {}) {
   const res = await fetch(url, { ...options, signal: AbortSignal.timeout(60_000) });
@@ -71,8 +81,27 @@ async function postComment(owner, repo, body) {
   });
 }
 
-async function callGemini(system, user) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent`;
+async function resolveGeminiModel() {
+  const list = await fetchJson("https://generativelanguage.googleapis.com/v1beta/models?pageSize=50", {
+    headers: { "x-goog-api-key": GEMINI_API_KEY },
+  });
+  const names = (list?.models || [])
+    .filter((m) => Array.isArray(m.supportedGenerationMethods) && m.supportedGenerationMethods.includes("generateContent"))
+    .map((m) => String(m.name || "").replace(/^models\//, ""))
+    .filter(Boolean);
+  const picked =
+    names.find((id) => /^gemini-3.*flash/i.test(id)) ||
+    names.find((id) => /gemini.*flash/i.test(id) && !/2\.5|2\.0|1\.5/i.test(id)) ||
+    names.find((id) => /flash/i.test(id)) ||
+    names[0];
+  if (!picked) throw new Error("Gemini 사용 가능한 모델을 찾지 못했습니다.");
+  console.log(`[info] Gemini 모델 자동 선택: ${picked}`);
+  geminiModel = picked;
+  return picked;
+}
+
+async function requestGemini(model, system, user) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
   const data = await fetchJson(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY },
@@ -81,7 +110,27 @@ async function callGemini(system, user) {
       contents: [{ role: "user", parts: [{ text: user }] }],
     }),
   });
-  return (data?.candidates?.[0]?.content?.parts || []).map((p) => p.text || "").join("\n").trim();
+  const text = (data?.candidates?.[0]?.content?.parts || []).map((p) => p.text || "").join("\n").trim();
+  if (!text) console.log(`[warn] GEMINI 빈 응답 (finishReason=${data?.candidates?.[0]?.finishReason || "unknown"})`);
+  return text;
+}
+
+async function callGemini(system, user) {
+  try {
+    return await requestGemini(geminiModel, system, user);
+  } catch (e) {
+    const msg = String(e.message || "");
+    if (msg.includes("HTTP 404")) {
+      await resolveGeminiModel();
+      return await requestGemini(geminiModel, system, user);
+    }
+    if (msg.includes("HTTP 503")) {
+      console.log("[info] GEMINI 503 혼잡 — 3초 후 1회 재시도");
+      await sleep(3000);
+      return await requestGemini(geminiModel, system, user);
+    }
+    throw e;
+  }
 }
 
 async function callOpenAI(system, user) {
@@ -93,10 +142,30 @@ async function callOpenAI(system, user) {
       messages: [{ role: "system", content: system }, { role: "user", content: user }],
     }),
   });
-  return data?.choices?.[0]?.message?.content?.trim() || "";
+  const text = data?.choices?.[0]?.message?.content?.trim() || "";
+  if (!text) console.log(`[warn] OPENAI 빈 응답 (finish_reason=${data?.choices?.[0]?.finish_reason || "unknown"})`);
+  return text;
 }
 
-async function callAnthropic(system, user) {
+async function resolveAnthropicModel() {
+  const list = await fetchJson("https://api.anthropic.com/v1/models?limit=20", {
+    headers: {
+      "x-api-key": ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+    },
+  });
+  const ids = (list?.data || []).map((m) => m.id).filter(Boolean);
+  const picked =
+    ids.find((id) => /sonnet/i.test(id)) ||
+    ids.find((id) => /claude/i.test(id)) ||
+    ids[0];
+  if (!picked) throw new Error("Anthropic 사용 가능한 모델을 찾지 못했습니다.");
+  console.log(`[info] Anthropic 모델 자동 선택: ${picked}`);
+  anthropicModel = picked;
+  return picked;
+}
+
+async function requestAnthropic(model, system, user) {
   const data = await fetchJson("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -105,20 +174,54 @@ async function callAnthropic(system, user) {
       "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify({
-      model: ANTHROPIC_MODEL,
-      max_tokens: 1200,
+      model,
+      max_tokens: 3000,
       system,
       messages: [{ role: "user", content: user }],
     }),
   });
-  return (data?.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
+  const text = (data?.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
+  if (!text) {
+    const types = (data?.content || []).map((b) => b.type).join(",") || "none";
+    console.log(`[warn] ANTHROPIC 빈 응답 (stop_reason=${data?.stop_reason || "unknown"}, blocks=${types})`);
+  }
+  return text;
+}
+
+async function callAnthropic(system, user) {
+  if (!anthropicModel) await resolveAnthropicModel();
+  try {
+    return await requestAnthropic(anthropicModel, system, user);
+  } catch (e) {
+    if (String(e.message).includes("HTTP 404")) {
+      await resolveAnthropicModel();
+      return await requestAnthropic(anthropicModel, system, user);
+    }
+    throw e;
+  }
 }
 
 const PROVIDERS = [
-  { id: "GEMINI", key: GEMINI_API_KEY, model: GEMINI_MODEL, call: callGemini },
-  { id: "OPENAI", key: OPENAI_API_KEY, model: OPENAI_MODEL, call: callOpenAI },
-  { id: "ANTHROPIC", key: ANTHROPIC_API_KEY, model: ANTHROPIC_MODEL, call: callAnthropic },
+  { id: "GEMINI", key: GEMINI_API_KEY, get model() { return geminiModel; }, call: callGemini },
+  { id: "OPENAI", key: OPENAI_API_KEY, get model() { return OPENAI_MODEL; }, call: callOpenAI },
+  { id: "ANTHROPIC", key: ANTHROPIC_API_KEY, get model() { return anthropicModel || "auto"; }, call: callAnthropic },
 ];
+
+const COUNCIL_SYSTEM_PROMPT = [
+  "너는 TRAIGO(age533174851-sudo/auto-platform)의 7개 AI 동등 협업자 중 하나다.",
+  "규칙(docs/AI_COLLABORATION_RULES.md):",
+  "1. 특정 AI를 총괄·최종 결정자·지시자로 취급하지 말고 동등하게 분석·설계·오류 수정·테스트·교차 검증에 참여하라.",
+  "2. 의견 충돌은 추측이 아니라 실제 코드·테스트·로그·PR 상태를 근거로 비교하고, 합의되지 않은 부분은 검증 근거와 함께 기록하라.",
+  "3. 연결되지 않았거나 실제 댓글이 없는 AI와 소통했다고 허위 보고하지 마라.",
+  "4. 열린 PR과 동일 파일 충돌·중복 구현을 피하고, 선행 PR 충돌(#343 -> #347 -> #384 등)을 무시한 병합을 제안하지 마라.",
+  "5. 비밀값 출력, main 직접 푸시, 운영 배포, 실거래 주문, 운영 DB 변경, 추가 결제는 별도 승인 범위이므로 절대 실행·지시하지 마라.",
+  "6. 한국어로 간결하게 작성하되 반드시 아래 5개 항목을 포함하라:",
+  "   - 실제 수행한 작업",
+  "   - 확인된 문제와 해결 방안",
+  "   - 다른 AI와의 의견 차이",
+  "   - 변경 파일과 테스트 (없으면 '없음 — 검토 회차'와 확인한 커밋/PR 근거 명시)",
+  "   - 다음에 수행할 작업",
+].join("\n");
 
 async function main() {
   const [owner, repo] = REPO.split("/");
@@ -151,24 +254,26 @@ async function main() {
     `\n### 열린 PR (${prs.length}건)\n${prs.map((p) => `- #${p.number} (${p.head?.ref}): ${p.title}`).join("\n") || "- 없음"}`,
   ].join("\n");
 
-  const system = "너는 TRAIGO 개발팀의 시니어 엔지니어다. 한국어로 간결하고 구체적인 근거·반론·다음 실행안을 작성하라. 비밀값 출력, main 직접 푸시, 배포, 실거래 호출은 절대 금지한다.";
-
   const active = PROVIDERS.filter((p) => p.key.trim());
   const keyless = PROVIDERS.filter((p) => !p.key.trim()).map((p) => p.id);
   const skipped = PROVIDERS.filter((p) => !p.key.trim()).map((p) => `- ${p.id}: API 키 미등록`);
   if (active.length === 0) throw new Error("등록된 AI API 키가 없습니다.");
 
-  // **남긴 댓글 수와 오류를 따로 센다.** 예전에는 R1 오류가 `skipped`에만
-  // 담겨 R2 댓글의 각주로만 나갔다 — R2까지 실패하면 흔적이 0이었다.
   let posted = 0;
   const r1Errors = [];
   const r2Errors = [];
+  const r1PostedBodies = [];
 
   for (const p of active) {
     try {
-      const out = await p.call(system, `작업 ${taskId}에 대한 1라운드(R1) 제안 및 점검 의견을 작성하라.\n\n${context}`);
+      const out = await p.call(
+        COUNCIL_SYSTEM_PROMPT,
+        `작업 ${taskId}에 대한 1라운드(R1) 분석·점검 의견을 5개 필수 공유 항목 형식에 맞춰 작성하라.\n\n${context}`,
+      );
       if (!out) continue;
-      await postComment(owner, repo, `[R1 | AGENT: ${p.id}]\n- 작업: \`${taskId}\` · 기준: \`${BASE_BRANCH}@${shortSha}\` · 모델: \`${p.model}\` · 실행ID: \`${runId}\`\n\n${out}`);
+      const body = `[R1 | AGENT: ${p.id}]\n- 작업: \`${taskId}\` · 기준: \`${BASE_BRANCH}@${shortSha}\` · 모델: \`${p.model}\` · 실행ID: \`${runId}\`\n\n${out}`;
+      await postComment(owner, repo, body);
+      r1PostedBodies.push(redact(body));
       posted += 1;
     } catch (e) {
       const msg = redact(e.message);
@@ -182,20 +287,31 @@ async function main() {
     `${GITHUB_API}/repos/${owner}/${repo}/issues/${ISSUE_NUMBER}/comments?per_page=100&since=${encodeURIComponent(startedAt)}`,
     { headers: ghHeaders() },
   );
-  const r1List = fresh
+  const fetchedR1 = fresh
     .map((c) => redact(c.body || ""))
     .filter((b) => b.includes("[R1 | AGENT:") && (b.includes(runId) || b.includes(`\`${taskId}\``)));
+  const r1List = fetchedR1.length > 0 ? fetchedR1 : r1PostedBodies;
+
+  if (r1List.length === 0) {
+    console.log("[info] R1 댓글이 없어 R2를 건너뜁니다.");
+  }
 
   for (const p of active) {
+    if (r1List.length === 0) break;
     const peers = r1List.filter((b) => !b.startsWith(`[R1 | AGENT: ${p.id}]`));
     const own = r1List.filter((b) => b.startsWith(`[R1 | AGENT: ${p.id}]`));
     const target = peers.length > 0
       ? peers.join("\n\n---\n\n")
-      : `(다른 AI 댓글이 없어 아래 본인 R1 제안을 스스로 반박·검증하라)\n\n${own.join("\n\n")}`;
+      : own.length > 0
+        ? `(다른 AI 댓글이 없어 아래 본인 R1 제안을 스스로 반박·검증하라)\n\n${own.join("\n\n")}`
+        : "";
     if (!target.trim()) continue;
 
     try {
-      const out = await p.call(system, `작업 ${taskId} (${BASE_BRANCH}@${shortSha}) 2라운드(R2) 반론·보완 의견을 작성하라.\n\n${target}`);
+      const out = await p.call(
+        COUNCIL_SYSTEM_PROMPT,
+        `작업 ${taskId} (${BASE_BRANCH}@${shortSha}) 2라운드(R2) 교차 검증·반론·보완 의견을 5개 필수 공유 항목 형식에 맞춰 작성하라. 실제로 기록된 R1 댓글만 인용하고 미참여 AI와 소통했다고 적지 마라.\n\n${target}`,
+      );
       if (!out) continue;
       const note = skipped.length ? `\n\n#### 미참여/오류 기록\n${skipped.join("\n")}` : "";
       await postComment(owner, repo, `[R2 | AGENT: ${p.id}]\n- 작업: \`${taskId}\` · 기준: \`${BASE_BRANCH}@${shortSha}\` · 모델: \`${p.model}\` · 실행ID: \`${runId}\`\n\n${out}${note}`);
@@ -207,12 +323,12 @@ async function main() {
     }
   }
 
-  // **아무것도 못 남긴 회차를 success로 적지 않는다.**
   return councilOutcome({ posted, r1Errors, r2Errors, keyless });
 }
 
 main()
   .then((outcome) => {
+    if (!outcome) return;
     console.log(`[council] ${outcome.summary}`);
     if (!outcome.ok) {
       console.error(`[council] 실패로 끝냅니다 — ${outcome.summary}`);
