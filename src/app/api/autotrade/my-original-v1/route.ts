@@ -810,7 +810,7 @@ export async function POST(req: NextRequest) {
   {
     const { fromLegacyMode, gateOrder } = await import('@/lib/engine/operatingMode');
     const opMode = fromLegacyMode(mode);
-    const modeGate = gateOrder(opMode, Number(notionalUsd) || 0);
+    const modeGate = gateOrder(opMode, (Number.isFinite(Number(notionalUsd)) && Number(notionalUsd) > 0) ? Number(notionalUsd) : null);
     if (modeGate.disposition !== 'SEND') {
       // 모의 모드면 **모의 계좌에 체결한다.** 판단과 관문은 이미 끝났고
       // 여기서 갈리는 것은 어디로 체결하는가 하나뿐이다.
