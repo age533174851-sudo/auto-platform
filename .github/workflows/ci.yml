@@ -917,6 +917,17 @@ jobs:
       - name: TESTNET 진단 변이 자기 점검 (전수 실행은 수동)
         run: node scripts/testnet-diagnose-mutations.mjs --self-test
 
+      # ── Binance 진단: 인증 거절과 권한 미확인을 가른다 ──
+      #
+      # **이 줄이 없으면 그 시험은 한 번도 안 돈다.** 파일 이름이
+      # `scripts/test-*.mjs`인데 CI는 검사기를 이름으로 하나하나 부르고,
+      # 저장소의 `scripts/test-*.mjs`는 한 건도 그 목록에 없었다.
+      # `check-wiring.mjs`도 못 잡는다 — 그쪽은 판정 모듈만 본다.
+      # 만들어 놓고 배선을 안 하는 것이 이 저장소에서 가장 자주 난
+      # 고장이라, 파일을 더하는 자리에서 같이 적는다.
+      - name: Binance 진단 인증·권한·잔고 계약 (판독 불가를 0·실패로 적지 않는다)
+        run: node scripts/test-binance-diagnose-permission.mjs
+
       # ── 운영 감사가 읽기만 하는가 ──
       #
       # 감사 SQL은 운영 DB에 붙는다. 한 줄이 쓰기로 바뀌어도 로컬 시험은
