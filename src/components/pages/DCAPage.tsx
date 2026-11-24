@@ -9,7 +9,7 @@ import {
   TrendingDown, Flame, Coins as CoinsIc, CircleCheck, X as XIcon,
 } from 'lucide-react';
 import { T } from '@/lib/constants';
-import { DefaultHint } from '@/components/ui/SettingField';
+import { SliderField } from '@/components/ui/SettingField';
 import { ErrorBoundary } from '@/components/pages/ErrorBoundary';
 import { formatKRW } from '@/lib/format';
 import {
@@ -283,13 +283,17 @@ function DCAInner({ currency = 'KRW' }: { currency?: string }) {
 
           {/* 기본값을 같이 적는다. 회당 얼마가 나가는지는 이 화면에서
               가장 중요한 숫자인데, 지금 값만 보이면 내가 바꾼 것인지
-              원래 그랬던 것인지 알 수 없다. */}
+              원래 그랬던 것인지 알 수 없다. 슬라이더는 감, 숫자칸은 정확 — 둘 다 있어야
+              폰에서 1픽셀 안 맞아서 아무 값이나 넣고 돌아가는 일이 안 생긴다. */}
           <Field label={`1회 매수금액: ${formatKRW(draft.baseAmount)}`}>
-            <div style={{ marginBottom: 4 }}>
-              <DefaultHint now={draft.baseAmount} base={DCA_DEFAULTS.baseAmount}
-                onReset={() => setDraft({ ...draft, baseAmount: DCA_DEFAULTS.baseAmount })}/>
-            </div>
-            <input type="number" value={draft.baseAmount} onChange={e => setDraft({ ...draft, baseAmount: Number(e.target.value)||0 })} style={inp} />
+            <SliderField
+              label="원"
+              value={draft.baseAmount}
+              base={DCA_DEFAULTS.baseAmount}
+              min={10000} max={10000000} step={10000}
+              onChange={v => setDraft({ ...draft, baseAmount: v })}
+              hint="1만원 ~ 1,000만원. 더 큰 금액이 필요하면 룰을 여러 개 만든다."
+            />
           </Field>
 
           <div style={{ padding: SP.sm + 2, background: T.alt, borderRadius: R.md, marginBottom: SP.md }}>
@@ -301,25 +305,27 @@ function DCAInner({ currency = 'KRW' }: { currency?: string }) {
               <span style={{ ...F.body, fontWeight: 700 }}>하락시 추가매수</span>
             </label>
             {draft.dipBoost.enabled && (
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
-                <div>
-                  <div style={{ display:'flex', alignItems:'baseline', gap:6, flexWrap:'wrap' }}>
-                    <span style={F.muted}>하락폭 (%)</span>
-                    <DefaultHint now={draft.dipBoost.threshold} base={DCA_DEFAULTS.dipBoost.threshold}
-                      onReset={() => setDraft({ ...draft, dipBoost: { ...draft.dipBoost, threshold: DCA_DEFAULTS.dipBoost.threshold } })}/>
-                  </div>
-                  <input type="number" value={draft.dipBoost.threshold}
-                    onChange={e => setDraft({ ...draft, dipBoost: { ...draft.dipBoost, threshold: Number(e.target.value) } })} style={inp} />
-                </div>
-                <div>
-                  <div style={{ display:'flex', alignItems:'baseline', gap:6, flexWrap:'wrap' }}>
-                    <span style={F.muted}>매수 배수</span>
-                    <DefaultHint now={draft.dipBoost.multiplier} base={DCA_DEFAULTS.dipBoost.multiplier}
-                      onReset={() => setDraft({ ...draft, dipBoost: { ...draft.dipBoost, multiplier: DCA_DEFAULTS.dipBoost.multiplier } })}/>
-                  </div>
-                  <input type="number" step={0.1} value={draft.dipBoost.multiplier}
-                    onChange={e => setDraft({ ...draft, dipBoost: { ...draft.dipBoost, multiplier: Number(e.target.value)||1 } })} style={inp} />
-                </div>
+              <div style={{ marginTop: 8 }}>
+                <SliderField
+                  label="하락폭 — 이보다 더 떨어지면 추가매수"
+                  value={draft.dipBoost.threshold}
+                  base={DCA_DEFAULTS.dipBoost.threshold}
+                  unit="%"
+                  min={-30} max={0} step={1}
+                  onChange={v => setDraft({ ...draft, dipBoost: { ...draft.dipBoost, threshold: v } })}
+                  color={T.grn}
+                  hint="직전 매수가 대비. -5면 5% 떨어졌을 때 발동."
+                />
+                <SliderField
+                  label="매수 배수"
+                  value={draft.dipBoost.multiplier}
+                  base={DCA_DEFAULTS.dipBoost.multiplier}
+                  unit="배"
+                  min={1} max={5} step={0.1}
+                  onChange={v => setDraft({ ...draft, dipBoost: { ...draft.dipBoost, multiplier: v } })}
+                  color={T.grn}
+                  hint="1회 매수금액 × 이 배수. 2면 100만원이 200만원으로."
+                />
               </div>
             )}
           </div>
@@ -333,21 +339,27 @@ function DCAInner({ currency = 'KRW' }: { currency?: string }) {
               <span style={{ ...F.body, fontWeight: 700 }}>과열시 축소</span>
             </label>
             {draft.overheatCut.enabled && (
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
-                <div>
-                  <div style={{ display:'flex', alignItems:'baseline', gap:6, flexWrap:'wrap' }}>
-                    <span style={F.muted}>상승폭 (%)</span>
-                    <DefaultHint now={draft.overheatCut.threshold} base={DCA_DEFAULTS.overheatCut.threshold}
-                      onReset={() => setDraft({ ...draft, overheatCut: { ...draft.overheatCut, threshold: DCA_DEFAULTS.overheatCut.threshold } })}/>
-                  </div>
-                  <input type="number" value={draft.overheatCut.threshold}
-                    onChange={e => setDraft({ ...draft, overheatCut: { ...draft.overheatCut, threshold: Number(e.target.value) } })} style={inp} />
-                </div>
-                <div>
-                  <div style={F.muted}>축소 배수</div>
-                  <input type="number" step={0.1} value={draft.overheatCut.multiplier}
-                    onChange={e => setDraft({ ...draft, overheatCut: { ...draft.overheatCut, multiplier: Number(e.target.value)||1 } })} style={inp} />
-                </div>
+              <div style={{ marginTop: 8 }}>
+                <SliderField
+                  label="상승폭 — 이보다 더 오르면 축소매수"
+                  value={draft.overheatCut.threshold}
+                  base={DCA_DEFAULTS.overheatCut.threshold}
+                  unit="%"
+                  min={0} max={100} step={1}
+                  onChange={v => setDraft({ ...draft, overheatCut: { ...draft.overheatCut, threshold: v } })}
+                  color={T.ylw}
+                  hint="직전 매수가 대비. 20이면 20% 올랐을 때 발동."
+                />
+                <SliderField
+                  label="축소 배수"
+                  value={draft.overheatCut.multiplier}
+                  base={DCA_DEFAULTS.overheatCut.multiplier}
+                  unit="배"
+                  min={0} max={1} step={0.1}
+                  onChange={v => setDraft({ ...draft, overheatCut: { ...draft.overheatCut, multiplier: v } })}
+                  color={T.ylw}
+                  hint="1회 매수금액 × 이 배수. 0.5면 100만원이 50만원으로. 0이면 그 회차 건너뜀."
+                />
               </div>
             )}
           </div>
