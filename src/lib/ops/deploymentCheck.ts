@@ -27,6 +27,69 @@
 //
 // 그래서 판정을 YAML 밖으로 뺀다 — `wait-worker-alive`와 같은 이유다.
 
+/**
+ * **배포를 확인하려고 시크릿을 요구하지 않는다.**
+ *
+ * 왜 이 함수가 생겼나 — 실제로 못 확인했다
+ * ────────────────────────────────────────
+ * `scripts/verify-deployment.mjs`는 주소를 `BASE`(워크플로가
+ * `EXIT_MONITOR_URL`에서 넣는다) 하나에서만 읽고, 비어 있으면 이렇게
+ * 끝냈다:
+ *
+ *     ::error::확인할 주소가 없습니다 (EXIT_MONITOR_URL)
+ *            — 배포 상태를 확인하지 못했습니다
+ *
+ * 그런데 무인 회차는 그 시크릿을 **일부러 받지 않는다**(`CLAUDE.md`의
+ * 울타리). 그래서 회차 보고마다 "배포를 확인하지 못했습니다"가 남고,
+ * 사람이 대신 눌러 봐야 했다 — `CLAUDE.md`가 없애라고 적은 바로 그
+ * 문장이다("SHA를 비교해 주세요").
+ *
+ * 그럴 필요가 없었다. `/api/system/deployment`는 **인증이 없는 경로**다.
+ * 주소만 알면 누구나 읽는다. 실측(2026-11-24):
+ *
+ *     GET https://<공개주소>/api/system/deployment?main=cc3dc28a…
+ *     → 200 · verdict MATCHED · main·vercel·fly 모두 cc3dc28
+ *
+ * 그래서 주소를 **네 곳에서 차례로** 찾고, 어느 쪽에서 찾았는지까지
+ * 돌려준다. 어디서 왔는지를 적지 않으면 "기본값으로 엉뚱한 배포를
+ * 봤다"를 나중에 구별할 수 없다.
+ *
+ * ★ 주소 자체는 호출부가 **로그에 적지 않는다**(이 파일을 쓰는 스크립트의
+ *   머리말 규칙). `source`만 적는다.
+ */
+export const PUBLIC_APP_BASE = 'https://auto-platform-zeta.vercel.app';
+
+export type DeployBaseSource =
+  /** 호출부가 직접 준 주소 (`BASE`) */
+  | 'BASE'
+  /** 워크플로 시크릿 */
+  | 'EXIT_MONITOR_URL'
+  /** 앱이 이미 쓰는 공개 주소 변수 */
+  | 'NEXT_PUBLIC_APP_URL'
+  | 'APP_URL'
+  /** 위가 전부 없을 때의 공개 기본값 */
+  | 'PUBLIC_DEFAULT';
+
+export interface DeployBase {
+  base: string;
+  source: DeployBaseSource;
+}
+
+/**
+ * 배포 상태를 읽을 주소를 정한다. **빈 값·공백은 없는 것으로 본다.**
+ *
+ * 순서에 뜻이 있다 — 호출부가 준 것이 가장 세고, 공개 기본값이 가장
+ * 약하다. 기본값까지 내려가도 **확인을 포기하지는 않는다.**
+ */
+export function deploymentBaseFrom(env: Record<string, string | undefined>): DeployBase {
+  const pick = (k: DeployBaseSource): string => String(env?.[k] ?? '').trim().replace(/\/+$/, '');
+  for (const k of ['BASE', 'EXIT_MONITOR_URL', 'NEXT_PUBLIC_APP_URL', 'APP_URL'] as const) {
+    const v = pick(k);
+    if (v) return { base: v, source: k };
+  }
+  return { base: PUBLIC_APP_BASE, source: 'PUBLIC_DEFAULT' };
+}
+
 export type DeployCheckCode =
   /** main · Vercel · Fly가 같은 코드다 */
   | 'MATCHED'
