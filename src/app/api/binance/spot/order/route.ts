@@ -215,7 +215,11 @@ export async function POST(req: NextRequest) {
     strategyId: body.strategyId ?? null,
   });
 
+  // `connection_unreadable`은 400이 아니다 — 400은 "당신 요청이 틀렸다"는
+  // 뜻이고, 여기서 틀린 것은 요청이 아니라 우리가 DB를 못 읽은 것이다.
+  // 킬스위치가 같은 경우에 이미 503을 쓴다(`kill_switch_unknown`).
   const status = r.ok ? 200
+    : r.code === 'connection_unreadable' ? 503
     : r.status === 'UNKNOWN' ? 502
     : r.status === 'BLOCKED' ? 400
     : 400;
