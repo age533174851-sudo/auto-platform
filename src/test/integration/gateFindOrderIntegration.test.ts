@@ -1,0 +1,290 @@
+// src/test/integration/gateFindOrderIntegration.test.ts
+//
+// **Gate 중복 확인이 "못 읽었다"를 "주문 없음"으로 적지 않는가.**
+//
+// 실제로 도는 것: `findOrderByClientIdGateFutures` → `toGateText` →
+//   `gateReq`(서명 생성 · 질의 조립 · 응답 파싱). 가짜는 `fetch` 한 겹뿐이다.
+//
+// 이 판정의 뜻은 호출부가 정한다 (`orderExecutor`의 Gate 진입 경로):
+//
+//     if (!lookup.ok)      → FAILED · 주문 중단
+//     if (lookup.order)    → RECONCILED (이미 있다)
+//     그 외                 → **주문을 보낸다**
+//
+// 즉 `{ ok: true, order: null }`은 **"보내도 된다"**는 허가다. 못 읽은
+// 회차가 그 모양으로 나가면 같은 주문이 한 번 더 나간다 — 이 함수의
+// 주석이 막겠다고 적어 둔 바로 그 사고다:
+// "레이트리밋이나 일시적 오류 한 번이 그대로 중복 체결이 될 수 있었다."
+
+import { test, eq, assert, flushAsync } from '../harness';
+import { FakeDb, FakeVenue, type VenueReply } from './venueHarness';
+// 정적 import — 러너가 이 사슬을 컴파일 대상에 넣어야 한다.
+import { findOrderByClientIdGateFutures } from '../../lib/exchanges/gateFutures';
+import { encryptSecret } from '../../lib/exchanges/crypto';
+import { placeSpotOrder } from '../../lib/exchanges/spotOrderExecutor';
+
+const ORDERS = '/api/v4/futures/usdt/orders';
+const KEY = 'K'.repeat(32);
+const SECRET = 'S'.repeat(64);
+const CID = 'LD-20261018-001';
+const CONTRACT = 'BTC_USDT';
+/** `toGateText`가 만드는 이름. 바뀌지 않는 키라 't-' 접두사만 붙는다 */
+const TEXT = `t-${CID}`;
+
+const ROW = {
+  id: 2089209928026685400, contract: CONTRACT, size: 1, price: '0',
+  status: 'finished', finish_as: 'filled', text: TEXT, left: 0, fill_price: '100000',
+};
+
+/** 내 이름이 아닌 줄로 한 쪽을 채운다 */
+function filler(n: number) {
+  return Array.from({ length: n }, (_, i) => ({
+    ...ROW, id: 1000 + i, text: `t-other-${i}`,
+  }));
+}
+
+async function on<T>(v: FakeVenue, fn: () => Promise<T>): Promise<T> {
+  const restore = v.install();
+  try { return await fn(); } finally { restore(); }
+}
+
+const SPOT_ORDERS = '/api/v4/spot/orders';
+
+async function gateSpotAttempt(lookup: VenueReply, submit: VenueReply) {
+  const venue = new FakeVenue()
+    .on(`${SPOT_ORDERS}/t-`, lookup, 'GET')
+    .on('/api/v4/spot/currency_pairs/BTC_USDT', { json: {
+      id: 'BTC_USDT', trade_status: 'tradable', amount_precision: 5,
+      precision: 2, min_base_amount: '0.0001', min_quote_amount: '1',
+    } }, 'GET')
+    .on(SPOT_ORDERS, submit, 'POST');
+  const previousKey = process.env.EXCHANGE_ENCRYPTION_KEY;
+  process.env.EXCHANGE_ENCRYPTION_KEY = 'gate-spot-order-integration-test-key';
+  try {
+    const db = new FakeDb().seed('exchange_connections', [{
+      id: 'gate-spot-fixture', user_id: 'fixture-user', exchange_id: 'gate',
+      api_key: KEY, api_secret_enc: encryptSecret(SECRET),
+      has_withdrawal: false, is_testnet: true,
+    }]);
+    const result = await on(venue, () => placeSpotOrder(db, {
+      userId: 'fixture-user', connectionId: 'gate-spot-fixture', symbol: 'BTCUSDT',
+      side: 'BUY', type: 'LIMIT', quantity: 0.002, price: 90000,
+    }));
+    const statuses = db.writes
+      .filter(w => w.table === 'live_orders' && w.patch.status)
+      .map(w => w.patch.status);
+    return { result, venue, statuses, row: db.table('live_orders')[0] };
+  } finally {
+    if (previousKey === undefined) delete process.env.EXCHANGE_ENCRYPTION_KEY;
+    else process.env.EXCHANGE_ENCRYPTION_KEY = previousKey;
+  }
+}
+
+async function runGateSpotOrderIdentityChecks() {
+  const absent = { status: 404, json: { label: 'ORDER_NOT_FOUND' } };
+  const filled = { status: 'closed', amount: '0.002', left: '0', filled_amount: '0.002' };
+  const valid = { status: 201, json: { ...filled, id: '7100' } };
+
+  const unreadableLookup = await gateSpotAttempt({ json: false }, valid);
+  test('Gate 현물 중복 조회 응답이 판독 불가이면 주문 전송과 SENT 기록을 막는다', () => {
+    const { result, venue, statuses, row } = unreadableLookup;
+    eq(venue.countOf(`${SPOT_ORDERS}/t-`, 'GET'), 1);
+    eq(venue.countOf(SPOT_ORDERS, 'POST'), 0);
+    eq(result.code, 'dup_check_failed');
+    eq(result.status, 'BLOCKED');
+    eq(row?.status, 'FAILED');
+    eq(statuses.join(','), 'INTENT,FAILED');
+  });
+
+  const missingId = await gateSpotAttempt(absent, { status: 201, json: filled });
+  test('Gate 현물 주문 전송 뒤 응답에 ID가 없으면 장부와 반환에 미확정을 남긴다', () => {
+    const { result, venue, statuses, row } = missingId;
+    eq(venue.countOf(SPOT_ORDERS, 'POST'), 1);
+    eq(result.status, 'UNKNOWN');
+    eq(result.ok, false);
+    eq(result.orderId, undefined);
+    eq(result.filledQty, undefined);
+    eq(row?.status, 'UNKNOWN');
+    eq(statuses.join(','), 'INTENT,SENT,UNKNOWN');
+    assert(row.acked_at == null && row.exchange_order_id == null && row.filled_qty == null);
+  });
+
+  const confirmed = await gateSpotAttempt(absent, valid);
+  test('Gate 현물 주문 없음이 확인되면 한 번 전송하고 유효한 ID와 체결량을 기록한다', () => {
+    const { result, venue, statuses, row } = confirmed;
+    eq(venue.countOf(SPOT_ORDERS, 'POST'), 1);
+    eq(result.status, 'FILLED');
+    eq(result.ok, true);
+    eq(result.orderId, '7100');
+    eq(result.filledQty, 0.002);
+    eq(row?.status, 'FILLED');
+    eq(row.exchange_order_id, '7100');
+    eq(row.filled_qty, 0.002);
+    assert(typeof row.acked_at === 'string');
+    eq(statuses.join(','), 'INTENT,SENT,FILLED');
+  });
+}
+
+export async function runGateFindOrderTests() {
+  console.log('[통합 — Gate 중복 확인]');
+
+  // ══════════ ① 찾으면 찾았다고 한다 (아래가 공허하지 않다) ══════════
+  {
+    const v = new FakeVenue().on(ORDERS, { json: (i: number) => (i === 0 ? [] : [ROW]) });
+    const r: any = await on(v, () => findOrderByClientIdGateFutures(
+      KEY, SECRET, CONTRACT, CID, true));
+
+    test('★ ① 같은 이름의 주문이 있으면 ok이고 그 줄을 싣는다', () => {
+      eq(r.ok, true, String(r.error));
+      assert(r.order != null, '있는 주문을 못 찾았다');
+      eq(String(r.order.text), TEXT);
+    });
+  }
+
+  // ══════════ ② 정말 없으면 "없음"이다 (재시도가 막히지 않는다) ══════════
+  {
+    const v = new FakeVenue().on(ORDERS, { json: [] });
+    const r: any = await on(v, () => findOrderByClientIdGateFutures(
+      KEY, SECRET, CONTRACT, CID, true));
+
+    test('★ ② 두 목록이 비어 있으면 ok:true · order:null (보내도 된다)', () => {
+      eq(r.ok, true);
+      eq(r.order, null);
+    });
+  }
+
+  // ══════════ ③ 200인데 배열이 아니면 "없음"이 아니다 ══════════
+  //
+  // `gateReq`는 **비2xx만** 던진다. 200으로 객체가 오면 그대로 돌려주고,
+  // `Array.isArray(rows) ? … : null`이 그것을 `hit=null`로 접는다.
+  // 두 상태를 다 돌고 나면 `{ ok: true, order: null }` — **보내도 된다**가
+  // 된다. 못 읽은 회차가 허가로 바뀌는 자리다.
+  {
+    const v = new FakeVenue().on(ORDERS, { json: { label: 'OK', message: 'fine' } });
+    const r: any = await on(v, () => findOrderByClientIdGateFutures(
+      KEY, SECRET, CONTRACT, CID, true));
+
+    test('★ ③ 배열이 아닌 200 응답을 "주문 없음"으로 적지 않는다', () => {
+      eq(r.ok, false, '못 읽은 조회가 "보내도 된다"로 나갔다 — 중복 주문이 된다');
+      eq(r.order, null);
+      assert(typeof r.error === 'string' && r.error.length > 0, '이유가 남아야 한다');
+    });
+  }
+
+  // ══════════ ④ 한쪽 목록만 깨져도 같다 ══════════
+  //
+  // `open`은 배열인데 `finished`가 아니면, 예전에는 그 사실이 사라지고
+  // "없음"이 됐다. 둘 중 하나라도 못 읽으면 없다고 말할 수 없다.
+  {
+    const v = new FakeVenue().on(ORDERS, {
+      json: (i: number) => (i === 0 ? [] : { label: 'OK' }),
+    });
+    const r: any = await on(v, () => findOrderByClientIdGateFutures(
+      KEY, SECRET, CONTRACT, CID, true));
+
+    test('★ ④ finished 목록만 깨져도 "없음"으로 적지 않는다', () => {
+      eq(r.ok, false);
+      eq(r.order, null);
+    });
+  }
+
+  // ══════════ ⑤ 번호 없는 줄을 "찾았다"로 넘기지 않는다 ══════════
+  //
+  // 호출부는 찾은 줄을 `exchange_order_id: String(existing.id)`로 적는다.
+  // `id`가 없으면 장부에 **문자열 "undefined"**가 남고, 나중 취소가 그
+  // 번호로 나가 `No order found with the given ID`가 된다 — 이 저장소가
+  // Gate 주문 번호로 이미 한 번 겪은 사고다(포지션 0인데 조건부 주문 2건).
+  {
+    const { id: _drop, ...noId } = ROW;
+    const v = new FakeVenue().on(ORDERS, { json: (i: number) => (i === 0 ? [noId] : []) });
+    const r: any = await on(v, () => findOrderByClientIdGateFutures(
+      KEY, SECRET, CONTRACT, CID, true));
+
+    test('★ ⑤ 번호를 못 읽은 줄은 확인된 주문이 아니다', () => {
+      eq(r.ok, false, '번호 없는 줄을 넘기면 장부에 "undefined"가 적힌다');
+      eq(r.order, null);
+    });
+  }
+  // ══════════ ⑥ 101번째 주문을 놓치지 않는다 ══════════
+  //
+  // Gate 문서는 이 엔드포인트의 **정렬 순서를 말하지 않는다.** `limit`
+  // 기본값은 100이고 `offset`으로 다음 쪽을 읽는다. 즉 첫 100건에 없다고
+  // 해서 없는 것이 아니다 — 내 주문이 101번째에 있을 수 있다.
+  //
+  // 예전에는 첫 쪽만 보고 `{ ok: true, order: null }`을 돌려줬고, 그것은
+  // 호출부에게 **"보내도 된다"**는 허가다. 그대로 중복 주문이 된다.
+  {
+    const v = new FakeVenue();
+    v.on(ORDERS, { json: () => {
+      const c = v.calls[v.calls.length - 1];
+      const status = c?.params?.status;
+      const offset = Number(c?.params?.offset ?? 0);
+      // open 목록은 101건이다. 내 주문은 **마지막 한 건**이다.
+      if (status === 'open') {
+        if (offset === 0) return filler(100);
+        if (offset === 100) return [ROW];
+        return [];
+      }
+      return [];
+    } });
+    const r: any = await on(v, () => findOrderByClientIdGateFutures(
+      KEY, SECRET, CONTRACT, CID, true));
+
+    test('★ ⑥ 첫 100건에 없으면 다음 쪽을 읽는다 (101번째를 찾는다)', () => {
+      eq(r.ok, true, String(r.error));
+      assert(r.order != null,
+        '첫 쪽만 보고 "없음"으로 끝내면 같은 주문이 한 번 더 나간다');
+      eq(String(r.order.text), TEXT);
+    });
+  }
+
+  // ══════════ ⑦ 쪽이 끝나면 "없음"이 증명된다 (막지 않는다) ══════════
+  //
+  // 한 쪽이 `limit`보다 짧게 오면 그것이 목록의 끝이다. 그때의 '없음'은
+  // 단정해도 되는 사실이고, 호출부는 주문을 보내도 된다.
+  // 흔한 계정(주문 몇 건)에서는 첫 쪽이 이미 짧으므로 **요청 수도
+  // 예전과 같다** — 느려지지 않는다.
+  {
+    const v = new FakeVenue().on(ORDERS, { json: [] });
+    const r: any = await on(v, () => findOrderByClientIdGateFutures(
+      KEY, SECRET, CONTRACT, CID, true));
+
+    test('★ ⑦ 짧은 쪽에서 끝나면 ok:true · null이고 요청은 두 번뿐이다', () => {
+      eq(r.ok, true);
+      eq(r.order, null);
+      eq(v.countOf(ORDERS), 2, 'open·finished 한 번씩이면 충분하다');
+    });
+  }
+
+  // ══════════ ⑧ 끝까지 꽉 차 있으면 "없음"이라 말하지 않는다 ══════════
+  //
+  // 상한까지 모든 쪽이 가득 찼다 = 아직 목록이 남았다는 뜻이다. 창을 다
+  // 보지 못했으므로 '없다'고 단정할 수 없다. 여기서 허가를 내주면 그것이
+  // 바로 중복 주문이다.
+  {
+    const v = new FakeVenue().on(ORDERS, { json: () => filler(100) });
+    const r: any = await on(v, () => findOrderByClientIdGateFutures(
+      KEY, SECRET, CONTRACT, CID, true));
+
+    test('★ ⑧ 모든 쪽이 가득 차면 ok:false다 (보내도 된다고 하지 않는다)', () => {
+      eq(r.ok, false, '다 보지 못한 목록을 "주문 없음"으로 적었다');
+      eq(r.order, null);
+      assert(typeof r.error === 'string' && r.error.length > 0, '이유가 남아야 한다');
+    });
+  }
+
+  // ══════════ ⑨ 쪽수는 유한하다 (영원히 읽지 않는다) ══════════
+  {
+    const v = new FakeVenue().on(ORDERS, { json: () => filler(100) });
+    await on(v, () => findOrderByClientIdGateFutures(KEY, SECRET, CONTRACT, CID, true));
+
+    test('★ ⑨ 가득 찬 목록이어도 요청 수에 상한이 있다', () => {
+      const n = v.countOf(ORDERS);
+      assert(n > 2 && n <= 20, `요청이 ${n}번 나갔다 — 상한이 없거나 쪽을 안 넘긴다`);
+    });
+  }
+
+  // 앞에서 등록된 비동기 테스트가 가짜 암호화 키를 바꾸기 전에 끝나야 한다.
+  await flushAsync();
+  await runGateSpotOrderIdentityChecks();
+}

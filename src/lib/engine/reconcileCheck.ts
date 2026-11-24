@@ -23,6 +23,23 @@ export interface GatherResult {
    * 지금 대조가 일치하더라도 그 위에 새 주문을 얹으면 안 된다.
    */
   unresolvedOrders: { clientOrderId: string; symbol: string; reason: string; needsAttention: boolean }[];
+  /**
+   * 미확정 주문 **수**. 세지 못했으면 null이다.
+   *
+   * 왜 배열과 따로 두는가
+   * ─────────────────────
+   * `unresolvedOrders`는 빈 배열이 두 가지를 뜻한다 — "세어 봤더니
+   * 없다"와 "못 셌다". 호출부가 `.length`를 그대로 적으면 둘이 똑같이
+   * **0**이 되고, 거래 전 점검은 그 0을 `pass '없음'`으로 쓴다.
+   * 확인하지 못한 것이 통과로 적히는 것이 이 저장소에서 가장 비싼
+   * 거짓말이다.
+   *
+   * 그래서 '못 셌다'를 **배열이 아니라 여기서** 말한다. 호출부는
+   * `reachable`을 다시 보고 삼항으로 가릴 필요 없이 이 값을 그대로
+   * 넘기면 된다 — 가려야 하는 곳이 넷이면 언젠가 한 곳이 빠진다.
+   * 실제로 빠져 있었다(일일 사다리).
+   */
+  unresolvedOrderCount: number | null;
 }
 
 export async function gatherAndReconcile(
@@ -32,7 +49,7 @@ export async function gatherAndReconcile(
   /**
    * **이 주문이 쓰는 연결.** 주면 그 연결만 본다.
    *
-   * 안 주면 예전처럼 활성 연결 중 아무거나 하나를 집는데, 연결이 여럿이면
+   * 안 주면 요청한 거래 모드의 활성 연결 중 하나를 고른다. 연결이 여럿이면
    * 그건 **주문과 상관없는 거래소**일 수 있다. 실제로 그랬다 — 바이낸스
    * 실전 진입이 "Gate 401: Invalid key provided"로 막혔다. Gate 키가 죽은
    * 것과 바이낸스 주문은 아무 관계가 없다.
@@ -42,17 +59,21 @@ export async function gatherAndReconcile(
    */
   connectionId?: string | null,
 ): Promise<GatherResult> {
-  const empty = { appPositions: [], exchangePositions: [], unresolvedOrders: [] };
+  const empty = { appPositions: [], exchangePositions: [], unresolvedOrders: [], unresolvedOrderCount: null };
 
   let q = sb.from('exchange_connections')
-    .select('exchange_id, api_key, api_secret_enc, has_withdrawal')
-    .eq('user_id', userId).eq('is_active', true);
+    .select('id, exchange_id, api_key, api_secret_enc, has_withdrawal')
+    .eq('user_id', userId).eq('is_active', true).eq('is_testnet', testnet);
   if (connectionId) q = q.eq('id', connectionId);
   const { data: conn } = await q.limit(1).maybeSingle();
 
-  if (!conn) return { reachable: false, verdict: null, error: '활성 거래소 연결이 없습니다', ...empty };
+  if (!conn) return { reachable: false, verdict: null, error: '요청한 거래 모드의 활성 거래소 연결이 없습니다', ...empty };
   if ((conn as any).has_withdrawal) {
     return { reachable: false, verdict: null, error: '출금 권한 키는 사용할 수 없습니다', ...empty };
+  }
+  const ledgerConnectionId = connectionId || conn.id;
+  if (typeof ledgerConnectionId !== 'string' || !ledgerConnectionId.trim()) {
+    return { reachable: false, verdict: null, error: '대조할 거래소 연결 ID를 확인하지 못했습니다', ...empty };
   }
 
   const { decryptSecret } = await import('@/lib/exchanges/crypto');
@@ -124,11 +145,17 @@ export async function gatherAndReconcile(
     // Gate 미체결 주문. clientOrderId는 't-' 접두사가 붙어 저장되므로 떼어낸다.
     try {
       const rows = await gf.getOpenOrdersGateFutures(key, secret, testnet);
+      if (!Array.isArray(rows) || rows.some(o => typeof o?.contract !== 'string' || !o.contract.trim())) {
+        throw new Error('invalid_gate_open_orders');
+      }
       exchangeOpenOrders = rows.map(o => ({
         clientOrderId: String(o.text || '').replace(/^t-/, ''),
-        symbol: String(o.contract || '').replace('_', ''),
+        symbol: o.contract.replace('_', ''),
       }));
-    } catch { exchangeOpenOrders = undefined; }
+    } catch {
+      return { reachable: false, verdict: null,
+        error: 'Gate 미체결 주문 목록을 읽지 못했습니다', ...empty };
+    }
 
   } else {
     const bf = await import('@/lib/exchanges/binanceFutures');
@@ -185,10 +212,8 @@ export async function gatherAndReconcile(
   // 실전 연결 대조를 막고 있었고, [미확정 주문 확정]을 눌러도 안 풀렸다.
   // 없는 것을 찾고 있었으니까.
   //
-  // 연결이 곧 거래소이자 망이다. 연결을 알면 그 연결 것만 본다.
-  // **모르면 좁히지 않는다** — 안 거르는 쪽이 과하게 막는 쪽이고,
-  // 과하게 막는 것은 놓치는 것보다 낫다.
-  const scope = (q: any) => (connectionId ? q.eq('connection_id', connectionId) : q);
+  // 연결을 자동 선택한 경우에도 거래소와 앱 장부의 범위를 맞춘다.
+  const scope = (q: any) => q.eq('connection_id', ledgerConnectionId);
 
   const appQuery = (cols: string) => scope(sb.from('live_orders')
     .select(cols)
@@ -224,25 +249,93 @@ export async function gatherAndReconcile(
   // 그 컬럼을 요청하면 조회 전체가 실패하고, 그러면 미확정 주문이 0건으로
   // 보여 관문이 열려버린다. 실패하면 컬럼을 빼고 다시 조회한다 —
   // 부가 정보가 없더라도 "미확정 주문이 있다"는 사실은 반드시 알아야 한다.
-  const unresolvedQuery = (cols: string) => scope(sb.from('live_orders')
+  // ── **미확정만 넓게 본다** ──
+  //
+  // 위 `scope`는 고른 연결로 좁힌다. 포지션·미체결 비교는 그래야 한다 —
+  // 다른 연결의 주문을 "거래소에 없는 앱 주문"으로 잡으면 안 되니까.
+  //
+  // 그런데 `live_orders.connection_id`는 012에서 nullable이고 백필
+  // 마이그레이션이 없다. `orderExecutor`는 지금도 연결을 모르면 NULL을
+  // 쓴다. 그런 행은 **"다른 연결 것"이 아니라 어느 연결 것인지 모르는
+  // 것**이다.
+  //
+  // 그리고 주문 직전 관문(`preflight.ts`)은 연결 ID 없이 이 함수를 부른다.
+  // 거기서 NULL 행을 빼면 미확정이 0건으로 보이고, `reachable`이 true이므로
+  // 호출부에는 **"확인했고 없음"**으로 읽힌다 — 그 위로 새 주문이 나간다.
+  // 미확정 한 건은 거래소 포지션이 앞으로 바뀔 수 있다는 뜻이고, 그게
+  // 이 관문이 막으려는 전부다.
+  //
+  // ★ **질의에서 연결로 좁히지 않고 읽은 뒤 가른다.** "NULL이거나 이 값"을
+  //   한 질의로 쓰려면 `or(connection_id.is.null,connection_id.eq.…)`가
+  //   필요하고, 그러면 통합 시험의 가짜 DB(`venueHarness.ts`)도 그 조건을
+  //   해석해야 한다. 그 파일은 **열린 PR 18건이 잡고 있다.** 판단은 어차피
+  //   한 곳에 있어야 하므로 여기 둔다.
+  const UNRESOLVED_SCAN = 60;
+  const unresolvedQuery = (cols: string) => sb.from('live_orders')
     .select(cols)
-    .eq('user_id', userId).eq('status', 'UNKNOWN'))
-    .order('created_at', { ascending: false }).limit(20);
+    .eq('user_id', userId).eq('status', 'UNKNOWN')
+    .order('created_at', { ascending: false }).limit(UNRESOLVED_SCAN);
 
   let { data: unresolvedRows, error: unresolvedErr } =
-    await unresolvedQuery('client_order_id, symbol, error_message, needs_attention');
+    await unresolvedQuery('client_order_id, symbol, connection_id, error_message, needs_attention');
   if (unresolvedErr) {
-    ({ data: unresolvedRows } = await unresolvedQuery('client_order_id, symbol, error_message'));
+    ({ data: unresolvedRows, error: unresolvedErr } =
+      await unresolvedQuery('client_order_id, symbol, connection_id, error_message'));
   }
-  const unresolvedOrders = (Array.isArray(unresolvedRows) ? unresolvedRows : []).map((r: any) => ({
-    clientOrderId: String(r.client_order_id || ''),
-    symbol: String(r.symbol || ''),
-    reason: String(r.error_message || '사유 미기록'),
-    needsAttention: r.needs_attention === true,
-  }));
+
+  // **폴백까지 실패하면 0건이 아니다.**
+  //
+  // 위 주석은 018 컬럼 하나를 걱정했고 그래서 폴백을 뒀는데, 그 폴백의
+  // error를 버렸다. DB가 통째로 안 되는 날(연결 끊김·RLS·테이블 없음)에는
+  // 둘 다 실패하고 `unresolvedRows`가 null로 와서 `[]`로 접힌다 —
+  // 그러면 관문은 열린다. 막으려던 그 사고가 한 칸 옆에 그대로 남아
+  // 있었다. 못 셌으면 센 척하지 않는다.
+  if (unresolvedErr || !Array.isArray(unresolvedRows)) {
+    return {
+      reachable: false, verdict: null,
+      error: `미확정 주문 목록을 읽지 못해 대조를 끝내지 못했습니다`
+           + `${unresolvedErr?.message ? ` (${unresolvedErr.message})` : ''}`,
+      ...empty,
+    };
+  }
+
+  const scanned = Array.isArray(unresolvedRows) ? unresolvedRows : [];
+
+  // **읽은 줄이 한도에 닿았으면 더 있는지 모른다.**
+  //
+  // 연결로 좁히지 않고 읽으므로, 다른 연결의 미확정이 한도를 채우면 이
+  // 연결 것이 밀려 나갈 수 있다. 그 상태의 건수는 숫자가 아니라 "모름"이다.
+  // 미확정이 60건 넘게 쌓인 계좌는 그 자체로 멈춰 세워야 하는 상태다.
+  if (scanned.length >= UNRESOLVED_SCAN) {
+    return {
+      reachable: false, verdict: null,
+      error: `결과 미확정 주문이 ${UNRESOLVED_SCAN}건 이상입니다 — 전부 세지 못했습니다`,
+      ...empty,
+    };
+  }
+
+  // **연결을 아는 것만 남의 것으로 치운다.**
+  //
+  // `connection_id`가 NULL이거나 읽히지 않은 행은 "다른 연결 것"이 아니라
+  // 어느 연결 것인지 모르는 것이다. 모르는 것은 치우지 않는다 — 과하게
+  // 막는 쪽이 놓치는 쪽보다 낫다.
+  const belongsToAnotherConnection = (r: any) =>
+    typeof r?.connection_id === 'string'
+    && r.connection_id.trim() !== ''
+    && r.connection_id !== ledgerConnectionId;
+
+  const unresolvedOrders = scanned
+    .filter((r: any) => !belongsToAnotherConnection(r))
+    .map((r: any) => ({
+      clientOrderId: String(r.client_order_id || ''),
+      symbol: String(r.symbol || ''),
+      reason: String(r.error_message || '사유 미기록'),
+      needsAttention: r.needs_attention === true,
+    }));
 
   const verdict = reconcileState({ appPositions, exchangePositions, appOpenOrders, exchangeOpenOrders });
-  return { reachable: true, verdict, appPositions, exchangePositions, unresolvedOrders };
+  return { reachable: true, verdict, appPositions, exchangePositions, unresolvedOrders,
+           unresolvedOrderCount: unresolvedOrders.length };
 }
 
 /**
