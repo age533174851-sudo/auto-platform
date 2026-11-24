@@ -114,8 +114,16 @@ export async function POST(req: NextRequest) {
     // 지정가면 수량×가격이다. 시장가+수량만 온 경우는 체결가를 모르므로
     // 0으로 둔다 — 여기서 시세를 추측해 채우면 모드 상한($100)이 추측값으로
     // 판정된다.
-    const notional = Number(body.quoteOrderQty)
-      || (Number(body.quantity) * Number(body.price)) || 0;
+    // **모르면 null이다 — 0으로 적지 않는다.** 0을 넘기면 gateOrder의
+    // 1회 상한 검사가 `0 > limit`로 거짓이 되어 그대로 통과했다.
+    // 시세를 추측해 채우지 않는다는 기존 판단은 그대로 둔다.
+    const notional = (() => {
+      const byQuote = Number(body.quoteOrderQty);
+      if (Number.isFinite(byQuote) && byQuote > 0) return byQuote;
+      const byQtyPrice = Number(body.quantity) * Number(body.price);
+      if (Number.isFinite(byQtyPrice) && byQtyPrice > 0) return byQtyPrice;
+      return null;
+    })();
 
     const localMs = Date.now();
     const serverMs = await readServerTime(spotTestnet);

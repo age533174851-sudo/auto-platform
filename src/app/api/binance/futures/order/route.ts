@@ -324,7 +324,8 @@ export async function POST(req: NextRequest) {
     const refPriceRaw = Number(price ?? risk?.markPrice ?? 0);
     const refPrice = Number.isFinite(refPriceRaw) && refPriceRaw > 0 ? refPriceRaw : null;
     preflightRef = refPrice;
-    const notionalUsd = refPrice ? orderQty * refPrice : 0;
+    // **시세를 못 읽었으면 null이다 — 0으로 적지 않는다.**
+    const notionalUsd = refPrice ? orderQty * refPrice : null;
 
     // **관문은 목적지를 기준으로 정한다.**
     //

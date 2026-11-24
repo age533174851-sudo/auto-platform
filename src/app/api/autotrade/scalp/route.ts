@@ -928,7 +928,7 @@ export async function POST(req: NextRequest) {
   //
   // 다른 검사를 다 통과했어도 여기서 막힐 수 있다. 모드는 가장 바깥
   // 관문이고, SEND가 아니면 **주문을 만들지 않는다.**
-  const modeGate = gateOrder(opMode, plan.positionSize ?? 0, { overrideMaxNotionalUsd: maxNotionalOverride() });
+  const modeGate = gateOrder(opMode, (Number.isFinite(Number(plan.positionSize)) && Number(plan.positionSize) > 0) ? Number(plan.positionSize) : null, { overrideMaxNotionalUsd: maxNotionalOverride() });
   if (modeGate.disposition !== 'SEND') {
     // ── 모의 모드면 **모의 계좌에 실제로 체결한다** ──
     //
