@@ -78,11 +78,11 @@ export async function POST(req: NextRequest) {
   const testnet = true; // TESTNET 외에는 위 게이트에서 거부했다.
 
   const checks: Check[] = [];
-  const run = async (name: string, fn: () => Promise<{ ok: boolean; detail: string }>) => {
+  const run = async (name: string, fn: () => Promise<Omit<Check, 'name' | 'ms'>>) => {
     const t0 = Date.now();
     try {
       const r = await fn();
-      checks.push({ name, ...r, ms: Date.now() - t0, status: r.ok ? 'PASS' : 'FAIL' });
+      checks.push({ name, ...r, ms: Date.now() - t0, status: r.status ?? (r.ok ? 'PASS' : 'FAIL') });
     }
     catch (e: any) {
       // **던진 것은 답을 못 받은 것이다.** 거래소가 거절한 것(FAIL)과
@@ -100,20 +100,41 @@ export async function POST(req: NextRequest) {
     exchangeCanTrade = r.success === true && r.canTrade === true;
     return { ok: r.success, detail: r.success ? 'TESTNET 계정 인증 성공' : r.message };
   });
+  // 어댑터는 canTrade 필드 누락도 false로 반환한다. 거래소 허용은 true로만 확인한다.
+  const storedCanTrade = conn.perm_trading;
+  const tradeStatus: DiagnoseStatus = exchangeCanTrade && typeof storedCanTrade === 'boolean'
+    ? (storedCanTrade ? 'PASS' : 'FAIL')
+    : 'UNKNOWN';
+  const tradeDetail = {
+    PASS: '거래소와 저장된 거래 권한이 일치합니다 (실제 주문은 내지 않았습니다)',
+    FAIL: '거래소의 선물 거래 권한을 확인했습니다. 저장된 연결의 거래 권한이 꺼져 있습니다',
+    UNKNOWN: exchangeCanTrade
+      ? '저장된 연결의 거래 권한을 확인하지 못했습니다'
+      : '거래소 응답에서 선물 거래 권한을 확인하지 못했습니다',
+  }[tradeStatus];
   checks.push({
     name: '선물 거래 권한',
-    ok: exchangeCanTrade && conn.perm_trading === true,
-    detail: exchangeCanTrade && conn.perm_trading === true
-      ? '거래소와 저장된 거래 권한이 일치합니다 (실제 주문은 내지 않았습니다)'
-      : '선물 거래 권한을 확인하지 못했습니다 — 진단 성공을 거래 가능으로 읽지 않습니다',
+    ok: statusToOk(tradeStatus),
+    detail: tradeDetail,
     ms: 0,
-    status: exchangeCanTrade && conn.perm_trading === true ? 'PASS' : 'FAIL',
+    status: tradeStatus,
     code: 'TRADE_PERMISSION',
   });
   // 2. 잔고 조회
   await run('잔고 조회', async () => {
     const r = await getFuturesBalance(apiKey, secret, testnet);
-    return { ok: r.success, detail: r.message };
+    if (!r.success) return { ok: false, detail: r.message };
+    // 어댑터가 0 잔고를 생략한 빈 배열은 유효하다. 남은 행의 자산과 금액을 확인한다.
+    if (!Array.isArray(r.balances) || r.balances.some(row =>
+      typeof row?.asset !== 'string' || !row.asset.trim()
+      || !Number.isFinite(row.balance) || !Number.isFinite(row.availableBalance),
+    )) {
+      return {
+        ok: false, status: 'UNKNOWN', code: 'BALANCE_UNREADABLE',
+        detail: '거래소 잔고 응답에서 자산 또는 금액을 확인하지 못했습니다',
+      };
+    }
+    return { ok: true, detail: r.message };
   });
   // 3. 포지션 조회 — 성공적으로 조회된 계좌의 실제 노출만 증거다.
   // 장부에 후보 0건이어도 이 값으로 "거래소에 포지션 0"이라 단정하지 않는다.
