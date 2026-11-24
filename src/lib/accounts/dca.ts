@@ -95,17 +95,23 @@ export function previewExecution(rule: DCARule, ctx: PriceContext): DCAExecution
 }
 
 // ── localStorage I/O ───────────────────────────────────
+//
+// **저장된 것이 없으면 빈 목록이다.** 예전에는 여기서 예시 규칙 셋을
+// 돌려줬는데, 그 예시에 "누적 1,200,000원 · 8회 실행" 같은 **이력**이
+// 들어 있었고 화면은 그것을 사용자의 실제 규칙처럼 그렸다. 적립한 적 없는
+// 사람이 120만 원을 넣은 줄 알게 되고, 스위치 하나만 눌러도 그 숫자가
+// 저장돼 남는다. 없는 것은 없다고 그린다 — 화면에 빈 상태가 이미 있다.
 export function loadDCARules(): DCARule[] {
-  if (typeof window === 'undefined') return seedRules();
+  if (typeof window === 'undefined') return [];
   try {
     const raw = window.localStorage.getItem(DCA_STORE_KEY);
-    if (!raw) return seedRules();
+    if (!raw) return [];
     const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return seedRules();
+    if (!Array.isArray(parsed)) return [];
     return parsed;
   } catch (e) {
     console.warn('[dca] load failed', e);
-    return seedRules();
+    return [];
   }
 }
 
@@ -116,48 +122,6 @@ export function saveDCARules(rules: DCARule[]): void {
   } catch (e) {
     console.warn('[dca] save failed', e);
   }
-}
-
-function seedRules(): DCARule[] {
-  const now = Date.now();
-  return [
-    {
-      id: 'dca_qqq', enabled: true, name: 'QQQ 매주 적립',
-      symbol: 'QQQ', symbolName: 'Invesco QQQ',
-      frequency: 'weekly', baseAmount: 100000,
-      dipBoost:     { enabled: true,  threshold: -5,  multiplier: 2 },
-      overheatCut:  { enabled: true,  threshold: 20,  multiplier: 0.5 },
-      reinvestDividend: true,
-      startedAt: now - 86400_000 * 60,
-      totalInvested: 1_200_000, totalShares: 2.1,
-      lastRunAt: now - 86400_000 * 3, nextRunAt: computeNextRun('weekly'),
-      runCount: 8,
-    },
-    {
-      id: 'dca_btc', enabled: true, name: 'BTC 매월 모으기',
-      symbol: 'BTC', symbolName: 'Bitcoin',
-      frequency: 'monthly', baseAmount: 200000,
-      dipBoost:     { enabled: true,  threshold: -10, multiplier: 1.5 },
-      overheatCut:  { enabled: false, threshold: 30,  multiplier: 0.5 },
-      reinvestDividend: false,
-      startedAt: now - 86400_000 * 180,
-      totalInvested: 1_200_000, totalShares: 0.014,
-      lastRunAt: now - 86400_000 * 12, nextRunAt: computeNextRun('monthly'),
-      runCount: 6,
-    },
-    {
-      id: 'dca_schd', enabled: false, name: 'SCHD 배당 재투자',
-      symbol: 'SCHD', symbolName: 'Schwab Dividend ETF',
-      frequency: 'monthly', baseAmount: 150000,
-      dipBoost:     { enabled: false, threshold: -5,  multiplier: 2 },
-      overheatCut:  { enabled: false, threshold: 20,  multiplier: 0.5 },
-      reinvestDividend: true,
-      startedAt: now - 86400_000 * 30,
-      totalInvested: 0, totalShares: 0,
-      nextRunAt: computeNextRun('monthly'),
-      runCount: 0,
-    },
-  ];
 }
 
 /**

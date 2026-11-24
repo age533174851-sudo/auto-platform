@@ -33,6 +33,8 @@
  * **실제 전략 id가 아니다.** registry에도 없고, 예약도 없고, 원장도 없다.
  * 오직 "이 주문은 스모크 테스트가 냈다"를 표시하는 데만 쓴다.
  */
+import { attestationVerdict } from './exposureAttestation';
+
 export const SMOKE_STRATEGY_ID = 'smoke-test';
 
 /** 고를 수 있는 유지 시간(분) */
@@ -421,6 +423,8 @@ function zeroStepOf(row: any, id: 'POSITION_ZERO' | 'ORDERS_ZERO'): string | nul
 export function unresolvedExposureBlock(i: {
   rows: any[] | null | undefined;
   connectionId?: string | null;
+  /** 지금. 사후 확인의 유효 기간을 재는 데만 쓴다 (시험이 시계를 넣는다) */
+  nowMs?: number;
 }): ExposureBlockVerdict {
   if (!Array.isArray(i?.rows)) {
     return {
@@ -431,6 +435,7 @@ export function unresolvedExposureBlock(i: {
   }
 
   const conn = i.connectionId == null ? null : String(i.connectionId);
+  const now = Number.isFinite(Number(i?.nowMs)) ? Number(i.nowMs) : Date.now();
   const unresolved: string[] = [];
   const unknown: string[] = [];
 
@@ -446,8 +451,17 @@ export function unresolvedExposureBlock(i: {
     if (pz === 'PASS' && oz === 'PASS') continue;
 
     const id = String(r?.id ?? '?');
-    if (pz === 'FAIL' || oz === 'FAIL') unresolved.push(id);
-    else unknown.push(id);                      // UNKNOWN · PENDING · 누락 · 그 밖
+    // **본 적 있는 FAIL은 사후 확인으로 덮지 않는다.** "주문이 남은 것을
+    // 봤다"는 기록된 사실이고, 지금 비어 있다는 관측이 그 사실을 지우지
+    // 않는다. 사람이 그 줄을 직접 보고 판단해야 한다.
+    if (pz === 'FAIL' || oz === 'FAIL') { unresolved.push(id); continue; }
+
+    // 모르는 줄은 **증거로** 풀 수 있다. 간격을 둔 두 번의 관측이 모두
+    // 비어 있었다면 이 줄은 더 이상 차단 사유가 아니다. 판정은
+    // `exposureAttestation`에 한 곳으로 두고 여기서는 묻기만 한다.
+    if (attestationVerdict(r?.steps?._attestation, now).accepted) continue;
+
+    unknown.push(id);                           // UNKNOWN · PENDING · 누락 · 그 밖
   }
 
   if (unresolved.length) {
@@ -460,8 +474,12 @@ export function unresolvedExposureBlock(i: {
   if (unknown.length) {
     return {
       blocked: true, code: 'EXPOSURE_UNKNOWN', offenders: unknown,
+      // **사람이 할 일을 적지 않는다.** 이 상태를 푸는 것은 사람이 거래소
+      // 화면을 열어 보고 DB를 고치는 일이 아니라 명령 하나다. 그 명령이
+      // 무엇인지까지 여기 적는다 — 안 적으면 결국 사람이 DB를 고친다.
       reason: `노출이 정리됐는지 확인하지 못한 회차가 ${unknown.length}건 있습니다`
-        + `(${unknown.join(' · ')}) — 모르는 것 위에 새 회차를 열지 않습니다`,
+        + `(${unknown.join(' · ')}) — 모르는 것 위에 새 회차를 열지 않습니다. `
+        + `노출 해소(attest-exposure)를 실행하면 거래소를 두 번 읽어 비어 있음을 확인하고 자동으로 풉니다`,
     };
   }
   return {

@@ -61,8 +61,63 @@ const REQUIRED = [
   { needle: 'parityGate', why: '워커가 다른 DB·다른 키를 보는 채로 주문이 나갑니다' },
 ];
 
+/**
+ * **방향 관문 — 원하는 방향과 이미 열린 포지션의 방향을 비교하는가.**
+ *
+ * 위의 여섯은 전부 **계좌·시스템** 관문이다(정지 · 마이그레이션 ·
+ * 청산감시 · 전략겹침 · 증거금 · 패리티). 그 여섯을 다 통과해도
+ * **거래소에 이미 열려 있는 포지션의 방향은 아무도 보지 않는다.**
+ *
+ * ONE_WAY 계좌에서 그게 무슨 뜻인가: SHORT가 열려 있는데 LONG 진입을
+ * 내면 거래소가 **그 숏을 상계해서 조용히 닫는다.** 반대도 같다.
+ * 사용자는 숏을 들고 있다고 믿는 채로 포지션이 사라지고, 보호주문은
+ * 고아로 남는다. 그리고 응답에는 "진입 성공"이 적힌다.
+ *
+ * 정본 판정은 이미 있다 — `src/lib/engine/positionLifecycle.ts`의
+ * `entryGate()`가 `PROCEED` · `SAME_SIDE_BLOCKED` · `REVERSAL_REQUIRED` ·
+ * `POSITION_UNKNOWN` · `POSITION_AMBIGUOUS`를 가른다. 부호로 방향을
+ * 읽고, 못 읽으면 `null`로 두고 0으로 눕히지 않는다.
+ *
+ * **그런데 그것을 부르는 라우트가 `my-original-v1` 하나뿐이었다.**
+ * 활성 전략인 `scalp`(1500줄)는 한 번도 부르지 않았다 — 이 저장소에서
+ * 가장 자주 난 고장(경로가 둘인데 한쪽만 고침)이 그대로 반복된 자리다.
+ */
+const DIRECTION_GATE = {
+  needle: 'entryGate',
+  why: '거래소에 열린 포지션의 **방향**을 보지 않습니다 — ONE_WAY 계좌에서'
+    + ' 반대 방향 진입이 기존 포지션을 조용히 상계해 닫습니다',
+};
+
+/**
+ * **빚 등록부.** 아직 방향 관문을 지나지 않는 경로.
+ *
+ * 비워 가는 것이 목표다. 여기 적어 두는 이유는 적지 않으면 잊기
+ * 때문이고, 전부 한 PR에서 고치면 그 PR을 아무도 검토할 수 없기
+ * 때문이다. **값을 지우면 그 경로가 빨개진다.**
+ *
+ * 그리고 빚을 갚았는데 등록부에 남아 있으면 그것도 실패로 센다 —
+ * 등록부가 낡으면 다음 사람이 "여기는 원래 안 보는 곳"이라고 읽는다.
+ */
+const DIRECTION_DEBT = {
+  'src/app/api/autotrade/daily-ladder/route.ts':
+    '일봉 사다리는 같은 방향 분할 진입이 설계라 반전 절차를 따로 봐야 한다',
+  'src/app/api/webhook/tradingview/route.ts':
+    '외부 신호 경로 — autoEntryGate 합성만 부른다. 방향 관문을 합성에 넣을지 별건',
+  'src/app/api/webhook/signal/route.ts':
+    '외부 신호 경로 — autoEntryGate 합성만 부른다. 방향 관문을 합성에 넣을지 별건',
+};
+
 let bad = 0;
 const err = (m) => { console.error(`❌ ${m}`); bad += 1; };
+
+// 등록부가 낡는 것을 막는다: 목록에 없는 경로를 면제해 봐야 아무것도
+// 면제되지 않고, 그 오타가 "면제했다"로 읽힌다.
+for (const f of Object.keys(DIRECTION_DEBT)) {
+  if (!ENTRY_ROUTES.includes(f)) {
+    err(`방향 관문 빚 등록부의 \`${f}\`가 ENTRY_ROUTES에 없습니다 — `
+      + '면제한 적 없는 것을 면제했다고 읽게 됩니다');
+  }
+}
 
 for (const f of ENTRY_ROUTES) {
   if (!existsSync(f)) {
@@ -70,6 +125,28 @@ for (const f of ENTRY_ROUTES) {
     continue;
   }
   const src = readFileSync(f, 'utf8');
+
+  // ── 방향 관문 ──
+  //
+  // **합성 함수로 면제되지 않는다.** `autoEntryGate`는 계좌·시스템
+  // 여섯만 돌리고 거래소 포지션의 방향은 보지 않으므로, 합성을 부른
+  // 것이 방향을 봤다는 뜻이 아니다. 그래서 이 검사는 `continue` 위에 둔다.
+  {
+    // `\b`는 `autoEntryGate(`에 걸리지 않는다 — `oE`는 둘 다 단어 문자라
+    // 경계가 없다. 그래서 합성 호출이 방향 관문으로 오인되지 않는다.
+    const called = new RegExp(`\\b${DIRECTION_GATE.needle}\\s*\\(`).test(src);
+    const excused = Object.prototype.hasOwnProperty.call(DIRECTION_DEBT, f);
+    if (called && excused) {
+      err(`${f}\n     방향 관문을 이미 부르는데 빚 등록부에 남아 있습니다`
+        + '\n     DIRECTION_DEBT에서 지우세요 — 낡은 등록부는 "원래 안 보는 곳"으로 읽힙니다');
+    } else if (!called && !excused) {
+      err(`${f}\n     ${DIRECTION_GATE.needle}를 부르지 않습니다 — ${DIRECTION_GATE.why}`
+        + '\n     정본: src/lib/engine/positionLifecycle.ts 의 entryGate()'
+        + `\n     (${COMPOSITE}()는 계좌·시스템 여섯만 돕니다 — 방향은 보지 않습니다)`);
+    } else if (!called && excused) {
+      console.log(`⚠️  ${f} — 방향 관문 미배선 (빚 등록부): ${DIRECTION_DEBT[f]}`);
+    }
+  }
 
   // 합성 함수 하나를 부르면 여섯이 다 돈다.
   if (new RegExp(`\\b${COMPOSITE}\\s*\\(`).test(src)) continue;

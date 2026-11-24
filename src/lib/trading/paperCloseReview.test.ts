@@ -275,4 +275,194 @@ export function runPaperCloseReviewTests() {
     eq((rowOf(rows, 'MARGIN').value as any).amount, 74.99);
     eq((rowOf(rows, 'LEVERAGE').value as any).text, '10배');
   });
+
+  // ══════════ 서버 쪽 · 포지션을 못 읽은 것은 "없음"이 아니다 ══════════
+  //
+  // 확인 창이 보내는 `/api/paper/close`가 포지션 SELECT의 `error`를 버리고
+  // `data`만 보고 있었다. DB가 잠깐 실패하면 **있는 포지션을** 404
+  // `not_found`로 답했다 — 사용자는 포지션이 사라진 줄 안다. 같은 장부를
+  // 읽는 `/api/paper/positions`는 이미 503 `positions_unreadable`로 갈라 둔
+  // 규칙이다.
+  closeRouteFacts();
+  modifyRouteFacts();
+}
+
+/** 실제 라우트 핸들러를 가짜 DB에 붙여 한 번 부른다 */
+async function hitCloseRoute(read: { data: any; error: any }, uid = 'u-1') {
+  return hitPaperRoute('close', { positionId: 'p1' }, read, uid);
+}
+
+async function hitPaperRoute(
+  route: 'close' | 'modify', body: any, read: { data: any; error: any }, uid = 'u-1',
+  opts: { write?: { data: any; error: any } } = {},
+) {
+  const serverPath = require.resolve('../supabase/server');
+  const adminPath = require.resolve('../supabase/admin');
+  const routePath = require.resolve(`../../app/api/paper/${route}/route`);
+  const prevServer = require.cache[serverPath];
+  const prevAdmin = require.cache[adminPath];
+  let selects = 0;
+  let rpcs = 0;
+  let updates = 0;
+  /** UPDATE에 붙은 조건. `status='open'`이 붙었는지 본다. */
+  const writeEqs: Array<[string, unknown]> = [];
+  const db = {
+    from: (_t: string) => {
+      let writing = false;
+      const q: any = {
+        // UPDATE 뒤의 `.select()`는 **맞은 행**을 돌려준다(PostgREST).
+        select: () => {
+          if (writing) return Promise.resolve(opts.write ?? { data: [{ id: 'p1' }], error: null });
+          selects++; return q;
+        },
+        update: () => { updates++; writing = true; return q; },
+        eq: (k: string, v: unknown) => { if (writing) writeEqs.push([k, v]); return q; },
+        maybeSingle: async () => read,
+      };
+      return q;
+    },
+    rpc: async () => { rpcs++; return { data: null, error: { message: '부르면 안 된다' } }; },
+  };
+  require.cache[serverPath] = {
+    id: serverPath, filename: serverPath, loaded: true, exports: {
+      getSupabaseAdmin: () => db,
+      resolveUserId: async () => uid,
+      getUserIdFromRequest: async () => uid,
+      serviceRoleKeyRole: () => 'service_role',
+    },
+  } as any;
+  delete require.cache[adminPath];
+  delete require.cache[routePath];
+  let POST: (r: any) => Promise<any>;
+  try {
+    POST = require(routePath).POST;
+  } finally {
+    delete require.cache[routePath];
+    delete require.cache[adminPath];
+    if (prevServer) require.cache[serverPath] = prevServer; else delete require.cache[serverPath];
+    if (prevAdmin) require.cache[adminPath] = prevAdmin;
+  }
+  const req = {
+    json: async () => body,
+    headers: { get: () => null },
+  };
+  const res = await POST!(req);
+  return { status: res.status as number, json: await res.json(), selects, rpcs, updates, writeEqs };
+}
+
+function closeRouteFacts() {
+  test('★ 포지션 조회가 실패하면 503 position_unreadable — 404 not_found로 적지 않는다', async () => {
+    const r = await hitCloseRoute({ data: null, error: { message: 'connection reset' } });
+    eq(r.selects, 1, '포지션을 읽으러 가지 않았다');
+    eq(r.status, 503);
+    eq(r.json.ok, false);
+    eq(r.json.error, 'position_unreadable');
+    assert(String(r.json.message).includes('없다는 뜻이 아닙니다'),
+      `모름을 없음과 가르는 문장이 없다: ${r.json.message}`);
+    eq(r.rpcs, 0, '못 읽은 포지션을 닫으러 갔다');
+  });
+
+  test('정말 없는 포지션은 그대로 404 not_found', async () => {
+    const r = await hitCloseRoute({ data: null, error: null });
+    eq(r.status, 404);
+    eq(r.json.error, 'not_found');
+    eq(r.rpcs, 0);
+  });
+
+  test('남의 포지션은 그대로 404 not_found — 있다는 사실도 알려 주지 않는다', async () => {
+    const r = await hitCloseRoute({
+      data: { id: 'p1', user_id: 'someone-else', symbol: 'ETHUSDT', status: 'open', market: 'USDM' },
+      error: null,
+    });
+    eq(r.status, 404);
+    eq(r.json.error, 'not_found');
+    eq(r.rpcs, 0);
+  });
+}
+
+// ══════════ 손절·익절 수정 · 같은 규칙 ══════════
+//
+// `/api/paper/modify`도 같은 포지션 SELECT를 하고, 같은 자리에서 `error`를
+// 버리고 있었다. DB가 잠깐 실패하면 **있는 포지션의 손절을 옮기려던
+// 사용자에게** 404 `not_found`가 갔다 — 청산만 고치고 수정은 남은 것이다.
+function modifyRouteFacts() {
+  const body = { positionId: 'p1', stopLoss: 2900 };
+
+  test('★ 수정: 포지션 조회가 실패하면 503 position_unreadable — 404 not_found로 적지 않는다', async () => {
+    const r = await hitPaperRoute('modify', body, { data: null, error: { message: 'connection reset' } });
+    eq(r.selects, 1, '포지션을 읽으러 가지 않았다');
+    eq(r.status, 503);
+    eq(r.json.ok, false);
+    eq(r.json.error, 'position_unreadable');
+    assert(String(r.json.message).includes('없다는 뜻이 아닙니다'),
+      `모름을 없음과 가르는 문장이 없다: ${r.json.message}`);
+    eq(r.updates, 0, '못 읽은 포지션을 고치러 갔다');
+  });
+
+  test('수정: 정말 없는 포지션은 그대로 404 not_found', async () => {
+    const r = await hitPaperRoute('modify', body, { data: null, error: null });
+    eq(r.status, 404);
+    eq(r.json.error, 'not_found');
+    eq(r.updates, 0);
+  });
+
+  test('수정: 남의 포지션은 그대로 404 not_found', async () => {
+    const r = await hitPaperRoute('modify', body, {
+      data: { id: 'p1', user_id: 'someone-else', symbol: 'ETHUSDT', side: 'LONG', status: 'open', entry_price: 3000, market: 'USDM' },
+      error: null,
+    });
+    eq(r.status, 404);
+    eq(r.json.error, 'not_found');
+    eq(r.updates, 0);
+  });
+
+  // ── 읽은 뒤에 닫힌 포지션 ──
+  //
+  // 포지션을 읽은 순간에는 열려 있었는데, 시세를 읽는 사이 감시기가 손절로
+  // 닫았다(정산은 `status='open'`일 때만 바뀌는 조건부 UPDATE다 — 072).
+  // 예전 수정 UPDATE는 `id`·`user_id`만 보고 **맞은 행 수를 보지 않았다.**
+  // 그래서 닫힌 포지션의 손절 칸을 덮어쓰고 "저장했습니다"를 답했다 —
+  // 사용자는 손절을 옮겼다고 믿는데 포지션은 이미 옛 손절로 닫혀 있다.
+  //
+  // 시세 조회는 네트워크로 가므로 시험에서는 **모르는 시장**을 준다 —
+  // `readPaperMarkPrice`가 그 자리에서 UNSUPPORTED_MARKET으로 돌아오고,
+  // 라우트는 진입가(3000)로 방향을 본다. 여기서 보려는 것은 그 뒤의 쓰기다.
+  // (비동기 시험이 동시에 돌아 `require.cache` 스텁은 서로 새어 나간다.)
+  const openPos = {
+    id: 'p1', user_id: 'u-1', symbol: 'ETHUSDT', side: 'LONG',
+    status: 'open', entry_price: 3000, market: 'TEST_OFFLINE',
+  };
+
+  test('★ 수정: UPDATE는 열린 포지션에만 맞는다 (status=open 조건)', async () => {
+    const r = await hitPaperRoute('modify', body, { data: openPos, error: null }, 'u-1');
+    eq(r.status, 200, JSON.stringify(r.json));
+    eq(r.updates, 1);
+    assert(r.writeEqs.some(([k, v]) => k === 'status' && v === 'open'),
+      `UPDATE에 status='open' 조건이 없다: ${JSON.stringify(r.writeEqs)}`);
+    assert(r.writeEqs.some(([k, v]) => k === 'user_id' && v === 'u-1'), '소유자 조건이 빠졌다');
+  });
+
+  test('★ 수정: 읽은 뒤 청산돼 0행이 바뀌면 409 already_closed — "저장했습니다"라 하지 않는다', async () => {
+    const r = await hitPaperRoute('modify', body, { data: openPos, error: null }, 'u-1',
+      { write: { data: [], error: null } });
+    eq(r.status, 409, JSON.stringify(r.json));
+    eq(r.json.ok, false);
+    eq(r.json.error, 'already_closed');
+    assert(!String(r.json.message).includes('저장했습니다'), `저장했다고 답했다: ${r.json.message}`);
+  });
+
+  test('★ 수정: 바뀐 행을 확인하지 못하면 성공으로 적지 않는다 (503)', async () => {
+    const r = await hitPaperRoute('modify', body, { data: openPos, error: null }, 'u-1',
+      { write: { data: null, error: null } });
+    eq(r.status, 503, JSON.stringify(r.json));
+    eq(r.json.ok, false);
+    eq(r.json.error, 'update_unconfirmed');
+  });
+
+  test('수정: UPDATE 오류는 그대로 500 update_failed', async () => {
+    const r = await hitPaperRoute('modify', body, { data: openPos, error: null }, 'u-1',
+      { write: { data: null, error: { message: 'boom' } } });
+    eq(r.status, 500);
+    eq(r.json.error, 'update_failed');
+  });
 }

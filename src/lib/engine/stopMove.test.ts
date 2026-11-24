@@ -118,7 +118,42 @@ export function runStopMoveTests() {
     });
     eq(seen.length, 1, '적기를 건너뛰지 않는다');
     eq(seen[0], null, '번호가 없다는 사실 그대로');
-    eq(r.code, 'MOVED', '진행한다');
+  });
+
+  // ══ 남길 번호를 모르면 옛 손절은 남는다 — 그것을 MOVED로 적지 않는다 ══
+  //
+  // `venuePositionOps.cancelOtherStops`는 keepId가 null이면 **아무것도
+  // 취소하지 않는다**(무엇을 남길지 모르고 지우면 손절 없는 포지션이 된다).
+  // 그런데 정본이 그 0건을 "지울 것이 없었다"로 읽어 MOVED · oldStopKept:false
+  // 로 적으면, 옛 손절이 거래소에 그대로 있는데 장부 결과는 "치웠다"가 된다.
+  test('★ 새 손절 번호를 모르면 옛 것을 치우지 않고 OLD_STOP_REMAINS로 적는다', async () => {
+    const calls = { cancel: 0 };
+    const r = await moveStopSafely({
+      symbol: 'BTCUSDT', side: 'LONG', newStop: 110,
+      place: async () => ({ ok: true, orderId: null }),
+      record: async () => ({ ok: true }),
+      cancelOthers: async () => { calls.cancel += 1; return { cancelled: 0 }; },
+    });
+    eq(calls.cancel, 0, '★ 남길 번호 없이 "나머지 취소"를 부르지 않는다');
+    eq(r.code, 'OLD_STOP_REMAINS', '★ 옛 손절이 남았는데 MOVED로 적었습니다');
+    eq(r.oldStopKept, true, '★ 옛 손절이 남은 사실이 사라졌습니다');
+    eq(r.ok, true, '새 손절은 걸렸으므로 실패는 아니다');
+    eq(r.newOrderId, null, '번호를 지어내지 않는다');
+    eq(r.cancelledOld, 0);
+    assert(/번호/.test(r.reason), r.reason);
+  });
+
+  test('빈 문자열 번호도 "모름"이다', async () => {
+    const calls = { cancel: 0 };
+    const r = await moveStopSafely({
+      symbol: 'BTCUSDT', side: 'SHORT', newStop: 90,
+      place: async () => ({ ok: true, orderId: '' }),
+      record: async () => ({ ok: true }),
+      cancelOthers: async () => { calls.cancel += 1; return { cancelled: 1 }; },
+    });
+    eq(calls.cancel, 0, '빈 번호로 나머지를 치우지 않는다');
+    eq(r.code, 'OLD_STOP_REMAINS');
+    eq(r.oldStopKept, true);
   });
 
   // ══ 건너뛴 정리를 완전 성공으로 숨기지 않는다 ══

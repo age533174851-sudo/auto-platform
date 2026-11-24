@@ -96,8 +96,10 @@ export function runKillTargetsTests() {
       spec: REDUCE, positions: wrong, positionsRead: true, ledgerRead: true,
       autoSymbols: new Set<string>(),
     });
-    // **이것이 예전에 "완료"로 끝나던 자리다.**
-    eq(plan.discovery.code, 'VERIFIED_EMPTY', '읽었는데 후보가 0이면 이렇게 보인다');
+    // **이것이 예전에 "완료"로 끝나던 자리다** (VERIFIED_EMPTY).
+    // 이제는 줄이 있는데 amount를 못 읽은 것으로 세어 UNKNOWN이 된다 —
+    // 칸 이름이 다시 틀려도 "줄일 포지션 없음"으로 조용히 끝나지 않는다.
+    eq(plan.discovery.code, 'UNKNOWN', '읽었는데 후보가 0이어도, 줄이 있으면 없다고 하지 않는다');
     eq(plan.targets.length, 0, '아무것도 안 줄인다');
   });
 
@@ -120,6 +122,59 @@ export function runKillTargetsTests() {
     });
     eq(plan.discovery.code, 'UNKNOWN', '못 읽었다');
     eq(plan.discovery.count, null, '0으로 적지 않는다');
+  });
+
+  // ══ 수량을 못 읽은 포지션 ══
+  //
+  // `futuresListPositions()`의 줄은 **전부 0이 아닌 포지션이다.**
+  //   · Gate: `getPositionsGateFutures`가 size 0을 거른다. 배수(spec)를
+  //     못 읽으면 `amount: null`로 줄을 남긴다.
+  //   · Binance: `getFuturesPositions`가 0을 거르고, 못 읽은 positionAmt는
+  //     **일부러** 줄로 남긴다('있다·모른다'). 어댑터가 그것을 null로 준다.
+  // 그래서 null은 "포지션 아님"이 아니라 **"수량을 모르는 열린 포지션"**이다.
+  test('★ REDUCE_RISK — 수량을 못 읽은 포지션이 있으면 VERIFIED_EMPTY가 아니라 UNKNOWN이다', () => {
+    const plan = targetPlan({
+      spec: REDUCE, positions: [execPosition('BTCUSDT', null)],
+      positionsRead: true, ledgerRead: true, autoSymbols: new Set<string>(),
+    });
+    eq(plan.discovery.code, 'UNKNOWN', '열린 포지션을 못 줄였는데 "없다"로 적으면 안 된다');
+    eq(plan.discovery.count, null, '0으로 적지 않는다');
+
+    // 그리고 그 결과로 완료가 되지 않는다 — AB에는 D가 없어 잔여가
+    // 포지션을 세지 않으므로, 여기서 막지 않으면 미체결 0만으로 완료다.
+    const done = killCompletion({
+      actionMode: 'AB',
+      exec: { ran: true, targeted: null, closeFailed: 0 } as any,
+      leftover: { code: 'CLEAR', expectedClosed: false, reason: '미체결 0' } as any,
+      discovery: plan.discovery,
+    });
+    eq(done.complete, false, '줄이지 못한 포지션 위에서 완료로 끝나지 않는다');
+  });
+
+  test('★ 읽힌 대상은 그대로 닫되, 못 읽은 줄이 섞이면 UNKNOWN이다', () => {
+    const plan = targetPlan({
+      spec: REDUCE, positions: [execPosition('BTCUSDT', 0.5), execPosition('ETHUSDT', null)],
+      positionsRead: true, ledgerRead: true, autoSymbols: new Set<string>(),
+    });
+    eq(plan.targets.length, 1, '읽힌 BTC는 여전히 줄인다 — 막는 것이 아니다');
+    eq(plan.targets[0].symbol, 'BTCUSDT', '그 심볼');
+    eq(plan.discovery.code, 'UNKNOWN', 'ETH를 줄였다고 말할 수 없다');
+  });
+
+  test('★ CLOSE_AUTOMATED — 봇의 심볼인데 수량을 못 읽으면 UNKNOWN이다', () => {
+    const plan = targetPlan({
+      spec: AUTO, positions: [execPosition('BTCUSDT', null)],
+      positionsRead: true, ledgerRead: true, autoSymbols: new Set(['BTCUSDT']),
+    });
+    eq(plan.discovery.code, 'UNKNOWN', '봇이 연 포지션을 못 닫았다');
+  });
+
+  test('CLOSE_AUTOMATED — 손매매 심볼의 수량을 못 읽은 것은 이 단계와 무관하다', () => {
+    const plan = targetPlan({
+      spec: AUTO, positions: [execPosition('ETHUSDT', null)],
+      positionsRead: true, ledgerRead: true, autoSymbols: new Set(['BTCUSDT']),
+    });
+    eq(plan.discovery.code, 'VERIFIED_EMPTY', '손매매는 원래 건드리지 않는다');
   });
 
   test('CLOSE_AUTOMATED에서 장부를 못 읽으면 UNKNOWN이다', () => {

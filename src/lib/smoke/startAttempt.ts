@@ -22,6 +22,7 @@ import {
   preflightVerdict, holdUntilMs, unprotectedExposureVerdict,
   smokeTestnetVerdict, unresolvedExposureBlock, SMOKE_STRATEGY_ID,
 } from './smokePlan';
+import { GATE_RECOVERY_KEY, gateRecoveryTimes, isGateRecoveryCandidate } from './gateRecovery';
 import { residualVerdict } from '../engine/orderOwnership';
 import { ownedOrderIds } from '../engine/protectionLedger';
 import { resolveExitPolicy, liquidationGuard, DEFAULT_EXIT_POLICY_ID } from '../strategies/exitPolicy';
@@ -107,7 +108,7 @@ export async function startAttempt(sb: any, i: StartAttemptInput): Promise<Start
   // 안전한 상한(1000)에 닿으면 전체를 확인한 것이 아니므로 차단한다.
   try {
     const { data, error } = await sb.from('smoke_tests')
-      .select('id, connection_id, steps, state')
+      .select('id, connection_id, steps, state, mode, symbol')
       .eq('user_id', i.userId).eq('connection_id', i.connectionId)
       .order('created_at', { ascending: false }).limit(1000);
     if (error) throw new Error(error.message);
@@ -117,7 +118,32 @@ export async function startAttempt(sb: any, i: StartAttemptInput): Promise<Start
         + '과거 미해결 노출을 모두 확인할 수 없어 새 주문을 차단합니다', 503);
     }
     const blk = unresolvedExposureBlock({ rows: data, connectionId: i.connectionId });
-    if (blk.blocked) return fail('BLOCKED', blk.reason, 409);
+    if (blk.blocked) {
+      const blockedRows = data.filter(row => blk.offenders.includes(row.id));
+      if (exchange !== 'gate' || !testnet || blockedRows.length === 0
+          || !blockedRows.every(row => isGateRecoveryCandidate(row)
+            && gateRecoveryTimes(row.steps?.[GATE_RECOVERY_KEY], startedMs)?.confirmedAt != null)) {
+        return fail('BLOCKED', blk.reason, 409);
+      }
+
+      // Recheck each recovered symbol and the proposed entry symbol before accepting recovery.
+      const { toGateContract } = await import('../exchanges/gatePlan');
+      const { readGateTestnetExposure } = await import('../exchanges/gateFutures');
+      const symbols = new Set<string>([i.symbol, ...blockedRows.map(row => row.symbol)]);
+      for (const symbol of symbols) {
+        const contract = typeof symbol === 'string' ? toGateContract(symbol) : null;
+        if (!contract) return fail('BLOCKED', blk.reason, 409);
+        const current = await readGateTestnetExposure(creds.key, creds.secret, contract);
+        if (Object.values(current).some(count => count !== 0)) {
+          return fail('BLOCKED', `Gate TESTNET ${symbol} 포지션과 두 주문 목록의 잔여 0을 확인하지 못했습니다`, 409);
+        }
+      }
+
+      const remaining = unresolvedExposureBlock({
+        rows: data.filter(row => !blk.offenders.includes(row.id)), connectionId: i.connectionId,
+      });
+      if (remaining.blocked) return fail('BLOCKED', remaining.reason, 409);
+    }
   } catch (e: any) {
     // 테이블 누락도 실패다. "첫 실행" 여부를 테이블 누락으로 추정하지 않는다.
     const msg = String(e?.message || e);
@@ -275,6 +301,10 @@ export async function startAttempt(sb: any, i: StartAttemptInput): Promise<Start
       filledQty: exec?.filledQty ?? null,
       avgPrice: exec?.avgPrice ?? null,
       rejected: exec?.ok === false,
+      // **거래소가 왜 거절했는지 함께 넘긴다.** 여기는 실제 TESTNET
+      // 주문이 나가는 경로다 — 스모크가 FAIL로 끝났을 때 사유가 없으면
+      // 사람이 거래소 화면을 따로 열어 봐야 한다.
+      rejectedReason: exec?.ok === false ? (exec?.message ?? null) : null,
       position: posAfter,
       leverageConfirmed: exec?.leverageConfirmed ?? null,
       positionModeConfirmed: exec?.positionModeConfirmed ?? null,

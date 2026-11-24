@@ -84,21 +84,26 @@ export async function GET(req: NextRequest) {
   // 대신 재면 그건 '오늘'이 아니라 '누적'이다.
   const { paperTodayPnl } = await import('@/lib/portfolio/paperAccount');
   let dayStartEquity: number | null = null;
+  let dayStartUnreadable = false;
   try {
     const dayStart = new Date(); dayStart.setUTCHours(0, 0, 0, 0);
-    const { data: snap } = await (sb as any).from('account_equity_snapshots')
+    const { data: snap, error: snapErr } = await (sb as any).from('account_equity_snapshots')
       .select('total_equity, taken_at')
       .eq('user_id', uid).eq('env', 'MOCK')
       .gte('taken_at', dayStart.toISOString())
       .order('taken_at', { ascending: true }).limit(1);
+    // **오류를 받아 본다.** Supabase는 실패를 던지지 않고 `error`로 돌려준다
+    // — 버리면 빈 결과가 되어 "기준점이 아직 없다"로 적혔다.
+    if (snapErr) throw new Error(snapErr.message);
     const first = Array.isArray(snap) && snap.length ? snap[0] : null;
     const v = first == null ? null : Number((first as any).total_equity);
     dayStartEquity = v != null && Number.isFinite(v) ? v : null;
   } catch {
     // **못 읽은 것을 0으로 두지 않는다.** null이면 아래에서 "기준점 없음"이 된다.
     dayStartEquity = null;
+    dayStartUnreadable = true;
   }
-  const today = paperTodayPnl({ totalEquity: eq.totalEquity, dayStartEquity });
+  const today = paperTodayPnl({ totalEquity: eq.totalEquity, dayStartEquity, dayStartUnreadable });
 
   return NextResponse.json({
     ok: true,
@@ -115,8 +120,15 @@ export async function GET(req: NextRequest) {
       totalFees: started ? (Number(acct.total_fees) || 0) : null,
       tradeCount: started ? (Number(acct.trade_count) || 0) : null,
       winCount: started ? (Number(acct.win_count) || 0) : null,
-      returnPct: started && initial != null && initial > 0 && balance != null
-        ? ((balance - initial) / initial) * 100 : null,
+      // **같은 판정을 쓴다.** 예전에는 이 줄이 `balance`(현금)로 수익률을
+      // 냈다 — 두 가지가 틀렸다: ① 충전액을 수익으로 셌고 ② 현금으로
+      // 나눠서 미실현손익·증거금을 무시했다. 바로 아래 주석이 "`balance`는
+      // 현금이지 총자산이 아니다"라고 경고하는데, 그 경고 위에서 그
+      // 현금으로 나누고 있었다(#592).
+      netPnl: started ? eq.netPnl : null,
+      returnPct: started ? eq.returnPct : null,
+      /** 수익률을 적지 못한 이유 — 화면이 '—'만 보여 주지 않도록 */
+      returnPctReason: started ? eq.returnPctReason : '',
     },
     // ── 화면이 읽을 canonical 값 ──
     //
@@ -132,7 +144,10 @@ export async function GET(req: NextRequest) {
       initialBalance: eq.initialBalance,
       realizedPnl: eq.realizedPnl,
       totalFees: eq.totalFees,
+      /** 거래로 번 돈 — 충전·출금에 면역 */
+      netPnl: eq.netPnl,
       returnPct: eq.returnPct,
+      returnPctReason: eq.returnPctReason,
       currency: 'USDT',
       note: eq.note,
     },

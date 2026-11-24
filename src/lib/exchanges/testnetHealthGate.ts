@@ -23,3 +23,31 @@ export function envHealthProbeVerdict(input: {
   }
   return { ok: true, code: 'READY', exchange: raw ? raw as EnvHealthExchange : null };
 }
+
+function decimalText(value: unknown): string | undefined {
+  if (typeof value !== 'string' && typeof value !== 'number') return undefined;
+  const raw = String(value).trim();
+  if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(raw)) return undefined;
+  return Number.isFinite(Number(raw)) ? raw : undefined;
+}
+
+export function envHealthPriceText(value: unknown): string | undefined {
+  const price = decimalText(value);
+  return price !== undefined && Number(price) > 0 ? price : undefined;
+}
+
+export function gateEnvHealthEvidence(input: {
+  publicOk: boolean;
+  privateOk: boolean;
+  lastPrice?: unknown;
+  balance?: unknown;
+  error?: string;
+}, configured: boolean) {
+  const lastPrice = input.publicOk ? envHealthPriceText(input.lastPrice) : undefined;
+  const balance = configured && input.privateOk ? decimalText(input.balance) : undefined;
+  const publicOk = lastPrice !== undefined;
+  const privateOk = balance !== undefined;
+  const error = input.error ?? (!publicOk ? '시세 응답에 유효한 현재가가 없습니다'
+    : configured && !privateOk ? '계좌 응답에 유효한 잔고가 없습니다' : undefined);
+  return { publicOk, privateOk, lastPrice, balance, error };
+}

@@ -34,10 +34,12 @@ export const fmt = (n: number | null | undefined, d = 0): string => {
   return v.toLocaleString('ko-KR', { minimumFractionDigits: d, maximumFractionDigits: d });
 };
 
+// **하락에 '−'를 지우지 않는다.** 예전에는 `Math.abs` 뒤에 음수 부호를
+// 붙이지 않아 −5.2%가 '5.20%'로 그려졌다. toFixed가 음수 부호를 붙인다.
 export const fmtPct = (n: number | null | undefined): string => {
   const v = Number(n);
   if (!Number.isFinite(v)) return '—';
-  return (v >= 0 ? '+' : '') + Math.abs(v).toFixed(2) + '%';
+  return (v >= 0 ? '+' : '') + v.toFixed(2) + '%';
 };
 
 // "—" 대신 다른 placeholder가 필요할 때
@@ -50,7 +52,7 @@ export const fmtSafe = (n: number | null | undefined, fallback = '—', d = 0): 
 export const fmtPctSafe = (n: number | null | undefined, fallback = '—'): string => {
   const v = Number(n);
   if (!Number.isFinite(v)) return fallback;
-  return (v >= 0 ? '+' : '') + Math.abs(v).toFixed(2) + '%';
+  return (v >= 0 ? '+' : '') + v.toFixed(2) + '%';
 };
 
 export const clamp = (v: number, a: number, b: number): number =>

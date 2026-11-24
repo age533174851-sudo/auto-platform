@@ -7,7 +7,7 @@
 // 보유량을 넘겨 거래소가 거부하거나 반대 포지션이 열린다.
 
 import { test, eq, assert } from '../../test/harness';
-import { closeQuantityFor } from './binanceFutures';
+import { closeQuantityFor, prepareClosePosition } from './binanceFutures';
 
 export function runCloseQtyTests() {
   console.log('[부분 청산 수량]');
@@ -108,5 +108,84 @@ export function runCloseQtyTests() {
     const r = closeQuantityFor(1, 50, 1, 1);
     eq(r.qty, 1);
     eq(r.fullClose, true);
+  });
+
+  // ── 못 읽은 보유량을 "없다"로 적지 않는다 ──
+  //
+  //   이 함수는 `percent`에 대해서는 이미 이 교훈을 적어 뒀다:
+  //
+  //       처음에는 `Number(percent) || 100`으로 두고 "0이나 음수는
+  //       전량"이라고 적었다. … 추측해서 청산하지 않습니다
+  //
+  //   그런데 `totalQty`는 아직 `Number(totalQty) || 0`이다. 같은 함수
+  //   안에서 **한쪽만 고쳐져 있다.** `Number('bad') || 0`은 0이므로
+  //   `total <= 0`에 걸려 **'포지션이 없습니다'**라고 적힌다.
+  //
+  //   닫히지는 않으므로(qty 0) 거래는 안전한 쪽으로 실패한다. 틀린 것은
+  //   **사람이 읽는 사실**이다 — 보유량을 못 읽은 것을 "포지션이 없다"고
+  //   적으면, 그 화면을 보고 포지션이 정리됐다고 판단한다.
+  for (const bad of [NaN, Infinity, -Infinity, undefined, null, 'bad', '']) {
+    test(`★★ 보유량을 못 읽으면 "없다"가 아니라 "모른다"다 (${String(bad)})`, () => {
+      const r = closeQuantityFor(bad as any, 50, 0.001, 0.001);
+      eq(r.qty, 0, '수량을 모르는데 청산 수량을 만들었다');
+      eq(r.fullClose, false);
+      assert(!/포지션이 없습니다/.test(r.reason),
+        `못 읽은 보유량을 "없다"로 적었다: ${r.reason}`);
+      assert(/확인하지 못|유효하지 않/.test(r.reason),
+        `모른다는 사실이 사유에 없다: ${r.reason}`);
+    });
+  }
+
+  test('★ 진짜 0은 그대로 "없다"다 — 과잉 차단하지 않는다', () => {
+    const r = closeQuantityFor(0, 50, 0.001, 0.001);
+    eq(r.qty, 0);
+    assert(/포지션이 없습니다/.test(r.reason), `진짜 0의 사유가 바뀌었다: ${r.reason}`);
+  });
+
+  // ── 방향 불일치와 "수량을 못 읽음"은 다른 사실이다 ──
+  //
+  //   `getFuturesPositions`는 `parseFloat(p.positionAmt) !== 0`으로
+  //   거른다. `parseFloat('bad')`는 `NaN`이고 `NaN !== 0`은 **true**라
+  //   깨진 줄이 **통과한다.** 그 줄은 이렇게 정규화된다:
+  //
+  //       side: amt > 0 ? 'LONG' : amt < 0 ? 'SHORT' : 'FLAT'   // → 'FLAT'
+  //       amount: Math.abs(amt)                                 // → NaN
+  //
+  //   `'FLAT'`은 **지어낸 관측**이다. 그래서 `prepareClosePosition`은
+  //   `pos.side !== positionSide`에 걸려 **"방향 불일치 — 요청 LONG,
+  //   실제 FLAT"**이라고 답한다. 상태가 어긋난 것이 아니라 수량을 못
+  //   읽은 것인데, 그 화면을 보면 없는 불일치를 찾게 된다.
+  test('★★ 수량을 못 읽은 줄을 "방향 불일치"로 적지 않는다', async () => {
+    const r = await prepareClosePosition(
+      'K', 'S', 'BTCUSDT', 'LONG', 100, true, null,
+      {
+        fetchPositions: async () => ({
+          success: true, message: '1개 포지션',
+          positions: [{
+            symbol: 'BTCUSDT', side: 'FLAT', amount: NaN,
+            entryPrice: 95000, markPrice: 95000, unrealizedPnl: 0,
+            leverage: 100, liquidationPrice: 90000, marginType: 'isolated',
+          }],
+        }),
+        fetchFilters: async () => ({ stepSize: 0.001, minQty: 0.001 } as any),
+      });
+    eq(r.ok, false, '수량을 모르는데 청산을 준비했다');
+    eq(r.alreadyFlat, false, '못 읽은 것을 flat으로 읽었다');
+    assert(!/방향 불일치/.test(r.message),
+      `수량 미확인을 방향 불일치로 적었다: ${r.message}`);
+    assert(!/포지션이 없습니다/.test(r.message),
+      `수량 미확인을 "없다"로 적었다: ${r.message}`);
+    assert(/확인하지 못|유효하지 않/.test(r.message),
+      `모른다는 사실이 메시지에 없다: ${r.message}`);
+  });
+
+  // 강제 변환이 남은 자리 — #540·#541의 입력 계약과 같은 규칙인가.
+  test('★★ boolean·배열·객체를 수량으로 인정하지 않는다', () => {
+    for (const bad of [true, false, [], {}, [1], '0x10']) {
+      const r = closeQuantityFor(bad as any, 50, 0.001, 0.001);
+      eq(r.qty, 0, `${JSON.stringify(bad)}을 수량으로 읽었다`);
+      assert(/확인하지 못/.test(r.reason),
+        `${JSON.stringify(bad)}의 사유가 "모른다"가 아니다: ${r.reason}`);
+    }
   });
 }
