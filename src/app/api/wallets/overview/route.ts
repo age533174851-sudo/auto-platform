@@ -100,6 +100,8 @@ export async function GET(req: NextRequest) {
   const perf: Record<string, any> = {};
   // 화면이 곡선을 그릴 원본. **없는 구간을 지어내지 않는다** — 찍힌 시점만.
   const rawSnapshots: Record<string, Array<{ takenAt: number; totalEquity: number | null; unrealizedPnl: number | null }>> = {};
+  // 환경별로 기록을 **읽었는가**. 빈 기록과 못 읽은 기록은 다르다.
+  const historyReadOk: Record<string, boolean> = {};
 
   for (const e of envs) {
     let history: EquitySnapshot[] = [];
@@ -128,6 +130,7 @@ export async function GET(req: NextRequest) {
     } catch {
       historyOk = false;
     }
+    historyReadOk[e.env] = historyOk;
 
     // **오래됐으면 오래됐다고 말한다.**
     //
@@ -165,6 +168,8 @@ export async function GET(req: NextRequest) {
     return paperTodayPnl({
       totalEquity: paper?.equity?.totalEquity ?? null,
       dayStartEquity: base != null && Number.isFinite(base) ? base : null,
+      // MOCK 기록을 못 읽었으면 "기준점 없음"이 아니라 "읽지 못함"이다.
+      dayStartUnreadable: historyReadOk.MOCK === false,
     });
   })();
 
