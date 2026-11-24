@@ -7,7 +7,8 @@
 // 구별되지 않는다 — 그래서 아래 첫 테스트는 **그날의 응답 원문**으로
 // 시작한다.
 import { test, assert, eq } from '../../test/harness';
-import { deploymentCheckVerdict, verdictCodeOf } from './deploymentCheck';
+import { deploymentCheckVerdict, verdictCodeOf, deploymentBaseFrom, PUBLIC_APP_BASE }
+  from './deploymentCheck';
 
 const MAIN = 'fc14ffe9556fe56014d079d79ea570246e7b6482';
 
@@ -110,4 +111,60 @@ export function runDeploymentCheckTests() {
     assert(v.ok, '비교 대상이 없으면 판정하지 않는다');
     eq(v.code, 'MISMATCH', '그래도 어긋난 사실은 코드에 남는다');
   });
+
+  // ══════════ 시크릿이 없다고 확인을 포기하지 않는다 ══════════
+  //
+  // 예전에는 `scripts/verify-deployment.mjs`가 `BASE`(워크플로가
+  // `EXIT_MONITOR_URL`에서 넣는다) 하나만 보고, 비어 있으면
+  //
+  //     ::error::확인할 주소가 없습니다 (EXIT_MONITOR_URL)
+  //
+  // 로 끝냈다. 무인 회차는 그 시크릿을 **일부러 받지 않으므로** 회차마다
+  // "배포를 확인하지 못했습니다"가 남았다. 그런데
+  // `/api/system/deployment`는 **인증이 없는 경로**다 — 주소만 알면 읽힌다.
+
+  test('★ 주소가 하나도 없어도 공개 기본값으로 확인한다', () => {
+    const r = deploymentBaseFrom({});
+    eq(r.base, PUBLIC_APP_BASE);
+    eq(r.source, 'PUBLIC_DEFAULT', '기본값을 썼다는 사실이 남아야 한다');
+  });
+
+  test('★ 어디서 온 주소인지 반드시 남는다', () => {
+    // 적어 두지 않으면 "기본값으로 엉뚱한 배포를 본 회차"를 나중에
+    // 구별할 수 없다. 그건 멀쩡한 배포를 MISMATCH로 적는 길이다.
+    eq(deploymentBaseFrom({ BASE: 'https://a.example' }).source, 'BASE');
+    eq(deploymentBaseFrom({ EXIT_MONITOR_URL: 'https://b.example' }).source, 'EXIT_MONITOR_URL');
+    eq(deploymentBaseFrom({ NEXT_PUBLIC_APP_URL: 'https://c.example' }).source, 'NEXT_PUBLIC_APP_URL');
+    eq(deploymentBaseFrom({ APP_URL: 'https://d.example' }).source, 'APP_URL');
+  });
+
+  test('호출부가 준 주소가 가장 세다 — 순서에 뜻이 있다', () => {
+    const r = deploymentBaseFrom({
+      BASE: 'https://a.example', EXIT_MONITOR_URL: 'https://b.example',
+      NEXT_PUBLIC_APP_URL: 'https://c.example', APP_URL: 'https://d.example',
+    });
+    eq(r.base, 'https://a.example');
+    eq(r.source, 'BASE');
+  });
+
+  test('★ 빈 값·공백은 없는 것으로 본다 — 빈 주소로 요청하지 않는다', () => {
+    // `EXIT_MONITOR_URL: ''`는 "주소가 있다"가 아니다. 이걸 통과시키면
+    // `/api/system/deployment`로 요청이 나가 즉시 실패한다.
+    eq(deploymentBaseFrom({ BASE: '', EXIT_MONITOR_URL: '   ' }).source, 'PUBLIC_DEFAULT');
+    eq(deploymentBaseFrom({ BASE: '  ', APP_URL: 'https://d.example' }).source, 'APP_URL');
+  });
+
+  test('끝의 슬래시는 떼어낸다 — `//api/...`가 되면 404다', () => {
+    eq(deploymentBaseFrom({ BASE: 'https://a.example//' }).base, 'https://a.example');
+    eq(deploymentBaseFrom({ APP_URL: 'https://d.example/' }).base, 'https://d.example');
+  });
+
+  test('공개 기본값은 앱이 이미 쓰는 주소와 같다', () => {
+    // 저장소에 이미 `NEXT_PUBLIC_APP_URL || '<이 주소>'` 꼴로 들어 있다
+    // (`src/lib/notify/telegram.ts` · `src/app/layout.tsx`). 다른 주소를
+    // 적으면 같은 질문에 두 정본이 생긴다.
+    assert(/^https:\/\/[a-z0-9.-]+$/.test(PUBLIC_APP_BASE), PUBLIC_APP_BASE);
+    assert(!PUBLIC_APP_BASE.endsWith('/'), '끝에 슬래시가 없어야 한다');
+  });
+
 }
