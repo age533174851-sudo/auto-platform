@@ -1,6 +1,7 @@
 import { test, eq, assert } from '../../test/harness';
 import {
   cronStatus, tableStatus, connectionStatus, overallSummary, ago, autotradeStatus,
+  rowsRead, deploymentView,
   type CronExpectation, type AutotradeProbe,
 } from './statusReport';
 
@@ -226,5 +227,53 @@ export function runStatusReportTests() {
   test('확인 못 한 것은 unknown — 없음으로 단정하지 않는다', () => {
     eq(autotradeStatus(okProbe({ tableExists: null }), now).health, 'unknown');
     eq(autotradeStatus(okProbe({ enabledRows: null }), now).health, 'unknown');
+  });
+
+  // ── 조회 한 번의 결과: 읽음 / 못 읽음 ─────────────────────
+  //
+  // supabase-js는 실패를 **던지지 않고** `{ error }`로 돌려준다. 그래서
+  // `const { data } = await ...`를 try/catch로 감싸도 아무것도 안 잡히고,
+  // 조회 실패가 "기록 0건"으로 흘러간다(/api/system/runtime-health).
+  test('조회 오류는 못 읽음이다 — 빈 목록이 아니다', () => {
+    eq(rowsRead({ data: null, error: { message: 'permission denied' } }).readable, false);
+    eq(rowsRead({ data: [], error: { message: 'timeout' } }).readable, false);
+  });
+
+  test('목록이 아닌 응답도 못 읽음이다', () => {
+    eq(rowsRead({ data: null, error: null }).readable, false);
+    eq(rowsRead(null).readable, false);
+    eq(rowsRead(undefined).readable, false);
+  });
+
+  test('진짜 빈 목록은 읽은 것이다 — 막지 않는다', () => {
+    const r = rowsRead({ data: [], error: null });
+    eq(r.readable, true);
+    eq(r.readable ? r.rows.length : -1, 0);
+  });
+
+  test('배포 검증을 못 읽었으면 "기록이 없습니다"라고 하지 않는다', () => {
+    const v = deploymentView(rowsRead({ data: null, error: { message: 'relation does not exist' } }));
+    eq(v.verdict, 'UNKNOWN');
+    eq(v.readable, false);
+    assert(!v.reason.includes('기록이 없습니다'), v.reason);
+    assert(v.reason.includes('읽지 못했습니다'), v.reason);
+  });
+
+  test('배포 검증 기록이 진짜 없으면 없다고 하되 검증됐다고는 하지 않는다', () => {
+    const v = deploymentView(rowsRead({ data: [], error: null }));
+    eq(v.verdict, 'UNKNOWN');
+    eq(v.readable, true);
+    assert(v.reason.includes('기록이 없습니다'), v.reason);
+  });
+
+  test('배포 검증 기록이 있으면 그 판정을 그대로 옮긴다', () => {
+    const v = deploymentView(rowsRead({ data: [{
+      checked_at: '2026-11-23T00:00:00Z', main_sha: 'aaa', fly_sha: 'aaa',
+      worker_fresh: true, migrations_applied: true, verdict: 'VERIFIED', reason: 'ok',
+    }], error: null }));
+    eq(v.verdict, 'VERIFIED');
+    eq(v.readable, true);
+    eq(v.checkedAt, '2026-11-23T00:00:00Z');
+    eq(v.mainSha, 'aaa');
   });
 }
