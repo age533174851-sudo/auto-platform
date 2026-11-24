@@ -2,7 +2,7 @@
 // PnL 엔진 유닛 테스트 — 레버리지/수수료/롱숏/손익분기 검증.
 import { calcTradePnL } from './index';
 import { test, close, gt, lt, assert, eq } from '../../test/harness';
-import { formatKRW } from '../format';
+import { formatKRW, safePercent } from '../format';
 import { fmtPct, fmtPctSafe } from '../utils';
 import { quoteCurrencyOf, estimateCalcTax } from './calcCurrency';
 import { readFileSync, readdirSync, statSync } from 'fs';
@@ -126,10 +126,23 @@ export function runPnlTests() {
     };
     roots.forEach(walk);
     assert(files.length > 0, '훑을 화면 파일을 찾지 못했습니다');
-    const doubled = /'\+'\s*:\s*''\s*\}\s*\{\s*fmtPct(Safe)?\(/;
-    const bad = files.filter(f => doubled.test(readFileSync(f, 'utf8')))
-      .map(f => f.split(/[\\/]src[\\/]/).pop());
+    // `safePercent`(src/lib/format.ts)도 0 이상에 '+'를 스스로 단다.
+    // 템플릿 문자열의 `+${safePercent(...)}`도 같은 실수다 — 가격 알림의
+    // 급등 문구가 'BTC ++5.20% 급등!'으로 나가던 자리가 이것이었다.
+    const doubled = [
+      /'\+'\s*:\s*''\s*\}\s*\{\s*(fmtPct(Safe)?|safePercent)\(/,
+      /\+\$\{\s*(fmtPct(Safe)?|safePercent)\(/,
+    ];
+    const bad = files.filter(f => {
+      const src = readFileSync(f, 'utf8');
+      return doubled.some(re => re.test(src));
+    }).map(f => f.split(/[\\/]src[\\/]/).pop());
     eq(bad.join(','), '');
+  });
+
+  test('safePercent는 상승에 스스로 + 를 단다 — 화면이 덧붙일 필요가 없다', () => {
+    eq(safePercent(5.2), '+5.20%');
+    eq(safePercent(-5.2), '-5.20%');
   });
   // ── 손익 계산기: 달러로 적은 가격을 원화로 셈하지 않는다 ──
   //
