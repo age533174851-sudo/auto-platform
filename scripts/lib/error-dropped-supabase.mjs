@@ -47,9 +47,20 @@ export function errorDroppedSites(src, where = '') {
   const text = String(src ?? '');
   const out = [];
   // 주석을 지운다 — 주석에 적힌 옛 코드를 세면 고친 자리를 다시 센다.
+  //
+  // **지우지 않고 공백으로 덮는다.** 예전에는 블록 주석을 `''`로 지웠는데,
+  // 그러면 그 안의 줄바꿈까지 사라져서 **뒤에 오는 모든 자리의 줄번호가
+  // 앞으로 밀렸다.** 개수는 맞고 가리키는 줄만 틀리는 고장이라
+  // 기준선으로는 안 보이고, 그 줄을 열어 본 사람이 주석을 코드로 읽는다.
+  //
+  // 실측(2026-11-24) `src/lib/risk/killSwitch.ts` — JSDoc이 많은 파일:
+  //   보고 198·247·255·265 → 실제 211·285·293·303 (밀린 양 13 → 38로 증가)
+  //
+  // 길이를 유지하면 줄도 칸도 그대로다.
+  const blank = (m) => m.replace(/[^\n]/g, ' ');
   const code = text
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .split('\n').map((l) => l.replace(/\/\/.*$/, '')).join('\n');
+    .replace(/\/\*[\s\S]*?\*\//g, blank)
+    .split('\n').map((l) => l.replace(/\/\/.*$/, blank)).join('\n');
 
   // ① 읽기: `const {` … `}` `= await` … `;`  — 구조분해에 error 가 없는 것
   const readRe = /const\s*\{([^}]*)\}\s*=\s*await\s+([\s\S]*?);/g;
@@ -72,7 +83,10 @@ export function errorDroppedSites(src, where = '') {
     // 결과를 쓰는 모양이면 세지 않는다 — `const x = await …` 는 위 정규식에
     // 걸리지 않지만, `return await …` 와 `.then(` 은 결과를 넘긴다.
     if (/^\s*(return|throw)\b/.test(expr)) continue;
-    const line = code.slice(0, m.index).split('\n').length;
+    // `m.index`는 앞의 `;`·`}`·줄바꿈을 가리킨다 — 그 줄바꿈을 세면 한 줄
+    // 앞을 적는다. `await`가 실제로 있는 자리에서 센다.
+    const at = m.index + Math.max(0, m[0].indexOf('await'));
+    const line = code.slice(0, at).split('\n').length;
     out.push({ kind: 'WRITE', where, line });
   }
   return out;
@@ -110,5 +124,23 @@ export function selfTest() {
   }
   // 빈 입력
   if (n('') !== 0) failed.push('빈 입력을 셌다');
-  return { total: 13, failed };
+
+  // ── 줄번호 ──
+  //
+  // **세는 것만으로는 부족하다.** 개수가 맞아도 가리키는 줄이 틀리면
+  // 그 줄을 열어 본 사람이 **주석을 코드로 읽는다.**
+  const lineOf = (src) => errorDroppedSites(src).map((s) => s.line);
+  if (String(lineOf("const { data } = await sb.from('t').select('*');")) !== '1') {
+    failed.push('첫 줄의 자리를 1로 적지 않았다');
+  }
+  // 앞에 블록 주석이 있으면 그만큼 밀리면 안 된다
+  if (String(lineOf("/**\n * 설명\n * 두 줄\n */\nconst { data } = await sb.from('t').select('*');")) !== '5') {
+    failed.push('앞선 블록 주석만큼 줄번호가 밀렸다');
+  }
+  // 줄 주석도 같다
+  if (String(lineOf("// 설명\n// 두 줄\nawait sb.from('t').insert({});")) !== '3') {
+    failed.push('앞선 줄 주석만큼 줄번호가 밀렸다');
+  }
+
+  return { total: 16, failed };
 }
