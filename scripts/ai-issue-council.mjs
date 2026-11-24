@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { councilOutcome } from "./lib/council-outcome.mjs";
 const GITHUB_API = "https://api.github.com";
 
 const EVENT_NAME = (process.env.EVENT_NAME || "workflow_dispatch").trim();
@@ -153,16 +154,27 @@ async function main() {
   const system = "너는 TRAIGO 개발팀의 시니어 엔지니어다. 한국어로 간결하고 구체적인 근거·반론·다음 실행안을 작성하라. 비밀값 출력, main 직접 푸시, 배포, 실거래 호출은 절대 금지한다.";
 
   const active = PROVIDERS.filter((p) => p.key.trim());
+  const keyless = PROVIDERS.filter((p) => !p.key.trim()).map((p) => p.id);
   const skipped = PROVIDERS.filter((p) => !p.key.trim()).map((p) => `- ${p.id}: API 키 미등록`);
   if (active.length === 0) throw new Error("등록된 AI API 키가 없습니다.");
+
+  // **남긴 댓글 수와 오류를 따로 센다.** 예전에는 R1 오류가 `skipped`에만
+  // 담겨 R2 댓글의 각주로만 나갔다 — R2까지 실패하면 흔적이 0이었다.
+  let posted = 0;
+  const r1Errors = [];
+  const r2Errors = [];
 
   for (const p of active) {
     try {
       const out = await p.call(system, `작업 ${taskId}에 대한 1라운드(R1) 제안 및 점검 의견을 작성하라.\n\n${context}`);
       if (!out) continue;
       await postComment(owner, repo, `[R1 | AGENT: ${p.id}]\n- 작업: \`${taskId}\` · 기준: \`${BASE_BRANCH}@${shortSha}\` · 모델: \`${p.model}\` · 실행ID: \`${runId}\`\n\n${out}`);
+      posted += 1;
     } catch (e) {
-      skipped.push(`- ${p.id} R1 오류: ${redact(e.message)}`);
+      const msg = redact(e.message);
+      r1Errors.push(msg);
+      skipped.push(`- ${p.id} R1 오류: ${msg}`);
+      console.error(`[error] ${p.id} R1 실패: ${msg}`);
     }
   }
 
@@ -187,13 +199,27 @@ async function main() {
       if (!out) continue;
       const note = skipped.length ? `\n\n#### 미참여/오류 기록\n${skipped.join("\n")}` : "";
       await postComment(owner, repo, `[R2 | AGENT: ${p.id}]\n- 작업: \`${taskId}\` · 기준: \`${BASE_BRANCH}@${shortSha}\` · 모델: \`${p.model}\` · 실행ID: \`${runId}\`\n\n${out}${note}`);
+      posted += 1;
     } catch (e) {
-      console.log(`[error] ${p.id} R2 실패: ${redact(e.message)}`);
+      const msg = redact(e.message);
+      r2Errors.push(msg);
+      console.error(`[error] ${p.id} R2 실패: ${msg}`);
     }
   }
+
+  // **아무것도 못 남긴 회차를 success로 적지 않는다.**
+  return councilOutcome({ posted, r1Errors, r2Errors, keyless });
 }
 
-main().catch((e) => {
-  console.error(redact(e?.stack || e?.message || e));
-  process.exit(1);
-});
+main()
+  .then((outcome) => {
+    console.log(`[council] ${outcome.summary}`);
+    if (!outcome.ok) {
+      console.error(`[council] 실패로 끝냅니다 — ${outcome.summary}`);
+      process.exit(outcome.exitCode);
+    }
+  })
+  .catch((e) => {
+    console.error(redact(e?.stack || e?.message || e));
+    process.exit(1);
+  });
