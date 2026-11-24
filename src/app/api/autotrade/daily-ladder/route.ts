@@ -345,7 +345,8 @@ export async function POST(req: NextRequest) {
 
   // ── 모드 관문 ──
   // 다른 모든 검사를 통과했어도 여기서 막힐 수 있다. 모드는 가장 바깥 관문이다.
-  const notionalUsd = result.plan?.positionSize ?? 0;
+  // **계획 크기를 못 읽었으면 null이다 — 0으로 적지 않는다.**
+  const notionalUsd = result.plan?.positionSize ?? null;
   // **상한을 자산에 붙인다.** 고정 $1,000짜리 상한은 100배 전략의
   // 명목가(자산의 10배)를 언제나 막는다 — 계좌가 아무리 커져도.
   // 자산을 못 읽었으면 넘기지 않는다: 그때는 고정 금액만 남는다.

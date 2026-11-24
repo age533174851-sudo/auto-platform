@@ -444,7 +444,9 @@ export async function POST(req: NextRequest) {
       const gate = await assertStateConsistent(sb, conn.user_id, isTestnet, conn.id || null);
 
       const refPrice = px > 0 ? px : (risk?.markPrice ?? null);
-      const notionalUsd = refPrice ? qty * refPrice : 0;
+      // **시세를 못 읽었으면 null이다 — 0으로 적지 않는다.**
+      // 0을 넘기면 gateOrder의 1회 상한 검사를 그대로 통과했다.
+      const notionalUsd = refPrice ? qty * refPrice : null;
       const opMode = fromLegacyMode(process.env.NEXT_PUBLIC_APP_MODE ?? null);
       const g = gateOrder(opMode, notionalUsd, { overrideMaxNotionalUsd: (() => { const n = Number(process.env.LIVE_MAX_NOTIONAL_USD); return Number.isFinite(n) && n > 0 ? n : null; })() });
 
