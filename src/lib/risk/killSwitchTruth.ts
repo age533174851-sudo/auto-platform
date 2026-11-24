@@ -494,6 +494,14 @@ export function discoveryVerdict(i: {
   ledgerRead: boolean;
   /** 찾은 대상 수 */
   targetCount: number;
+  /**
+   * 이 단계의 대상이 될 포지션 중 **수량을 못 읽은 줄의 수.**
+   *
+   * 거래소 목록에 줄은 있는데(= 0이 아닌 포지션) 수량을 모르면 대상
+   * 목록에 못 들어간다. 그걸 세지 않으면 "읽었고 줄일 것이 없다"가
+   * 되어 **한 건도 못 줄인 채 VERIFIED_EMPTY**다. 안 주면 0이다.
+   */
+  unreadableCount?: number;
 }): DiscoveryVerdict {
   const spec = i.spec ?? null;
   if (!spec || !(spec.closePct > 0)) {
@@ -510,6 +518,16 @@ export function discoveryVerdict(i: {
       code: 'UNKNOWN', count: null,
       reason: '자동매매 장부(live_orders)를 읽지 못해 어느 포지션이 봇의 것인지 가리지 못했습니다 — '
         + '대상이 없다는 뜻이 아닙니다',
+    };
+  }
+  // 줄은 있는데 수량을 모른다 — **없다는 뜻이 아니다.** 읽힌 대상은
+  // 그대로 닫히지만, 이 단계가 끝났다고는 말할 수 없다.
+  const unreadable = Math.max(0, Math.floor(Number(i.unreadableCount) || 0));
+  if (unreadable > 0) {
+    return {
+      code: 'UNKNOWN', count: null,
+      reason: `거래소에 열린 포지션 ${unreadable}건의 수량을 읽지 못했습니다 — `
+        + '줄일 것이 없다는 뜻이 아닙니다',
     };
   }
   const n = Math.max(0, Math.floor(Number(i.targetCount) || 0));

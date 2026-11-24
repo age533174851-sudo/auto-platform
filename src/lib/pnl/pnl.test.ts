@@ -1,7 +1,12 @@
 // src/lib/pnl/pnl.test.ts
 // PnL 엔진 유닛 테스트 — 레버리지/수수료/롱숏/손익분기 검증.
 import { calcTradePnL } from './index';
-import { test, close, gt, lt, assert } from '../../test/harness';
+import { test, close, gt, lt, assert, eq } from '../../test/harness';
+import { formatKRW, safePercent } from '../format';
+import { fmtPct, fmtPctSafe } from '../utils';
+import { quoteCurrencyOf, estimateCalcTax } from './calcCurrency';
+import { readFileSync, readdirSync, statSync } from 'fs';
+import { resolve, join } from 'path';
 
 const feeCfg = { exchangeId: 'binance', makerRate: 0.001, takerRate: 0.001, slippage: 0.0005 } as any;
 const base = {
@@ -59,5 +64,126 @@ export function runPnlTests() {
     // 아주 작은 가격 이동 → 수수료가 이익을 잠식
     const r = calcTradePnL({ ...base, entryPrice: 100, exitPrice: 100.001, quantity: 1 });
     assert(!r.isViable || r.netPnL <= r.grossPnL, '비용 반영 확인');
+  });
+
+  // ── 손실 표시 ──
+  //
+  // 화면은 손익을 `formatKRW`로 그린다(모의투자 평가손익·실현손익, 매매
+  // 일지의 평균 손실·최악 거래, 포트폴리오 평가손익). 손실이 '₩0'으로
+  // 그려지면 빨간 '₩0'만 남고 **얼마를 잃었는지가 사라진다.**
+  test('손실은 ₩0이 아니라 음수 금액으로 그린다', () => {
+    eq(formatKRW(-50_000), '-₩50,000');
+    eq(formatKRW(-1_234_567), '-₩1,234,567');
+    eq(formatKRW(-250_000_000), '-₩2.5억');
+    eq(formatKRW(-3.5), '-₩3.50');
+  });
+
+  test('양수·0·비수치 표시는 그대로다', () => {
+    eq(formatKRW(50_000), '₩50,000');
+    eq(formatKRW(250_000_000), '₩2.5억');
+    eq(formatKRW(0), '₩0');
+    eq(formatKRW(-0), '₩0');
+    eq(formatKRW(NaN), '₩0');
+    eq(formatKRW(undefined), '₩0');
+  });
+
+  // ── 등락률·수익률 표시: 하락에 '−'를 지우지 않는다 ──
+  //
+  // `fmtPct`는 시세표·홈·포트폴리오 수익률·모의 포지션 손익률이 쓴다.
+  // 예전에는 `Math.abs`를 쓰고 음수에는 부호를 붙이지 않았다 —
+  // −5.2%가 '5.20%'로 그려졌다. 색만 빨간색이고 숫자는 하락을 말하지
+  // 않았다(색을 못 구분하거나 복사해 붙이면 손실이 이익처럼 읽힌다).
+  test('fmtPct: 하락은 −부호를 달고 상승은 +를 단다', () => {
+    eq(fmtPct(-5.2), '-5.20%');
+    eq(fmtPct(-0.01), '-0.01%');
+    eq(fmtPct(3), '+3.00%');
+    eq(fmtPct(0), '+0.00%');
+    eq(fmtPct(undefined), '—');
+    eq(fmtPct(NaN), '—');
+  });
+
+  test('fmtPctSafe: 같은 규칙, 모르는 값은 지정한 자리표시', () => {
+    eq(fmtPctSafe(-12.345), '-12.35%');
+    eq(fmtPctSafe(7.5), '+7.50%');
+    eq(fmtPctSafe(undefined, 'N/A'), 'N/A');
+  });
+
+  // ── 부호를 두 번 달지 않는다 ──
+  //
+  // `fmtPct`·`fmtPctSafe`는 상승에 스스로 '+'를 단다. 화면이 그 앞에
+  // `{v >= 0 ? '+' : ''}`를 또 붙이면 상승 종목이 '++3.00%'로 그려진다
+  // (스캐너 페이지 상승 종목에서 실제로 나던 일). 화면 전체를 훑어
+  // 다시 생기지 않게 막는다.
+  test('fmtPct 앞에 화면이 부호를 또 붙이지 않는다', () => {
+    const roots = ['../../components', '../../app'].map(r => resolve(__dirname, r));
+    const files: string[] = [];
+    const walk = (d: string) => {
+      for (const n of readdirSync(d)) {
+        const f = join(d, n);
+        if (statSync(f).isDirectory()) walk(f);
+        else if (/\.tsx$/.test(n)) files.push(f);
+      }
+    };
+    roots.forEach(walk);
+    assert(files.length > 0, '훑을 화면 파일을 찾지 못했습니다');
+    // `safePercent`(src/lib/format.ts)도 0 이상에 '+'를 스스로 단다.
+    // 템플릿 문자열의 `+${safePercent(...)}`도 같은 실수다 — 가격 알림의
+    // 급등 문구가 'BTC ++5.20% 급등!'으로 나가던 자리가 이것이었다.
+    const doubled = [
+      /'\+'\s*:\s*''\s*\}\s*\{\s*(fmtPct(Safe)?|safePercent)\(/,
+      /\+\$\{\s*(fmtPct(Safe)?|safePercent)\(/,
+    ];
+    const bad = files.filter(f => {
+      const src = readFileSync(f, 'utf8');
+      return doubled.some(re => re.test(src));
+    }).map(f => f.split(/[\\/]src[\\/]/).pop());
+    eq(bad.join(','), '');
+  });
+
+  test('safePercent는 상승에 스스로 + 를 단다 — 화면이 덧붙일 필요가 없다', () => {
+    eq(safePercent(5.2), '+5.20%');
+    eq(safePercent(-5.2), '-5.20%');
+  });
+  // ── 손익 계산기: 달러로 적은 가격을 원화로 셈하지 않는다 ──
+  //
+  // 미국주식·ETF 예시는 NVDA 875→920처럼 **달러**로 적는다. 그런데
+  // 계산기는 환율 칸을 받아 놓고 한 번도 쓰지 않았다 — 결과는 '₩450'으로
+  // 그려졌고, 양도세의 250만 **원** 공제를 달러 이익에서 뺐다. 그래서
+  // 이익이 250만 달러를 넘기 전에는 22% 양도세가 언제나 0이었다.
+  test('계산기: 미국주식·ETF 가격은 달러, 나머지는 원화다', () => {
+    eq(quoteCurrencyOf('us_stock'), 'USD');
+    eq(quoteCurrencyOf('etf'), 'USD');
+    eq(quoteCurrencyOf('kr_stock'), 'KRW');
+    eq(quoteCurrencyOf('crypto'), 'KRW');
+    eq(quoteCurrencyOf('futures'), 'KRW');
+  });
+
+  test('계산기: 달러 이익의 양도세는 250만 원을 환율로 바꿔 공제한다', () => {
+    // $20,000 × 1,375 = 2,750만 원 → 공제 후 2,500만 원 × 22% = 550만 원 = $4,000
+    const t = estimateCalcTax({ taxMode: 'us_stock', grossProfit: 20_000, sellAmount: 0,
+      taxRatePct: 22, quote: 'USD', fxRate: 1375 });
+    assert(t !== null, '환율이 있는데 세금을 확인 불가로 적었다');
+    close(t as number, 4_000, 1e-6);
+  });
+
+  test('계산기: 원화 자산의 세금 규칙은 그대로다', () => {
+    close(estimateCalcTax({ taxMode: 'us_stock', grossProfit: 10_000_000, sellAmount: 0,
+      taxRatePct: 22, quote: 'KRW', fxRate: 0 }) as number, 1_650_000, 1e-6);
+    close(estimateCalcTax({ taxMode: 'crypto', grossProfit: 1_000_000, sellAmount: 0,
+      taxRatePct: 0, quote: 'KRW', fxRate: 0 }) as number, 0, 1e-9);
+    close(estimateCalcTax({ taxMode: 'kr_stock', grossProfit: 0, sellAmount: 8_200_000,
+      taxRatePct: 0.23, quote: 'KRW', fxRate: 0 }) as number, 18_860, 1e-6);
+    close(estimateCalcTax({ taxMode: 'custom', grossProfit: 1_000, sellAmount: 0,
+      taxRatePct: 10, quote: 'KRW', fxRate: 0 }) as number, 100, 1e-9);
+  });
+
+  test('계산기: 환율을 모르면 원화 공제 세금을 0으로 적지 않는다', () => {
+    eq(estimateCalcTax({ taxMode: 'us_stock', grossProfit: 20_000, sellAmount: 0,
+      taxRatePct: 22, quote: 'USD', fxRate: 0 }), null);
+    eq(estimateCalcTax({ taxMode: 'futures', grossProfit: 20_000, sellAmount: 0,
+      taxRatePct: 20, quote: 'USD', fxRate: NaN }), null);
+    // 공제가 없는 규칙은 환율이 필요 없다
+    close(estimateCalcTax({ taxMode: 'kr_stock', grossProfit: 0, sellAmount: 1_000,
+      taxRatePct: 0.23, quote: 'USD', fxRate: 0 }) as number, 2.3, 1e-9);
   });
 }

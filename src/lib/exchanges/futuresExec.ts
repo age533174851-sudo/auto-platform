@@ -1095,9 +1095,40 @@ export async function futuresCountOpen(
             : null,
       };
     }
+    // ── 바이낸스: 조회 실패를 0건으로 세지 않는다 ──
+    //
+    // 예전에는 `bf.countOpen`을 그대로 돌려줬다. 그 함수는 두 조회의
+    // `success`를 보지 않고 `(positions || []).length`를 셌다 — 둘 다
+    // 실패해도 `{ 0, 0 }`이고, 킬스위치가 그것을 "잔여 없음"으로 읽어
+    // **완료**를 적었다. 수량을 못 읽은 줄(`amount: NaN`)도
+    // `Math.abs(NaN || 0)`에서 0이 되어 사라졌다.
+    //
+    // 두 조회는 이미 실패를 `success: false`로 돌려준다. 여기서 그 값을
+    // 읽기만 한다. 한쪽만 실패하면 그쪽만 null이다.
     const bf = await import('./binanceFutures');
-    const r = await bf.countOpen(t.key, t.secret, t.testnet);
-    return { positions: r.positions, orders: r.orders, error: null };
+    const [pr, or] = await Promise.all([
+      bf.getFuturesPositions(t.key, t.secret, t.testnet),
+      bf.getFuturesOpenOrders(t.key, t.secret, t.testnet),
+    ]);
+    const errs: string[] = [];
+    let positions: number | null = null;
+    if (pr?.success === true && Array.isArray((pr as any).positions)) {
+      const rows = (pr as any).positions as any[];
+      if (rows.some((p: any) => !Number.isFinite(Number(p?.amount)))) {
+        errs.push('수량을 읽지 못한 포지션이 있습니다 — 포지션 수를 확정할 수 없습니다');
+      } else {
+        positions = rows.filter((p: any) => Math.abs(Number(p.amount)) > 0).length;
+      }
+    } else {
+      errs.push(`포지션 조회 실패 (${pr?.message || '사유 미상'}) — 포지션이 없다는 뜻이 아닙니다`);
+    }
+    let orders: number | null = null;
+    if (or?.success === true && Array.isArray(or.orders)) {
+      orders = or.orders.length;
+    } else {
+      errs.push(`미체결 조회 실패 (${(or as any)?.message || '사유 미상'}) — 주문이 없다는 뜻이 아닙니다`);
+    }
+    return { positions, orders, error: errs.length ? errs.join(' · ') : null };
   } catch (e: any) {
     return { positions: null, orders: null, error: String(e?.message || e) };
   }
@@ -1215,16 +1246,35 @@ export async function futuresSetTpsl(t: ExecTarget, input: TpslInput): Promise<T
   let tp: TpslOutcome['tp'] = null;
   let sl: TpslOutcome['sl'] = null;
 
+  // ── 트리거 가격을 호가 단위에 올린다 ──
+  //
+  // 이 함수는 트레일링·본전 이동(`placeStop`)과 워커 SET_TPSL이 같이 쓴다.
+  // `planTrail`의 새 손절은 `진입가 ± 1R × R배수`라 생 부동소수다
+  // (예: 3.477979). Gate 갈래는 `gateStopSpec`이 호가에 올리고 진입 경로는
+  // `roundTrigger`를 지나는데, **이 갈래만 그대로 보냈다** — 거래소는
+  // 호가 단위 밖의 stopPrice를 거절하고(-4014 · -1111) 손절은 안 옮겨진다.
+  //
+  // 정본은 진입 경로와 같은 `roundTrigger`다(방향: 손절·익절 모두 진입에서
+  // 멀어지는 쪽). 규격을 못 읽으면 tick이 null이라 값을 지어내지 않고
+  // 그대로 보낸다 — 진입 경로와 같은 계약이고, 손절 자체를 막지 않는다.
+  const { roundTrigger } = await import('../engine/fillBasedExit');
+  const filters = await bf.getSymbolFilters(input.symbol, t.testnet).catch(() => null);
+  const tick = filters?.tickSize && filters.tickSize > 0 ? filters.tickSize : null;
+  const trig = (price: unknown, kind: 'STOP' | 'TAKE_PROFIT'): number => {
+    const r = roundTrigger(Number(price), input.positionSide, kind, tick);
+    return r.price ?? Number(price);
+  };
+
   if (hasTp) {
     const r = await bf.placeFuturesTPSL(t.key, t.secret, {
-      symbol: input.symbol, side: closeSide, stopPrice: Number(input.tpPrice),
+      symbol: input.symbol, side: closeSide, stopPrice: trig(input.tpPrice, 'TAKE_PROFIT'),
       type: 'TAKE_PROFIT_MARKET', fallbackQuantity: input.quantity ?? null,
     }, t.testnet);
     tp = { ok: !!r.success, orderId: r.orderId != null ? String(r.orderId) : null, message: r.message };
   }
   if (hasSl) {
     const r = await bf.placeFuturesTPSL(t.key, t.secret, {
-      symbol: input.symbol, side: closeSide, stopPrice: Number(input.slPrice),
+      symbol: input.symbol, side: closeSide, stopPrice: trig(input.slPrice, 'STOP'),
       type: 'STOP_MARKET', fallbackQuantity: input.quantity ?? null,
     }, t.testnet);
     sl = { ok: !!r.success, orderId: r.orderId != null ? String(r.orderId) : null, message: r.message };

@@ -132,7 +132,7 @@ export default function AlertsPage({
       if (rule.type === 'price') {
         return `${rule.assetName} ${rule.condition === 'above' ? '≥' : '≤'} ${formatKRW(rule.value)} 도달 (현재 ${formatKRW(cur)})`;
       }
-      if (rule.type === 'pump') return `${rule.assetName} +${safePercent(safeNumber(current.c, 0))} 급등!`;
+      if (rule.type === 'pump') return `${rule.assetName} ${safePercent(safeNumber(current.c, 0))} 급등!`;
       if (rule.type === 'dump') return `${rule.assetName} ${safePercent(safeNumber(current.c, 0))} 급락!`;
       return `${rule.assetName} 조건 충족`;
     })();

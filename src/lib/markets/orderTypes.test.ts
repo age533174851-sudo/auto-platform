@@ -135,6 +135,30 @@ export function runOrderTypesTests() {
     eq(ok.value?.price, 2000);
   });
 
+  // ── reduceOnly는 진입/청산을 가르는 칸이다 ──
+  //
+  // 라우트는 `isExit = !!reduceOnly`로 진입 점검(손절·증거금·미확정 주문)을
+  // 건너뛸지 정한다. 검증기가 `!!input.reduceOnly`로 읽으면 문자열
+  // `"false"`·`"0"`이 **true**가 되어, 신규 진입 요청이 청산으로 분류되고
+  // 진입 점검을 통과하지 않은 채 reduceOnly 주문으로 큐에 들어간다
+  // (포지션이 없으면 거래소가 -2022로 거절한다).
+  test('reduceOnly: 불리언 true/false와 생략만 받는다', () => {
+    const base = { symbol: 'BTCUSDT', side: 'BUY', type: 'MARKET', quantity: 1 };
+    eq(validateOrder({ ...base }).value?.reduceOnly, false);
+    eq(validateOrder({ ...base, reduceOnly: null }).value?.reduceOnly, false);
+    eq(validateOrder({ ...base, reduceOnly: false }).value?.reduceOnly, false);
+    eq(validateOrder({ ...base, reduceOnly: true }).value?.reduceOnly, true);
+  });
+
+  test('**reduceOnly "false"·"0"·1을 청산으로 바꾸지 않는다** — 막는다', () => {
+    const base = { symbol: 'BTCUSDT', side: 'BUY', type: 'MARKET', quantity: 1 };
+    for (const bad of ['false', '0', 'true', '', 1, 0, {}, []] as unknown[]) {
+      const v = validateOrder({ ...base, reduceOnly: bad });
+      eq(v.ok, false, `reduceOnly=${JSON.stringify(bad)}가 통과했습니다 (reduceOnly=${v.value?.reduceOnly})`);
+      eq(v.code, 'invalid_reduce_only');
+    }
+  });
+
   test('시장가는 가격이 없어도 통과한다', () => {
     const v = validateOrder({ symbol: 'BTCUSDT', side: 'BUY', type: 'MARKET', quantity: 1 });
     eq(v.ok, true);

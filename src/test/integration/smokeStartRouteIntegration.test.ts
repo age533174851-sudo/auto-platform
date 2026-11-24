@@ -53,6 +53,7 @@ export async function runSmokeStartRouteTests() {
   const serverPath = require.resolve('../../lib/supabase/server');
   const adminPath = require.resolve('../../lib/supabase/admin');
   const routePath = require.resolve('../../app/api/autotrade/smoke-test/route');
+  const attestRoutePath = require.resolve('../../app/api/autotrade/smoke-test/attest-exposure/route');
   const evidenceRoutePath = require.resolve('../../app/api/autotrade/smoke-test/legacy-evidence/route');
 
   /**
@@ -183,6 +184,241 @@ export async function runSmokeStartRouteTests() {
       eq(db.writes.length, 0);
     } finally { r.restore(); }
   });
+
+
+  // ══════════ #344 노출 사후 확인 — 막은 것을 푸는 경로 ══════════
+  //
+  // 여기서는 거래소까지 간다. FakeVenue가 `fetch`를 가로채므로 실제
+  // Binance 호출은 0건이다. 보는 것은 **GET만 나가는가**, **못 읽었을 때
+  // 비었다고 적지 않는가**, **장부에 정확히 한 줄을 썼는가**다.
+  //
+  // 주의: 이 하네스의 `test(async)`는 **동시에** 돈다. FakeVenue는
+  // `globalThis.fetch`를 갈아 끼우므로 시험 안에서 설치하면 서로 엉킨다
+  // (실제로 엉켜서 다른 시험의 거래소 응답을 받았다). 그래서 관측은
+  // 여기서 **순차로 미리** 돌리고, 시험에는 단언만 둔다.
+  {
+    const ATT = '22222222-2222-4222-8222-222222222222';
+    const attReq = (auth = true) =>
+      req({ testId: ATT }, auth ? { authorization: 'Bearer fake.jwt' } : {});
+
+    const legacySmoke = (over: Record<string, any> = {}) => ({
+      id: ATT, user_id: 'u-1', connection_id: 'c-testnet',
+      symbol: 'BTCUSDT', state: 'UNKNOWN', mode: 'TESTNET',
+      steps: {
+        PREFLIGHT: { state: 'PASS' },
+        ENTRY: { state: 'FAIL', note: '[-1111] Precision is over the maximum' },
+        POSITION_ZERO: { state: 'PASS' },
+      },
+      created_at: '2026-10-16T04:22:40.000Z',
+      ...over,
+    });
+
+    /** 비어 있는 거래소 — 세 조회 모두 빈 배열 */
+    const emptyVenue = () => new FakeVenue()
+      .on('/fapi/v2/positionRisk', { json: [] })
+      .on('/fapi/v1/openOrders', { json: [] })
+      .on('/fapi/v1/openAlgoOrders', { json: [] });
+
+    const pendingFirst = () => ({
+      at: new Date(Date.now() - 11 * 60_000).toISOString(),
+      code: 'OBSERVED_FLAT_NOW', positions: 0, regular: 0, algo: 0,
+    });
+
+    async function attest(venue: FakeVenue, opts: {
+      smoke?: any[]; jwt?: string | null; dbOpts?: any; conn?: any; auth?: boolean;
+    } = {}) {
+      const restoreCrypto = withCryptoEnv();
+      const uninstall = venue.install();
+      const db = new FakeDb(opts.dbOpts ?? {});
+      db.seed('exchange_connections', [opts.conn ?? conn()]);
+      db.seed('smoke_tests', opts.smoke ?? [legacySmoke()]);
+      const r = loadRoute(db, opts.jwt === undefined ? 'u-1' : opts.jwt, attestRoutePath);
+      try {
+        const res = await r.POST(attReq(opts.auth !== false));
+        return { status: res.status, json: await res.json(), db, venue };
+      } finally { r.restore(); uninstall(); restoreCrypto(); }
+    }
+
+    const attOf = (db: FakeDb) => (db.row('smoke_tests', { id: ATT })?.steps as any)?._attestation ?? null;
+
+    const listConn = '33333333-3333-4333-8333-333333333333';
+    async function listCandidates(owner: string | null = 'u-1', connection = conn({ id: listConn })) {
+      const db = new FakeDb();
+      db.seed('exchange_connections', [connection]);
+      db.seed('smoke_tests', [
+        legacySmoke({ connection_id: listConn }),
+        legacySmoke({ id: 'foreign-row', connection_id: listConn, user_id: 'other' }),
+        legacySmoke({ id: 'other-connection', connection_id: 'other' }),
+      ]);
+      const r = loadRoute(db, owner, attestRoutePath);
+      try {
+        if (!r.GET) return { status: 501, json: {} as any, db };
+        const res = await r.GET({ url: `http://localhost/api/autotrade/smoke-test/attest-exposure?connectionId=${listConn}`,
+          headers: new Headers() });
+        return { status: res.status, json: await res.json(), db };
+      } finally { r.restore(); }
+    }
+    const CANDIDATES = await listCandidates();
+    const FOREIGN_LIST = await listCandidates('other');
+    const LIVE_LIST = await listCandidates('u-1', conn({ id: listConn, is_testnet: false }));
+    const ANON_LIST = await listCandidates(null);
+    test('#344 owner can discover recovery candidates without exposing foreign rows or secrets', () => {
+      eq(CANDIDATES.status, 200);
+      eq(CANDIDATES.json.candidates.length, 1);
+      eq(CANDIDATES.json.candidates[0].id, ATT);
+      eq(CANDIDATES.db.writes.length, 0);
+      assert(!JSON.stringify(CANDIDATES.json).includes('api_secret'), 'credential leaked');
+    });
+    test('#344 candidate listing rejects foreign, LIVE and anonymous access', () => {
+      eq(FOREIGN_LIST.status, 404);
+      eq(LIVE_LIST.status, 409);
+      eq(ANON_LIST.status, 401);
+    });
+
+    // ── 관측을 순차로 먼저 돌린다 ──
+    const FIRST = await attest(emptyVenue());
+    const DONE = await attest(emptyVenue(), {
+      smoke: [legacySmoke({ steps: {
+        PREFLIGHT: { state: 'PASS' }, ENTRY: { state: 'FAIL' },
+        POSITION_ZERO: { state: 'PASS' },
+        _attestation: { code: 'PENDING', first: pendingFirst(), method: 'm', env: 'TESTNET' },
+      } })],
+    });
+    const ALGO_OPEN = await attest(new FakeVenue()
+      .on('/fapi/v2/positionRisk', { json: [] })
+      .on('/fapi/v1/openOrders', { json: [] })
+      .on('/fapi/v1/openAlgoOrders', { json: [{ algoId: 9, symbol: 'BTCUSDT' }] }));
+    const READ_FAIL = await attest(new FakeVenue()
+      .on('/fapi/v2/positionRisk', { json: [] })
+      .on('/fapi/v1/openOrders', { status: 503, json: { code: -1001, msg: 'Internal error' } })
+      .on('/fapi/v1/openAlgoOrders', { json: [] }));
+    const MALFORMED = await attest(new FakeVenue()
+      .on('/fapi/v2/positionRisk', { json: [] })
+      .on('/fapi/v1/openOrders', { json: { oops: true } })
+      .on('/fapi/v1/openAlgoOrders', { json: [] }));
+    const ZERO_ROWS = await attest(emptyVenue(), {
+      dbOpts: { updateFailure: { table: 'smoke_tests', mode: 'zero-rows' } },
+    });
+    const WRITE_ERR = await attest(emptyVenue(), {
+      dbOpts: { updateFailure: { table: 'smoke_tests', mode: 'error' } },
+    });
+    const MISSING_DATA = await attest(emptyVenue(), {
+      dbOpts: { updateFailure: { table: 'smoke_tests', mode: 'missing-data' } },
+    });
+    const WRONG_ID = await attest(emptyVenue(), {
+      dbOpts: { updateFailure: { table: 'smoke_tests', mode: 'wrong-id' } },
+    });
+    const CONCURRENT_STEPS = await attest(emptyVenue(), {
+      dbOpts: { beforeUpdate: (table: string, rows: any[]) => {
+        if (table === 'smoke_tests') rows[0].steps = {
+          ...rows[0].steps, ORDERS_ZERO: { state: 'FAIL', note: 'concurrent evidence' },
+        };
+      } },
+    });
+    const RECORDED_FAIL = await attest(emptyVenue(), {
+      smoke: [legacySmoke({ steps: {
+        POSITION_ZERO: { state: 'PASS' }, ORDERS_ZERO: { state: 'FAIL', note: '손절 123 남음' },
+      } })],
+    });
+    const OTHER_OWNER = await attest(emptyVenue(), { smoke: [legacySmoke({ user_id: 'someone-else' })] });
+    const LIVE_CONN = await attest(emptyVenue(), { conn: conn({ is_testnet: false }) });
+    const NO_AUTH = await attest(emptyVenue(), { jwt: null, auth: false });
+
+    test('★★ #344 비어 있으면 첫 관측을 적는다 — 읽고 끝나지 않는다', () => {
+      eq(FIRST.status, 200, `응답 ${FIRST.status}: ${JSON.stringify(FIRST.json).slice(0, 200)}`);
+      eq(FIRST.json.phase, 'FIRST', `단계가 ${FIRST.json.phase}다`);
+      eq(FIRST.json.code, 'OBSERVED_FLAT_NOW', `관측이 ${FIRST.json.code}다`);
+      assert(attOf(FIRST.db) != null,
+        '관측을 장부에 적지 않았다 — 읽고 끝나면 사람이 DB를 고치게 된다');
+      eq(attOf(FIRST.db).code, 'PENDING', '한 번 보고 완료로 적었다');
+      eq(FIRST.venue.orderSends().length, 0, '주문을 보냈다');
+      eq(FIRST.venue.calls.filter((c: any) => c.method !== 'GET').length, 0, 'GET이 아닌 요청이 나갔다');
+      eq(FIRST.venue.calls.length, 3, `거래소 조회가 ${FIRST.venue.calls.length}번이다 — 셋 다 읽어야 한다`);
+    });
+
+    test('★★ #344 과거 판정은 그대로다 — state·verdict·ENTRY를 고치지 않는다', () => {
+      const row = FIRST.db.row('smoke_tests', { id: ATT });
+      eq(row.state, 'UNKNOWN', '과거 판정을 바꿨다');
+      eq((row.steps as any).ENTRY.state, 'FAIL', '과거 ENTRY 실패를 덮었다');
+      eq((row.steps as any).ORDERS_ZERO, undefined, 'ORDERS_ZERO를 증거 없이 적었다');
+    });
+
+    test('★★ #344 간격을 채운 두 번째 관측에서 완료되고 차단이 풀린다', () => {
+      eq(DONE.json.phase, 'COMPLETED', `단계가 ${DONE.json.phase}다`);
+      eq(attOf(DONE.db).code, 'ATTESTED_FLAT', '완료인데 PENDING으로 적었다');
+      const { unresolvedExposureBlock } = require('../../lib/smoke/smokePlan');
+      const blk = unresolvedExposureBlock({
+        rows: [DONE.db.row('smoke_tests', { id: ATT })], connectionId: 'c-testnet',
+      });
+      eq(blk.blocked, false, `적어 놓고도 막힌다 (${blk.code}) — 배선이 안 됐다`);
+    });
+
+    test('★★ #344 사후 확인은 진입 허가가 아니다 — mayStartSmoke는 항상 false', () => {
+      eq(DONE.json.mayStartSmoke, false, '사후 확인이 진입을 허가했다');
+      eq(DONE.json.priorSmokeVerdictUnchanged, true, '과거 판정을 바꿨다고 적었다');
+    });
+
+    test('★★ #344 조건부(Algo) 주문이 남아 있으면 비었다고 적지 않는다', () => {
+      eq(ALGO_OPEN.json.code, 'EXPOSURE_OPEN', `관측이 ${ALGO_OPEN.json.code}다`);
+      assert(ALGO_OPEN.json.phase !== 'COMPLETED', `남아 있는데 ${ALGO_OPEN.json.phase}로 끝냈다`);
+      eq(attOf(ALGO_OPEN.db), null, '노출이 보이는데 관측을 남겼다');
+    });
+
+    test('★★ #344 서명 GET이 실패하면 비었다고 적지 않는다 (못 읽음 ≠ 0건)', () => {
+      eq(READ_FAIL.json.code, 'UNKNOWN', `조회 실패를 ${READ_FAIL.json.code}로 읽었다`);
+      eq(attOf(READ_FAIL.db), null, '못 읽었는데 관측을 적었다');
+    });
+
+    test('★★ #344 HTTP 200인데 배열이 아니면 0건으로 적지 않는다', () => {
+      eq(MALFORMED.json.code, 'UNKNOWN', `깨진 200을 ${MALFORMED.json.code}로 읽었다`);
+      eq(attOf(MALFORMED.db), null, '깨진 응답으로 관측을 적었다');
+    });
+
+    test('★★ #344 장부 UPDATE가 0행이면 성공으로 적지 않는다', () => {
+      eq(ZERO_ROWS.status, 409, `응답이 ${ZERO_ROWS.status}다`);
+      eq(ZERO_ROWS.json.code, 'ATTESTATION_WRITE_UNCONFIRMED', `코드가 ${ZERO_ROWS.json.code}다`);
+    });
+
+    test('★★ #344 장부 UPDATE가 오류면 성공으로 적지 않는다', () => {
+      eq(WRITE_ERR.status, 503, `응답이 ${WRITE_ERR.status}다`);
+      eq(WRITE_ERR.json.code, 'ATTESTATION_WRITE_FAILED', `코드가 ${WRITE_ERR.json.code}다`);
+    });
+    test('#344 missing or wrong-row readback cannot confirm attestation persistence', () => {
+      eq(MISSING_DATA.status, 409);
+      eq(WRONG_ID.status, 409);
+    });
+    test('#344 concurrent evidence cannot be replaced by a stale steps snapshot', () => {
+      eq(CONCURRENT_STEPS.status, 409);
+      eq(CONCURRENT_STEPS.db.row('smoke_tests', { id: ATT }).steps.ORDERS_ZERO.state, 'FAIL');
+      eq(CONCURRENT_STEPS.db.writes.length, 0);
+    });
+
+    test('★★ #344 기록된 ORDERS_ZERO=FAIL은 사후 확인 대상이 아니다', () => {
+      eq(RECORDED_FAIL.status, 409, `응답이 ${RECORDED_FAIL.status}다`);
+      eq(RECORDED_FAIL.json.code, 'RECORDED_FAILURE_NOT_ATTESTABLE', `코드가 ${RECORDED_FAIL.json.code}다`);
+      eq(RECORDED_FAIL.db.writes.length, 0, '본 적 있는 FAIL 위에 뭔가 썼다');
+      eq(RECORDED_FAIL.venue.calls.length, 0, 'FAIL 줄인데 거래소를 불렀다');
+    });
+
+    test('#344 타인의 회차는 보이지 않는다', () => {
+      eq(OTHER_OWNER.status, 404, `응답이 ${OTHER_OWNER.status}다`);
+      eq(OTHER_OWNER.json.code, 'NOT_FOUND');
+      eq(OTHER_OWNER.db.writes.length, 0, '남의 줄을 건드렸다');
+    });
+
+    test('#344 LIVE 연결로는 사후 확인을 하지 않는다', () => {
+      eq(LIVE_CONN.status, 409, `응답이 ${LIVE_CONN.status}다`);
+      eq(LIVE_CONN.json.code, 'VERIFIED_TESTNET_REQUIRED', `코드가 ${LIVE_CONN.json.code}다`);
+      eq(LIVE_CONN.db.writes.length, 0, 'LIVE 연결로 장부를 건드렸다');
+      eq(LIVE_CONN.venue.calls.length, 0, 'LIVE 연결인데 거래소를 불렀다');
+    });
+
+    test('#344 비인증 요청은 401이고 거래소를 부르지 않는다', () => {
+      eq(NO_AUTH.status, 401, `응답이 ${NO_AUTH.status}다`);
+      eq(NO_AUTH.venue.calls.length, 0, '인증 전에 거래소를 불렀다');
+      eq(NO_AUTH.db.writes.length, 0, '인증 전에 장부를 건드렸다');
+    });
+  }
 
   // ── ① 인증 우회가 없는가 ──
 
@@ -534,4 +770,119 @@ export async function runSmokeStartRouteTests() {
     assert(/읽지 못했습니다/.test(String(positionMalformed.json?.message)),
       String(positionMalformed.json?.message));
   });
+
+  // ══════════ 겹친 두 복구 경로 — 어느 것도 건너뛰지 않는다 ══════════
+  //
+  // `startAttempt`에는 막힌 노출을 푸는 길이 둘 있다.
+  //
+  //   ① Gate TESTNET 전용 복구 (try 안)
+  //   ② 연결 단위 거래소 증거 복구 (try 뒤, `exposureGateAfterVenueCheck`)
+  //
+  // 합칠 때 ①의 거절을 전부 `return`으로 두면 ②가 **한 번도 실행되지
+  // 않는다** — ①의 첫 조건이 `exchange !== 'gate'`라서 바이낸스는 즉시
+  // 409로 끝난다. 그러면 ②는 만들어 놓고 부르는 곳이 없는 코드가 된다.
+  //
+  // 그래서 ①의 **해당 없음**(Gate가 아니다 등)은 흘려보내고 ①의 **증거
+  // 거절**(Gate가 0이 아니다 등)만 409로 막는다. 아래 시험은 그 배선이
+  // 실제로 ②까지 닿는지를 **거래소 호출 수로** 확인한다 — 소스만 보면
+  // "읽었지만 안 불렀다"를 구별할 수 없다.
+  //
+  // 주의: FakeVenue는 `globalThis.fetch`를 갈아 끼우고 이 하네스의
+  // `test(async)`는 동시에 돈다. 그래서 관측은 여기서 **순차로 미리**
+  // 돌리고 시험에는 단언만 둔다.
+  {
+    const LEG = '33333333-3333-4333-8333-333333333333';
+
+    /** 과거 UNKNOWN 한 줄: PZ는 PASS인데 ORDERS_ZERO 기록이 없다 */
+    const legacyUnknown = () => ({
+      id: LEG, user_id: 'u-1', connection_id: 'c-testnet',
+      symbol: 'BTCUSDT', state: 'UNKNOWN', mode: 'TESTNET',
+      steps: {
+        PREFLIGHT: { state: 'PASS' },
+        ENTRY: { state: 'FAIL', note: '[-1111] Precision is over the maximum' },
+        POSITION_ZERO: { state: 'PASS' },
+      },
+      created_at: '2026-10-16T04:22:40.000Z',
+    });
+
+    async function startWith(venue: FakeVenue) {
+      const uninstall = venue.install();
+      try {
+        const r = await hit(good, { 'x-admin-secret': ADMIN },
+          { seedConn: conn(), seedSmoke: [legacyUnknown()] });
+        return { ...r, venue };
+      } finally { uninstall(); }
+    }
+
+    const EMPTY = await startWith(new FakeVenue()
+      .on('/fapi/v2/positionRisk', { json: [] })
+      .on('/fapi/v1/openOrders', { json: [] })
+      .on('/fapi/v1/openAlgoOrders', { json: [] }));
+
+    const ALGO_UNREAD = await startWith(new FakeVenue()
+      .on('/fapi/v2/positionRisk', { json: [] })
+      .on('/fapi/v1/openOrders', { json: [] })
+      .on('/fapi/v1/openAlgoOrders', { status: 500, json: { code: -1000, msg: 'x' } }));
+
+    const ALGO_LEFT = await startWith(new FakeVenue()
+      .on('/fapi/v2/positionRisk', { json: [] })
+      .on('/fapi/v1/openOrders', { json: [] })
+      .on('/fapi/v1/openAlgoOrders',
+        { json: [{ algoId: '9000000000000000001', symbol: 'ETHUSDT' }] }));
+
+    /**
+     * 노출 관문이 막은 응답인가.
+     *
+     * ★ **상태 코드로 판정하지 않는다.** 처음에 `status === 409`로 적었다가
+     *   시험 둘이 틀렸다. 이 라우트는 차단을 409가 아니라
+     *   **200 + `ok:false` + `run.state === 'STOPPED'`** 로 돌려준다.
+     *   그 조건을 409로 적으면 **막혔는지 안 막혔는지를 전혀 안 보는**
+     *   단언이 되고, "안 막혔다" 쪽 시험이 빈 통과한다.
+     *
+     *   실측한 세 응답 (같은 입력, 거래소 응답만 다르게):
+     *     세 장부 0      state=FAIL     reason=현재가를 읽지 못했습니다
+     *     Algo 못 읽음   state=STOPPED  reason=노출이 정리됐는지 확인하지 못한…
+     *     Algo 남음      state=STOPPED  reason=노출이 정리됐는지 확인하지 못한…
+     */
+    const blockedByExposure = (r: any) =>
+      String(r.json?.run?.state ?? '') === 'STOPPED'
+      && /노출이 정리됐는지 확인하지 못한/.test(String(r.json?.run?.reason ?? ''));
+
+    const say = (r: any) => `status ${r.status} · state=${r.json?.run?.state}`
+      + ` · ${String(r.json?.run?.reason ?? '').slice(0, 120)}`;
+
+    test('★ 겹친 경로: 연결 단위 거래소 조회가 **실제로 불린다** (빈 통과 방지)', () => {
+      // 이것이 없으면 아래 시험들이 "관문에 닿지도 못해서" 통과할 수 있다.
+      assert(EMPTY.venue.countOf('/fapi/v1/openAlgoOrders') > 0,
+        `조건부 주문 장부를 한 번도 안 불렀다 — ②에 닿지 못했다. ${say(EMPTY)}`);
+      assert(EMPTY.venue.countOf('/fapi/v2/positionRisk') > 0, '포지션을 안 불렀다');
+      assert(EMPTY.venue.countOf('/fapi/v1/openOrders') > 0, '일반 주문을 안 불렀다');
+    });
+
+    test('★ 겹친 경로: 세 장부가 모두 0으로 읽히면 과거 UNKNOWN은 더 이상 차단 사유가 아니다', () => {
+      // 예전에는 `exchange !== 'gate'`에서 즉시 409였다 — 바이낸스에서는
+      // ②가 영영 실행되지 않았다.
+      assert(!blockedByExposure(EMPTY), `노출로 막혔다 — ${say(EMPTY)}`);
+      // **관문을 지나 그 뒤까지 갔다는 증거.** 이것이 없으면 "안 막혔다"가
+      // 관문에 닿지도 못한 경우와 구별되지 않는다.
+      assert(/현재가/.test(String(EMPTY.json?.run?.reason ?? '')),
+        `관문 뒤 단계까지 가지 않았다 — ${say(EMPTY)}`);
+    });
+
+    test('★ 겹친 경로: 조건부 주문 장부를 못 읽으면 여전히 막힌다 (못 읽음 ≠ 0건)', () => {
+      assert(blockedByExposure(ALGO_UNREAD), `못 읽었는데 통과했다 — ${say(ALGO_UNREAD)}`);
+    });
+
+    test('★ 겹친 경로: 조건부 주문이 남아 있으면 여전히 막힌다', () => {
+      assert(blockedByExposure(ALGO_LEFT), `남아 있는데 통과했다 — ${say(ALGO_LEFT)}`);
+    });
+
+    test('★ 주문은 한 건도 나가지 않았다 — 이 시험들은 관문까지만 본다', () => {
+      for (const [name, r] of [['EMPTY', EMPTY], ['ALGO_UNREAD', ALGO_UNREAD],
+        ['ALGO_LEFT', ALGO_LEFT]] as const) {
+        eq(r.venue.orderSends().length, 0, `${name}에서 주문이 나갔다`);
+      }
+    });
+  }
+
 }

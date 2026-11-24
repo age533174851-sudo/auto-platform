@@ -400,13 +400,19 @@ jobs:
           }
           cat /tmp/ch-conc.out
           n_ok="$(grep -c '^ok  ' /tmp/ch-conc.out || true)"
-          if [ "${n_ok}" -lt 14 ]; then
+          if [ "${n_ok}" -lt 16 ]; then
             echo "::error::동시성 확인이 ${n_ok}건뿐입니다"
             exit 1
           fi
           # **출발선에 정말 모였는지**까지 본다. 겹치지 않은 채 통과한 적이 있다.
           if ! grep -q '출발선에 8명이 동시에 모였다' /tmp/ch-conc.out; then
             echo "::error::동시 생성이 실제로 겹치지 않았습니다 — 경합을 만들지 못한 통과입니다"
+            exit 1
+          fi
+          # ②의 출발선도 같은 이유로 **값으로** 본다. 이 줄이 없으면
+          # "A가 계좌 잠금에 막히지 않았다"가 CAS 통과로 섞여 들어온다.
+          if ! grep -q 'A가 계좌 잠금에서 B를 기다렸다' /tmp/ch-conc.out; then
+            echo "::error::CAS 경합 출발선 확인이 보고에 없습니다 — 경합을 만들지 못한 통과입니다"
             exit 1
           fi
           {

@@ -108,6 +108,31 @@ const M = [
     s => s.replace("      return { ok: false, marginType: null, leverage: null, positionAmt: null,\n        error: `${sym} 설정 줄이 응답에 없습니다` };",
       "      return { ok: true, marginType: 'isolated', leverage: 100, positionAmt: 0, error: null };")],
 
+  // ── 시계 오차: 못 잰 것을 통과로 ──
+  //   서명 요청은 recvWindow 밖이면 -1021로 거부된다. 그 거부는 화면에서
+  //   "키가 틀렸다"와 거의 같아 보이므로, 이 칸이 거짓말을 하면 사람은
+  //   멀쩡한 키를 다시 발급한다.
+  ['TD-22 못 읽은 시각·허용선을 통과로 (UNKNOWN 갈래 전부)', P.v,
+    s => s.replace("    ({ status: 'UNKNOWN', code, reason: why, rangeMs: null, roundTripMs: rtt });",
+      "    ({ status: 'PASS', code, reason: why, rangeMs: null, roundTripMs: rtt });")],
+  ['TD-23 왕복을 무시하고 오차를 한 점으로 단정', P.v,
+    s => s.replace('  const low = st - recv;', '  const low = st - sent;')],
+  ['TD-24 허용선을 걸치는 측정을 통과로', P.v,
+    s => s.replace("    status: 'UNKNOWN', code: 'MEASUREMENT_INCONCLUSIVE',",
+      "    status: 'PASS', code: 'MEASUREMENT_INCONCLUSIVE',")],
+  ['TD-25 허용 오차가 0이어도 비교한다', P.v,
+    s => s.replace("  if (typeof tol !== 'number' || !Number.isFinite(tol) || !(tol > 0)) {",
+      "  if (typeof tol !== 'number' || !Number.isFinite(tol)) {")],
+  ['TD-26 라우트가 시계 판정을 부르지 않는다', P.route,
+    s => s.replace('    const v = clockSkewVerdict({',
+      "    const v = { status: 'PASS' as const, code: 'IN_TOLERANCE', reason: '' };"
+      + ' const _unused3 = ({')],
+  ['TD-27 라우트 허용 오차가 서명 recvWindow와 갈린다', P.route,
+    s => s.replace('const SIGNED_RECV_WINDOW_MS = 5000;', 'const SIGNED_RECV_WINDOW_MS = 60000;')],
+  ['TD-28 서버 시각을 조회하지 않고 지어낸다', P.route,
+    s => s.replace('    const serverTimeMs = await getFuturesServerTime(testnet).catch(() => null);',
+      '    const serverTimeMs = sentAtMs;')],
+
   // ── 대조군: 아무것도 깨지 않는 변이. **빨개지면 과도 검출이다** ──
   ['OK1   주석 한 줄 추가 (중립이어야 한다)', P.v,
     s => s.replace('export type DiagnoseStatus', '// 중립 변이\nexport type DiagnoseStatus'), 'GREEN'],

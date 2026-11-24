@@ -300,7 +300,27 @@ export function modeNeedsConfirmation(mode: OperatingMode): boolean {
 
 export function gateOrder(
   mode: OperatingMode,
-  notionalUsd: number,
+  /**
+   * 이 주문의 명목가(USD). **모르면 `null`이다 — 0으로 적지 않는다.**
+   *
+   * 왜 타입이 넓어졌나
+   * ──────────────────
+   * 호출부 몇 곳이 금액을 모를 때 `|| 0` · `?? 0`으로 채워 넘겼다.
+   * 그 0이 아래 상한 검사에 들어가면 0은 어떤 상한도 넘지 않으므로
+   * **그대로 통과한다.** 실제로 실행해 확인한 값(기준 main 1543d4b8):
+   *
+   *   LIVE_SMALL · 0        → SEND
+   *   LIVE_SMALL · NaN      → SEND   (NaN 비교는 항상 거짓)
+   *   LIVE_SMALL · null     → SEND
+   *   LIVE_SMALL · 500      → BLOCK  (상한 100달러)
+   *
+   * 즉 상한은 **아는 값이 너무 클 때만** 막고 **모르면 열렸다.** 시세를
+   * 못 읽은 화면에서 주문이 나가면 그 경로를 그대로 탄다.
+   *
+   * 추측해서 채우지 않는다는 기존 판단은 옳다. 바뀌는 것은 **추측하지
+   * 않은 결과를 0이라고 적지 않는 것**뿐이다.
+   */
+  notionalUsd: number | null | undefined,
   opts?: GateOptions,
 ): OrderGate {
   const cap = CAP[mode];
@@ -320,16 +340,33 @@ export function gateOrder(
     };
   }
 
+  // **금액을 모르면 상한을 검사할 수 없다 — 그러면 보내지 않는다.**
+  //
+  // 주문을 실제로 보내는 모드에서 명목가는 언제나 0보다 크다. 0 · NaN ·
+  // null · undefined는 "0달러짜리 주문"이 아니라 **못 읽은 것**이다.
+  // 못 읽은 것을 통과로 적지 않는다.
+  //
+  // 보내지 않는 모드(모의 · Shadow)는 위에서 이미 끝났으므로 여기 오지
+  // 않는다 — 모의 주문이 금액 미상으로 막히는 일은 없다.
+  const known = Number(notionalUsd);
+  if (!Number.isFinite(known) || known <= 0) {
+    return {
+      disposition: 'BLOCK', live: cap.realMoney, needsConfirmation: false,
+      reason: `${cap.label} — 주문 금액을 확인하지 못해 1회 상한을 검사할 수 없습니다. `
+        + '시세와 수량을 확인한 뒤 다시 시도하세요',
+    };
+  }
+
   // 상한은 권고가 아니라 강제다. 넘으면 보내지 않는다.
   const limit = notionalCapOf(mode, opts);
-  if (limit !== null && notionalUsd > limit) {
+  if (limit !== null && known > limit) {
     const eq = Number(opts?.equityUsd);
     const byPct = cap.maxNotionalPctOfEquity != null && Number.isFinite(eq) && eq > 0
       && eq * (cap.maxNotionalPctOfEquity / 100) >= limit;
     return {
       disposition: 'BLOCK', live: cap.realMoney, needsConfirmation: false,
       reason: `${cap.label}의 1회 상한 $${limit.toFixed(2)}를 넘습니다 `
-        + `(요청 $${notionalUsd.toFixed(2)})`
+        + `(요청 $${known.toFixed(2)})`
         + (byPct ? ` — 자산 $${eq.toFixed(2)}의 ${cap.maxNotionalPctOfEquity}%` : ''),
     };
   }

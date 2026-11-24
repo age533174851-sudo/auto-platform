@@ -23,6 +23,7 @@ import {
   smokeTestnetVerdict, unresolvedExposureBlock, exposureGateAfterVenueCheck,
   SMOKE_STRATEGY_ID, type ExposureBlockVerdict,
 } from './smokePlan';
+import { GATE_RECOVERY_KEY, gateRecoveryTimes, isGateRecoveryCandidate } from './gateRecovery';
 import { residualVerdict } from '../engine/orderOwnership';
 import { ownedOrderIds } from '../engine/protectionLedger';
 import { resolveExitPolicy, liquidationGuard, DEFAULT_EXIT_POLICY_ID } from '../strategies/exitPolicy';
@@ -109,7 +110,7 @@ export async function startAttempt(sb: any, i: StartAttemptInput): Promise<Start
   let blk: ExposureBlockVerdict;
   try {
     const { data, error } = await sb.from('smoke_tests')
-      .select('id, connection_id, steps, state')
+      .select('id, connection_id, steps, state, mode, symbol')
       .eq('user_id', i.userId).eq('connection_id', i.connectionId)
       .order('created_at', { ascending: false }).limit(1000);
     if (error) throw new Error(error.message);
@@ -119,6 +120,65 @@ export async function startAttempt(sb: any, i: StartAttemptInput): Promise<Start
         + '과거 미해결 노출을 모두 확인할 수 없어 새 주문을 차단합니다', 503);
     }
     blk = unresolvedExposureBlock({ rows: data, connectionId: i.connectionId });
+
+    // ── 두 복구 경로가 겹친다. **둘 중 어느 것도 건너뛰지 않는다** ──
+    //
+    // 이 자리에 서로 다른 시기에 들어온 길이 둘 있다.
+    //
+    //   ① Gate TESTNET 전용 복구 (이 블록)
+    //        막힌 줄들이 전부 `isGateRecoveryCandidate`이고 확인 시각이
+    //        찍혀 있으면, 그 종목들을 Gate에 **다시 물어** 0이면 받아들인다.
+    //
+    //   ② 연결 단위 거래소 증거 복구 (이 try 뒤의 `exposureGateAfterVenueCheck`)
+    //        거래소에 이 연결의 포지션 0 · 일반 주문 0 · 조건부 주문 0이
+    //        **읽혀야만** 풀린다. 거래소를 가리지 않는다.
+    //
+    // 합칠 때 ①의 거절을 전부 `return`으로 두면 ②가 **한 번도 실행되지
+    // 않는다.** ①의 첫 조건이 `exchange !== 'gate'`라서 바이낸스는 즉시
+    // 409로 끝나고, ②는 만들어 놓고 부르는 곳이 없는 코드가 된다.
+    //
+    // 그래서 ①의 거절을 두 종류로 나눈다:
+    //
+    //   **해당 없음**  — Gate가 아니다 · 테스트넷이 아니다 · 막힌 줄이
+    //                   없다 · 복구 후보가 아니다.
+    //                   이건 "노출이 있다"가 아니라 "이 복구 수단이
+    //                   적용되지 않는다"다. 여기서 끝내지 않고 ②로 넘긴다.
+    //
+    //   **증거 거절**  — Gate 계약 이름을 만들 수 없다 · Gate가 0이 아니다 ·
+    //                   남은 줄이 여전히 막혀 있다.
+    //                   이건 실제 증거다. 그대로 409로 막는다.
+    //
+    // 그래서 **어느 경로의 증거 거절도 살아 있고**, 풀리는 길은 둘 중
+    // 하나가 실제 증거로 0을 확인했을 때뿐이다. ②는 `EXPOSURE_UNKNOWN`
+    // 차단만 풀 수 있고 세 장부 중 하나라도 못 읽으면 `READ_FAILED`로
+    // 막는다(`legacyExposureClearance`) — 못 읽은 것을 0으로 적지 않는다.
+    if (blk.blocked) {
+      const blockedRows = data.filter(row => blk.offenders.includes(row.id));
+      const gateRecoveryApplies = exchange === 'gate' && testnet
+        && blockedRows.length > 0
+        && blockedRows.every(row => isGateRecoveryCandidate(row)
+          && gateRecoveryTimes(row.steps?.[GATE_RECOVERY_KEY], startedMs)?.confirmedAt != null);
+
+      if (gateRecoveryApplies) {
+        // Recheck each recovered symbol and the proposed entry symbol before accepting recovery.
+        const { toGateContract } = await import('../exchanges/gatePlan');
+        const { readGateTestnetExposure } = await import('../exchanges/gateFutures');
+        const symbols = new Set<string>([i.symbol, ...blockedRows.map(row => row.symbol)]);
+        for (const symbol of symbols) {
+          const contract = typeof symbol === 'string' ? toGateContract(symbol) : null;
+          if (!contract) return fail('BLOCKED', blk.reason, 409);
+          const current = await readGateTestnetExposure(creds.key, creds.secret, contract);
+          if (Object.values(current).some(count => count !== 0)) {
+            return fail('BLOCKED', `Gate TESTNET ${symbol} 포지션과 두 주문 목록의 잔여 0을 확인하지 못했습니다`, 409);
+          }
+        }
+
+        const remaining = unresolvedExposureBlock({
+          rows: data.filter(row => !blk.offenders.includes(row.id)), connectionId: i.connectionId,
+        });
+        if (remaining.blocked) return fail('BLOCKED', remaining.reason, 409);
+      }
+    }
   } catch (e: any) {
     // 테이블 누락도 실패다. "첫 실행" 여부를 테이블 누락으로 추정하지 않는다.
     const msg = String(e?.message || e);
@@ -295,6 +355,10 @@ export async function startAttempt(sb: any, i: StartAttemptInput): Promise<Start
       filledQty: exec?.filledQty ?? null,
       avgPrice: exec?.avgPrice ?? null,
       rejected: exec?.ok === false,
+      // **거래소가 왜 거절했는지 함께 넘긴다.** 여기는 실제 TESTNET
+      // 주문이 나가는 경로다 — 스모크가 FAIL로 끝났을 때 사유가 없으면
+      // 사람이 거래소 화면을 따로 열어 봐야 한다.
+      rejectedReason: exec?.ok === false ? (exec?.message ?? null) : null,
       position: posAfter,
       leverageConfirmed: exec?.leverageConfirmed ?? null,
       positionModeConfirmed: exec?.positionModeConfirmed ?? null,

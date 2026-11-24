@@ -1,0 +1,55 @@
+name: ai-issue-council
+
+on:
+  schedule:
+    - cron: "30 * * * *"
+  workflow_dispatch:
+    inputs:
+      task_id:
+        description: "작업 번호 (비워두면 자동 생성)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  issues: write
+  contents: read
+  pull-requests: read
+  checks: read
+
+concurrency:
+  group: ai-issue-council-724
+  cancel-in-progress: false
+
+jobs:
+  council:
+    name: Multi-AI Issue #724 Council
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository (read-only)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Run AI Council
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          ISSUE_NUMBER: "724"
+          TASK_ID: ${{ github.event.inputs.task_id || '' }}
+          BASE_BRANCH: "main"
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-2.5-flash' }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-4.1-mini' }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL || 'claude-sonnet-4-20250514' }}
+        run: node scripts/ai-issue-council.mjs

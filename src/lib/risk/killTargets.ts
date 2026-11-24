@@ -55,6 +55,27 @@ export function liveFromPositions(positions: PositionLike[] | null | undefined):
   return out;
 }
 
+/**
+ * 줄은 있는데 **수량을 못 읽은** 포지션의 심볼.
+ *
+ * `futuresListPositions()`의 줄은 전부 0이 아닌 포지션이다 — Gate는
+ * size 0을 거르고, Binance도 0을 거르되 못 읽은 positionAmt는 일부러
+ * 줄로 남긴다. 그래서 `amount`가 null·NaN인 줄은 "포지션 아님"이 아니라
+ * **"수량을 모르는 열린 포지션"**이다. `liveFromPositions`는 그것을
+ * 대상에서 빼므로(수량 없이 줄일 수 없다), 뺀 사실을 여기서 센다.
+ */
+export function unreadableSymbols(positions: PositionLike[] | null | undefined): string[] {
+  if (!Array.isArray(positions)) return [];
+  const out: string[] = [];
+  for (const p of positions) {
+    const symbol = String(p?.symbol || '').toUpperCase();
+    if (!symbol) continue;
+    const a = p?.amount;
+    if (a == null || !Number.isFinite(Number(a))) out.push(symbol);
+  }
+  return out;
+}
+
 export interface TargetPlan {
   live: LivePosition[];
   targets: Array<{ symbol: string; qty: number | null; reason: string }>;
@@ -83,6 +104,9 @@ export function targetPlan(i: {
   const live = liveFromPositions(i.positions);
   const plan = closeTargets(i.spec as any, live as any, i.autoSymbols);
   const targets = (plan.targets || []) as TargetPlan['targets'];
+  // 자동매매 것만 닫는 단계면 손매매 줄은 원래 대상이 아니다.
+  const unreadable = unreadableSymbols(i.positions)
+    .filter(s => !i.spec?.automatedOnly || i.autoSymbols.has(s));
   return {
     live,
     targets,
@@ -92,6 +116,7 @@ export function targetPlan(i: {
       positionsRead: i.positionsRead,
       ledgerRead: i.ledgerRead,
       targetCount: targets.length,
+      unreadableCount: unreadable.length,
     }),
   };
 }

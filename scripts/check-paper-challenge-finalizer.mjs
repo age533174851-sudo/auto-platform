@@ -15,6 +15,7 @@
 //   ⑦ 084가 고친 표-한정 참조가 `086`에도 전부 남아 있다
 //   ⑧ 새 상태가 TS·워커까지 실제로 배선됐다
 import { readFileSync } from 'node:fs';
+import ts from 'typescript';
 import { loadPlan } from './gen-migration-manifest.mjs';
 
 const MIG   = 'supabase/migrations/086_paper_challenge_finalizer.sql';
@@ -220,6 +221,83 @@ for (const [file, fn, label] of [
   notes.push('084가 고친 표-한정 참조가 086에도 전부 남아 있다');
 }
 
+// ── 배선 판정: **TS AST로 tick() 안의 실제 await 호출만 센다** ──
+//
+// 예전에는 정규식 하나였다:
+//
+//     /pollChallengeSweep\s*\(\s*isMain\s*\)/
+//
+// 이것은 **두 방향으로 틀렸다.**
+//
+//   ① 더 안전한 코드를 거부한다. 긴 tick 중 임차를 다시 확인하는
+//      `pollChallengeSweep((await mainLease?.allowed()) === true)`가
+//      "배선 안 됨"으로 찍힌다. 검사기의 목적은 "배선됐는가"인데
+//      **무엇을 넘기는지 철자까지** 못박고 있었다.
+//   ② 가짜 배선을 통과시킨다. 문자열 리터럴·주석 안의 같은 글자,
+//      그리고 `tick` 바깥의 호출이 전부 초록이 된다. 거짓 초록은
+//      검사가 없는 것보다 나쁘다 — 켜져 있는 것처럼 보이기 때문이다.
+//
+// 그래서 파싱해서 본다. 받아들이는 관문은 둘뿐이다:
+//   · `isMain`
+//   · `(await mainLease?.allowed()) === true`
+// `?.`가 빠지거나 `==`로 느슨해지거나 역전되면 통과시키지 않는다.
+function challengeSweepWired(worker) {
+  const source = ts.createSourceFile('worker.ts', worker, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  let found = false;
+  const safeGate = (arg) => {
+    if (ts.isIdentifier(arg)) return arg.text === 'isMain';
+    if (!ts.isBinaryExpression(arg)
+      || arg.operatorToken.kind !== ts.SyntaxKind.EqualsEqualsEqualsToken
+      || arg.right.kind !== ts.SyntaxKind.TrueKeyword) return false;
+    const left = ts.isParenthesizedExpression(arg.left) ? arg.left.expression : arg.left;
+    if (!ts.isAwaitExpression(left) || !ts.isCallExpression(left.expression)) return false;
+    const call = left.expression;
+    const prop = call.expression;
+    return call.arguments.length === 0 && ts.isPropertyAccessExpression(prop)
+      && prop.questionDotToken?.kind === ts.SyntaxKind.QuestionDotToken
+      && ts.isIdentifier(prop.expression) && prop.expression.text === 'mainLease'
+      && prop.name.text === 'allowed';
+  };
+  const visit = (node) => {
+    if (found) return;
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)
+      && node.expression.text === 'pollChallengeSweep' && node.arguments.length === 1
+      && ts.isAwaitExpression(node.parent) && safeGate(node.arguments[0])) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  for (const statement of source.statements) {
+    if (ts.isFunctionDeclaration(statement) && statement.name?.text === 'tick' && statement.body) {
+      visit(statement.body);
+    }
+  }
+  return found;
+}
+
+// **검사기 자신을 먼저 검사한다.** 호출 삭제·우회뿐 아니라
+// 문자열·템플릿·정규식·주석 위장과 tick 바깥 호출도 전부 RED여야 한다.
+for (const [label, source, expected] of [
+  ['기존 main 게이트', 'async function tick() { await pollChallengeSweep(isMain); }', true],
+  ['임차 갱신 게이트', 'async function tick() { await pollChallengeSweep((await mainLease?.allowed()) === true); }', true],
+  ['호출 삭제', 'async function tick() {}', false],
+  ['강제 true', 'async function tick() { await pollChallengeSweep(true); }', false],
+  ['게이트 역전', 'async function tick() { await pollChallengeSweep((await mainLease?.allowed()) !== true); }', false],
+  ['줄 주석 위장', 'async function tick() { // await pollChallengeSweep(isMain);\n}', false],
+  ['블록 주석 위장', 'async function tick() { /* await pollChallengeSweep(isMain); */ }', false],
+  ['작은따옴표 문자열 위장', "async function tick() { const x = 'await pollChallengeSweep(isMain);'; }", false],
+  ['큰따옴표 문자열 위장', 'async function tick() { const x = "await pollChallengeSweep(isMain);"; }', false],
+  ['템플릿 문자열 위장', 'async function tick() { const x = `await pollChallengeSweep((await mainLease?.allowed()) === true);`; }', false],
+  ['정규식 리터럴 위장', 'async function tick() { const x = /await pollChallengeSweep\\(isMain\\);/; }', false],
+  ['tick 바깥 호출', 'async function other() { await pollChallengeSweep(isMain); } async function tick() {}', false],
+  ['잘못된 인수', 'async function tick() { await pollChallengeSweep(false); }', false],
+  ['optional 관문 누락', 'async function tick() { await pollChallengeSweep((await mainLease.allowed()) === true); }', false],
+  ['동등 비교로 약화', 'async function tick() { await pollChallengeSweep((await mainLease?.allowed()) == true); }', false],
+]) {
+  if (challengeSweepWired(source) !== expected) fail(`챌린지 스윕 검사기 자체 회귀: ${label}`);
+}
+
 // ── ⑧ 새 상태와 스윕이 실제로 배선됐는가 ──
 {
   const store = read(STORE) ?? '';
@@ -241,7 +319,7 @@ for (const [file, fn, label] of [
     fail(`${ROUTE}이 기존 청산 경로를 쓰지 않습니다`);
   }
   const worker = read(WORKER) ?? '';
-  if (!/pollChallengeSweep\s*\(\s*isMain\s*\)/.test(worker)) {
+  if (!challengeSweepWired(worker)) {
     fail(`${WORKER}의 tick이 pollChallengeSweep을 부르지 않습니다`
       + ' — 만들어 놓고 배선을 안 한 상태입니다');
   }

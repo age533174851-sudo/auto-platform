@@ -340,3 +340,71 @@ export function overallSummary(items: StatusItem[]): { health: Health; text: str
   }
   return { health: 'ok', text: `${list.length}개 모두 정상` };
 }
+
+/**
+ * **조회 한 번의 결과를 "읽음 / 못 읽음"으로 가른다.**
+ *
+ * supabase-js는 실패를 던지지 않고 `{ data: null, error }`로 돌려준다.
+ * `const { data } = await ...`를 try/catch로 감싸도 아무것도 잡히지 않고,
+ * `Array.isArray(data) ? data : []`가 조회 실패를 **"기록 0건"**으로
+ * 바꾼다. `/api/system/runtime-health`의 배포 검증 · 자동 복구 이력 ·
+ * 청산 감시 실행 기록이 그 모양이었다.
+ *
+ * 진짜 빈 목록은 읽은 것이다 — 막지 않는다.
+ */
+export type RowsRead = { readable: true; rows: any[] } | { readable: false };
+
+export function rowsRead(res: unknown): RowsRead {
+  const r = res as { data?: unknown; error?: unknown } | null | undefined;
+  if (!r || r.error || !Array.isArray(r.data)) return { readable: false };
+  return { readable: true, rows: r.data };
+}
+
+export interface DeploymentView {
+  verdict: string;
+  reason: string;
+  checkedAt: string | null;
+  /** false=**검증 기록을 읽지 못했다.** 기록이 없는 것과 다르다 */
+  readable: boolean;
+  mainSha?: string | null;
+  flySha?: string | null;
+  workerFresh?: boolean | null;
+  migrationsApplied?: boolean | null;
+}
+
+/**
+ * 최근 배포 검증 기록을 화면에 보낼 모양으로.
+ *
+ * 세 경우를 가른다. 못 읽은 것을 "기록이 없습니다"로 적으면 사람은
+ * 검증기가 안 돈 줄 알고 엉뚱한 곳을 고친다. 둘 다 **검증됐다는 뜻은
+ * 아니다** — verdict는 UNKNOWN이다.
+ */
+export function deploymentView(read: RowsRead): DeploymentView {
+  if (!read.readable) {
+    return {
+      verdict: 'UNKNOWN',
+      reason: '배포 검증 기록을 읽지 못했습니다 — 기록이 없다는 뜻도, 검증됐다는 뜻도 아닙니다',
+      checkedAt: null,
+      readable: false,
+    };
+  }
+  const row = read.rows[0];
+  if (!row) {
+    return {
+      verdict: 'UNKNOWN',
+      reason: '배포 검증 기록이 없습니다 — 검증됐다는 뜻이 아닙니다',
+      checkedAt: null,
+      readable: true,
+    };
+  }
+  return {
+    verdict: row.verdict,
+    reason: row.reason,
+    checkedAt: row.checked_at ?? null,
+    readable: true,
+    mainSha: row.main_sha ?? null,
+    flySha: row.fly_sha ?? null,
+    workerFresh: row.worker_fresh ?? null,
+    migrationsApplied: row.migrations_applied ?? null,
+  };
+}

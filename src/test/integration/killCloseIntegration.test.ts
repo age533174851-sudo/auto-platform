@@ -37,6 +37,8 @@ interface VOpts {
   positions?: any[];
   /** 전송 뒤에도 남아 있는가 */
   leftAfter?: boolean;
+  /** 전송 뒤 positionRisk 응답을 직접 정한다 (`leftAfter`보다 우선) */
+  positionsAfter?: any[];
   openOrders?: any[];
   /** 미체결 조회가 실패한다 */
   openOrdersFail?: boolean;
@@ -83,6 +85,7 @@ function venueFor(o: VOpts = {}): FakeVenue {
     ? { status: 500, json: { code: -1000, msg: 'down' } }
     : { json: () => {
         const sent = v.orderSends().length > 0;
+        if (sent && o.positionsAfter) return o.positionsAfter;
         const open = !sent || o.leftAfter === true;
         const rows = o.positions ?? [{ symbol: 'BTCUSDT', positionAmt: '0.010',
           entryPrice: '100000', markPrice: '100000', leverage: '10',
@@ -108,8 +111,142 @@ async function exec(venue: FakeVenue, actionMode: string, over: any = {}) {
 /** 취소(DELETE) 호출 수 — 0이어야 하는 자리에서 0인지 센다 */
 const cancels = (v: FakeVenue) => v.countOf(ORDER, 'DELETE');
 
+// ══════════ 웹훅: 킬스위치가 켜져도 청산 신호는 통과한다 ══════════
+//
+// `/api/webhook/tradingview`는 같은 질문 — "이 신호가 청산인가" — 을
+// **두 곳에서 따로** 답하고 있었다.
+//
+//   · 킬스위치 판정:   `!body.reduceOnly`               (truthy)
+//   · 주문 분류(isExit): reduceOnly === true || orderType close* || action close*/exit*
+//
+// 그래서 `orderType: 'closeLong'` 신호(트레이딩뷰 청산 알림의 기본 모양,
+// reduceOnly 칸 없음)는 킬스위치가 켜진 계좌에서 **신규 진입으로 취급돼
+// 버려졌다** — 바로 그 순간이 포지션을 닫아야 하는 때인데.
+// 거꾸로 `reduceOnly: "false"`(문자열)는 킬스위치 판정에선 청산, 주문
+// 분류에선 진입이었다.
+//
+// 거래소는 부르지 않는다. 킬스위치 판정 **바로 다음** 단계(중복 차단)를
+// 가짜로 바꿔 "중복"을 돌려주게 해 두고, 응답이 킬스위치 거절인지
+// 중복 응답인지로 **킬스위치 문을 지났는지**만 본다.
+async function runWebhookKillSwitchExitTests() {
+  const WH_SECRET = 'wh-code-test-0123456789';
+  const USER_SECRET = 'tvw_user-secret-test-0123456789';
+  const routePath = require.resolve('../../app/api/webhook/tradingview/route');
+  const stubs: Record<string, any> = {
+    [require.resolve('../../lib/safety')]: {
+      validatePreOrder: async () => ({ allowed: true, blockers: [], warnings: [] }),
+      isDuplicateWebhook: () => false,
+      logAudit: () => {},
+      getKillSwitchState: () => ({ active: false, reason: null }),
+    },
+    [require.resolve('../../lib/risk/idempotency')]: {
+      signalKeySet: () => ['k'],
+      claimSignal: async () => ({ duplicate: true, reason: 'PAST_KILL_SWITCH' }),
+      cleanupDedup: async () => ({ ok: true }),
+    },
+    [require.resolve('../../lib/notify/telegram')]: {
+      sendTelegramAlert: async () => ({ ok: true }),
+      sendTelegram: async () => ({ ok: true }),
+      fmtError: (m: string) => m,
+    },
+  };
+  const { hashSecret } = require('../../lib/security/webhookAuth');
+
+  /** 테이블 세 개만 아는 가짜 Supabase. 킬스위치 표는 실제 판정기가 읽는다 */
+  function fakeSb(ks: { active?: boolean; readError?: string }) {
+    return {
+      from(table: string) {
+        const q: any = {
+          select: () => q, eq: () => q, limit: () => q, update: () => q,
+          single: async () => table === 'exchange_connections'
+            ? { data: { id: 'c-1', user_id: 'u-1', exchange_id: 'binance', is_testnet: true, has_withdrawal: false }, error: null }
+            : { data: null, error: null },
+          maybeSingle: async () => {
+            if (table === 'webhook_secrets') {
+              return { data: { user_id: 'u-1', secret_hash: hashSecret(USER_SECRET), revoked_at: null }, error: null };
+            }
+            if (table === 'kill_switch_state') {
+              return ks.readError
+                ? { data: null, error: { message: ks.readError } }
+                : { data: { active: !!ks.active, trigger_reason: 'test' }, error: null };
+            }
+            return { data: null, error: null };
+          },
+          then: (res: any) => res({ data: null, error: null }),
+        };
+        return q;
+      },
+    };
+  }
+
+  async function post(body: Record<string, any>, ks: { active?: boolean; readError?: string }) {
+    const adminPath = require.resolve('../../lib/supabase/admin');
+    const saved: Record<string, any> = {};
+    const all = { ...stubs, [adminPath]: { getSupabaseAdmin: () => fakeSb(ks) } };
+    for (const [k, exp] of Object.entries(all)) {
+      saved[k] = require.cache[k];
+      require.cache[k] = { id: k, filename: k, loaded: true, exports: exp } as any;
+    }
+    const prevEnv = process.env.TRADINGVIEW_WEBHOOK_SECRET;
+    process.env.TRADINGVIEW_WEBHOOK_SECRET = WH_SECRET;
+    delete require.cache[routePath];
+    try {
+      const { POST } = require(routePath);
+      const r = await POST({ json: async () => ({
+        code: WH_SECRET, secret: USER_SECRET, mode: 'testnet', userId: 'u-1',
+        connectionId: 'c-1', symbol: 'BTCUSDT', id: `t-${Math.random()}`, ...body,
+      }) } as any);
+      return await r.json();
+    } finally {
+      delete require.cache[routePath];
+      for (const [k, prev] of Object.entries(saved)) {
+        if (prev) require.cache[k] = prev; else delete require.cache[k];
+      }
+      if (prevEnv === undefined) delete process.env.TRADINGVIEW_WEBHOOK_SECRET;
+      else process.env.TRADINGVIEW_WEBHOOK_SECRET = prevEnv;
+    }
+  }
+
+  const passedKill = (j: any) => j?.duplicate === true && /PAST_KILL_SWITCH/.test(String(j?.message));
+  const blockedKill = (j: any) => j?.blocked === true && j?.dropped === true && /킬스위치/.test(String(j?.message));
+
+  // 대조군 — 시험 장치가 킬스위치를 실제로 켜고 있다는 증거
+  const openActive = await post({ orderType: 'openLong', side: 'buy' }, { active: true });
+  test('웹훅 대조: 킬스위치 켜짐 + openLong → 버린다', () => {
+    assert(blockedKill(openActive), `막지 않았다: ${JSON.stringify(openActive)}`);
+  });
+  const openOff = await post({ orderType: 'openLong', side: 'buy' }, { active: false });
+  test('웹훅 대조: 킬스위치 꺼짐 + openLong → 킬스위치 문을 지난다', () => {
+    assert(passedKill(openOff), `지나지 못했다: ${JSON.stringify(openOff)}`);
+  });
+
+  const closeActive = await post({ orderType: 'closeLong', side: 'sell' }, { active: true });
+  test('★ 웹훅: 킬스위치 켜짐 + closeLong(reduceOnly 칸 없음) → 청산은 버리지 않는다', () => {
+    assert(passedKill(closeActive), `청산 신호를 버렸다: ${JSON.stringify(closeActive)}`);
+  });
+  const exitAction = await post({ action: 'exit', side: 'sell' }, { active: true });
+  test('★ 웹훅: 킬스위치 켜짐 + action=exit → 청산은 버리지 않는다', () => {
+    assert(passedKill(exitAction), `청산 신호를 버렸다: ${JSON.stringify(exitAction)}`);
+  });
+  const closeUnknown = await post({ orderType: 'closeShort', side: 'buy' }, { readError: 'db down' });
+  test('★ 웹훅: 킬스위치 못 읽음 + closeShort → 청산은 막지 않는다', () => {
+    assert(passedKill(closeUnknown), `청산 신호를 막았다: ${JSON.stringify(closeUnknown)}`);
+  });
+  const openUnknown = await post({ orderType: 'openLong', side: 'buy' }, { readError: 'db down' });
+  test('웹훅: 킬스위치 못 읽음 + openLong → 진입은 막는다', () => {
+    assert(!passedKill(openUnknown) && /확인하지 못해/.test(String(openUnknown?.message)),
+      `진입이 지나갔다: ${JSON.stringify(openUnknown)}`);
+  });
+  const strFalse = await post({ orderType: 'openLong', side: 'buy', reduceOnly: 'false' }, { active: true });
+  test('★ 웹훅: 킬스위치 켜짐 + reduceOnly "false"(문자열) 진입 → 버린다', () => {
+    assert(blockedKill(strFalse), `문자열 "false"가 킬스위치를 지나갔다: ${JSON.stringify(strFalse)}`);
+  });
+}
+
 export async function runKillCloseIntegrationTests() {
   console.log('[통합 — 긴급 종료 안전성 (fetch·DB만 가짜)]');
+
+  await runWebhookKillSwitchExitTests();
 
   // ══════════ ① 단방향 정상 — 대상만 취소하고 닫는다 ══════════
   {
@@ -336,6 +473,39 @@ export async function runKillCloseIntegrationTests() {
     });
   }
 
+  // ══════════ ⑨-b 수량을 못 읽은 줄이 남았는데 "전부 닫혔다"로 적었다 ══════════
+  //
+  //   계획(`planKillClose`)은 수량을 못 읽은 줄을 **플랫이라고 말할 수
+  //   없다**며 `unusableTargets`로 세고 닫지 않는다. 그런데 종료 뒤
+  //   잔여를 세는 `readLeftover`는 같은 줄을 `Number(null) === 0`으로
+  //   읽어 **잔여에서 뺐다.** 읽을 수 있던 BTC만 닫히면 잔여 0 →
+  //   `CLOSED_VERIFIED` · "포지션 0을 거래소에서 확인했습니다" — ETH
+  //   포지션은 거래소에 그대로 열려 있는데.
+  {
+    const ETH_UNREADABLE = { symbol: 'ETHUSDT', positionAmt: 'garbage',
+      entryPrice: '3000', markPrice: '3000', leverage: '10',
+      marginType: 'isolated', liquidationPrice: '2700', unRealizedProfit: '0' };
+    const BTC = { symbol: 'BTCUSDT', positionAmt: '0.010',
+      entryPrice: '100000', markPrice: '100000', leverage: '10',
+      marginType: 'isolated', liquidationPrice: '90000', unRealizedProfit: '0' };
+    const v = venueFor({
+      positions: [BTC, ETH_UNREADABLE],
+      positionsAfter: [{ ...BTC, positionAmt: '0' }, ETH_UNREADABLE],
+    });
+    const { r } = await exec(v, 'ABCD');
+
+    test('★★ ⑨-b 수량을 못 읽은 포지션이 남았으면 닫혔다고 적지 않는다', () => {
+      eq(r.safety?.planCode, 'PROCEED_PARTIAL', '읽을 수 있는 BTC만 닫는 계획');
+      eq(r.safety?.unusableTargets, 1, 'ETH 줄은 수량을 못 읽었다');
+      eq(v.orderSends().length, 1, 'BTC 종료 1건만 — 모르는 수량으로 보내지 않는다');
+      eq(r.close?.success, false, '★ ETH가 남았는데 성공으로 적었다');
+      eq(r.close?.remaining, 1, '★ 못 읽은 줄은 잔여 0이 아니다');
+      assert(r.safety?.protectionCode !== 'CLOSED',
+        `★ "포지션 0을 확인했다"고 적었다 (${r.safety?.protectionCode})`);
+      eq(r.safety?.manualInterventionRequired, true);
+    });
+  }
+
   // ══════════ ⑩ 닫지 않는 단계(C만) — 보호주문을 남긴다 ══════════
   {
     const v = venueFor({ openOrders: [
@@ -400,4 +570,78 @@ export async function runKillCloseIntegrationTests() {
       eq(p.cancelIds.length, 0);
     }
   });
+
+  await runCancelProtectionCountTests();
+}
+
+// ══════════ 전량 청산 뒤 보호주문 정리 — 거절된 취소를 "취소됨"으로 세지 않는다 ══════════
+//
+// 실제로 도는 것: `futuresCancelProtection` → `getFuturesOpenOrders` →
+//   `cancelFuturesOrder` → 서명 생성 · 응답 파싱. 가짜는 `fetch` 한 겹.
+//
+// `cancelFuturesOrder`는 **던지지 않는다** — 거래소 거절을 받으면
+// `{ success: false }`를 돌려준다. 그런데 정리 루프는
+// `try { await cancel(); n++ } catch {}`였다. catch는 한 번도 발동하지
+// 않으므로 **거절된 취소가 전부 "취소됨"으로 세어졌다.** 결과는
+// `cancelled: 1 · " · 남은 보호 주문 1건 취소"` — 평탄해진 포지션 위에
+// 손절이 무장된 채 남아 있는데(트리거에 닿으면 반대 포지션이 열린다)
+// 화면은 "정리했다"고 말한다.
+const CP_STOP = {
+  orderId: 8801, symbol: 'BTCUSDT', type: 'STOP_MARKET', side: 'SELL',
+  stopPrice: '99000', closePosition: true, reduceOnly: false,
+  origQty: '0', price: '0', workingType: 'MARK_PRICE', status: 'NEW',
+};
+const CP_TP = { ...CP_STOP, orderId: 8802, type: 'TAKE_PROFIT_MARKET', stopPrice: '120000' };
+
+async function runCancelProtectionCountTests() {
+  const { futuresCancelProtection } = await import('../../lib/exchanges/futuresAdapter');
+  const run = async (v: FakeVenue) => {
+    const restore = v.install();
+    try { return await futuresCancelProtection('binance', KEY, SECRET, true, 'BTCUSDT'); }
+    finally { restore(); }
+  };
+
+  // ── ⑭ 거래소가 취소를 거절하면 0건이다 ──
+  {
+    const v = new FakeVenue()
+      .on(OPEN, { json: [CP_STOP] })
+      .on(ORDER, { status: 500, json: { code: -1000, msg: 'Internal error' } }, 'DELETE');
+    const r = await run(v);
+    test('★ ⑭ 거절된 취소를 "취소됨"으로 세지 않는다', () => {
+      eq(v.countOf(ORDER, 'DELETE'), 1, '취소 시도는 실제로 나가야 한다');
+      eq(r.cancelled, 0, '거래소가 거절했는데 1건 취소로 적었다');
+      assert(r.note.includes('⚠'),
+        `남은 손절을 사람에게 알리지 않았다: ${JSON.stringify(r.note)}`);
+      assert(!/^ · 남은 보호 주문 \d+건 취소$/.test(r.note), '성공 문구가 나갔다');
+    });
+  }
+
+  // ── ⑮ 둘 중 하나만 거절되면 "1건만"이다 ──
+  {
+    const v = new FakeVenue()
+      .on(OPEN, { json: [CP_STOP, CP_TP] })
+      .onParams(ORDER, 'DELETE', { orderId: '8801' },
+        { json: { orderId: 8801, status: 'CANCELED' } })
+      .onParams(ORDER, 'DELETE', { orderId: '8802' },
+        { status: 400, json: { code: -1003, msg: 'Too many requests' } });
+    const r = await run(v);
+    test('★ ⑮ 일부만 취소되면 실제로 취소된 수만 센다', () => {
+      eq(v.countOf(ORDER, 'DELETE'), 2);
+      eq(r.cancelled, 1);
+      assert(r.note.includes('⚠') && r.note.includes('2건 중 1건'),
+        `부분 실패 문구가 아니다: ${JSON.stringify(r.note)}`);
+    });
+  }
+
+  // ── ⑯ 받아들여진 취소는 그대로 센다 (⑭가 공허하지 않다) ──
+  {
+    const v = new FakeVenue()
+      .on(OPEN, { json: [CP_STOP] })
+      .on(ORDER, { json: { orderId: 8801, status: 'CANCELED' } }, 'DELETE');
+    const r = await run(v);
+    test('★ ⑯ 받아들여진 취소는 1건으로 센다', () => {
+      eq(r.cancelled, 1);
+      eq(r.note, ' · 남은 보호 주문 1건 취소');
+    });
+  }
 }

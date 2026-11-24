@@ -145,10 +145,53 @@ export async function POST(req: NextRequest) {
     const contract = gp.toGateContract(want);
     if (!contract) return reject(`Gate 계약 이름을 만들 수 없습니다 (${want})`, 'gate_contract');
 
-    // 기존 보호 주문을 먼저 지운다. 안 지우면 손절이 두 개 걸린다.
-    const { futuresCancelProtection } = await import('@/lib/exchanges/futuresAdapter');
-    const cp = await futuresCancelProtection(creds.exchange!, creds.key!, creds.secret!, creds.testnet!, want);
-    cancelled = { cancelled: cp.cancelled };
+    // ── 기존 보호주문을 **읽는다. 지우지 않는다** ──
+    //
+    //   예전에는 `futuresCancelProtection`을 불러 Gate의
+    //   `DELETE /price_orders?contract=…`로 **그 계약의 조건부 주문을
+    //   전부** 지웠다. 그건 `Cancel All`이고, CLAUDE.md의 절대 규칙이
+    //   금지하는 자리다 — **다른 전략의 보호주문을 지운다.**
+    //
+    //   그리고 결과를 보지 않았다: `cancelled = { cancelled: cp.cancelled }`
+    //   뒤에 바로 새 주문을 걸었다. `cp.cancelled === null`(조회·취소
+    //   실패)이어도, 200에 비배열 본문이 와서 `cancelled: 0`이 되어도
+    //   `ok: true, executed: true`가 나갔다.
+    //
+    //   안전하게 **내 것만** 골라 지우려면 소유권 분류와 범위 취소가
+    //   필요하고, 그 설계는 #365(`replaceProtectiveScope`)가 들고 있다.
+    //   여기서 복제하지 않는다. 대신 **지우는 일을 아예 하지 않는다**:
+    //
+    //     · 못 읽었으면      → 거절 (무엇이 걸려 있는지 모른다)
+    //     · 하나라도 있으면  → 거절 (남의 것까지 지우지 않는다)
+    //     · 비어 있으면      → 지울 것이 없다 → 그대로 건다
+    //
+    //   세 번째가 정상 경로다. 두 번째는 Gate에서 보호주문 **교체**를
+    //   앱에서 못 하게 만든다 — 그건 기능 후퇴다. 그래도 남의 손절을
+    //   지우는 것보다 낫고, 사용자에게 **무엇을 해야 하는지** 알린다.
+    //   제대로 된 복구는 #365의 범위 취소가 들어온 뒤다.
+    const existing = await gf.getPriceOrdersGateFutures(
+      creds.key!, creds.secret!, contract, creds.testnet!);
+    if (existing == null) {
+      return NextResponse.json({
+        ok: false, queued: false, executed: false,
+        error: 'gate_protective_lookup_failed',
+        message: '기존 보호주문을 확인하지 못해 새 주문을 보내지 않았습니다 — '
+               + '겹쳐 걸면 손절이 둘이 됩니다. 거래소에서 직접 확인하세요',
+      }, { status: 502, headers: { 'Cache-Control': 'no-store' } });
+    }
+    if (existing.length > 0) {
+      return NextResponse.json({
+        ok: false, queued: false, executed: false,
+        error: 'gate_protective_exists',
+        existingProtective: existing.length,
+        message: `이 계약에 조건부 주문이 이미 ${existing.length}건 있습니다 — `
+               + '그것만 골라 지우는 기능이 아직 없어 겹쳐 걸지 않았습니다. '
+               + '거래소에서 기존 주문을 정리한 뒤 다시 시도하세요 '
+               + '(계약 전체를 일괄 취소하면 다른 전략의 보호주문까지 지워집니다)',
+      }, { status: 502, headers: { 'Cache-Control': 'no-store' } });
+    }
+    // 비어 있다 — 지운 것이 없으므로 0이다. '못 읽음'이 아니다.
+    cancelled = { cancelled: 0 };
 
     const spec = await gf.getGateContractSpec(contract, creds.testnet!);
 
@@ -179,6 +222,41 @@ export async function POST(req: NextRequest) {
   } else {
     const bf = await import('@/lib/exchanges/binanceFutures');
     cancelled = await bf.cancelOpenTPSL(creds.key!, creds.secret!, want, creds.testnet!);
+
+    // ── 취소 결과를 **보고** 새 주문을 낸다 ──
+    //
+    //   `cancelOpenTPSL`은 기존 보호주문을 확인하지 못했거나 못 지웠으면
+    //   `success: false`를 돌려준다. 그런데 이 라우트는 그 값을 보지 않고
+    //   바로 새 TP/SL을 POST했고, `ok` 계산에서도 제외했다 — **만들어
+    //   놓고 배선을 안 한 자리**다.
+    //
+    //   그러면 같은 포지션에 보호주문이 **둘**이 된다(옛것이 남은 채로
+    //   새것이 붙는다). 그리고 화면에는 `ok: true`가 뜬다.
+    //
+    //   그래서 새 주문을 보내지 않는다:
+    //     · 하나도 못 지웠으면 **옛 보호는 그대로 살아 있다** — 그 상태가
+    //       새것을 겹쳐 거는 것보다 안전하다.
+    //     · 일부만 지웠으면 남은 것이 무엇인지 모른다. 그 위에 겹쳐 걸지
+    //       않고, **보호가 불완전할 수 있다는 사실**을 그대로 돌려준다.
+    //
+    //   `Cancel All`로 쓸어내는 길은 쓰지 않는다 — 다른 전략의 보호주문을
+    //   지우기 때문이다.
+    if (cancelled && cancelled.success !== true) {
+      const partial = Number(cancelled.cancelled) > 0;
+      return NextResponse.json({
+        ok: false, queued: false, executed: false,
+        error: 'existing_protective_unresolved',
+        cancelledExisting: cancelled.cancelled ?? 0,
+        tp: null, sl: null, trailing: null,
+        testnet: creds.testnet, workingType, portionQty: portion.qty,
+        message: partial
+          ? `기존 보호주문을 일부만 지웠습니다 (${cancelled.cancelled}건) — `
+            + '겹쳐 걸지 않고 멈췄습니다. 보호가 불완전할 수 있으니 거래소에서 '
+            + `직접 확인하세요: ${cancelled.message || '사유 미상'}`
+          : '기존 보호주문을 확인·정리하지 못해 새 주문을 보내지 않았습니다 — '
+            + `옛 보호주문이 남아 있을 수 있습니다: ${cancelled.message || '사유 미상'}`,
+      }, { status: 502, headers: { 'Cache-Control': 'no-store' } });
+    }
 
     if (tpPrice != null && Number(tpPrice) > 0) {
       out.tp = await bf.placeFuturesTPSL(creds.key!, creds.secret!, {

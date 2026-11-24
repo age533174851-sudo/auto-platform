@@ -21,6 +21,7 @@
 import { test, eq, assert } from '../../test/harness';
 import { loadConnection, normalizeExchange, CONN_SELECT } from './connection';
 import { futuresExchangeOf } from './futuresAdapter';
+import { exchangePermissionLabel } from './types';
 
 /** 004/028 마이그레이션에 실제로 있는 칸 */
 const REAL_COLUMNS = new Set([
@@ -49,6 +50,22 @@ const ROW = {
 
 export function runConnectionTests() {
   console.log('[거래소 연결 — 없는 칸을 고르면 질의가 통째로 죽는다]');
+
+  const gateRead = {
+    exchange: 'gate', isPaper: false, permissions: { read: true, trading: false, withdrawal: false },
+  } as const;
+
+  test('Gate 연결 상세는 조회 허용과 거래 권한 미확인을 함께 표시한다', () => {
+    eq(exchangePermissionLabel(gateRead, 'read'), '허용');
+    eq(exchangePermissionLabel(gateRead, 'trading'), '미확인');
+  });
+
+  test('거래 권한의 저장값과 MOCK·다른 거래소 표시는 유지한다', () => {
+    eq(exchangePermissionLabel({ ...gateRead, permissions: { ...gateRead.permissions, trading: true } }, 'trading'), '허용');
+    eq(exchangePermissionLabel({ ...gateRead, isPaper: true }, 'trading'), '없음');
+    eq(exchangePermissionLabel({ ...gateRead, exchange: 'binance' }, 'trading'), '없음');
+    eq(exchangePermissionLabel(gateRead, 'withdrawal'), '없음');
+  });
 
   // ── **이 파일의 이유** ────────────────────────────────
   test('select 목록에 실존하지 않는 칸이 없다', () => {
