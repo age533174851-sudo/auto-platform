@@ -155,4 +155,101 @@ export function runPositionScopeTests() {
     assert(!/liquidationPrice:\s*Number\(p\.liquidation_price\)/.test(route),
       '/api/paper/positions가 청산가를 Number(...)로 바꿔 0을 만듭니다');
   });
+
+  // ── ★ 기본 장부의 잔고는 **방금 정한 그 계좌**에서, 오류를 받아 읽는다 ──
+  //
+  // 무엇이 틀려 있었나
+  // ──────────────────
+  // 기본 장부 경로는 `resolvePaperScope`로 계좌 id를 정한 뒤 잔고를
+  // `getPaperAccount`로 **다시** 읽었다. 그 함수는 조회 `error`를 받지
+  // 않고, 못 읽으면 **잔고 10,000짜리 새 계좌 행을 지어내 돌려준다.**
+  // 그래서 두 번째 조회만 잠깐 실패하면 응답은 200 · ok:true에
+  // `balance: 10000`, `available: 10000`이었다 — 사이징 슬라이더가 그
+  // 숫자를 나눠 주문 수량을 정한다. 못 읽은 잔고가 "1만 달러 있음"이 된다.
+  //
+  // 실제 라우트 핸들러 + 가짜 Supabase. 실제 DB·외부 호출 없음.
+  const adminPath = require.resolve('../supabase/admin');
+  const routePath = require.resolve('../../app/api/paper/positions/route');
+  const FAKE_UID = '00000000-0000-4000-8000-0000000000b7';
+
+  // **한 번에 하나씩 돈다.** 라우트는 admin 모듈을 늦게(동적 import로)
+  // 불러온다 — 시험이 겹치면 다른 시험의 가짜 DB를 집는다.
+  let chain: Promise<unknown> = Promise.resolve();
+  function callPositions(acctRead: 'ok' | 'error' | 'missing') {
+    const run = chain.then(() => callPositionsOnce(acctRead));
+    chain = run.catch(() => undefined);
+    return run;
+  }
+
+  async function callPositionsOnce(acctRead: 'ok' | 'error' | 'missing') {
+    const oldAdmin = require.cache[adminPath];
+    const oldRoute = require.cache[routePath];
+    const inserts: string[] = [];
+    const fakeDb = {
+      from(table: string) {
+        let cols = '';
+        const result = () => {
+          if (table === 'paper_positions') return { data: [], error: null };
+          // 계좌 id 해석(`select('id')`)은 성공한다 — 실패는 그 다음 읽기에서만.
+          if (cols === 'id') return { data: { id: 'acct_default' }, error: null };
+          if (acctRead === 'error') return { data: null, error: { message: 'fake db failure' } };
+          if (acctRead === 'missing') return { data: null, error: null };
+          return {
+            data: { id: 'acct_default', user_id: FAKE_UID, balance: 4321, initial_balance: 5000,
+                    total_pnl: -679, total_fees: 0, trade_count: 3, win_count: 1, is_default: true },
+            error: null,
+          };
+        };
+        const q: any = {
+          select(c: string) { cols = String(c); return q; },
+          eq() { return q; }, order() { return q; }, limit() { return q; },
+          maybeSingle() { return Promise.resolve(result()); },
+          insert() { inserts.push(table); return Promise.resolve({ data: null, error: null }); },
+          then(res: any, rej: any) { return Promise.resolve(result()).then(res, rej); },
+        };
+        return q;
+      },
+    };
+    require.cache[adminPath] = {
+      id: adminPath, filename: adminPath, loaded: true,
+      exports: { getSupabaseAdmin: () => fakeDb, resolveUserId: async () => FAKE_UID },
+    } as any;
+    delete require.cache[routePath];
+    const url = new URL('https://example.test/api/paper/positions');
+    const request: any = {
+      nextUrl: url, url: url.toString(),
+      headers: { get(n: string) { return n.toLowerCase() === 'authorization' ? 'Bearer fake' : null; } },
+    };
+    try {
+      const mod = require(routePath);
+      const res = await mod.GET(request);
+      return { status: res.status, body: await res.json(), inserts };
+    } finally {
+      if (oldAdmin) require.cache[adminPath] = oldAdmin; else delete require.cache[adminPath];
+      if (oldRoute) require.cache[routePath] = oldRoute; else delete require.cache[routePath];
+    }
+  }
+
+  test('★ 기본 장부 잔고를 못 읽으면 지어낸 10,000이 아니라 503이다', async () => {
+    const r = await callPositions('error');
+    eq(r.body.ok, false, 'ok:false');
+    eq(r.status, 503, '503');
+    eq(r.body.account, undefined, '잔고·가용을 싣지 않는다');
+    eq(r.inserts.length, 0, '못 읽었다고 계좌를 새로 만들지 않는다');
+  });
+
+  test('★ 정한 계좌가 다시 읽을 때 없으면 새 계좌를 만들지 않고 503이다', async () => {
+    const r = await callPositions('missing');
+    eq(r.body.ok, false, 'ok:false');
+    eq(r.status, 503, '503');
+    eq(r.inserts.length, 0, '조회 라우트는 계좌를 만들지 않는다');
+  });
+
+  test('기본 장부 잔고를 읽으면 그 값 그대로 나간다', async () => {
+    const r = await callPositions('ok');
+    eq(r.status, 200, '200');
+    eq(r.body.ok, true, 'ok:true');
+    eq(r.body.account.balance, 4321, '읽은 잔고');
+    eq(r.body.account.available, 4321, '열린 포지션이 없으면 가용 = 잔고');
+  });
 }

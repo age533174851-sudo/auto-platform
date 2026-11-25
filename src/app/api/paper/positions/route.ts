@@ -33,7 +33,6 @@ export async function GET(req: NextRequest) {
   if (!userId) return NextResponse.json({ ok: false, error: 'auth_required' }, { status: 401 });
 
   try {
-    const { getPaperAccount } = await import('@/lib/engine/paperStore');
     const { resolvePaperScope, paperScopeFailed } = await import('@/lib/engine/paperScope');
     const { resolveChallengeScope, challengeScopeFailed } =
       await import('@/lib/engine/paperChallengeScope');
@@ -47,7 +46,6 @@ export async function GET(req: NextRequest) {
     // 계좌를 못 정하면 **0건으로 읽지 않는다** — 0건은 "포지션이 없다"로
     // 보이고 그건 확인된 사실이 아니다.
     let accountId: string;
-    let account: any;
     if (rawChallengeId) {
       const cs = await resolveChallengeScope(sb, userId, rawChallengeId);
       if (challengeScopeFailed(cs)) {
@@ -59,17 +57,7 @@ export async function GET(req: NextRequest) {
         }, { status: unreadable ? 503 : 404, headers: { 'Cache-Control': 'no-store' } });
       }
       accountId = cs.accountId;
-      // 챌린지 계좌는 **찾기만 한다.** `getPaperAccount`는 기본 계좌를 찾고
-      // 없으면 만든다 — 여기서 부르면 아무도 고르지 않은 계좌가 생긴다.
-      const { data: ca } = await sb.from('paper_accounts')
-        .select('*').eq('id', accountId).eq('user_id', userId).maybeSingle();
-      if (!ca?.id) {
-        return NextResponse.json({
-          ok: false, error: 'account_unreadable',
-          message: '챌린지 계좌를 읽지 못했습니다 — 계좌가 없다는 뜻이 아닙니다',
-        }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
-      }
-      account = ca;
+      // 챌린지 계좌는 **찾기만 한다.** (아래 한 번의 조회)
     } else {
       const scope = await resolvePaperScope(sb, userId);
       if (paperScopeFailed(scope)) {
@@ -78,7 +66,27 @@ export async function GET(req: NextRequest) {
         }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
       }
       accountId = scope.accountId;
-      account = await getPaperAccount(sb, userId);
+    }
+
+    // ── 잔고는 **방금 정한 그 계좌**에서, 오류를 받아 **찾기만** 한다 ──
+    //
+    // 예전 기본 장부 경로는 여기서 `getPaperAccount`를 다시 불렀다. 그
+    // 함수는 조회 `error`를 받지 않고, 못 읽으면 **잔고 10,000짜리 새 계좌
+    // 행을 지어내 돌려주며** INSERT까지 시도한다. 두 번째 조회만 잠깐
+    // 실패하면 응답은 200 · `balance: 10000` · `available: 10000`이었고,
+    // 사이징 슬라이더가 그 가짜 잔고를 나눠 수량을 정했다.
+    //
+    // 두 장부가 같은 한 줄을 쓴다 — 계좌 id는 위에서 이미 정해졌고,
+    // 조회 라우트는 계좌를 만들지 않는다.
+    const { data: account, error: acctErr } = await sb.from('paper_accounts')
+      .select('*').eq('id', accountId).eq('user_id', userId).maybeSingle();
+    if (acctErr || !account?.id) {
+      return NextResponse.json({
+        ok: false, error: 'account_unreadable',
+        message: rawChallengeId
+          ? '챌린지 계좌를 읽지 못했습니다 — 계좌가 없다는 뜻이 아닙니다'
+          : '모의 계좌를 읽지 못했습니다 — 잔고가 0이나 기본값이라는 뜻이 아닙니다',
+      }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
     }
 
     // ── **조회 실패를 "없음"으로 적지 않는다** ──
