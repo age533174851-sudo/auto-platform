@@ -388,11 +388,38 @@ export class FakeDb {
 }
 
 /** 암호화된 시크릿을 넣기 위한 키. 실행기가 실제 복호화를 거치게 한다 */
+/**
+ * 시험용 암호키를 **스스로** 공급한다.
+ *
+ * ★ 이 함수는 오랫동안 아무 일도 하지 않았다. `ENCRYPTION_KEY`만 넣었는데
+ *   `crypto.ts:getKey()`가 읽는 이름은 **`EXCHANGE_ENCRYPTION_KEY`**다.
+ *   이름이 한 글자도 안 겹치는 것이 아니라 접두사가 달라서, 호출부는
+ *   "키를 넣었다"고 믿고 `encryptSecret`은 키 없이 돌았다.
+ *
+ *   그런데도 묶음은 초록이었다 — `src/lib/exchanges/connection.test.ts`가
+ *   `EXCHANGE_ENCRYPTION_KEY`를 설정하고 **원복하지 않아서** 그 뒤에 도는
+ *   통합시험들이 그 유출된 키를 주워 썼다. 즉 **암호화가 시험 순서에
+ *   매달려 있었다.** 그 파일을 고치거나 순서가 바뀌면 열 몇 개가 한꺼번에
+ *   "EXCHANGE_ENCRYPTION_KEY가 설정되지 않았거나 너무 짧습니다"로 깨진다.
+ *
+ * 그래서 **두 이름을 다 넣는다.**
+ *   · `EXCHANGE_ENCRYPTION_KEY` — `crypto.ts`가 실제로 읽는 키
+ *   · `ENCRYPTION_KEY`          — `parityGate` · `runtime-health` 등이
+ *                                 지문 비교에 쓰는 대체 이름. 지우면
+ *                                 그쪽 시험이 "키 없음"을 보게 된다.
+ *
+ * 값은 32자 이상이어야 한다(`getKey()`가 그보다 짧으면 던진다).
+ */
 export function withCryptoEnv(): () => void {
+  const KEY = 'traigo-integration-test-key-0123456789';
   const prev = process.env.ENCRYPTION_KEY;
-  process.env.ENCRYPTION_KEY = 'traigo-integration-test-key-0123456789';
+  const prevExchange = process.env.EXCHANGE_ENCRYPTION_KEY;
+  process.env.ENCRYPTION_KEY = KEY;
+  process.env.EXCHANGE_ENCRYPTION_KEY = KEY;
   return () => {
     if (prev === undefined) delete process.env.ENCRYPTION_KEY;
     else process.env.ENCRYPTION_KEY = prev;
+    if (prevExchange === undefined) delete process.env.EXCHANGE_ENCRYPTION_KEY;
+    else process.env.EXCHANGE_ENCRYPTION_KEY = prevExchange;
   };
 }
