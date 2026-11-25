@@ -3,7 +3,7 @@ import { A } from '@/lib/theme/colors';
 import React, { useState, useEffect, useCallback } from 'react';
 import { T } from '@/lib/constants';
 import { Card } from './SharedUI';
-import { SettingField, DefaultHint, settingInput, ResetAll, countChanged } from '@/components/ui/SettingField';
+import { SettingField, SliderField, DefaultHint, settingInput, ResetAll, countChanged } from '@/components/ui/SettingField';
 import { TrendingDown, Info } from 'lucide-react';
 import { DEFAULT_FEAR_DCA, evaluateFearDca, getDcaState, type FearDcaConfig } from '@/lib/strategies/fearDca';
 
@@ -145,17 +145,19 @@ export default function FearDcaPage() {
             style={settingInput(8)} placeholder="BTC" />
         </SettingField>
 
+        {/* 돈 설정은 기본값·슬라이더·숫자칸을 같이 본다. 슬라이더는 감, 숫자칸은
+            정확 — 1회 2만원을 20만원으로 적어 놓고 돌아가는 사고를 막는다. */}
         {([
-          { k: 'buyPerTime', l: '1회 매수금액', unit: '원', step: 5000, ch: 12 },
-          { k: 'totalSeed', l: '전체 시드', unit: '원', step: 100000, ch: 14 },
+          { k: 'buyPerTime', l: '1회 매수금액', unit: '원', min: 5000, max: 1000000, step: 5000,
+            hint: '5천원 ~ 100만원. 한 번 공포 신호에 이만큼 들어간다.' },
+          { k: 'totalSeed', l: '전체 시드', unit: '원', min: 100000, max: 100000000, step: 100000,
+            hint: '10만원 ~ 1억원. 최대 투입비율을 이 시드에 곱해서 상한을 잡는다.' },
         ] as const).map(f => (
-          <SettingField key={f.k} label={f.l} value={(cfg as any)[f.k]}
+          <SliderField key={f.k} label={f.l} value={(cfg as any)[f.k]}
             base={(DEFAULT_FEAR_DCA as any)[f.k]} unit={f.unit}
-            onReset={() => update({ [f.k]: (DEFAULT_FEAR_DCA as any)[f.k] } as any)}>
-            <input type="number" value={(cfg as any)[f.k]} step={f.step} inputMode="numeric"
-              onChange={e => update({ [f.k]: parseFloat(e.target.value) || 0 } as any)}
-              style={settingInput(f.ch)} />
-          </SettingField>
+            min={f.min} max={f.max} step={f.step}
+            onChange={v => update({ [f.k]: v } as any)}
+            hint={f.hint} />
         ))}
 
         {([
