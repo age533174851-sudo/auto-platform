@@ -216,7 +216,21 @@ function DividendInner({ currency = 'KRW' }: { currency?: string }) {
                   필요로 하는 유한 max**일 뿐이고, 그보다 많이 보유한 항목을
                   편집하면 이 값으로 잘린다. 100만주는 1주당 $30짜리 ETF 기준
                   $3천만 포지션이라 개인 투자자 한계를 넉넉히 넘는다. 초과 보유가
-                  있다면 이 상한을 올리거나 slider 경로 자체를 피하도록 바꾼다. */}
+                  있다면 이 상한을 올리거나 slider 경로 자체를 피하도록 바꾼다.
+
+                이 min·max·step 조합에서 **SliderField의 clamp·round**가 어떤
+                입력을 어떤 저장값으로 바꾸는지는, 수동 `node --test`로 확인한
+                값으로 못 박아 둔다 (follow-up PR에서 `src/lib/accounts/`에
+                정식 테스트로 올릴 예정 — 지금은 `scripts/run-tests.mjs`가
+                다른 PR에 잡혀 있어 신규 .test.ts의 등록이 막혀 있다):
+                  · 0.5     → 0.5      (소수 보존)
+                  · 0.001   → 0.001    (step 자리)
+                  · 0.0005  → 0.001    (step 자리 미만은 반올림)
+                  · 100     → 100      (정수 그대로)
+                  · 5000000 → 1000000  (max clamp)
+                  · 0       → 0        (삭제 경로 / addHolding이 거름)
+                SettingField.tsx의 clamp·round 산식이 바뀌면 이 숫자들도 같이
+                바꿔야 한다 — 복제가 아닌 **표의 값**으로 관리한다. */}
             <div style={{ marginTop: SP.sm }}>
               <SliderField
                 label="수량"
