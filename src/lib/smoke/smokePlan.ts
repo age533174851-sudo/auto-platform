@@ -640,6 +640,67 @@ export function exposureGateAfterVenueCheck(i: {
   };
 }
 
+// ── ①의 결론은 둘이 아니라 **셋**이다 ──────────────────────────
+/**
+ * 종목별 거래소 재조회(①) 경로가 내린 결론.
+ *
+ * 처음에는 둘로만 나눴다 — "해당 없음"은 ②로 흘려보내고 "증거 거절"은
+ * 409. 그런데 **성공에 이름을 주지 않았다.** 그래서 ①이 대상 종목
+ * 전부 0을 확인한 뒤에도 장부 차단이 그대로 남아 ②가 다시 판단했고,
+ * ②(`legacyExposureClearance`)는 `EXPOSURE_UNKNOWN`만 풀 수 있어서
+ * ①이 푸는 `UNPROTECTED_UNRESOLVED`를 반드시 `NOT_CLEARABLE`로
+ * 되막았다. **①이 풀 수 있는 차단이 하나도 없었다.**
+ *
+ * 실측한 응답이 그 말을 그대로 했다:
+ *   `정리되지 않은 노출이 1건 있습니다(…) · 거래소가 비어 있어도
+ *    기계가 풀지 않는 차단입니다 — 사람이 확인해야 합니다`
+ *
+ * 그래서 성공도 결론이다. **이름 없는 결론은 다음 사람이 지운다.**
+ *
+ * 이 함수는 아무것도 쓰지 않는다. 옛 회차의 판정은 그대로 남고, 푸는
+ * 것은 "지금 새 회차를 열어도 되는가" 하나뿐이다.
+ */
+export type ExposureRecoveryOutcome =
+  /** ①이 거래소에 다시 물어 **대상 종목 전부 0을 확인했다** */
+  | 'CLEARED_BY_RECHECK'
+  /** ①이 **적용되지 않았다** — 풀린 것이 아니다. ②가 판단한다 */
+  | 'NOT_APPLICABLE';
+
+export function exposureVerdictAfterRecovery(i: {
+  /** `unresolvedExposureBlock`의 결과 */
+  block: ExposureBlockVerdict;
+  /** ①이 내린 결론 */
+  recovery: ExposureRecoveryOutcome;
+}): ExposureBlockVerdict & {
+  /** ②(연결 단위 거래소 증거)를 물어야 하는가 */
+  consultVenue: boolean;
+} {
+  const block = i?.block;
+
+  // 판정 자체를 못 읽었으면 통과로 적지 않는다. ②도 묻지 않는다 —
+  // 무엇을 푸는지 모르는 채로 푸는 길을 열지 않는다.
+  if (!block || typeof block.blocked !== 'boolean') {
+    return {
+      blocked: true, code: 'LEDGER_UNREADABLE', offenders: [], consultVenue: false,
+      reason: '노출 차단 판정을 읽지 못했습니다 — 통과로 적지 않습니다',
+    };
+  }
+
+  if (i?.recovery === 'CLEARED_BY_RECHECK') {
+    return {
+      blocked: false, code: 'CLEAR', offenders: block.offenders, consultVenue: false,
+      reason: '막힌 회차의 종목을 거래소에 다시 물어 포지션 0 · 일반 주문 0 · '
+        + '조건부 주문 0을 직접 확인했습니다 (과거 회차의 판정은 그대로입니다)',
+    };
+  }
+
+  // 해당 없음 — ①은 아무것도 풀지 않았다. 막혔으면 ②가 판단한다.
+  return {
+    blocked: block.blocked, code: block.code, offenders: block.offenders,
+    reason: block.reason, consultVenue: block.blocked === true,
+  };
+}
+
 // ── 진입이 확정되지 않았을 때 포지션을 방치하지 않는다 ─────────
 
 /** 이 회차 줄을 어떻게 끝낼 것인가 */

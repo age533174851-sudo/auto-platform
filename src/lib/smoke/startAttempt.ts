@@ -21,6 +21,7 @@
 import {
   preflightVerdict, holdUntilMs, unprotectedExposureVerdict,
   smokeTestnetVerdict, unresolvedExposureBlock, exposureGateAfterVenueCheck,
+  exposureVerdictAfterRecovery, type ExposureRecoveryOutcome,
   SMOKE_STRATEGY_ID, type ExposureBlockVerdict,
 } from './smokePlan';
 import { GATE_RECOVERY_KEY, gateRecoveryTimes, isGateRecoveryCandidate } from './gateRecovery';
@@ -108,6 +109,8 @@ export async function startAttempt(sb: any, i: StartAttemptInput): Promise<Start
   // 50개만 읽으면 그 이전의 미해결 노출이 사라진 것처럼 보인다.
   // 안전한 상한(1000)에 닿으면 전체를 확인한 것이 아니므로 차단한다.
   let blk: ExposureBlockVerdict;
+  // ①이 내린 결론. **try 밖에 둔다** — try 안에서만 알면 뒤에서 못 쓴다.
+  let recovery: ExposureRecoveryOutcome = 'NOT_APPLICABLE';
   try {
     const { data, error } = await sb.from('smoke_tests')
       .select('id, connection_id, steps, state, mode, symbol')
@@ -137,7 +140,8 @@ export async function startAttempt(sb: any, i: StartAttemptInput): Promise<Start
     // 않는다.** ①의 첫 조건이 `exchange !== 'gate'`라서 바이낸스는 즉시
     // 409로 끝나고, ②는 만들어 놓고 부르는 곳이 없는 코드가 된다.
     //
-    // 그래서 ①의 거절을 두 종류로 나눈다:
+    // 그래서 ①의 결론을 **세 종류**로 나눈다. 처음에 둘로만 나눴다가
+    // 고장났다 — 성공에 이름이 없어서 아래 ②가 그것을 덮었다:
     //
     //   **해당 없음**  — Gate가 아니다 · 테스트넷이 아니다 · 막힌 줄이
     //                   없다 · 복구 후보가 아니다.
@@ -147,6 +151,11 @@ export async function startAttempt(sb: any, i: StartAttemptInput): Promise<Start
     //   **증거 거절**  — Gate 계약 이름을 만들 수 없다 · Gate가 0이 아니다 ·
     //                   남은 줄이 여전히 막혀 있다.
     //                   이건 실제 증거다. 그대로 409로 막는다.
+    //
+    //   **증거로 풀림** — 대상 종목 전부에서 Gate가 0을 돌려줬고 남은
+    //                   줄도 막히지 않았다. `recovery`에 적고 **②를
+    //                   묻지 않는다.** 넘기면 ②가 `EXPOSURE_UNKNOWN`만
+    //                   풀 수 있어 `NOT_CLEARABLE`로 되막는다.
     //
     // 그래서 **어느 경로의 증거 거절도 살아 있고**, 풀리는 길은 둘 중
     // 하나가 실제 증거로 0을 확인했을 때뿐이다. ②는 `EXPOSURE_UNKNOWN`
@@ -177,6 +186,11 @@ export async function startAttempt(sb: any, i: StartAttemptInput): Promise<Start
           rows: data.filter(row => !blk.offenders.includes(row.id)), connectionId: i.connectionId,
         });
         if (remaining.blocked) return fail('BLOCKED', remaining.reason, 409);
+
+        // ★ **여기까지 왔으면 ①이 증거로 풀었다.** 그 사실에 이름을 준다.
+        //   예전에는 이 자리가 그냥 흘러내렸고, 아래 ②가 같은 차단을
+        //   `NOT_CLEARABLE`로 되막아 ①이 푸는 차단이 하나도 없었다.
+        recovery = 'CLEARED_BY_RECHECK';
       }
     }
   } catch (e: any) {
@@ -195,8 +209,15 @@ export async function startAttempt(sb: any, i: StartAttemptInput): Promise<Start
   //
   // 옛 회차의 판정은 그대로 UNKNOWN으로 남는다. 아무것도 쓰지 않고,
   // 증거를 저장해 두고 재사용하지도 않는다 — 다음 회차는 다시 읽는다.
-  let gate: ExposureBlockVerdict = blk;
-  if (blk.blocked) {
+  //
+  // **①이 이미 증거로 풀었으면 ②를 묻지 않는다.** 두 경로는 서로 다른
+  // 차단 코드를 푼다 — ①은 `UNPROTECTED_UNRESOLVED`, ②는
+  // `EXPOSURE_UNKNOWN`뿐이다. ①의 성공을 ②에 넘기면 ②가 "기계가 풀지
+  // 않는 차단"이라며 되막는다. 그 판단을 `exposureVerdictAfterRecovery`
+  // **한 곳**에 둔다 — 호출부가 각자 해석하면 또 갈린다.
+  const afterRecovery = exposureVerdictAfterRecovery({ block: blk, recovery });
+  let gate: ExposureBlockVerdict = afterRecovery;
+  if (afterRecovery.consultVenue) {
     const vops = await import('../engine/venuePositionOps');
     const reads = await vops.readConnectionExposureForSmoke({
       exchange, apiKey: (creds as any).key, apiSecret: (creds as any).secret, testnet,

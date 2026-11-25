@@ -23,6 +23,7 @@
 import { test, eq, assert, flushAsync } from '../harness';
 import { FakeDb, FakeVenue, withCryptoEnv } from './venueHarness';
 import { encryptSecret } from '../../lib/exchanges/crypto';
+import { GATE_RECOVERY_KEY } from '../../lib/smoke/gateRecovery';
 
 const ADMIN = 'test-admin-secret-0123456789';
 
@@ -880,6 +881,104 @@ export async function runSmokeStartRouteTests() {
     test('★ 주문은 한 건도 나가지 않았다 — 이 시험들은 관문까지만 본다', () => {
       for (const [name, r] of [['EMPTY', EMPTY], ['ALGO_UNREAD', ALGO_UNREAD],
         ['ALGO_LEFT', ALGO_LEFT]] as const) {
+        eq(r.venue.orderSends().length, 0, `${name}에서 주문이 나갔다`);
+      }
+    });
+  }
+
+  // ── ◆ Gate TESTNET ① 경로를 **실제로 통과시켜 본다** ────────────
+  //
+  // 위 ★ 시험들은 전부 바이낸스다. 바이낸스는 ①의 첫 조건
+  // (`exchange === 'gate'`)에서 걸러져 **②만 본다.** 그래서 ★이 전부
+  // 초록이어도 ①은 한 번도 안 돌 수 있고, 실제로 그랬다 — ①을 통과까지
+  // 끌고 가 보는 시험이 하나도 없었다.
+  //
+  // ①이 푸는 차단은 `UNPROTECTED_UNRESOLVED`(ORDERS_ZERO가 FAIL)이고,
+  // ②의 `legacyExposureClearance`는 **`EXPOSURE_UNKNOWN`만** 풀 수 있다.
+  // 그래서 ①이 전부 0을 확인한 뒤 그 결과를 ②에 넘기면 ②는 반드시
+  // `NOT_CLEARABLE`로 되막는다 — **①이 풀 수 있는 차단이 하나도
+  // 없어진다.** 아래 (a)가 그 회귀를 잡는다.
+  {
+    const GLEG = '44444444-4444-4444-8444-444444444444';
+    const gnow = Date.now();
+
+    /** Gate ①의 복구 후보 한 줄: PZ PASS · OZ FAIL · 간격 둔 확인 기록 */
+    const gateCandidate = () => ({
+      id: GLEG, user_id: 'u-1', connection_id: 'c-testnet',
+      symbol: 'BTCUSDT', state: 'FAIL', mode: 'TESTNET',
+      steps: {
+        POSITION_ZERO: { state: 'PASS' },
+        ORDERS_ZERO: { state: 'FAIL' },
+        [GATE_RECOVERY_KEY]: {
+          firstAt: gnow - 20 * 60 * 1000, confirmedAt: gnow - 5 * 60 * 1000,
+        },
+      },
+      created_at: '2026-10-16T04:22:40.000Z',
+    });
+
+    async function startGate(venue: FakeVenue) {
+      const uninstall = venue.install();
+      try {
+        const r = await hit(good, { 'x-admin-secret': ADMIN },
+          { seedConn: conn({ exchange_id: 'gate' }), seedSmoke: [gateCandidate()] });
+        return { ...r, venue };
+      } finally { uninstall(); }
+    }
+
+    const G_CLEAR = await startGate(new FakeVenue()
+      .on('/api/v4/futures/usdt/positions', { json: [] })
+      .on('/api/v4/futures/usdt/orders', { json: [] })
+      .on('/api/v4/futures/usdt/price_orders', { json: [] }));
+
+    const G_POS_LEFT = await startGate(new FakeVenue()
+      .on('/api/v4/futures/usdt/positions', { json: [{ contract: 'BTC_USDT', size: 3 }] })
+      .on('/api/v4/futures/usdt/orders', { json: [] })
+      .on('/api/v4/futures/usdt/price_orders', { json: [] }));
+
+    const G_POS_UNREAD = await startGate(new FakeVenue()
+      .on('/api/v4/futures/usdt/positions', { status: 500, json: { label: 'x' } })
+      .on('/api/v4/futures/usdt/orders', { json: [] })
+      .on('/api/v4/futures/usdt/price_orders', { json: [] }));
+
+    const gsay = (r: any) => `status ${r.status} · state=${r.json?.run?.state}`
+      + ` · ${String(r.json?.run?.reason ?? r.json?.message ?? '').slice(0, 170)}`;
+
+    /**
+     * 노출 관문이 막은 응답인가.
+     *
+     * ★ 상태 코드로 판정하지 않는다 — ②를 볼 때 배운 것과 같다. 그리고
+     *   ① 쪽 문구(`잔여 0을 확인하지 못했습니다`)와 ② 쪽 문구
+     *   (`정리되지 않은 노출` · `기계가 풀지 않는 차단`)를 **둘 다** 본다.
+     *   한쪽만 보면 "다른 경로가 막았다"를 통과로 읽는다.
+     */
+    const gateBlocked = (r: any) => {
+      const t = `${r.json?.run?.reason ?? ''} ${r.json?.message ?? ''}`;
+      return /정리되지 않은 노출|잔여 0을 확인하지 못했습니다|기계가 풀지 않는 차단/.test(t);
+    };
+
+    test('◆ Gate ① 경로가 **실제로 불린다** (빈 통과 방지)', () => {
+      assert(G_CLEAR.venue.countOf('/api/v4/futures/usdt/positions') > 0,
+        `Gate 포지션을 한 번도 안 불렀다 — ①에 닿지 못했다. ${gsay(G_CLEAR)}`);
+      assert(G_CLEAR.venue.countOf('/api/v4/futures/usdt/price_orders') > 0,
+        `Gate 조건부 주문을 안 불렀다 — ①에 닿지 못했다. ${gsay(G_CLEAR)}`);
+    });
+
+    test('◆ (a) Gate 세 조회가 전부 0이면 노출 관문은 더 이상 막지 않는다', () => {
+      assert(!gateBlocked(G_CLEAR),
+        `①이 전부 0을 확인했는데도 노출로 막혔다 — ②가 ①의 성공을 덮었다. ${gsay(G_CLEAR)}`);
+    });
+
+    test('◆ (b) Gate 포지션이 남아 있으면 막는다', () => {
+      assert(gateBlocked(G_POS_LEFT), `남아 있는데 통과했다 — ${gsay(G_POS_LEFT)}`);
+    });
+
+    test('◆ (c) Gate 조회가 실패하면 0건으로 적지 않고 막는다', () => {
+      assert(gateBlocked(G_POS_UNREAD), `못 읽었는데 통과했다 — ${gsay(G_POS_UNREAD)}`);
+    });
+
+    test('◆ 이 시험들에서 주문은 한 건도 나가지 않았다', () => {
+      for (const [name, r] of [['G_CLEAR', G_CLEAR], ['G_POS_LEFT', G_POS_LEFT],
+        ['G_POS_UNREAD', G_POS_UNREAD]] as const) {
         eq(r.venue.orderSends().length, 0, `${name}에서 주문이 나갔다`);
       }
     });

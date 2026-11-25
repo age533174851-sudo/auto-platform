@@ -13,6 +13,7 @@ import {
   smokeBlocksStrategy, preflightVerdict, unprotectedExposureVerdict,
   smokeTestnetVerdict, unresolvedExposureBlock, legacySmokeExposureVerdict,
   legacyExposureClearance, exposureGateAfterVenueCheck,
+  exposureVerdictAfterRecovery,
   STEP_ORDER, HOLD_CHOICES, DEFAULT_HOLD_MIN, MAX_HOLD_MIN, SMOKE_STRATEGY_ID,
   type StepId, type StepState,
 } from './smokePlan';
@@ -967,4 +968,70 @@ export function runSmokePlanTests() {
     });
     assert(v.reason.includes('t-13'), v.reason);
   });
+
+  // ── ①의 결론이 셋이다: 해당 없음 · 증거 거절 · 증거로 풀림 ──────
+  //
+  // `exposureVerdictAfterRecovery`가 그 셋을 하나의 차단 판정으로 바꾼다.
+  // 이 함수가 생긴 이유는 ①의 **성공에 이름이 없어서** ②가 그것을 덮은
+  // 회귀다. 그래서 여기서 보는 것은 "성공이 ②를 건너뛰는가"와
+  // "건너뛰기가 다른 경우로 새지 않는가" 둘이다.
+  {
+    const BLOCKED = {
+      blocked: true as const, code: 'UNPROTECTED_UNRESOLVED' as const,
+      offenders: ['t-1'], reason: '정리되지 않은 노출이 1건 있습니다(t-1)',
+    };
+
+    test('◆ ①이 증거로 풀었으면 막지 않고 ②를 묻지 않는다', () => {
+      const v = exposureVerdictAfterRecovery({
+        block: BLOCKED, recovery: 'CLEARED_BY_RECHECK',
+      });
+      eq(v.blocked, false);
+      eq(v.code, 'CLEAR');
+      eq(v.consultVenue, false);
+      // 근거가 된 회차 id는 남긴다 — 사람이 찾아볼 수 있어야 한다.
+      eq(v.offenders.join(','), 't-1');
+      assert(/직접 확인했습니다/.test(v.reason), v.reason);
+    });
+
+    test('◆ 해당 없음이면 차단을 그대로 두고 ②에 넘긴다', () => {
+      const v = exposureVerdictAfterRecovery({
+        block: BLOCKED, recovery: 'NOT_APPLICABLE',
+      });
+      eq(v.blocked, true);
+      eq(v.code, 'UNPROTECTED_UNRESOLVED');
+      eq(v.consultVenue, true);
+      eq(v.reason, BLOCKED.reason);
+    });
+
+    test('◆ 애초에 막히지 않았으면 ②를 물을 일도 없다', () => {
+      const v = exposureVerdictAfterRecovery({
+        block: {
+          blocked: false, code: 'CLEAR', offenders: [],
+          reason: '이 연결에 정리되지 않은 노출이 없습니다',
+        },
+        recovery: 'NOT_APPLICABLE',
+      });
+      eq(v.blocked, false);
+      eq(v.consultVenue, false);
+    });
+
+    test('◆ 차단 판정 자체를 못 읽으면 통과로 적지 않는다 (②도 묻지 않는다)', () => {
+      // 무엇을 푸는지 모르는 채로 푸는 길을 열지 않는다.
+      for (const bad of [null, undefined, {}, { blocked: 'yes' }] as any[]) {
+        const v = exposureVerdictAfterRecovery({ block: bad, recovery: 'NOT_APPLICABLE' });
+        eq(v.blocked, true, JSON.stringify(bad));
+        eq(v.code, 'LEDGER_UNREADABLE', JSON.stringify(bad));
+        eq(v.consultVenue, false, JSON.stringify(bad));
+      }
+    });
+
+    test('◆ 못 읽은 판정은 "풀렸다"고 해도 통과하지 않는다', () => {
+      // 복구 성공이 **판정 못 읽음을 덮는 열쇠**가 되면 안 된다.
+      const v = exposureVerdictAfterRecovery({
+        block: null as any, recovery: 'CLEARED_BY_RECHECK',
+      });
+      eq(v.blocked, true);
+      eq(v.code, 'LEDGER_UNREADABLE');
+    });
+  }
 }
