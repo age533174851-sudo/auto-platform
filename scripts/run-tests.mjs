@@ -352,12 +352,14 @@ import { runStrategySyncTests } from './src/lib/strategies/syncPlan.test';
 import { runKillSwitchGateTests } from './src/lib/risk/killSwitchGate.test';
 import { runKillSwitchTruthTests } from './src/lib/risk/killSwitchTruth.test';
 import { runKillSwitchSelfHealTests } from './src/lib/risk/killSwitchSelfHeal.test';
+import { runConnectionLookupTests } from './src/lib/exchanges/connectionLookup.test';
 import { runKillTargetsTests } from './src/lib/risk/killTargets.test';
 import { runKillClosePlanTests } from './src/lib/risk/killClosePlan.test';
 import { runKillCloseRunTests } from './src/lib/risk/killCloseRun.test';
 import { runKillCloseIntegrationTests } from './src/test/integration/killCloseIntegration.test';
 import { runProtectiveReadFailClosedTests } from './src/test/integration/protectiveReadFailClosedIntegration.test';
 import { runAiKeysRouteIntegrationTests } from './src/test/integration/aiKeysRouteIntegration.test';
+import { runKillSwitchLookupTests } from './src/test/integration/killSwitchLookupIntegration.test';
 import { runGateCloseTests } from './src/test/integration/gateCloseIntegration.test';
 import { runGateOrderReadTests } from './src/test/integration/gateOrderReadIntegration.test';
 import { runKillAlertTests } from './src/lib/risk/killAlert.test';
@@ -533,7 +535,7 @@ runExecutionCostTests(); runMarketFreshnessTests(); runExitAuthorityTests(); run
 runExitLifecycleTests(); runStopMoveTests(); runScheduleCancelTests(); runDeploymentCheckTests(); runMigrationWaitTests(); runVercelRedeployTests(); runRunOutcomeTests(); runFirstEvalRaceTests();
 runTradeVenueTests(); runHighWaterTests(); runOrphanSweepTests(); runPaperAccountTests(); runPaperWiringTests(); runPaperOrderTelemetryTests(); runPaperUnifyTests(); runIngestPipelineTests();
 runScheduledExitRunnerTests(); runScalpSignalDiagnosisTests(); runRunStrategyDiagnosisTests(); runEntryWindowDueTests(); runForcedEntryWindowWakeTests(); runDailyForcedEntryTests(); runPaperBotPerfTests(); runPaperBotPerfViewTests();
-runNextRunTextTests(); runSyntheticSweepTests(); runCollectLimitsTests(); runVenuePositionOpsTests(); runCancelReceiptTests(); runKillSwitchSelfHealTests(); runProtectiveReadbackTests(); runStrategyFactoryTests();
+runNextRunTextTests(); runSyntheticSweepTests(); runCollectLimitsTests(); runVenuePositionOpsTests(); runCancelReceiptTests(); runKillSwitchSelfHealTests(); runConnectionLookupTests(); runProtectiveReadbackTests(); runStrategyFactoryTests();
 // 비동기 테스트가 끝나기 전에 집계하면 실패가 통과로 잡힌다.
 // CommonJS로 컴파일되므로 최상위 await을 못 쓴다 — 즉시 실행 함수로 감싼다.
 (async () => {
@@ -577,6 +579,9 @@ runNextRunTextTests(); runSyntheticSweepTests(); runCollectLimitsTests(); runVen
   await flushAsync();
   // 같은 admin 모듈 캐시를 바꾸므로 앞의 비동기 시험이 끝난 뒤에 돈다.
   await runAiKeysRouteIntegrationTests();
+  await flushAsync();
+  // 같은 이유로 또 한 번 비운다 — 이 시험도 admin 모듈 캐시를 바꾼다.
+  await runKillSwitchLookupTests();
   await flushAsync();
   const s = summary();
   console.log('\\n결과: ' + s.passed + ' 통과 / ' + s.failed + ' 실패');

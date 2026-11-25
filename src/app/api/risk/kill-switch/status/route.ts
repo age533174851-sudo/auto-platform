@@ -5,6 +5,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { loadKillSwitch, saveKillSwitch, evaluate, logKillEvent, reconcile } from '@/lib/risk/killSwitch';
 import { isTestnetConn, leftoverVerdict , effectiveModeOf } from '@/lib/risk/killSwitchTruth';
+import { connectionLookupVerdict } from '@/lib/exchanges/connectionLookup';
 import { killTriggerAlert, reconcileAlert } from '@/lib/risk/killAlert';
 import { loadFuturesCreds } from '@/lib/exchanges/loadCreds';
 import { futuresEquityUsd } from '@/lib/exchanges/futuresAdapter';
@@ -23,7 +24,12 @@ export async function GET(req: NextRequest) {
 
   const { data: conn, error } = await (sb.from('exchange_connections') as any)
     .select('*').eq('id', connectionId).eq('user_id', uid).single();
-  if (error || !conn) return NextResponse.json({ error: 'connection_not_found' }, { status: 404 });
+  // **못 읽은 것을 "없다"로 적지 않는다.** 판정은 한 곳에 있다 —
+  // 0행 오류(PGRST116)만 404고, 그 밖의 오류·빈 응답은 503이다.
+  const look = connectionLookupVerdict({ data: conn, error: error, shape: 'single' });
+  if (look.kind !== 'FOUND') {
+    return NextResponse.json({ error: look.code, message: look.reason }, { status: look.status });
+  }
 
   // **저장소 전체 규칙: `is_testnet === false`만 실전이다.**
   // 예전에는 `=== true`였다 — 칸이 비어 있으면(NULL) 실전으로 읽혀서
