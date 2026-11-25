@@ -5,11 +5,12 @@ import { confirmDialog } from '@/lib/confirm/dialog';
 import { notifyInfo } from '@/lib/notify/center';
 import { T } from '@/lib/constants';
 import { Card } from './SharedUI';
+import { SliderField } from '@/components/ui/SettingField';
 import { Wallet, Plus, Trash2, Edit3, TrendingUp, TrendingDown, Info } from 'lucide-react';
 import {
   loadManualAccounts, saveManualAccount, deleteManualAccount,
   valuateAccount, valuateAll, muid,
-  ACCOUNT_TYPE_LABEL, ACCOUNT_TYPE_COLOR,
+  ACCOUNT_TYPE_LABEL, ACCOUNT_TYPE_COLOR, MANUAL_ACCOUNT_DEFAULTS,
   type ManualAccount, type ManualAccountType, type ManualHolding,
 } from '@/lib/accounts/manual';
 
@@ -247,12 +248,26 @@ function AccountEditor({ account, onSave, onCancel }: {
                 </button>
               </div>
               {isFutures && (
-                <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
-                  <select value={h.side || 'long'} onChange={e => updHolding(i, { side: e.target.value as any })} style={{ ...inputStyle as any, flex: 1 }}>
-                    <option value="long">롱</option><option value="short">숏</option>
-                  </select>
-                  <input type="number" value={h.leverage || ''} onChange={e => updHolding(i, { leverage: parseFloat(e.target.value) || 1 })} placeholder="레버리지" style={{ ...inputStyle, flex: 1 }} />
-                </div>
+                <>
+                  <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
+                    <select value={h.side || 'long'} onChange={e => updHolding(i, { side: e.target.value as any })} style={{ ...inputStyle as any, flex: 1 }}>
+                      <option value="long">롱</option><option value="short">숏</option>
+                    </select>
+                  </div>
+                  {/* 레버리지는 1배가 "안 씀"이라는 명확한 기본이 있고 범위도 1~125로
+                      고정이라, 숫자칸만 두는 것보다 슬라이더+숫자칸+기본값이 낫다.
+                      1125처럼 한 자리 더 치는 사고를 clamp가 막는다. */}
+                  <SliderField
+                    label="레버리지"
+                    value={h.leverage || MANUAL_ACCOUNT_DEFAULTS.leverage}
+                    base={MANUAL_ACCOUNT_DEFAULTS.leverage}
+                    unit="x"
+                    min={1} max={125} step={1}
+                    onChange={v => updHolding(i, { leverage: v })}
+                    color={T.prp}
+                    hint="1배는 레버리지 안 씀. 10배 넘으면 몇 % 움직임만으로 청산될 수 있다."
+                  />
+                </>
               )}
               <div style={{ display: 'flex', gap: 6 }}>
                 <input type="number" value={h.qty || ''} onChange={e => updHolding(i, { qty: parseFloat(e.target.value) || 0 })} placeholder="수량" style={{ ...inputStyle, flex: 1 }} />

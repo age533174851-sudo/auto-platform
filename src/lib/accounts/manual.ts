@@ -27,6 +27,23 @@ export interface ManualAccount {
   updatedAt:   number;
 }
 
+/**
+ * 수동 계좌 편집창의 **기본값**.
+ *
+ * `leverage`만 적는다. 이 화면의 다른 숫자칸(`cashBalance` · `qty` ·
+ * `avgPrice` · `curPrice`)은 **사용자의 실제 보유값**이고, "권장 기본"
+ * 이란 개념이 성립하지 않는다. 가짜 기본을 0으로 적어두면 되돌리기
+ * 버튼이 사용자의 입력을 0으로 날리는 사고가 난다.
+ *
+ * `leverage`는 다르다. 선물 포지션의 레버리지 1배는 **"레버리지 안
+ * 씀"**이라는 뜻이고, 이 화면에서 포지션을 새로 만들 때 명시적으로
+ * 1로 초기화된다 (`ManualAccountsPage.tsx`의 `addHolding`). 그래서
+ * "기본 1x에서 몇 배로 올려놨는지"를 보여주는 꼬리표가 의미가 있다.
+ */
+export const MANUAL_ACCOUNT_DEFAULTS = {
+  leverage: 1,
+} as const;
+
 const KEY = 'tg_manual_accounts_v1';
 
 export const ACCOUNT_TYPE_LABEL: Record<ManualAccountType, string> = {
