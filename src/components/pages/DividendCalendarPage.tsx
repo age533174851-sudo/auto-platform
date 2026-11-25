@@ -201,16 +201,30 @@ function DividendInner({ currency = 'KRW' }: { currency?: string }) {
             {/* 숫자칸 혼자였을 때는 '100' 칠 자리에 '1000'을 눌러도 알아채기
                 어려웠다. 1주당 배당이 크지 않다 보니 10배 입력해도 연배당 숫자가
                 "꽤 나오네" 범위에 들어가 지나칠 수 있다. 슬라이더로 감을 잡고,
-                숫자칸으로 정확히 넣고, 범위 밖 입력(1 미만·10만주 초과)은
-                SliderField가 자동으로 clamp해서 들여 보낸다. */}
+                숫자칸으로 정확히 넣고, 범위 밖 입력은 SliderField가 자동으로
+                clamp해서 들여 보낸다.
+
+                min·max·step 고른 이유 (#778 리뷰 지적 반영):
+                - `step=0.001` — DRIP·분할매수로 생기는 **소수 보유**(0.5주 등)를
+                  그대로 들여 보낸다. `addHolding`은 `!isFinite(n) || n <= 0`일 때만
+                  막으므로 저장 계약상 소수를 받아 온 걸 slider가 정수로 반올리면
+                  **기존 경로 축소**가 된다.
+                - `min=0` — `addHolding`이 0 이하를 `notifyError`로 거르는 안전망이
+                  이미 있어 slider에서 추가로 1로 끌어올릴 필요가 없다. 0으로
+                  드래그 후 저장하면 기존 안내 그대로 뜬다.
+                - `max=1_000_000` — 저장 계약에는 상한이 없다. 이 값은 **slider가
+                  필요로 하는 유한 max**일 뿐이고, 그보다 많이 보유한 항목을
+                  편집하면 이 값으로 잘린다. 100만주는 1주당 $30짜리 ETF 기준
+                  $3천만 포지션이라 개인 투자자 한계를 넉넉히 넘는다. 초과 보유가
+                  있다면 이 상한을 올리거나 slider 경로 자체를 피하도록 바꾼다. */}
             <div style={{ marginTop: SP.sm }}>
               <SliderField
                 label="수량"
                 value={Number(addShares) || 0}
                 unit="주"
-                min={1} max={100000} step={1}
+                min={0} max={1_000_000} step={0.001}
                 onChange={v => setAddShares(v > 0 ? String(v) : '')}
-                hint="1 ~ 10만주. 보통 10 ~ 1,000주 사이."
+                hint="소수 보유(0.5주 등)도 그대로. 0으로 저장하면 안내가 뜬다."
               />
             </div>
             <div style={{ ...F.muted, marginTop: 6 }}>지원 종목 탭에서 사용 가능한 심볼 확인</div>
@@ -246,15 +260,16 @@ function DividendInner({ currency = 'KRW' }: { currency?: string }) {
                   <div style={{ marginTop: 8, padding: SP.sm, background: T.alt, borderRadius: R.md }}>
                     {/* 기본값(= 바꾸기 전 보유 수량)을 같이 적는다. "원래 100주였는데
                         지금 125로 바꿔 놨다"가 한눈에 보인다. 0으로 두고 확인하면
-                        보유 목록에서 삭제된다 — updateHolding의 기존 분기 그대로. */}
+                        보유 목록에서 삭제된다 — updateHolding의 기존 분기 그대로.
+                        step=0.001·max=1_000_000은 add 쪽과 같은 이유 (#778 리뷰 참고). */}
                     <SliderField
                       label="수량"
                       value={Number(draftShares) || 0}
                       base={est.shares}
                       unit="주"
-                      min={0} max={100000} step={1}
+                      min={0} max={1_000_000} step={0.001}
                       onChange={v => setDraftShares(String(v))}
-                      hint="0으로 두고 확인하면 보유 목록에서 삭제됩니다."
+                      hint="소수 보유(0.5주 등)도 그대로. 0으로 두고 확인하면 보유 목록에서 삭제됩니다."
                     />
                     <div style={{ display: 'flex', gap: 6, marginTop: SP.sm }}>
                       <button onClick={() => updateHolding(est.symbol)} style={{ ...buttonStyle('primary'), flex: 1 }}>확인</button>
