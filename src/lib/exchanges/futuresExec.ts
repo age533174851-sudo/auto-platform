@@ -794,7 +794,14 @@ export interface UnknownVerdict {
 //   -1007 TIMEOUT          "Send status unknown; execution status unknown."
 //   -1006 UNEXPECTED_RESP  "Execution status unknown."
 //   -1001 DISCONNECTED  ·  -1008 SERVER_BUSY  ·  -1016 SERVICE_SHUTTING_DOWN
-const AMBIGUOUS_BINANCE_CODES = new Set([-1001, -1006, -1007, -1008, -1016]);
+//   -1000 UNKNOWN          "An unknown error occured while processing the request."
+//
+// -1000이 여기 있어야 하는 이유: 바이낸스 5xx는 대개 `{code:-1000, msg}`
+// 본문을 싣는데, `binanceFutures.ts`의 문구는 본문이 있으면 HTTP 상태를
+// 버리고 `[-1000] msg`만 남긴다. 그러면 아래 5xx 규칙이 닿지 않아 **5xx가
+// 거절로 읽혀 재시도가 열렸다.** 공식 문서상 5XX는 "execution status is
+// UNKNOWN and could have been a success"다.
+const AMBIGUOUS_BINANCE_CODES = new Set([-1000, -1001, -1006, -1007, -1008, -1016]);
 
 // 처리된 뒤에 응답만 잃었을 수 있는 HTTP 상태. 4xx여도 거절로 보지 않는다.
 //   408 Request Timeout · 425 Too Early · 429 Too Many Requests
@@ -818,8 +825,15 @@ const NOT_SENT = /LIMIT은 가격 필요|수량을 모르면|clientOrderId가 �
 /** 전송 계층 오류 — 요청이 나갔는지 자체를 모른다 */
 const TRANSPORT = /응답\s*없음|응답을\s*받지\s*못|타임아웃|timed?\s*out|ETIMEDOUT|ECONNRESET|ECONNABORTED|ECONNREFUSED|ENOTFOUND|EHOSTUNREACH|ENETUNREACH|EPIPE|EAI_AGAIN|socket hang up|socket disconnected|premature close|terminated|UND_ERR|network\s*error|fetch failed|aborted|AbortError|TimeoutError/i;
 
-/** 거래소가 스스로 "결과를 모른다"고 적은 문구 */
-const SAYS_UNKNOWN = /execution status unknown|send status unknown|status unknown/i;
+/**
+ * 거래소가 스스로 "결과를 모른다"고 적은 문구.
+ *
+ * `unknown error`: 바이낸스 503 "Unknown error, please check your request or
+ * try again later." — 공식 문서가 "NOT treat this as a failure operation;
+ * the execution status is UNKNOWN"이라고 적은 문구다. 본문 code가 무엇이든
+ * 문구만으로 모름이다.
+ */
+const SAYS_UNKNOWN = /execution status unknown|send status unknown|status unknown|unknown error/i;
 
 const UNKNOWN_REASON =
   '거래소가 받았는지 알 수 없습니다. 주문이 나갔을 수 있어 재시도하지 않습니다 — '
