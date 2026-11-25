@@ -15,6 +15,7 @@ import {
   loadDividendHoldings, saveDividendHoldings,
 } from '@/lib/accounts/dividends';
 import type { DividendHolding, UpcomingDividend } from '@/lib/accounts/dividends';
+import { SliderField } from '@/components/ui/SettingField';
 import { IconBox, IC_SIZE, IC_STROKE } from '@/components/ui/Icon';
 import { cardStyle, buttonStyle, F, SP, R, PAGE_STYLE } from '@/components/ui/tokens';
 
@@ -194,9 +195,23 @@ function DividendInner({ currency = 'KRW' }: { currency?: string }) {
           <div style={cardStyle()}>
             <div style={F.section}>＋ 보유 종목 추가/수정</div>
             <div style={{ display: 'flex', gap: 6, marginTop: SP.sm }}>
-              <input value={addSymbol} onChange={e => setAddSymbol(e.target.value)} placeholder="심볼 (예: SCHD)" style={{ ...inp, flex: 2 }} />
-              <input type="number" value={addShares} onChange={e => setAddShares(e.target.value)} placeholder="수량" style={{ ...inp, flex: 1 }} />
+              <input value={addSymbol} onChange={e => setAddSymbol(e.target.value)} placeholder="심볼 (예: SCHD)" style={{ ...inp, flex: 1 }} />
               <button onClick={addHolding} style={buttonStyle('primary')}>저장</button>
+            </div>
+            {/* 숫자칸 혼자였을 때는 '100' 칠 자리에 '1000'을 눌러도 알아채기
+                어려웠다. 1주당 배당이 크지 않다 보니 10배 입력해도 연배당 숫자가
+                "꽤 나오네" 범위에 들어가 지나칠 수 있다. 슬라이더로 감을 잡고,
+                숫자칸으로 정확히 넣고, 범위 밖 입력(1 미만·10만주 초과)은
+                SliderField가 자동으로 clamp해서 들여 보낸다. */}
+            <div style={{ marginTop: SP.sm }}>
+              <SliderField
+                label="수량"
+                value={Number(addShares) || 0}
+                unit="주"
+                min={1} max={100000} step={1}
+                onChange={v => setAddShares(v > 0 ? String(v) : '')}
+                hint="1 ~ 10만주. 보통 10 ~ 1,000주 사이."
+              />
             </div>
             <div style={{ ...F.muted, marginTop: 6 }}>지원 종목 탭에서 사용 가능한 심볼 확인</div>
           </div>
@@ -228,10 +243,23 @@ function DividendInner({ currency = 'KRW' }: { currency?: string }) {
                   <span style={{ ...F.numM, color: T.grn }}>{formatKRW(toKRW(est.annualDividend, est.currency))}</span>
                 </div>
                 {editingSymbol === est.symbol && (
-                  <div style={{ marginTop: 8, padding: SP.sm, background: T.alt, borderRadius: R.md, display: 'flex', gap: 6 }}>
-                    <input type="number" value={draftShares} onChange={e => setDraftShares(e.target.value)} style={{ ...inp, flex: 1 }} autoFocus />
-                    <button onClick={() => updateHolding(est.symbol)} style={buttonStyle('primary')}>확인</button>
-                    <button onClick={() => { setEditingSymbol(null); setDraftShares(''); }} style={buttonStyle('ghost')}>취소</button>
+                  <div style={{ marginTop: 8, padding: SP.sm, background: T.alt, borderRadius: R.md }}>
+                    {/* 기본값(= 바꾸기 전 보유 수량)을 같이 적는다. "원래 100주였는데
+                        지금 125로 바꿔 놨다"가 한눈에 보인다. 0으로 두고 확인하면
+                        보유 목록에서 삭제된다 — updateHolding의 기존 분기 그대로. */}
+                    <SliderField
+                      label="수량"
+                      value={Number(draftShares) || 0}
+                      base={est.shares}
+                      unit="주"
+                      min={0} max={100000} step={1}
+                      onChange={v => setDraftShares(String(v))}
+                      hint="0으로 두고 확인하면 보유 목록에서 삭제됩니다."
+                    />
+                    <div style={{ display: 'flex', gap: 6, marginTop: SP.sm }}>
+                      <button onClick={() => updateHolding(est.symbol)} style={{ ...buttonStyle('primary'), flex: 1 }}>확인</button>
+                      <button onClick={() => { setEditingSymbol(null); setDraftShares(''); }} style={{ ...buttonStyle('ghost'), flex: 1 }}>취소</button>
+                    </div>
                   </div>
                 )}
               </div>
