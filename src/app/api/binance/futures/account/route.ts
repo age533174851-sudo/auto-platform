@@ -4,6 +4,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
+import { connectionLookupVerdict } from '@/lib/exchanges/connectionLookup';
 import { decryptSecret } from '@/lib/exchanges/crypto';
 import { getFuturesBalance, getFuturesPositions, getFuturesFunding, getCachedBracket, getFuturesOpenOrders, getPremiumIndex } from '@/lib/exchanges/binanceFutures';
 
@@ -22,7 +23,14 @@ export async function GET(req: NextRequest) {
 
   const { data: conn, error } = await (sb.from('exchange_connections') as any)
     .select('*').eq('id', connectionId).eq('user_id', uid).single();
-  if (error || !conn) return NextResponse.json({ error: 'connection_not_found' }, { status: 404 });
+  // **받아서 뭉개지 않는다.** 예전에는 `if (error || !conn)`로 둘을 같은
+  // 404에 합쳤다 — `error`가 처리된 것처럼 보이지만 호출자 쪽에서는
+  // DB가 죽은 것과 연결이 없는 것이 구별되지 않았다.
+  // 0행도 오류로 오므로(PGRST116) 그 구분은 한 줄이 아니다.
+  const look = connectionLookupVerdict({ data: conn, error, shape: 'single' });
+  if (look.kind !== 'FOUND') {
+    return NextResponse.json({ error: look.code, message: look.reason }, { status: look.status });
+  }
   // **거래소를 가리지 않는다.**
   //
   // 예전에는 바이낸스가 아니면 not_binance로 끝났다. 그래서 Gate 연결로

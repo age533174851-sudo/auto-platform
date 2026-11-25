@@ -6,6 +6,7 @@ import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { loadKillSwitch, saveKillSwitch, logKillEvent, reconcile } from '@/lib/risk/killSwitch';
 import { isTestnetConn, leftoverVerdict, resetVerdict, effectiveModeOf, targetedStateOf } from '@/lib/risk/killSwitchTruth';
 import { loadFuturesCreds } from '@/lib/exchanges/loadCreds';
+import { connectionLookupVerdict } from '@/lib/exchanges/connectionLookup';
 import { futuresEquityUsd } from '@/lib/exchanges/futuresAdapter';
 
 export const dynamic = 'force-dynamic';
@@ -22,9 +23,14 @@ export async function POST(req: NextRequest) {
   const { connectionId } = body;
   if (!connectionId) return NextResponse.json({ error: 'missing_connectionId' }, { status: 400 });
 
-  const { data: conn } = await (sb.from('exchange_connections') as any)
+  const { data: conn, error: connErr } = await (sb.from('exchange_connections') as any)
     .select('*').eq('id', connectionId).eq('user_id', uid).single();
-  if (!conn) return NextResponse.json({ error: 'connection_not_found' }, { status: 404 });
+  // **못 읽은 것을 "없다"로 적지 않는다.** 판정은 한 곳에 있다 —
+  // 0행 오류(PGRST116)만 404고, 그 밖의 오류·빈 응답은 503이다.
+  const look = connectionLookupVerdict({ data: conn, error: connErr, shape: 'single' });
+  if (look.kind !== 'FOUND') {
+    return NextResponse.json({ error: look.code, message: look.reason }, { status: look.status });
+  }
 
   const s = await loadKillSwitch(sb, uid, connectionId);
   if (s.noTable) return NextResponse.json({ error: 'table_missing', message: 'kill_switch_state 테이블이 없습니다.' }, { status: 503 });

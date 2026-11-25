@@ -4,6 +4,7 @@
 // 섞이면 "취소" 한 번이 엉뚱한 시장의 주문을 지운다.
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/server';
+import { connectionLookupVerdict } from '@/lib/exchanges/connectionLookup';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -20,11 +21,16 @@ async function creds(req: NextRequest) {
     ?? (await req.clone().json().catch(() => ({})))?.connectionId;
   if (!connectionId) return { err: NextResponse.json({ error: 'missing_connectionId' }, { status: 400 }) };
 
-  const { data: conn } = await (sb.from('exchange_connections') as any)
+  const { data: conn, error: connErr } = await (sb.from('exchange_connections') as any)
     .select('id, exchange_id, api_key, api_secret_enc, encrypted_secret, has_withdrawal, is_testnet')
     .eq('id', connectionId).eq('user_id', uid).maybeSingle();
 
-  if (!conn) return { err: NextResponse.json({ error: 'connection_not_found' }, { status: 404 }) };
+  // **못 읽은 것을 "없다"로 적지 않는다.** 판정은 한 곳에 있다 —
+  // maybeSingle의 빈 응답만 0행이고, 오류는 전부 503이다.
+  const look = connectionLookupVerdict({ data: conn, error: connErr, shape: 'maybeSingle' });
+  if (look.kind !== 'FOUND') {
+    return { err: NextResponse.json({ error: look.code, message: look.reason }, { status: look.status }) };
+  }
   if (String(conn.exchange_id).toLowerCase() !== 'binance') {
     return { err: NextResponse.json({ error: 'not_binance' }, { status: 400 }) };
   }

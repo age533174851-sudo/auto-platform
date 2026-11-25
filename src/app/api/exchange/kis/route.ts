@@ -22,6 +22,7 @@ import { splitAccountNo } from '@/lib/exchanges/kisCore';
 // 있으면 언젠가 갈리고, 실제로 갈렸다 — 거래소 쪽을 지문으로 고치는
 // 동안 이쪽은 앞뒤 4자를 계속 흘렸다. 정본 하나를 가져다 쓴다.
 import { maskKey } from '@/lib/exchanges/crypto';
+import { connectionLookupVerdict } from '@/lib/exchanges/connectionLookup';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -53,13 +54,19 @@ export async function POST(req: NextRequest) {
 
   // ── 기존 연결 다시 테스트 ──
   if (action === 'test') {
-    const { data: conn } = await (sb as any)
+    const { data: conn, error: connErr } = await (sb as any)
       .from('exchange_connections')
       .select('id, api_key, api_secret_enc, account_no, is_testnet')
       .eq('id', String(body.connectionId || '')).eq('user_id', uid).eq('exchange_id', 'kis')
       .maybeSingle();
-    if (!conn) {
-      return NextResponse.json({ ok: false, error: 'connection_not_found' }, { status: 404 });
+    // **못 읽은 것을 "없다"로 적지 않는다.** 아래 저장 쪽은 이미 그
+    // 분별이 있었다("'연결 실패'로 뭉개면 키를 다시 발급받으러 간다") —
+    // 읽기 쪽에만 빠져 있었다. 증권사 연결은 앱키·시크릿·계좌번호를
+    // 다시 받아야 하므로 그 잘못된 안내의 대가가 더 크다.
+    const look = connectionLookupVerdict({ data: conn, error: connErr, shape: 'maybeSingle' });
+    if (look.kind !== 'FOUND') {
+      return NextResponse.json({ ok: false, error: look.code, message: look.reason },
+        { status: look.status });
     }
     const r = await testKisConnection({
       appKey: String(conn.api_key || ''),

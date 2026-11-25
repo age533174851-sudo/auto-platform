@@ -11,6 +11,7 @@
 // 단가는 유지한다(그때 실현손익이 확정된다). 수수료는 받은 그대로 뺀다.
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/server';
+import { connectionLookupVerdict } from '@/lib/exchanges/connectionLookup';
 // 평균 매수가 계산은 순수 함수라 lib에 둔다. 라우트 파일은 정해진 이름만
 // export할 수 있고, 무엇보다 이 계산에는 테스트가 필요하다.
 import { computeCostBasis } from '@/lib/markets/costBasis';
@@ -37,11 +38,16 @@ export async function GET(req: NextRequest) {
       { status: 400 });
   }
 
-  const { data: conn } = await (sb.from('exchange_connections') as any)
+  const { data: conn, error: connErr } = await (sb.from('exchange_connections') as any)
     .select('id, exchange_id, api_key, api_secret_enc, encrypted_secret, has_withdrawal, is_testnet')
     .eq('id', connectionId).eq('user_id', uid).maybeSingle();
 
-  if (!conn) return NextResponse.json({ error: 'connection_not_found' }, { status: 404 });
+  // **못 읽은 것을 "없다"로 적지 않는다.** 판정은 한 곳에 있다 —
+  // maybeSingle의 빈 응답만 0행이고, 오류는 전부 503이다.
+  const look = connectionLookupVerdict({ data: conn, error: connErr, shape: 'maybeSingle' });
+  if (look.kind !== 'FOUND') {
+    return NextResponse.json({ error: look.code, message: look.reason }, { status: look.status });
+  }
   if (String(conn.exchange_id).toLowerCase() !== 'binance') {
     return NextResponse.json({ error: 'not_binance' }, { status: 400 });
   }
