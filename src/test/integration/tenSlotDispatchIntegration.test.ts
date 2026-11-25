@@ -165,6 +165,57 @@ export async function runTenSlotDispatchIntegrationTests() {
     });
   }
 
+  // ══════════ ②-b 두 거래소 TESTNET 이외에는 예약·주문 금지 ══════════
+  //
+  // 이번 요청은 Binance/Gate *TESTNET* 전용이다. TEN_SLOT_DISPATCH=on만으로
+  // LIVE 주문이 열리면 안 된다. 이 시험은 반드시 예약/전송 모두 0을 본다.
+  for (const [label, over] of [
+    ['LIVE 모드', { mode: 'LIVE' }],
+    ['PAPER 모드 (사이트 모의거래는 별도 경로)', { mode: 'PAPER' }],
+    ['모드 미확인', { mode: undefined }],
+    ['모드 소문자', { mode: 'testnet' }],
+    ['지원하지 않는 거래소', { exchange: 'other-venue' }],
+    ['거래소 미확인', { exchange: '' }],
+    ['거래소 대소문자 혼동', { exchange: 'BINANCE' }],
+  ] as Array<[string, any]>) {
+    const db = claimedDb();
+    const venue = sendableVenue();
+    const r = await scenario(venue, () => dispatch(db, ENV_ON, over));
+    test(`★★ TESTNET 전용: ${label}는 예약/주문 0회`, () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(db.rpcCalls.length, 0, '테스트넷 이외 목적지로 예약했다');
+      eq(venue.orderSends().length, 0, '테스트넷 이외 목적지로 거래소 주문을 보냈다');
+      eq((r as any).ok, false);
+      eq((r as any).exec, null);
+    });
+  }
+
+  // ══════════ ②-c 동시 포지션 최대 1: 미확인/음수/이미 사용 중은 예약하지 않는다 ══════════
+  //
+  // 이 값들은 호출자가 제공한다. 따라서 0이어도 실제 거래소에서 신선하게
+  // 읽었다는 뜻이 아니다. 추후 호출자는 별도 독립 증거로 검증해야 한다.
+  for (const [label, exposure] of [
+    ['포지션 1개', { positions: 1, openOrders: 0, pendingEntries: 0 }],
+    ['미체결 주문 1개', { positions: 0, openOrders: 1, pendingEntries: 0 }],
+    ['예약 대기 1개', { positions: 0, openOrders: 0, pendingEntries: 1 }],
+    ['음수 포지션 개수', { positions: -1, openOrders: 0, pendingEntries: 0 }],
+    ['숫자가 아닌 값', { positions: NaN, openOrders: 0, pendingEntries: 0 }],
+    ['무한 개수', { positions: Infinity, openOrders: 0, pendingEntries: 0 }],
+    ['빠진 개수', { positions: 0, openOrders: undefined, pendingEntries: 0 }],
+    ['문자열 0', { positions: '0', openOrders: 0, pendingEntries: 0 }],
+  ] as Array<[string, any]>) {
+    const db = claimedDb();
+    const venue = sendableVenue();
+    const r = await scenario(venue, () => dispatch(db, ENV_ON, { exposure }));
+    test(`★★ 동시 포지션 제한: ${label}는 예약/주문 0회`, () => {
+      assert(!(r instanceof Error), String((r as any)?.message));
+      eq(db.rpcCalls.length, 0, '노출이 있는데 예약했다');
+      eq(venue.orderSends().length, 0, '노출이 있는데 주문을 보냈다');
+      eq((r as any).ok, false);
+      eq((r as any).exec, null);
+    });
+  }
+
   test('켜는 값은 하나뿐이다 — true·1·yes로는 켜지지 않는다', () => {
     eq(tenSlotEnabled({}), false);
     eq(tenSlotEnabled({ TEN_SLOT_DISPATCH: 'true' }), false);

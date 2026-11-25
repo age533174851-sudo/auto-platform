@@ -188,6 +188,41 @@ export async function dispatchTenSlot(
       claimVerdictOf(null, new Error('not enabled')));
   }
 
+  // ── 10슬롯은 승인된 두 선물 TESTNET만 사용한다 ──
+  //
+  // 이 P0의 범위는 Binance/Gate TESTNET이다. `TEN_SLOT_DISPATCH=on`만
+  // 보고 mode=LIVE를 그대로 RPC/executeOrder에 넘기면 실제 주문이 열린다.
+  // LIVE/사이트 내부 PAPER는 별도 경로이며, 명시적 별도 승인 없이는
+  // 10슬롯 디스패치에 섞지 않는다. 입력은 추측해 정규화하지 않는다.
+  if (a.mode !== 'TESTNET') {
+    return off('10슬롯은 TESTNET 전용입니다 — LIVE/PAPER/미확인 모드로 예약하지 않습니다',
+      claimVerdictOf(null, new Error('not exact TESTNET')));
+  }
+  if (a.exchange !== 'binance' && a.exchange !== 'gate') {
+    return off('10슬롯은 Binance·Gate 선물 TESTNET 연결만 허용합니다 — 거래소를 추측하지 않습니다',
+      claimVerdictOf(null, new Error('unsupported testnet venue')));
+  }
+
+  // ── 동시 진입 1개 상한: 호출자 보고 수치도 검증 없이 믿지 않는다 ──
+  //
+  // SQL도 노출을 검사하지만, 잘못된 값으로 RPC를 부르면 그 오류로 슬롯이
+  // 묶일 수 있다. 무엇보다 `0`을 기본값으로 채우면 동시 포지션이 열린다.
+  // 0/0/0을 **유한 안전 정수로** 확인하기 전에는 예약하지 않는다.
+  //
+  // 주의: 이 값은 호출자가 보낸 숫자일 뿐이다. 여기서 0이라고 실제
+  // Binance+Gate 계좌/원장 조회가 신선하고 완전했다는 증거는 아니다.
+  // 실거래 연결부는 그 출처·시각·계좌 소유까지 별도 검증해야 한다.
+  const exposure = a.exposure;
+  if (!exposure || ![exposure.positions, exposure.openOrders, exposure.pendingEntries]
+      .every(n => typeof n === 'number' && Number.isSafeInteger(n) && n >= 0)) {
+    return off('포지션·미체결·대기 수량을 모두 확인하지 못했습니다 — 예약하지 않습니다',
+      claimVerdictOf(null, new Error('unreadable exposure')));
+  }
+  if (exposure.positions !== 0 || exposure.openOrders !== 0 || exposure.pendingEntries !== 0) {
+    return off('기존 포지션·미체결·예약 대기 항목이 있습니다 — 동시 진입 1개 상한으로 예약하지 않습니다',
+      claimVerdictOf(null, new Error('existing exposure')));
+  }
+
   // ── 이어받을 수 있는 것만 예약한다 ──
   //
   // **예약 뒤에 알면 늦다.** 커밋된 의도를 이어받지 못하면 슬롯은
