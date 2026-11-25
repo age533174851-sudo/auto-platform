@@ -13,6 +13,7 @@ import {
   DIVIDEND_UNIVERSE, FREQ_LABEL,
   getUpcomingDividends, estimateAnnualDividends,
   loadDividendHoldings, saveDividendHoldings,
+  validateHoldingShares,
 } from '@/lib/accounts/dividends';
 import type { DividendHolding, UpcomingDividend } from '@/lib/accounts/dividends';
 import { SliderField } from '@/components/ui/SettingField';
@@ -83,10 +84,29 @@ function DividendInner({ currency = 'KRW' }: { currency?: string }) {
   };
 
   const updateHolding = (symbol: string) => {
-    const n = Number(draftShares);
-    if (!isFinite(n) || n < 0) return;
-    if (n === 0) persist(holdings.filter(h => h.symbol !== symbol));
-    else persist(holdings.map(h => h.symbol === symbol ? { ...h, shares: n } : h));
+    // 수정 경로는 양의 유한 수량만 받는다. 삭제는 별도 버튼 (removeHolding).
+    //
+    // **왜 분기를 뗐는가 (#778 Codex 3차 재현)**
+    // 전에는 n === 0이면 삭제로 해석했다. 그런데 SliderField의 toFixed(5)는
+    // step 아래 입력(예: 0.000001)을 0으로 반올린다. 양의 수량 0.000001을
+    // 치려던 사용자가 **보유를 조용히 잃는다.** 삭제 의도를 숫자칸과
+    // 공유하지 않도록 아예 분리.
+    const v = validateHoldingShares(Number(draftShares));
+    if (v.ok === false) {
+      // 참고: tsconfig strict=false라 discriminated union narrowing이 좁아
+      // reason 접근은 any 경유. 이 분기는 ok===false인 variant만 들어온다.
+      const reason = (v as { ok: false; reason: 'not-finite' | 'non-positive' }).reason;
+      notifyError(reason === 'non-positive'
+        ? '수량은 0보다 커야 합니다. 보유를 없애려면 삭제 버튼을 쓰세요.'
+        : '수량을 정확히 입력하세요.');
+      return;
+    }
+    persist(holdings.map(h => h.symbol === symbol ? { ...h, shares: v.shares } : h));
+    setEditingSymbol(null); setDraftShares('');
+  };
+
+  const removeHolding = (symbol: string) => {
+    persist(holdings.filter(h => h.symbol !== symbol));
     setEditingSymbol(null); setDraftShares('');
   };
 
@@ -232,9 +252,9 @@ function DividendInner({ currency = 'KRW' }: { currency?: string }) {
                 label="수량"
                 value={Number(addShares) || 0}
                 unit="주"
-                min={0} max={100_000_000} step={0.00001}
+                min={0.00001} max={100_000_000} step={0.00001}
                 onChange={v => setAddShares(v > 0 ? String(v) : '')}
-                hint="소수 다섯째 자리까지 보존. 0으로 저장하면 안내가 뜬다."
+                hint="소수 다섯째 자리까지 보존 (범위 밖은 min/max로 들여 잡힘)."
               />
             </div>
             <div style={{ ...F.muted, marginTop: 6 }}>지원 종목 탭에서 사용 가능한 심볼 확인</div>
@@ -269,21 +289,32 @@ function DividendInner({ currency = 'KRW' }: { currency?: string }) {
                 {editingSymbol === est.symbol && (
                   <div style={{ marginTop: 8, padding: SP.sm, background: T.alt, borderRadius: R.md }}>
                     {/* 기본값(= 바꾸기 전 보유 수량)을 같이 적는다. "원래 100주였는데
-                        지금 125로 바꿔 놨다"가 한눈에 보인다. 0으로 두고 확인하면
-                        보유 목록에서 삭제된다 — updateHolding의 기존 분기 그대로.
-                        step=0.00001·max=100_000_000은 add 쪽과 같은 이유 (#778 리뷰 두 차례 참고). */}
+                        지금 125로 바꿔 놨다"가 한눈에 보인다. 삭제는 **별도
+                        버튼**으로 떼어 냈다 — 전에는 "0으로 두고 확인하면 삭제"
+                        였는데, SliderField의 toFixed(5)가 양의 소수 0.000001을
+                        0으로 반올려 **의도치 않은 삭제**로 이어진다는 걸 Codex
+                        3차 재현이 짚었다 (#778 코멘트 7177918783).
+
+                        min=step(0.00001)로 올려 slider가 0에 닿지 않게 하고,
+                        숫자칸에서 0을 치더라도 SliderField가 min으로 clamp하므로
+                        draftShares는 0이 되지 않는다. 최종 방어는 updateHolding의
+                        validateHoldingShares — 그쪽이 n<=0을 거절한다. */}
                     <SliderField
                       label="수량"
-                      value={Number(draftShares) || 0}
+                      value={Number(draftShares) || est.shares}
                       base={est.shares}
                       unit="주"
-                      min={0} max={100_000_000} step={0.00001}
+                      min={0.00001} max={100_000_000} step={0.00001}
                       onChange={v => setDraftShares(String(v))}
-                      hint="소수 다섯째 자리까지 보존. 0으로 두고 확인하면 보유 목록에서 삭제됩니다."
+                      hint="소수 다섯째 자리까지 보존. 삭제는 🗑 버튼."
                     />
                     <div style={{ display: 'flex', gap: 6, marginTop: SP.sm }}>
                       <button onClick={() => updateHolding(est.symbol)} style={{ ...buttonStyle('primary'), flex: 1 }}>확인</button>
                       <button onClick={() => { setEditingSymbol(null); setDraftShares(''); }} style={{ ...buttonStyle('ghost'), flex: 1 }}>취소</button>
+                      <button onClick={() => removeHolding(est.symbol)}
+                        style={{ ...buttonStyle('ghost'), flex: 0, padding: '0 14px',
+                                 color: T.red, borderColor: A(T.red, '40') }}
+                        title={`${est.symbol} 보유를 목록에서 뺀다`}>🗑</button>
                     </div>
                   </div>
                 )}
