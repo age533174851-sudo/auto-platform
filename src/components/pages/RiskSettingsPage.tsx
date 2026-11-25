@@ -8,7 +8,7 @@ import {
   Edit3, History, TriangleAlert, Lock, Unlock, RotateCcw, Save, X,
 } from 'lucide-react';
 import { T } from '@/lib/constants';
-import { DefaultHint } from '@/components/ui/SettingField';
+import { DefaultHint, SliderField } from '@/components/ui/SettingField';
 import { ErrorBoundary } from './ErrorBoundary';
 import { IconBox, IC_SIZE, IC_STROKE } from '@/components/ui/Icon';
 import { cardStyle, buttonStyle, F, SP, R, PAGE_STYLE } from '@/components/ui/tokens';
@@ -385,52 +385,53 @@ function EditModal({
             </div>
           </div>
 
-          {/* 항목별 편집 */}
+          {/* 항목별 편집
+              ──────────────
+              SliderField는 **감 잡는 슬라이더 + 정확히 넣는 숫자칸 + 기본값 꼬리표**를
+              한 덩어리로 묶는다. 폰에서 손가락 1픽셀 안 맞아서 "대충 70쯤"으로 두고
+              돌아가는 일이 안 생기도록. 리스크 한도는 돈이 얼마나 나가는지를 정하므로
+              대충 맞출 수 없는 숫자다.
+
+              nullable 두 필드(`dailyMaxLossKRW`·`maxDrawdownPct`)는 `null = 제한 없음`
+              이라서 슬라이더에 올릴 수 없다. 이때는 "제한 없음" 배지만 보이고, 아래
+              quick 버튼의 금액을 누르면 슬라이더로 돌아온다. */}
           {fields.map(f => {
             const value = draft[f.key];
             const isNull = value === null;
-            const displayValue = isNull ? '' : String(value ?? '');
+            const base = (RISK_PRESETS as any)[draft.mode]?.[f.key as any];
             return (
               <div key={String(f.key)} style={{ marginBottom: SP.md }}>
-                {/* 지금 고른 모드의 권장값을 **라벨 줄 안에** 적는다.
-                    줄을 따로 쓰면 항목마다 한 줄씩 늘어나고, 스크롤이
-                    길어질수록 "내가 뭘 바꿨더라"가 더 안 보인다. */}
-                <div style={{ display: 'flex', justifyContent: 'space-between',
-                              alignItems: 'baseline', gap: 8, marginBottom: 4, flexWrap: 'wrap' }}>
-                  <span style={{ ...F.caption, color: T.sub, display: 'inline-flex',
-                                 alignItems: 'baseline', gap: 7, flexWrap: 'wrap' }}>
-                    {f.label}
-                    <DefaultHint
-                      now={value}
-                      base={(RISK_PRESETS as any)[draft.mode]?.[f.key as any]}
-                      unit={f.suffix || ''}
-                      onReset={() => update(f.key, (RISK_PRESETS as any)[draft.mode]?.[f.key as any])}/>
-                  </span>
-                  <span style={{ color: isNull ? T.red : T.acl, fontWeight: 800, fontSize: 13 }}>
-                    {isNull ? '제한 없음' : `${displayValue}${f.suffix || ''}`}
-                  </span>
-                </div>
-                <input
-                  type="number"
-                  value={displayValue}
-                  min={f.min} max={f.max} step={f.step ?? 1}
-                  disabled={isNull}
-                  onChange={e => {
-                    const n = parseFloat(e.target.value);
-                    if (Number.isFinite(n)) update(f.key, n as any);
-                  }}
-                  style={{
-                    // 여섯 자리 숫자에 화면 전체 너비를 주지 않는다. 칸이
-                    // 크다고 더 정확해지지 않고, 한 화면에 보이는 항목만 줄어든다.
-                    width: `${String(f.max).length + 4}ch`, minWidth: 96, maxWidth: '100%',
-                    boxSizing: 'border-box',
-                    background: T.bg, color: isNull ? T.muted : T.txt,
-                    border: `1px solid ${T.border}`, borderRadius: R.sm,
-                    padding: '7px 10px', fontSize: 13, fontFamily: 'monospace',
-                    outline: 'none', marginBottom: 6, display: 'block',
-                  }}/>
+                {isNull ? (
+                  // "제한 없음" — 숫자를 받을 수 없으므로 슬라이더를 안 띄운다.
+                  // 라벨·기본값·'제한 없음' 표시만 남기고, 숫자로 돌아가는 길은
+                  // 아래 quick 버튼이 맡는다.
+                  <div style={{ display: 'flex', justifyContent: 'space-between',
+                                alignItems: 'baseline', gap: 8, marginBottom: 6, flexWrap: 'wrap' }}>
+                    <span style={{ ...F.caption, color: T.sub, display: 'inline-flex',
+                                   alignItems: 'baseline', gap: 7, flexWrap: 'wrap' }}>
+                      {f.label}
+                      <DefaultHint
+                        now={value}
+                        base={base}
+                        unit={f.suffix || ''}
+                        onReset={() => update(f.key, base)}/>
+                    </span>
+                    <span style={{ color: T.red, fontWeight: 800, fontSize: 13 }}>제한 없음</span>
+                  </div>
+                ) : (
+                  <SliderField
+                    label={f.label}
+                    value={value as number}
+                    base={base ?? undefined}
+                    unit={f.suffix || ''}
+                    min={f.min}
+                    max={f.max}
+                    step={f.step ?? 1}
+                    onChange={v => update(f.key, v as any)}
+                  />
+                )}
                 {f.quick && (
-                  <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                  <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: isNull ? 0 : -4 }}>
                     {f.quick.map(q => (
                       <button key={q.label}
                         onClick={() => update(f.key, q.v as any)}
