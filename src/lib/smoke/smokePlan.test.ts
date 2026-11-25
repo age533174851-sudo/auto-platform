@@ -12,6 +12,8 @@ import {
   smokeRequestVerdict, stepsOf, smokeVerdict, holdUntilMs, closeDue,
   smokeBlocksStrategy, preflightVerdict, unprotectedExposureVerdict,
   smokeTestnetVerdict, unresolvedExposureBlock, legacySmokeExposureVerdict,
+  legacyExposureClearance, exposureGateAfterVenueCheck,
+  exposureVerdictAfterRecovery,
   STEP_ORDER, HOLD_CHOICES, DEFAULT_HOLD_MIN, MAX_HOLD_MIN, SMOKE_STRATEGY_ID,
   type StepId, type StepState,
 } from './smokePlan';
@@ -336,6 +338,174 @@ export function runSmokePlanTests() {
     });
     eq(v.blocked, false);
     eq(v.code, 'CLEAR');
+  });
+
+  console.log('[과거 UNKNOWN 회차 — 거래소 증거로만 풀린다]');
+
+  /** 거래소가 셋 다 비어 있다고 **읽힌** 상태 */
+  const FLAT = {
+    positionRead: { success: true, positions: [] },
+    regularOrderRead: { success: true, orders: [] },
+    algoOrderRead: { success: true, orders: [] },
+  };
+  const unknownBlock = (ids = ['t-legacy']) =>
+    unresolvedExposureBlock({
+      rows: ids.map(id => ({ id, connection_id: 'c-1', state: 'UNKNOWN', steps: {} })),
+      connectionId: 'c-1',
+    });
+
+  test('★ state=UNKNOWN에 단계 기록이 없으면 "노출 없음"이 아니라 미확인이다', () => {
+    // 이것이 열려 있던 구멍이다. 단계 기록이 없다는 이유로 건너뛰면,
+    // 정리됐는지 **모르는** 회차 위에 새 회차가 그대로 열린다.
+    const v = unknownBlock();
+    eq(v.blocked, true);
+    eq(v.code, 'EXPOSURE_UNKNOWN');
+    eq(v.offenders.join(','), 't-legacy');
+  });
+
+  test('★ 정산이 예외로 끝나 state=FAIL만 남은 회차도 미확인으로 막는다', () => {
+    const v = unresolvedExposureBlock({
+      rows: [{
+        id: 't-settle-threw', connection_id: 'c-1', state: 'FAIL',
+        steps: { CLOSE: { state: 'UNKNOWN' }, RECONCILE: { state: 'UNKNOWN' } },
+      }],
+      connectionId: 'c-1',
+    });
+    eq(v.blocked, true);
+    eq(v.code, 'EXPOSURE_UNKNOWN');
+  });
+
+  test('★ 사전 확인에서 멈춘 회차(BLOCKED)는 노출이 아니다', () => {
+    // 주문을 낸 적이 없다. 이것까지 막으면 한 번 막힌 뒤로 영영
+    // 시작할 수 없고, 그 상태를 푸는 길은 아무도 쓰지 않는다.
+    const v = unresolvedExposureBlock({
+      rows: [{
+        id: 't-blocked', connection_id: 'c-1', state: 'BLOCKED',
+        steps: { PREFLIGHT: { state: 'FAIL' } },
+      }],
+      connectionId: 'c-1',
+    });
+    eq(v.blocked, false);
+    eq(v.code, 'CLEAR');
+  });
+
+  test('★ 세 장부가 모두 0으로 **읽혀야만** 과거 UNKNOWN이 풀린다', () => {
+    const c = legacyExposureClearance({ block: unknownBlock(), ...FLAT });
+    eq(c.cleared, true);
+    eq(c.code, 'CLEARED_BY_VENUE');
+    eq(c.positionCount, 0); eq(c.regularOrderCount, 0); eq(c.algoOrderCount, 0);
+  });
+
+  test('★ 셋 중 하나라도 못 읽으면 풀리지 않는다 — 0건이 아니라 모른다', () => {
+    for (const key of ['positionRead', 'regularOrderRead', 'algoOrderRead'] as const) {
+      const c = legacyExposureClearance({
+        block: unknownBlock(), ...FLAT, [key]: { success: false, message: 'timeout' },
+      });
+      eq(c.cleared, false, key);
+      eq(c.code, 'READ_FAILED', key);
+      // **못 읽은 장부는 0이 아니라 null로 적힌다**
+      const counts: any = c;
+      const field = key === 'positionRead' ? 'positionCount'
+        : key === 'regularOrderRead' ? 'regularOrderCount' : 'algoOrderCount';
+      eq(counts[field], null, key);
+    }
+  });
+
+  test('★ 200이어도 배열이 아니면 "비어 있음"으로 읽지 않는다', () => {
+    for (const bad of [
+      { positionRead: { success: true, positions: {} } },
+      { regularOrderRead: { success: true, orders: null } },
+      { algoOrderRead: { success: true, orders: 'none' } },
+      { positionRead: { success: true, positions: [{ symbol: 'BTCUSDT', amount: NaN }] } },
+      { positionRead: { success: true, positions: [{ symbol: 7, amount: 1 }] } },
+    ]) {
+      const c = legacyExposureClearance({ block: unknownBlock(), ...FLAT, ...bad });
+      eq(c.cleared, false, JSON.stringify(bad));
+      eq(c.code, 'READ_FAILED', JSON.stringify(bad));
+    }
+  });
+
+  test('★ 포지션·일반 주문·조건부 주문이 하나라도 남으면 풀리지 않는다', () => {
+    for (const residual of [
+      { positionRead: { success: true, positions: [{ symbol: 'ETHUSDT', amount: 0.1 }] } },
+      { regularOrderRead: { success: true, orders: [{ orderId: 1, symbol: 'ETHUSDT' }] } },
+      { algoOrderRead: { success: true, orders: [{ algoId: '9001', symbol: 'ETHUSDT' }] } },
+    ]) {
+      const c = legacyExposureClearance({ block: unknownBlock(), ...FLAT, ...residual });
+      eq(c.cleared, false, JSON.stringify(residual));
+      eq(c.code, 'EXPOSURE_OPEN', JSON.stringify(residual));
+    }
+  });
+
+  test('★ 다른 종목에 남은 노출도 막는다 — 이 판정은 연결 단위다', () => {
+    // 요청 종목이 BTCUSDT여도 ETHUSDT에 남은 포지션이 막아야 한다.
+    const c = legacyExposureClearance({
+      block: unknownBlock(), ...FLAT,
+      positionRead: { success: true, positions: [{ symbol: 'ETHUSDT', amount: 0.5 }] },
+    });
+    eq(c.code, 'EXPOSURE_OPEN');
+    eq(c.positionCount, 1);
+  });
+
+  test('★ FAIL로 기록된 회차는 거래소가 비어 있어도 기계가 풀지 않는다', () => {
+    const block = unresolvedExposureBlock({
+      rows: [{ id: 't-fail', connection_id: 'c-1', state: 'FAIL',
+        steps: { POSITION_ZERO: { state: 'PASS' }, ORDERS_ZERO: { state: 'FAIL' } } }],
+      connectionId: 'c-1',
+    });
+    eq(block.code, 'UNPROTECTED_UNRESOLVED');
+    const c = legacyExposureClearance({ block, ...FLAT });
+    eq(c.cleared, false);
+    eq(c.code, 'NOT_CLEARABLE');
+  });
+
+  test('★ 장부를 못 읽은 차단은 거래소 증거로 풀지 않는다', () => {
+    const block = unresolvedExposureBlock({ rows: null, connectionId: 'c-1' });
+    eq(block.code, 'LEDGER_UNREADABLE');
+    eq(legacyExposureClearance({ block, ...FLAT }).code, 'NOT_CLEARABLE');
+  });
+
+  test('★ 막히지 않은 상태를 "풀렸다"로 돌려주지 않는다', () => {
+    const block = unresolvedExposureBlock({ rows: [], connectionId: 'c-1' });
+    eq(block.blocked, false);
+    eq(legacyExposureClearance({ block, ...FLAT }).cleared, false);
+  });
+
+  test('★ 거래소 증거는 옛 회차의 판정을 고치지 않는다', () => {
+    // 푸는 것은 "지금 새 회차를 열어도 되는가" 하나뿐이다. 옛 줄의
+    // UNKNOWN을 PASS로 바꾸면 그 회차가 통과한 것처럼 보인다.
+    const rows = [{ id: 't-legacy', connection_id: 'c-1', state: 'UNKNOWN', steps: {} }];
+    const before = JSON.stringify(rows);
+    const block = unresolvedExposureBlock({ rows, connectionId: 'c-1' });
+    eq(legacyExposureClearance({ block, ...FLAT }).cleared, true);
+    eq(JSON.stringify(rows), before, '판정 함수가 장부 줄을 고쳤습니다');
+    // 같은 줄을 다시 보면 여전히 막힌다 — 증거는 저장되지 않는다.
+    eq(unresolvedExposureBlock({ rows, connectionId: 'c-1' }).blocked, true);
+  });
+
+  test('★ 관문은 하나다 — 합친 판정이 blocked를 말한다', () => {
+    const open = exposureGateAfterVenueCheck({
+      block: unknownBlock(), ...FLAT,
+      algoOrderRead: { success: true, orders: [{ algoId: '9001' }] },
+    });
+    eq(open.blocked, true);
+    eq(open.code, 'EXPOSURE_UNKNOWN');
+    assert(open.reason.includes('남아 있습니다'), open.reason);
+
+    const clear = exposureGateAfterVenueCheck({ block: unknownBlock(), ...FLAT });
+    eq(clear.blocked, false);
+    eq(clear.code, 'CLEAR');
+    eq(clear.clearance.code, 'CLEARED_BY_VENUE');
+
+    // FAIL로 기록된 차단은 거래소가 비어 있어도 합친 뒤에도 막혀 있다.
+    const recordedFail = unresolvedExposureBlock({
+      rows: [{ id: 't-fail', connection_id: 'c-1',
+        steps: { POSITION_ZERO: { state: 'FAIL' } } }],
+      connectionId: 'c-1',
+    });
+    const still = exposureGateAfterVenueCheck({ block: recordedFail, ...FLAT });
+    eq(still.blocked, true);
+    eq(still.code, 'UNPROTECTED_UNRESOLVED');
   });
 
   console.log('[스모크 테스트 — 시작 요청 검사]');
@@ -798,4 +968,70 @@ export function runSmokePlanTests() {
     });
     assert(v.reason.includes('t-13'), v.reason);
   });
+
+  // ── ①의 결론이 셋이다: 해당 없음 · 증거 거절 · 증거로 풀림 ──────
+  //
+  // `exposureVerdictAfterRecovery`가 그 셋을 하나의 차단 판정으로 바꾼다.
+  // 이 함수가 생긴 이유는 ①의 **성공에 이름이 없어서** ②가 그것을 덮은
+  // 회귀다. 그래서 여기서 보는 것은 "성공이 ②를 건너뛰는가"와
+  // "건너뛰기가 다른 경우로 새지 않는가" 둘이다.
+  {
+    const BLOCKED = {
+      blocked: true as const, code: 'UNPROTECTED_UNRESOLVED' as const,
+      offenders: ['t-1'], reason: '정리되지 않은 노출이 1건 있습니다(t-1)',
+    };
+
+    test('◆ ①이 증거로 풀었으면 막지 않고 ②를 묻지 않는다', () => {
+      const v = exposureVerdictAfterRecovery({
+        block: BLOCKED, recovery: 'CLEARED_BY_RECHECK',
+      });
+      eq(v.blocked, false);
+      eq(v.code, 'CLEAR');
+      eq(v.consultVenue, false);
+      // 근거가 된 회차 id는 남긴다 — 사람이 찾아볼 수 있어야 한다.
+      eq(v.offenders.join(','), 't-1');
+      assert(/직접 확인했습니다/.test(v.reason), v.reason);
+    });
+
+    test('◆ 해당 없음이면 차단을 그대로 두고 ②에 넘긴다', () => {
+      const v = exposureVerdictAfterRecovery({
+        block: BLOCKED, recovery: 'NOT_APPLICABLE',
+      });
+      eq(v.blocked, true);
+      eq(v.code, 'UNPROTECTED_UNRESOLVED');
+      eq(v.consultVenue, true);
+      eq(v.reason, BLOCKED.reason);
+    });
+
+    test('◆ 애초에 막히지 않았으면 ②를 물을 일도 없다', () => {
+      const v = exposureVerdictAfterRecovery({
+        block: {
+          blocked: false, code: 'CLEAR', offenders: [],
+          reason: '이 연결에 정리되지 않은 노출이 없습니다',
+        },
+        recovery: 'NOT_APPLICABLE',
+      });
+      eq(v.blocked, false);
+      eq(v.consultVenue, false);
+    });
+
+    test('◆ 차단 판정 자체를 못 읽으면 통과로 적지 않는다 (②도 묻지 않는다)', () => {
+      // 무엇을 푸는지 모르는 채로 푸는 길을 열지 않는다.
+      for (const bad of [null, undefined, {}, { blocked: 'yes' }] as any[]) {
+        const v = exposureVerdictAfterRecovery({ block: bad, recovery: 'NOT_APPLICABLE' });
+        eq(v.blocked, true, JSON.stringify(bad));
+        eq(v.code, 'LEDGER_UNREADABLE', JSON.stringify(bad));
+        eq(v.consultVenue, false, JSON.stringify(bad));
+      }
+    });
+
+    test('◆ 못 읽은 판정은 "풀렸다"고 해도 통과하지 않는다', () => {
+      // 복구 성공이 **판정 못 읽음을 덮는 열쇠**가 되면 안 된다.
+      const v = exposureVerdictAfterRecovery({
+        block: null as any, recovery: 'CLEARED_BY_RECHECK',
+      });
+      eq(v.blocked, true);
+      eq(v.code, 'LEDGER_UNREADABLE');
+    });
+  }
 }
