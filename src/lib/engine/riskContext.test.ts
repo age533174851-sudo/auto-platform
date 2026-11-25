@@ -41,6 +41,55 @@ export function runRiskContextTests() {
     eq(ctx.config.riskPerTradePct, 10);
   });
 
+  // ── **"못 읽음"을 "미설정"·"0"으로 읽지 않는다** ──
+  //
+  // 실패한 Supabase select는 예외를 던지지 않고 `{ data: null, error }`를
+  // 준다. 그래서 `catch`에 안 걸리고,
+  //
+  //   · 한도 조회     → `else` 가지로 떨어져 **"미설정"** + 기본값
+  //   · 열린 위험 조회 → 배열이 아니라 그냥 **0**
+  //
+  // 이 됐다. 기본값(계좌 위험 5% · 일일 -3% · 명목가 300%)은 1%/1%/100%로
+  // 좁혀 둔 사람에게 **3~5배 넓은 값**이고, 열린 위험 0은 계좌가 통째로
+  // 비어 보이게 해 전체 위험 한도를 무력화한다.
+  /** 모든 select가 실패하는 Supabase 한 겹 */
+  const failingSb = () => ({
+    from() {
+      const b: any = {
+        select() { return b; }, eq() { return b; }, gte() { return b; },
+        order() { return b; }, limit() { return b; },
+        async maybeSingle() { return { data: null, error: { message: '조회 실패' } }; },
+        then(res: any, rej?: any) {
+          return Promise.resolve({ data: null, error: { message: '조회 실패' } }).then(res, rej);
+        },
+      };
+      return b;
+    },
+  });
+
+  test('★ 한도 조회가 실패하면 limitsKnown=false다 — "미설정"이 아니다', async () => {
+    const ctx = await buildRiskContext(failingSb() as any, { userId: 'u-1' });
+    eq(ctx.config.limitsKnown, false, '못 읽은 것을 읽었다고 적지 않는다');
+    assert(ctx.warnings.some(w => w.includes('확인 불가')),
+      '경고가 "미설정"이라고만 적으면 사람이 설정하러 간다: ' + ctx.warnings.join(' / '));
+    assert(!ctx.warnings.some(w => w.includes('미설정 — 기본값')),
+      '미설정이라고 적으면 안 된다: ' + ctx.warnings.join(' / '));
+  });
+
+  test('★ 열린 위험을 못 세면 openRiskKnown=false다 — 0이 아니다', async () => {
+    const ctx = await buildRiskContext(failingSb() as any, { userId: 'u-1' });
+    eq(ctx.config.openRiskKnown, false, '못 센 것을 0으로 적지 않는다');
+    assert(ctx.warnings.some(w => w.includes('0건과 다릅니다')),
+      '사유를 적어야 한다: ' + ctx.warnings.join(' / '));
+  });
+
+  // 과잉 차단 방지 — sb가 없으면(백테스트·시뮬) 예전처럼 돈다.
+  test('★ sb가 없으면 known 플래그가 막지 않는다', async () => {
+    const ctx = await buildRiskContext(null, {});
+    assert(ctx.config.limitsKnown !== false, '조회할 곳이 없는 것은 실패가 아니다');
+    assert(ctx.config.openRiskKnown !== false, '조회할 곳이 없는 것은 실패가 아니다');
+  });
+
   // ── **0은 '모름'이 아니다. 그리고 '모름'을 0으로 읽으면 안 된다** ──
   //
   // 마이그레이션 034 전이면 이 칸이 아예 없어서 undefined가 온다. 그걸
