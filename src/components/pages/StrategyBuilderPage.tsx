@@ -978,26 +978,47 @@ function ManualBuilder({
           {/* 주문 금액 — 돈 설정은 기본값·슬라이더·숫자칸을 같이 본다.
               범위 바깥 입력은 SliderField가 clamp한다 (10,000 ~ 10,000,000).
               빠른 선택 버튼은 그대로 둔다 — 자주 쓰는 금액을 한 번에
-              맞추는 도구로, 슬라이더가 대체하지 않는다. */}
-          <SliderField
-            label={`주문 금액 (${s.order.currency})`}
-            value={Number.isFinite(s.order.amount) ? s.order.amount : DEFAULT_ORDER_AMOUNT_KRW}
-            base={DEFAULT_ORDER_AMOUNT_KRW}
-            unit="원"
-            min={10000}
-            max={10000000}
-            step={10000}
-            onChange={v => update({ order: { ...s.order, amount: v } })}
-          />
-          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: SP.sm }}>
-            {[50000, 100000, 200000, 500000, 1000000].map(v => (
-              <button key={v}
-                onClick={() => update({ order: { ...s.order, amount: v } })}
-                style={{ ...buttonStyle('ghost','sm'), background: T.alt, color: T.muted, fontSize: 10 }}>
-                ₩{(v/10000).toFixed(0)}만
-              </button>
-            ))}
-          </div>
+              맞추는 도구로, 슬라이더가 대체하지 않는다.
+
+              **통화 분기**: `StrategyOrder.currency`는 `'KRW' | 'USD'`다.
+              현재 UI는 KRW만 만들고, `blankStrategy()`·동기화 fallback도
+              KRW이지만 — 타입이 USD를 허용하고 SliderField는 min/max 밖
+              입력을 clamp하므로, USD 전략(예: DB·외부 생성·마이그레이션)을
+              열면 100 USD → 10,000으로 뭉개진다. 승인되지 않은 USD 기본값·
+              범위를 새로 추정하지 않고, KRW에만 SliderField를 적용하고
+              USD는 원래 숫자 입력을 유지한다. */}
+          {s.order.currency === 'KRW' ? (
+            <>
+              <SliderField
+                label={`주문 금액 (${s.order.currency})`}
+                value={Number.isFinite(s.order.amount) ? s.order.amount : DEFAULT_ORDER_AMOUNT_KRW}
+                base={DEFAULT_ORDER_AMOUNT_KRW}
+                unit="원"
+                min={10000}
+                max={10000000}
+                step={10000}
+                onChange={v => update({ order: { ...s.order, amount: v } })}
+              />
+              <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: SP.sm }}>
+                {[50000, 100000, 200000, 500000, 1000000].map(v => (
+                  <button key={v}
+                    onClick={() => update({ order: { ...s.order, amount: v } })}
+                    style={{ ...buttonStyle('ghost','sm'), background: T.alt, color: T.muted, fontSize: 10 }}>
+                    ₩{(v/10000).toFixed(0)}만
+                  </button>
+                ))}
+              </div>
+            </>
+          ) : (
+            <>
+              <div style={{ ...F.caption, marginBottom: 6 }}>주문 금액 ({s.order.currency})</div>
+              <input type="number" value={s.order.amount}
+                onChange={e => update({ order: { ...s.order, amount: parseFloat(e.target.value) || 0 } })}
+                style={{ width: '100%', boxSizing: 'border-box', background: T.bg, color: T.txt,
+                  border: `1px solid ${T.border}`, borderRadius: R.sm, padding: '10px 12px',
+                  fontSize: 14, fontFamily: 'monospace', outline: 'none', marginBottom: SP.sm }}/>
+            </>
+          )}
         </div>
       )}
 
