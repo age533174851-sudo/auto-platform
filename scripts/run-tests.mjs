@@ -408,6 +408,7 @@ import { runScheduleExitTests } from './src/lib/engine/scheduleExit.test';
 import { runOAuthProvidersTests } from './src/lib/auth/oauthProviders.test';
 import { runSignupOutcomeTests } from './src/lib/auth/signupOutcome.test';
 import { runCloseQtyTests } from './src/lib/exchanges/closeQty.test';
+import { runSessionLogVerdictTests } from './src/lib/auth/sessionLogVerdict.test';
 import { runLosslessJsonTests } from './src/lib/exchanges/losslessJson.test';
 import { runGatePlanTests } from './src/lib/exchanges/gatePlan.test';
 import { runFuturesExecTests } from './src/lib/exchanges/futuresExec.test';
@@ -482,7 +483,7 @@ runOverlayStackTests(); runThemeTests(); runPositionViewTests(); runDisplayTests
 runPracticeEnvTests(); runOrderViewTests(); runNewsSchemaTests(); runAnalyzeOneTests(); runCollectTests(); runEnrichPlanTests(); runConsensusTests(); runPricingTests();
 runCalendarTests(); runEconManualEventTests(); runRetentionTests(); runAdminGateTests(); runCommandTests(); runKeymapTests(); runPreTradeChecklistTests(); runReconcileEvidenceTests();
 runAutoMergeGateTests(); runGateBackfillTests(); runAutoRebaseTests(); runEntryBarSignalsTests(); runPaperRunnerStatusTests(); runWakeAuthTests(); runAttestScheduleTests(); runDeployDispatchTests();
-runExecutorHealthTests(); runManualPlanTests(); runCloseQtyTests(); runLosslessJsonTests(); runGatePlanTests(); runBinanceTpSlFallbackTests(); runFuturesExecTests(); runPromotionMapTests();
+runExecutorHealthTests(); runManualPlanTests(); runCloseQtyTests(); runSessionLogVerdictTests(); runLosslessJsonTests(); runGatePlanTests(); runBinanceTpSlFallbackTests(); runFuturesExecTests(); runPromotionMapTests();
 runTradeModeTests(); runPaperPlanTests(); runDailyLossTests(); runRegimeGateTests(); runRefreshStateTests(); runTrailPlanTests(); runPaperRunnerTests(); runAllocationTests();
 runStoredHoldingsTests(); runStatsTests(); runRoutingTests(); runGateSpotPlanTests(); runLossStreakTests(); runTradeVetoTests(); runCalibrationTests(); runRecordPredictionTests();
 runSubAccountTests(); runExitRulesTests(); runSafetyLogTests(); runFredTests(); runEventGuardTests(); runStopVerifyTests(); runManualOverrideTests(); runGateRecoveryTests();
