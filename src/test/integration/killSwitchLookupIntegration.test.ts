@@ -103,11 +103,13 @@ export async function runKillSwitchLookupTests(): Promise<void> {
       const res = await handler(request);
       let body: any = {};
       try { body = await res.json(); } catch { body = {}; }
-      return { status: res.status as number, body };
+      return { status: res.status as number, body, thrown: null as string | null };
     } catch (e) {
-      // 던진 것은 404가 아니다 — "없다"로 적지 않았으므로 이 시험의
-      // 관점에서는 실패가 아니다. 상태는 500으로 센다.
-      return { status: 500, body: { thrown: String(e).slice(0, 80) } };
+      // **삼키지 않는다.** 예전 판은 여기서 `{ status: 500 }`을 돌려줬고,
+      // 아래 단언이 "404가 아니다"만 봤기 때문에 **핸들러가 터져도 통과**했다.
+      // 부정(404가 아니다)을 단언하면 터진 것과 제대로 답한 것이 같아진다.
+      // 그래서 던진 것은 던진 것으로 남기고, 아래에서 계약을 직접 본다.
+      return { status: 0, body: {}, thrown: String(e).slice(0, 120) };
     } finally {
       if (oldAdmin) require.cache[adminPath] = oldAdmin; else delete require.cache[adminPath];
       if (oldRoute) require.cache[routePath] = oldRoute; else delete require.cache[routePath];
@@ -119,24 +121,29 @@ export async function runKillSwitchLookupTests(): Promise<void> {
   const EMPTY: Reply = { data: null, error: null };
 
   for (const which of ['status', 'update', 'reset'] as const) {
-    test(`★ ${which}: 조회 실패를 404 "연결 없음"으로 답하지 않는다`, async () => {
+    test(`★ ${which}: 조회 실패는 503 connection_unreadable 이다`, async () => {
       const r = await call(which, FAIL);
-      assert(r.status !== 404,
-        `404를 돌려줬다 — 못 읽은 것을 "그런 연결 없다"로 적었다 (body=${JSON.stringify(r.body)})`);
-      assert(r.body?.error !== 'connection_not_found',
-        `error=connection_not_found 로 적었다 (status=${r.status})`);
+      assert(!r.thrown, `핸들러가 던졌다: ${r.thrown}`);
+      eq(r.status, 503, `못 읽은 것의 상태 (body=${JSON.stringify(r.body)})`);
+      eq(r.body?.error, 'connection_unreadable', `못 읽은 것의 코드 (status=${r.status})`);
+      // 부정도 함께 고정한다 — 되돌아가면 이 줄이 먼저 깨진다.
+      assert(r.status !== 404, '못 읽은 것을 "그런 연결 없다"로 적었다');
+      assert(r.body?.error !== 'connection_not_found', 'error=connection_not_found 로 적었다');
     });
 
-    test(`★ ${which}: 행도 오류도 없는 응답도 "없음"이 아니다`, async () => {
+    test(`★ ${which}: 행도 오류도 없는 응답도 503 connection_unreadable 이다`, async () => {
       // `.single()`은 0행이면 PGRST116을 준다. 둘 다 비어 온 것은
       // 대답을 못 받은 것이다.
       const r = await call(which, EMPTY);
-      assert(r.status !== 404,
-        `404를 돌려줬다 — 대답을 못 받은 것을 "없다"로 적었다 (body=${JSON.stringify(r.body)})`);
+      assert(!r.thrown, `핸들러가 던졌다: ${r.thrown}`);
+      eq(r.status, 503, `빈 응답의 상태 (body=${JSON.stringify(r.body)})`);
+      eq(r.body?.error, 'connection_unreadable', `빈 응답의 코드 (status=${r.status})`);
+      assert(r.status !== 404, '대답을 못 받은 것을 "없다"로 적었다');
     });
 
     test(`${which}: 진짜 0행은 그대로 404다 — 막기만 하지 않는다`, async () => {
       const r = await call(which, NO_ROWS);
+      assert(!r.thrown, `핸들러가 던졌다: ${r.thrown}`);
       eq(r.status, 404, `0행인데 404가 아니다 (body=${JSON.stringify(r.body)})`);
       eq(r.body?.error, 'connection_not_found');
     });
@@ -147,6 +154,7 @@ export async function runKillSwitchLookupTests(): Promise<void> {
       data: null,
       error: { code: '08006', message: 'could not connect to postgres://user:pw@h/db' },
     });
+    assert(!r.thrown, `핸들러가 던졌다: ${r.thrown}`);
     const s = JSON.stringify(r.body);
     assert(!/postgres:\/\/|pw@|password|secret|key=/i.test(s), s);
   });
