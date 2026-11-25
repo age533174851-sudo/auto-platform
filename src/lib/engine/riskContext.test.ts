@@ -313,4 +313,62 @@ export function runRiskContextTests() {
     assert(!ctx.warnings.some(w => w.includes('가정값')),
       '모의 자산을 정확히 읽었는데 가정값이라고 적었다: ' + ctx.warnings.join(' / '));
   });
+
+  // ══ 열린 위험을 못 읽은 것을 '열린 위험 0'으로 세지 않는다 ══
+  //
+  // `position_plans` 조회가 실패하면(오류 반환·예외·배열 아님·못 읽는 줄)
+  // 예전에는 0이 남았다. planPosition의 전체 동시 위험 상한
+  // (TOTAL_RISK_LIMIT)은 `보유 + 신규 > 한도`로 판정하므로, 0이면 이미
+  // 한도까지 차 있어도 경고 없이 통과한다. 못 읽은 것은 null로 넘긴다.
+  const openRiskSb = (plans: { data?: unknown; error?: unknown; throws?: boolean }) => ({
+    from(table: string) {
+      const b: any = {
+        select() { return b; }, eq() { return b; }, gte() { return b; },
+        order() { return b; }, limit() { return b; },
+        maybeSingle: async () => ({ data: null, error: null }),
+        then(res: any, rej: any) {
+          if (table === 'position_plans') {
+            if (plans.throws) return Promise.reject(new Error('network down')).then(res, rej);
+            return res({ data: plans.data ?? null, error: plans.error ?? null });
+          }
+          return res({ data: [], error: null });
+        },
+      };
+      return b;
+    },
+  });
+
+  test('열린 위험 조회가 오류를 돌려주면 0이 아니라 모름(null)이다', async () => {
+    const ctx = await buildRiskContext(
+      openRiskSb({ data: null, error: { message: 'permission denied' } }) as any,
+      { userId: 'u1', mode: 'TESTNET' });
+    eq(ctx.currentOpenRisk, null, '조회 오류를 열린 위험 0으로 셌다');
+    assert(ctx.warnings.some(w => w.includes('열린 위험')),
+      '열린 위험을 못 읽었다는 경고가 없다: ' + ctx.warnings.join(' / '));
+  });
+
+  test('열린 위험 조회가 예외를 던져도 모름(null)이다', async () => {
+    const ctx = await buildRiskContext(
+      openRiskSb({ throws: true }) as any, { userId: 'u1', mode: 'TESTNET' });
+    eq(ctx.currentOpenRisk, null, '예외를 열린 위험 0으로 셌다');
+  });
+
+  test('위험액을 못 읽는 줄이 하나라도 있으면 합계를 모른다', async () => {
+    for (const bad of [null, 'abc', undefined]) {
+      const ctx = await buildRiskContext(
+        openRiskSb({ data: [{ risk_amount: 300 }, { risk_amount: bad }] }) as any,
+        { userId: 'u1', mode: 'TESTNET' });
+      eq(ctx.currentOpenRisk, null, `못 읽는 위험액(${String(bad)})을 0으로 더했다`);
+    }
+  });
+
+  test('정상으로 읽으면 합계를 그대로 낸다 — 0 자체는 문제가 아니다', async () => {
+    const ctx = await buildRiskContext(
+      openRiskSb({ data: [{ risk_amount: 300 }, { risk_amount: '200' }] }) as any,
+      { userId: 'u1', mode: 'TESTNET' });
+    eq(ctx.currentOpenRisk, 500);
+    const empty = await buildRiskContext(
+      openRiskSb({ data: [] }) as any, { userId: 'u1', mode: 'TESTNET' });
+    eq(empty.currentOpenRisk, 0, '빈 결과(진짜 0)를 모름으로 바꿨다');
+  });
 }

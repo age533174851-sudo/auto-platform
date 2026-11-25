@@ -278,4 +278,32 @@ export function runRiskManagerTests() {
     eq(planPosition(signal(), cfg()).approved, true);
     eq(planPosition(signal(), cfg({ equityKnown: true })).approved, true);
   });
+
+  // ── 열린 위험을 모르면 전체 위험 상한을 평가할 수 없다 ──
+  //
+  // `보유 + 신규 > 한도`에 '모름'을 0으로 넣으면 한도까지 차 있어도
+  // 통과하고, NaN을 넣으면 비교가 false라 역시 통과한다.
+  test('열린 위험을 모르면(null) 진입하지 않는다', () => {
+    const p = planPosition(signal(), cfg(), null);
+    eq(p.approved, false, '열린 위험을 모르는 채로 통과했다');
+    eq(p.rejectCode, 'OPEN_RISK_UNKNOWN');
+  });
+
+  test('열린 위험이 숫자가 아니면(NaN·Infinity) 진입하지 않는다', () => {
+    for (const v of [NaN, Infinity, -Infinity]) {
+      const p = planPosition(signal(), cfg(), v);
+      eq(p.approved, false, `열린 위험 ${v}로 통과했다`);
+      eq(p.rejectCode, 'OPEN_RISK_UNKNOWN');
+    }
+  });
+
+  test('열린 위험 0과 생략은 예전대로 통과한다', () => {
+    eq(planPosition(signal(), cfg(), 0).approved, true);
+    eq(planPosition(signal(), cfg()).approved, true);
+  });
+
+  test('확인한 열린 위험이 한도를 넘기면 예전대로 TOTAL_RISK_LIMIT', () => {
+    // 자산 100,000 · 상한 5% = 5,000 · 신규 1% = 1,000
+    eq(planPosition(signal(), cfg(), 4_500).rejectCode, 'TOTAL_RISK_LIMIT');
+  });
 }
