@@ -12,21 +12,17 @@ import { ErrorBoundary } from '@/components/pages/ErrorBoundary';
 import { formatKRW } from '@/lib/format';
 import {
   generatePortfolio,
+  AI_PORTFOLIO_DEFAULTS,
   RISK_LABEL, THEME_LABEL, HORIZON_LABEL,
 } from '@/lib/accounts/aiPortfolio';
 import type { AIPortfolioInput, AIPortfolioResult, RiskProfile, Theme, Horizon } from '@/lib/accounts/aiPortfolio';
+import { SliderField } from '@/components/ui/SettingField';
 import { IconBox, IC_SIZE, IC_STROKE } from '@/components/ui/Icon';
 import { cardStyle, buttonStyle, F, SP, R, PAGE_STYLE } from '@/components/ui/tokens';
 
 const CAT_COLOR: Record<string, string> = {
   us_stock: '#60A5FA', us_etf: '#3B82F6', kr_stock: '#F59E0B', kr_etf: '#FB923C',
   crypto: '#F0B90B', cash: 'var(--t-sub)', bond: '#10B981',
-};
-
-const inp: React.CSSProperties = {
-  width: '100%', padding: '12px 14px', minHeight: 48,
-  background: T.alt, border: `1px solid ${T.border}`, borderRadius: R.md,
-  color: T.txt, fontSize: 14, boxSizing: 'border-box',
 };
 
 function Donut({ items, size = 180 }: { items: { weight: number; color: string }[]; size?: number }) {
@@ -81,9 +77,9 @@ const THEMES: Theme[]        = ['ai_semi','us_tech','dividend','crypto','broad_e
 const HORIZONS: Horizon[]    = ['1y','3y','5y','10y'];
 
 function AIPortfolioInner({ prices = {}, currency = 'KRW' }: { prices?: Record<string, number>; currency?: string }) {
-  const [goal,    setGoal]    = useState(100_000_000);
+  const [goal,    setGoal]    = useState<number>(AI_PORTFOLIO_DEFAULTS.goal);
   const [horizon, setHorizon] = useState<Horizon>('5y');
-  const [monthly, setMonthly] = useState(1_000_000);
+  const [monthly, setMonthly] = useState<number>(AI_PORTFOLIO_DEFAULTS.monthly);
   const [risk,    setRisk]    = useState<RiskProfile>('aggressive');
   const [themes,  setThemes]  = useState<Theme[]>(['ai_semi','us_tech','crypto']);
   const [riskTol, setRiskTol] = useState(60);
@@ -123,9 +119,18 @@ function AIPortfolioInner({ prices = {}, currency = 'KRW' }: { prices?: Record<s
 
       {/* 입력 폼 */}
       <div style={cardStyle({ marginBottom: SP.md })}>
-        <Field Icon={Target} label="목표 금액 (KRW)">
-          <input type="number" value={goal} onChange={e => setGoal(Number(e.target.value)||0)} style={inp} />
-          <div style={{ ...F.muted, marginTop: 4 }}>{formatKRW(goal)}</div>
+        {/* 기본값을 같이 적는다. 포트폴리오 설계는 "내가 얼마를 모으려 하는지"가
+            전제인데, 지금 값만 보이면 그게 이 화면의 권장값인지 내가 어제
+            바꿔 놓은 값인지 알 수 없다. 돈 숫자는 모르고 돌리면 안 된다. */}
+        <Field Icon={Target} label={`목표 금액 — ${formatKRW(goal)}`}>
+          <SliderField
+            label="KRW"
+            value={goal}
+            base={AI_PORTFOLIO_DEFAULTS.goal}
+            min={1_000_000} max={10_000_000_000} step={1_000_000}
+            onChange={setGoal}
+            hint="100만원 ~ 100억원. 개인 투자자는 보통 1~30억 사이."
+          />
         </Field>
 
         <Field Icon={Calendar} label="투자 기간">
@@ -133,9 +138,15 @@ function AIPortfolioInner({ prices = {}, currency = 'KRW' }: { prices?: Record<s
             value={horizon} onChange={v => setHorizon(v as Horizon)} />
         </Field>
 
-        <Field Icon={BadgeDollarSign} label="월 투자금 (KRW)">
-          <input type="number" value={monthly} onChange={e => setMonthly(Number(e.target.value)||0)} style={inp} />
-          <div style={{ ...F.muted, marginTop: 4 }}>{formatKRW(monthly)}</div>
+        <Field Icon={BadgeDollarSign} label={`월 투자금 — ${formatKRW(monthly)}`}>
+          <SliderField
+            label="KRW/월"
+            value={monthly}
+            base={AI_PORTFOLIO_DEFAULTS.monthly}
+            min={100_000} max={20_000_000} step={100_000}
+            onChange={setMonthly}
+            hint="10만원 ~ 2천만원. 10만원 미만은 거래비용 비중이 커 경고가 붙는다."
+          />
         </Field>
 
         <Field Icon={SlidersHorizontal} label="투자 성향">
