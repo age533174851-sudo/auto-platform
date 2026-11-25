@@ -17,6 +17,7 @@ let geminiModel =
   !rawGeminiModel || rawGeminiModel === "gemini-2.5-flash"
     ? "gemini-3.8-flash"
     : rawGeminiModel;
+let cachedGeminiModels = null;
 
 const OPENAI_MODEL = (process.env.OPENAI_MODEL || "gpt-4.1-mini").trim();
 
@@ -73,6 +74,20 @@ async function getLatestComments(owner, repo, total, limit = 12) {
   return list.slice(-limit);
 }
 
+async function getAllOpenPrs(owner, repo, maxPages = 5) {
+  const all = [];
+  for (let page = 1; page <= maxPages; page += 1) {
+    const batch = await fetchJson(
+      `${GITHUB_API}/repos/${owner}/${repo}/pulls?state=open&per_page=100&page=${page}`,
+      { headers: ghHeaders() },
+    );
+    if (!Array.isArray(batch) || batch.length === 0) break;
+    all.push(...batch);
+    if (batch.length < 100) break;
+  }
+  return all;
+}
+
 async function postComment(owner, repo, body) {
   return fetchJson(`${GITHUB_API}/repos/${owner}/${repo}/issues/${ISSUE_NUMBER}/comments`, {
     method: "POST",
@@ -81,23 +96,32 @@ async function postComment(owner, repo, body) {
   });
 }
 
-async function resolveGeminiModel() {
-  const list = await fetchJson("https://generativelanguage.googleapis.com/v1beta/models?pageSize=50", {
+function rankGeminiModel(id) {
+  if (/^gemini-3.*flash/i.test(id) && !/lite/i.test(id)) return 1;
+  if (/^gemini-3.*flash-lite/i.test(id)) return 2;
+  if (/^gemini-3.*pro/i.test(id)) return 3;
+  if (/^gemini-2\.5-flash$/i.test(id)) return 4;
+  if (/^gemini-2\.5-flash-lite/i.test(id)) return 5;
+  if (/^gemini-2\.5-pro/i.test(id)) return 6;
+  if (/flash/i.test(id)) return 7;
+  return 8;
+}
+
+async function listGeminiModels() {
+  if (Array.isArray(cachedGeminiModels) && cachedGeminiModels.length > 0) {
+    return cachedGeminiModels;
+  }
+  const list = await fetchJson("https://generativelanguage.googleapis.com/v1beta/models?pageSize=100", {
     headers: { "x-goog-api-key": GEMINI_API_KEY },
   });
   const names = (list?.models || [])
     .filter((m) => Array.isArray(m.supportedGenerationMethods) && m.supportedGenerationMethods.includes("generateContent"))
     .map((m) => String(m.name || "").replace(/^models\//, ""))
-    .filter(Boolean);
-  const picked =
-    names.find((id) => /^gemini-3.*flash/i.test(id)) ||
-    names.find((id) => /gemini.*flash/i.test(id) && !/2\.5|2\.0|1\.5/i.test(id)) ||
-    names.find((id) => /flash/i.test(id)) ||
-    names[0];
-  if (!picked) throw new Error("Gemini 사용 가능한 모델을 찾지 못했습니다.");
-  console.log(`[info] Gemini 모델 자동 선택: ${picked}`);
-  geminiModel = picked;
-  return picked;
+    .filter((id) => /^gemini-/i.test(id) && !/embedding|imagen|veo|tts|audio|image|robotics|computer-use|live/i.test(id));
+
+  names.sort((a, b) => rankGeminiModel(a) - rankGeminiModel(b) || b.localeCompare(a));
+  cachedGeminiModels = names;
+  return names;
 }
 
 async function requestGemini(model, system, user) {
@@ -111,25 +135,59 @@ async function requestGemini(model, system, user) {
     }),
   });
   const text = (data?.candidates?.[0]?.content?.parts || []).map((p) => p.text || "").join("\n").trim();
-  if (!text) console.log(`[warn] GEMINI 빈 응답 (finishReason=${data?.candidates?.[0]?.finishReason || "unknown"})`);
+  if (!text) console.log(`[warn] GEMINI(${model}) 빈 응답 (finishReason=${data?.candidates?.[0]?.finishReason || "unknown"})`);
   return text;
 }
 
 async function callGemini(system, user) {
+  const tried = new Set();
+  let lastErr = null;
+
+  const attempt = async (model) => {
+    tried.add(model);
+    return await requestGemini(model, system, user);
+  };
+
   try {
-    return await requestGemini(geminiModel, system, user);
+    return await attempt(geminiModel);
   } catch (e) {
+    lastErr = e;
     const msg = String(e.message || "");
-    if (msg.includes("HTTP 404")) {
-      await resolveGeminiModel();
-      return await requestGemini(geminiModel, system, user);
+    const is404 = msg.includes("HTTP 404");
+    const isTransient =
+      msg.includes("HTTP 503") ||
+      msg.includes("HTTP 502") ||
+      msg.includes("HTTP 504") ||
+      msg.includes("HTTP 429");
+
+    if (!is404 && !isTransient) throw e;
+
+    if (isTransient) {
+      console.log(`[info] GEMINI(${geminiModel}) 일시 혼잡 — 2초 후 1회 재시도`);
+      await sleep(2000);
+      try {
+        return await requestGemini(geminiModel, system, user);
+      } catch (retryErr) {
+        lastErr = retryErr;
+        console.log(`[warn] GEMINI(${geminiModel}) 재시도 실패 — 예비 모델 우회 시도`);
+      }
     }
-    if (msg.includes("HTTP 503")) {
-      console.log("[info] GEMINI 503 혼잡 — 3초 후 1회 재시도");
-      await sleep(3000);
-      return await requestGemini(geminiModel, system, user);
+
+    const models = await listGeminiModels().catch(() => []);
+    const candidates = models.filter((id) => !tried.has(id)).slice(0, 4);
+    for (const fallback of candidates) {
+      try {
+        console.log(`[info] GEMINI 예비 모델 시도: ${fallback}`);
+        const res = await attempt(fallback);
+        geminiModel = fallback;
+        console.log(`[info] GEMINI 우회 성공 — 현재 모델 전환: ${fallback}`);
+        return res;
+      } catch (fbErr) {
+        lastErr = fbErr;
+        console.log(`[warn] GEMINI 예비 모델(${fallback}) 실패: ${redact(fbErr.message).slice(0, 140)}`);
+      }
     }
-    throw e;
+    throw lastErr;
   }
 }
 
@@ -175,7 +233,7 @@ async function requestAnthropic(model, system, user) {
     },
     body: JSON.stringify({
       model,
-      max_tokens: 3000,
+      max_tokens: 5000,
       system,
       messages: [{ role: "user", content: user }],
     }),
@@ -184,6 +242,8 @@ async function requestAnthropic(model, system, user) {
   if (!text) {
     const types = (data?.content || []).map((b) => b.type).join(",") || "none";
     console.log(`[warn] ANTHROPIC 빈 응답 (stop_reason=${data?.stop_reason || "unknown"}, blocks=${types})`);
+  } else if (data?.stop_reason === "max_tokens") {
+    console.log("[warn] ANTHROPIC 응답이 max_tokens(5000)에 도달해 절단되었습니다.");
   }
   return text;
 }
@@ -215,7 +275,7 @@ const COUNCIL_SYSTEM_PROMPT = [
   "3. 연결되지 않았거나 실제 댓글이 없는 AI와 소통했다고 허위 보고하지 마라.",
   "4. 열린 PR과 동일 파일 충돌·중복 구현을 피하고, 선행 PR 충돌(#343 -> #347 -> #384 등)을 무시한 병합을 제안하지 마라.",
   "5. 비밀값 출력, main 직접 푸시, 운영 배포, 실거래 주문, 운영 DB 변경, 추가 결제는 별도 승인 범위이므로 절대 실행·지시하지 마라.",
-  "6. 한국어로 간결하게 작성하되 반드시 아래 5개 항목을 포함하라:",
+  "6. 한국어로 작성하되 각 항목은 핵심 위주 3~5줄 이내로 간결하게 정리하고, 반드시 아래 5개 항목을 끝까지 완결하라:",
   "   - 실제 수행한 작업",
   "   - 확인된 문제와 해결 방안",
   "   - 다른 AI와의 의견 차이",
@@ -246,12 +306,17 @@ async function main() {
     return;
   }
 
-  const prs = await fetchJson(`${GITHUB_API}/repos/${owner}/${repo}/pulls?state=open&per_page=50`, { headers: ghHeaders() });
+  const prs = await getAllOpenPrs(owner, repo, 5);
+  const prScopeNote = prs.length >= 500 ? "조회 상한 500건 도달" : "전체 조회 완료";
+  const prLines = prs.map(
+    (p) => `- #${p.number} (${p.head?.ref}): ${String(p.title || "").slice(0, 100)}`,
+  );
+
   const context = [
     `저장소: ${REPO} · 기준 커밋: ${BASE_BRANCH}@${shortSha} · 작업 번호: ${taskId}`,
     `\n### 이슈 #${ISSUE_NUMBER} 본문\n${redact(issue?.body || "").slice(0, 3500)}`,
     `\n### 최근 댓글\n${recent.map((c) => `[@${c.user?.login}] ${redact(c.body || "").slice(0, 600)}`).join("\n---\n") || "(없음)"}`,
-    `\n### 열린 PR (${prs.length}건)\n${prs.map((p) => `- #${p.number} (${p.head?.ref}): ${p.title}`).join("\n") || "- 없음"}`,
+    `\n### 열린 PR (총 ${prs.length}건 · ${prScopeNote})\n${prLines.join("\n") || "- 없음"}`,
   ].join("\n");
 
   const active = PROVIDERS.filter((p) => p.key.trim());
