@@ -572,6 +572,7 @@ export async function runKillCloseIntegrationTests() {
   });
 
   await runCancelProtectionCountTests();
+  await runEquityUnreadableTests();
 }
 
 // ══════════ 전량 청산 뒤 보호주문 정리 — 거절된 취소를 "취소됨"으로 세지 않는다 ══════════
@@ -642,6 +643,95 @@ async function runCancelProtectionCountTests() {
     test('★ ⑯ 받아들여진 취소는 1건으로 센다', () => {
       eq(r.cancelled, 1);
       eq(r.note, ' · 남은 보호 주문 1건 취소');
+    });
+  }
+}
+
+// ══════════ 킬스위치 총자산 — 못 읽은 잔고를 0원으로 적지 않는다 ══════════
+//
+// 실제로 도는 것: `futuresEquityUsd` → `getFuturesBalance` → 서명 생성 ·
+//   `/fapi/v2/balance` 응답 파싱. 가짜는 `fetch` 한 겹.
+//
+// `getFuturesBalance`는 `parseFloat(b.balance)`로 읽는다. 칸이 없거나
+// 숫자가 아니면 **NaN**이다. 그런데 총자산 계산이
+// `Number(u.balance || 0)`이었다 — `NaN || 0`은 **0**이다. 그래서
+// 못 읽은 잔고가 `{ equity: 0, error: null }`로 나갔다.
+//
+// 그 0을 받는 곳은 킬스위치 평가다(`/api/risk/kill-switch/status`).
+// 그 라우트는 `equity == null`일 때만 평가를 멈춘다 — 0은 그대로
+// `evaluate`로 가서 낙폭 **-100%**가 되고, 멀쩡한 계좌에서 킬스위치가
+// 발동한다. 조합에 D가 있으면 **실제 포지션이 전부 청산된다.**
+// `futuresEquityUsd`의 주석이 이미 금지한 일이다("못 읽으면 null이다 —
+// 절대 0이 아니다"). Gate 갈래는 지키고 있었고 바이낸스 갈래만 새었다.
+const BAL = '/fapi/v2/balance';
+
+async function runEquityUnreadableTests() {
+  console.log('[통합 — 킬스위치 총자산: 못 읽은 잔고는 0원이 아니다]');
+  const { futuresEquityUsd } = await import('../../lib/exchanges/futuresAdapter');
+  const run = async (rows: any[]) => {
+    const v = new FakeVenue().on(BAL, { json: rows });
+    const restore = v.install();
+    try { return await futuresEquityUsd('binance', KEY, SECRET, true); }
+    finally { restore(); }
+  };
+
+  // ── ⑰ USDT 줄에 잔고 칸이 없다 ──
+  {
+    const r = await run([{ asset: 'USDT', availableBalance: '500', crossUnPnl: '0' }]);
+    test('★ ⑰ 잔고 칸이 없는 USDT 줄을 총자산 0원으로 적지 않는다', () => {
+      eq(r.equity, null, `못 읽은 잔고가 총자산 ${r.equity}로 나갔다 — 킬스위치가 -100%로 읽는다`);
+      assert(!!r.error, '모른다는 사유가 없다');
+    });
+  }
+
+  // ── ⑱ 잔고가 숫자가 아니다 ──
+  {
+    const r = await run([{ asset: 'USDT', balance: 'abc', availableBalance: '500', crossUnPnl: '0' }]);
+    test('★ ⑱ 숫자가 아닌 잔고를 0원으로 적지 않는다', () => {
+      eq(r.equity, null);
+      assert(!!r.error);
+    });
+  }
+
+  // ── ⑲ 미실현 손익을 못 읽었다 ──
+  //
+  // 0으로 채우면 미실현 손실이 사라진다 — 포지션이 크게 밀리는 동안
+  // 낙폭이 작게 보여 킬스위치가 **발동해야 할 때 발동하지 않는다.**
+  {
+    const r = await run([{ asset: 'USDT', balance: '1000', availableBalance: '500', crossUnPnl: 'x' }]);
+    test('★ ⑲ 못 읽은 미실현 손익을 0으로 채워 총자산을 만들지 않는다', () => {
+      eq(r.equity, null, `미실현을 모르는데 총자산 ${r.equity}로 적었다`);
+      assert(!!r.error);
+    });
+  }
+
+  // ── ⑳ USDT 줄이 없을 때의 합산도 같다 ──
+  {
+    const r = await run([{ asset: 'BNB', balance: 'NaN', availableBalance: '1', crossUnPnl: '0' }]);
+    test('★ ⑳ 합산 갈래도 못 읽은 잔고를 0원으로 더하지 않는다', () => {
+      eq(r.equity, null, `못 읽은 잔고를 합쳐 총자산 ${r.equity}로 적었다`);
+      assert(!!r.error);
+    });
+  }
+
+  // ── ㉑ 읽히면 그대로 읽는다 (⑰~⑳이 공허하지 않다) ──
+  {
+    const r = await run([{ asset: 'USDT', balance: '1000', availableBalance: '500', crossUnPnl: '-50' }]);
+    test('★ ㉑ 잔고와 미실현이 읽히면 총자산은 그 합이다', () => {
+      eq(r.equity, 950);
+      eq(r.error, null);
+    });
+  }
+
+  // ── ㉒ 진짜 0원은 0원이다 ──
+  //
+  // 거래소가 `"0"`이라고 적은 것은 모르는 것이 아니다. 이것까지 null로
+  // 만들면 빈 계좌의 킬스위치가 영원히 "평가 못 함"에 머문다.
+  {
+    const r = await run([{ asset: 'USDT', balance: '0', availableBalance: '0.5', crossUnPnl: '0' }]);
+    test('★ ㉒ 거래소가 0이라고 적은 잔고는 0원이다', () => {
+      eq(r.equity, 0);
+      eq(r.error, null);
     });
   }
 }
