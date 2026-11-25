@@ -14,6 +14,7 @@ import { locationVerdict } from '@/lib/runtime/dataLocation';
 import { ErrorBoundary } from './ErrorBoundary';
 import { IconBox, IC_SIZE, IC_STROKE } from '@/components/ui/Icon';
 import { cardStyle, buttonStyle, F, SP, R, PAGE_STYLE } from '@/components/ui/tokens';
+import { SliderField } from '@/components/ui/SettingField';
 import {
   type UserStrategy, type StrategyTimeframe, type StrategyMarket,
   type StrategyAction, type StrategyMode, type IndicatorName, type Operator,
@@ -24,6 +25,12 @@ import {
   listStrategies, saveStrategy, deleteStrategy, toggleEnabled,
   duplicateStrategy, newStrategyId,
 } from '@/lib/strategies/store';
+
+// 블랭크 전략이 쓰는 기본값. `SliderField`에 base로 넘겨 "지금 값이
+// 원래 기본값인지 내가 바꾼 값인지"가 항상 보이게 한다.
+// blankStrategy()의 `order.amount`와 같은 숫자여야 한다 — 다르면
+// 되돌리기가 사용자가 모르는 값으로 데려간다.
+const DEFAULT_ORDER_AMOUNT_KRW = 100000;
 
 const QUICK_EXAMPLES = [
   'BTC RSI 30 이하일 때 10만원 매수, 익절 5%, 손절 2%',
@@ -968,13 +975,21 @@ function ManualBuilder({
               );
             })}
           </div>
-          <div style={{ ...F.caption, marginBottom: 6 }}>주문 금액 ({s.order.currency})</div>
-          <input type="number" value={s.order.amount}
-            onChange={e => update({ order: { ...s.order, amount: parseFloat(e.target.value) || 0 } })}
-            style={{ width: '100%', boxSizing: 'border-box', background: T.bg, color: T.txt,
-              border: `1px solid ${T.border}`, borderRadius: R.sm, padding: '10px 12px',
-              fontSize: 14, fontFamily: 'monospace', outline: 'none', marginBottom: SP.sm }}/>
-          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+          {/* 주문 금액 — 돈 설정은 기본값·슬라이더·숫자칸을 같이 본다.
+              범위 바깥 입력은 SliderField가 clamp한다 (10,000 ~ 10,000,000).
+              빠른 선택 버튼은 그대로 둔다 — 자주 쓰는 금액을 한 번에
+              맞추는 도구로, 슬라이더가 대체하지 않는다. */}
+          <SliderField
+            label={`주문 금액 (${s.order.currency})`}
+            value={Number.isFinite(s.order.amount) ? s.order.amount : DEFAULT_ORDER_AMOUNT_KRW}
+            base={DEFAULT_ORDER_AMOUNT_KRW}
+            unit="원"
+            min={10000}
+            max={10000000}
+            step={10000}
+            onChange={v => update({ order: { ...s.order, amount: v } })}
+          />
+          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: SP.sm }}>
             {[50000, 100000, 200000, 500000, 1000000].map(v => (
               <button key={v}
                 onClick={() => update({ order: { ...s.order, amount: v } })}
