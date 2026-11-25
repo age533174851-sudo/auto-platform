@@ -169,17 +169,67 @@ export async function touchWatch(sb: any, id: string, payload: WatchPayload): Pr
 }
 
 /**
+ * 감시 닫기 결과. **못 닫은 것을 닫았다고 넘기지 않는다.**
+ *
+ * 판별 합집합(`{ok:true} | {ok:false;reason}`)이 아니라 평평한 모양이다 —
+ * 이 저장소의 다른 판정 결과(`killSwitchGate`의 `{allowed,status,error,message}`)와
+ * 같은 모양이고, 부르는 쪽이 좁히기 없이 `reason`을 읽을 수 있다.
+ */
+export type WatchCloseResult = { ok: boolean; reason?: string };
+
+/**
  * 감시를 끝낸다.
  *
  * 발동해서 주문이 나갔든, 주문이 실패했든 **다시 활성으로 돌리지 않는다.**
  * 실패했다고 되살리면 다음 주기에 또 시도하고, 그 사이 가격이 더 내려가
  * 훨씬 나쁜 값에 팔린다. 실패는 사람이 보고 다시 걸어야 한다.
+ *
+ * ── 그래서 결과를 돌려준다 ──
+ *
+ * 예전에는 `Promise<void>`였고 UPDATE의 `error`를 버렸다. 쓰기가 실패하면
+ * 행은 `status: 'ACTIVE'`로 **남는다** — 위 문단이 막으려던 바로 그
+ * 상태다. `listActiveWatches`는 `status='ACTIVE'`를 고르므로 다음 주기에
+ * 같은 감시가 **다시 발동한다.**
+ *
+ * 아래쪽에서 막아 주지도 않는다. `clientOrderId`가
+ * `SP${Date.now()…}${symbol}`로 매 호출마다 달라서 바이낸스 멱등성이
+ * 걸리지 않고, Gate는 그 번호로만 중복을 찾는다
+ * (`spotOrderExecutor.ts`의 주석이 `clientOrderId 멱등성이 없다`고 적어 둔
+ * 그 자리다). 즉 **실제 시장가 주문이 한 번 더 나갈 수 있다.**
+ *
+ * 닫혔는지는 부르는 쪽이 알아야 한다. 모르고 넘어가면 아무도 모른다.
  */
 export async function closeWatch(
   sb: any, id: string, status: 'TRIGGERED' | 'FAILED' | 'CANCELED', note: string,
-): Promise<void> {
-  await sb.from('signals').update({
-    status,
-    reject_reason: note.slice(0, 500),
-  }).eq('id', id);
+): Promise<WatchCloseResult> {
+  try {
+    const { error } = await sb.from('signals').update({
+      status,
+      reject_reason: note.slice(0, 500),
+    }).eq('id', id);
+    if (error) return { ok: false, reason: String(error.message || error) };
+    return { ok: true };
+  } catch (e: any) {
+    return { ok: false, reason: String(e?.message || e) };
+  }
+}
+
+/**
+ * 감시 닫기 — 한 번 더 시도한다.
+ *
+ * **두 번이고 세 번이 아니다.** 이 루프는 15분마다 돌고 `maxDuration`이
+ * 60초다. 한 감시에서 오래 끌면 뒤의 감시들이 이번 주기를 통째로
+ * 놓친다 — 닫기 하나를 더 붙잡는 것보다 그게 비싸다.
+ *
+ * 두 번 다 실패하면 **거짓으로 닫았다고 적지 않고** 그대로 돌려준다.
+ * 부르는 쪽이 결과에 적어서 사람이 볼 수 있게 한다.
+ */
+export async function closeWatchWithRetry(
+  sb: any, id: string, status: 'TRIGGERED' | 'FAILED' | 'CANCELED', note: string,
+): Promise<WatchCloseResult> {
+  const first = await closeWatch(sb, id, status, note);
+  if (first.ok) return first;
+  const again = await closeWatch(sb, id, status, note);
+  if (again.ok) return again;
+  return { ok: false, reason: again.reason || first.reason };
 }

@@ -84,21 +84,26 @@ export async function GET(req: NextRequest) {
   // 대신 재면 그건 '오늘'이 아니라 '누적'이다.
   const { paperTodayPnl } = await import('@/lib/portfolio/paperAccount');
   let dayStartEquity: number | null = null;
+  let dayStartUnreadable = false;
   try {
     const dayStart = new Date(); dayStart.setUTCHours(0, 0, 0, 0);
-    const { data: snap } = await (sb as any).from('account_equity_snapshots')
+    const { data: snap, error: snapErr } = await (sb as any).from('account_equity_snapshots')
       .select('total_equity, taken_at')
       .eq('user_id', uid).eq('env', 'MOCK')
       .gte('taken_at', dayStart.toISOString())
       .order('taken_at', { ascending: true }).limit(1);
+    // **오류를 받아 본다.** Supabase는 실패를 던지지 않고 `error`로 돌려준다
+    // — 버리면 빈 결과가 되어 "기준점이 아직 없다"로 적혔다.
+    if (snapErr) throw new Error(snapErr.message);
     const first = Array.isArray(snap) && snap.length ? snap[0] : null;
     const v = first == null ? null : Number((first as any).total_equity);
     dayStartEquity = v != null && Number.isFinite(v) ? v : null;
   } catch {
     // **못 읽은 것을 0으로 두지 않는다.** null이면 아래에서 "기준점 없음"이 된다.
     dayStartEquity = null;
+    dayStartUnreadable = true;
   }
-  const today = paperTodayPnl({ totalEquity: eq.totalEquity, dayStartEquity });
+  const today = paperTodayPnl({ totalEquity: eq.totalEquity, dayStartEquity, dayStartUnreadable });
 
   return NextResponse.json({
     ok: true,

@@ -24,7 +24,14 @@ export async function GET(req: NextRequest) {
   if (!sb) return NextResponse.json({ ok: false, error: 'supabase_not_configured' }, { status: 503 });
 
   const url = new URL(req.url);
-  const testnet = url.searchParams.get('mode')?.toUpperCase() !== 'LIVE';
+  const mode = url.searchParams.get('mode')?.toUpperCase() ?? 'TESTNET';
+  if (mode !== 'TESTNET' && mode !== 'LIVE') {
+    return NextResponse.json({
+      ok: false, error: 'invalid_reconcile_mode',
+      message: '거래소 대조는 TESTNET과 LIVE 모드에서 지원합니다',
+    }, { status: 400, headers: { 'Cache-Control': 'no-store' } });
+  }
+  const testnet = mode === 'TESTNET';
   // ── **어느 연결을 대조하는가** ──
   //
   // 이게 없어서 gatherAndReconcile이 활성 연결 중 **아무거나 하나**를

@@ -47,7 +47,7 @@ const err = (m) => { console.error(`❌ ${m}`); console.error(`::error::${m}`); 
 // 그래서 임시 저장소를 만들어 **깨끗한 트리**와 **더러운 트리**에서
 // 각각 이 파일을 실제로 돌려 본다. 정적 추론이 아니다.
 if (argv.includes('--self-test')) {
-  const { mkdtempSync, writeFileSync, appendFileSync, rmSync } = await import('node:fs');
+  const { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, rmSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
   const self = new URL(import.meta.url).pathname;
@@ -145,6 +145,124 @@ if (argv.includes('--self-test')) {
     want('공통 조상을 못 구하면 판정하지 않는다',
       noBase.code === 1 && /공통 조상/.test(noBase.out),
       `exit=${noBase.code} ${noBase.out.trim()}`);
+
+    // ── ③ 권한 표면 — 경로가 아니라 능력으로 막는지 실제로 돌려 본다 ──
+    //
+    // 정적 추론이 아니다. 임시 저장소에 진짜 워크플로를 만들고 고쳐서
+    // 이 검사기를 돌린다. "막는 집합이 줄지 않았다"를 값으로 보인다.
+    const WF = '.github/workflows/w.yml';
+    const BASE_WF = [
+      'name: w', 'on:', '  schedule:', "    - cron: '0 * * * *'",
+      'permissions:', '  contents: read', '  actions: read',
+      'jobs:', '  j:', '    runs-on: ubuntu-latest', '    timeout-minutes: 10',
+      '    steps:', '      - uses: actions/checkout@v4',
+      '      - name: 검사', '        run: |', '          node scripts/check-a.mjs',
+      '',
+    ].join('\n');
+    const seedWf = (body) => {
+      mkdirSync(join(dir, '.github/workflows'), { recursive: true });
+      writeFileSync(join(dir, WF), body);
+    };
+    const commitAll = (msg) => { g('add', '-A'); g('commit', '-q', '-m', msg); };
+
+    seedWf(BASE_WF); commitAll('wf');
+    const wfBase = g('rev-parse', 'HEAD').trim();
+    const runWf = () => {
+      try {
+        const out = execFileSync(process.execPath, [self, '--base', wfBase, '--mode', 'trading'],
+          { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+        return { code: 0, out };
+      } catch (e) { return { code: e.status ?? 1, out: `${e.stdout || ''}${e.stderr || ''}` }; }
+    };
+
+    // (a) 셸 본문만 바꾼다 → 능력이 안 바뀌므로 통과해야 한다
+    seedWf(BASE_WF.replace('node scripts/check-a.mjs', 'node scripts/run-all-checkers.mjs'));
+    commitAll('run body');
+    const bodyOnly = runWf();
+    want('셸 본문만 바꾸면 통과한다 — 능력이 바뀌지 않는다',
+      bodyOnly.code === 0, `exit=${bodyOnly.code} ${bodyOnly.out.trim()}`);
+
+    // (b) 주석만 더한다 → 통과해야 한다
+    seedWf(BASE_WF.replace('      - name: 검사', '      # 설명 주석\n      - name: 검사'));
+    commitAll('comment');
+    const commentOnly = runWf();
+    want('주석만 더하면 통과한다 — 설명은 능력이 아니다',
+      commentOnly.code === 0, `exit=${commentOnly.code} ${commentOnly.out.trim()}`);
+
+    // (c) 토큰 권한을 올린다 → **거부되어야 한다**
+    seedWf(BASE_WF.replace('  contents: read', '  contents: write'));
+    commitAll('perm');
+    const perm = runWf();
+    want('토큰 권한을 올리면 거부한다',
+      perm.code === 1 && /권한 표면이 바뀌었습니다/.test(perm.out),
+      `exit=${perm.code} ${perm.out.trim()}`);
+
+    // (d) 도구 허용 목록을 넓힌다 → **거부되어야 한다**
+    seedWf(BASE_WF.replace('        run: |',
+      '        run: |\n          claude --allowedTools "Bash(curl:*)"'));
+    commitAll('tools');
+    const tools = runWf();
+    want('도구 허용 목록을 넓히면 거부한다',
+      tools.code === 1 && /권한 표면이 바뀌었습니다/.test(tools.out),
+      `exit=${tools.code} ${tools.out.trim()}`);
+
+    // (e) 시크릿을 새로 받는다 → **거부되어야 한다**
+    seedWf(BASE_WF.replace('    steps:',
+      '    env:\n      ADMIN_SECRET: ${{ secrets.ADMIN_SECRET }}\n    steps:'));
+    commitAll('secret');
+    const secret = runWf();
+    want('시크릿을 새로 받으면 거부한다',
+      secret.code === 1 && /권한 표면이 바뀌었습니다/.test(secret.out),
+      `exit=${secret.code} ${secret.out.trim()}`);
+
+    // (e2) 셸 본문에서 시크릿을 직접 끌어온다 → **거부되어야 한다**
+    //
+    // GitHub Actions 는 `run:` 안에서도 `${{ secrets.X }}` 를 푼다.
+    // `env:` 를 거치지 않으므로 키 줄 패턴으로는 안 잡히고 **`secrets.`
+    // 패턴만** 잡는다. 돌연변이 ①이 이 구멍을 찾아냈다 — 처음 시험은
+    // `env:` 로 넣어서 다른 패턴에 걸렸고, 그래서 `secrets.` 를 빼도
+    // 초록이었다. 시험이 약하면 관문이 약한 것과 구별되지 않는다.
+    seedWf(BASE_WF.replace('          node scripts/check-a.mjs',
+      '          node scripts/check-a.mjs "${{ secrets.ADMIN_SECRET }}"'));
+    commitAll('secret in run');
+    const secretRun = runWf();
+    want('셸 본문에서 시크릿을 끌어와도 거부한다',
+      secretRun.code === 1 && /권한 표면이 바뀌었습니다/.test(secretRun.out),
+      `exit=${secretRun.code} ${secretRun.out.trim()}`);
+
+    // (f) 더 자주 깨어나게 한다 → **거부되어야 한다**
+    seedWf(BASE_WF.replace("    - cron: '0 * * * *'", "    - cron: '*/5 * * * *'"));
+    commitAll('cron');
+    const cron = runWf();
+    want('더 자주 깨어나게 하면 거부한다',
+      cron.code === 1 && /권한 표면이 바뀌었습니다/.test(cron.out),
+      `exit=${cron.code} ${cron.out.trim()}`);
+
+    // (f2) 워크플로를 **새로 만든다** → 거부되어야 한다
+    //
+    // 돌연변이 ⑦이 이 구멍을 찾았다 — "못 읽은 쪽을 통과로" 바꿔도
+    // 시험이 전부 초록이었다. 새 파일은 기준 쪽이 없으므로 그 분기로
+    // 들어오고, 막지 않으면 회차가 **원하는 권한으로 워크플로를 새로
+    // 만들 수 있다.** 고치는 것보다 만드는 쪽이 더 쉬운 길이면 울타리가
+    // 아니다.
+    mkdirSync(join(dir, '.github/workflows'), { recursive: true });
+    writeFileSync(join(dir, '.github/workflows/new.yml'),
+      'name: new\non:\n  push:\npermissions:\n  contents: write\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n');
+    commitAll('new wf');
+    const added = runWf();
+    want('워크플로를 새로 만들면 거부한다 — 만드는 길이 더 쉬우면 울타리가 아니다',
+      added.code === 1 && /새로 만들었습니다/.test(added.out),
+      `exit=${added.code} ${added.out.trim()}`);
+    rmSync(join(dir, '.github/workflows/new.yml'));
+    commitAll('drop new wf');
+
+    // (g) 워크플로를 통째로 지운다 → **거부되어야 한다**
+    rmSync(join(dir, WF));
+    commitAll('delete wf');
+    const del = runWf();
+    want('워크플로를 지우면 거부한다 — 울타리가 사라질 수 있다',
+      del.code === 1 && /지웠습니다/.test(del.out),
+      `exit=${del.code} ${del.out.trim()}`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -154,6 +272,9 @@ if (argv.includes('--self-test')) {
     : `❌ 울타리 자기 점검 실패 ${fails}/${total}건`);
   process.exit(fails ? 1 : 0);
 }
+
+const { readFileSync } = await import('node:fs');
+const { authorityFindings } = await import('./lib/workflow-authority.mjs');
 
 const git = (...args) => {
   try { return execFileSync('git', args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }); }
@@ -237,15 +358,36 @@ if (changed.length === 0) {
   process.exit(0);
 }
 
-// ── ③ 제 울타리를 스스로 고치지 않는다 ──
+// ── ③ 제 울타리를 스스로 넓히지 않는다 ──
 //
-// 무인 회차가 자기 워크플로를 고칠 수 있으면, 울타리를 넓히는 변경을
-// 스스로 제안할 수 있다. 그 PR을 사람이 놓치면 다음 회차부터 울타리가
-// 없다. 울타리 변경은 **사람이 직접 연 PR에서만** 한다.
+// 무인 회차가 울타리를 넓히는 변경을 스스로 제안할 수 있으면, 그 PR을
+// 사람이 놓친 순간 다음 회차부터 울타리가 없다. 그래서 막는다.
+//
+// **막는 기준은 경로가 아니라 권한이다.** 전에는 `.github/workflows/`
+// 아래면 무엇이든 거부했는데, 그러면 취지보다 넓게 막힌다 — 회차가 제
+// 권한을 1mm도 넓히지 않는 수정(검사기 전수 한 줄, ci.yml 배선 한 줄)도
+// 같은 빨간불로 막혔고, 그때마다 사람이 눌러야 했다. 2026-11-15~18에
+// 그 한 줄 때문에 main 이 며칠 빨갰다.
+//
+// 이제 **권한 표면**(`scripts/lib/workflow-authority.mjs`)을 본다. 깨어나는
+// 조건·토큰 권한·시크릿·환경 키·`uses:`·`with:`·도구 허용/차단·겹침·상한.
+// 그 표면이 한 글자라도 달라지면 **그대로 거부**한다. 셸 본문과 주석만
+// 바뀌었으면 통과한다 — 그 둘은 능력을 바꾸지 않는다.
+//
+// 막는 집합은 줄지 않았다. 통과시키는 집합이 늘었고, 늘어난 쪽에는
+// 권한을 바꾸는 변경이 하나도 없다.
 for (const f of changed) {
-  if (f.path.startsWith('.github/workflows/')) {
-    err(`무인 회차가 워크플로를 고쳤습니다: ${f.path} — 제 울타리는 스스로 넓힐 수 없습니다`);
+  if (!f.path.startsWith('.github/workflows/')) continue;
+  const before = f.status === 'A' ? null : git('show', `${MERGE_BASE}:${f.path}`);
+  const after = f.status === 'D' ? null : (() => {
+    try { return readFileSync(f.path, 'utf8'); } catch { return null; }
+  })();
+  // 읽지 못한 것을 통과로 적지 않는다.
+  if (f.status !== 'A' && before == null) {
+    err(`${f.path}: 기준 쪽을 읽지 못했습니다 — 못 읽은 것을 통과로 적지 않습니다`);
+    continue;
   }
+  for (const m of authorityFindings({ path: f.path, before, after })) err(m);
 }
 
 // **제출 통로도 울타리다.**

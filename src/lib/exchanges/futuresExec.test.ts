@@ -791,6 +791,105 @@ export function runFuturesExecTests() {
     });
   });
 
+  // ── 바이낸스 잔여 세기: 조회 실패가 "0건"이 되던 자리 ──
+  //
+  // 예전 바이낸스 갈래는 `bf.countOpen`을 그대로 돌려줬다. 그 함수는
+  // `getFuturesPositions`·`getFuturesOpenOrders`의 `success`를 보지 않고
+  // `(positions || []).length`·`(orders || []).length`를 셌다. 두 조회가
+  // 다 실패해도 `{ positions: 0, orders: 0 }` — 킬스위치(워커·라우트)가
+  // 그 0을 "잔여 없음"으로 읽고 **완료**를 적는다.
+  const binTarget: any = { exchange: 'binance', key: 'k', secret: 's', testnet: true };
+  const BIN_POS = '/fapi/v2/positionRisk';
+  const BIN_ORD = '/fapi/v1/openOrders';
+
+  netTest('★ 바이낸스 포지션·주문 조회가 둘 다 실패하면 0이라고 말하지 않는다', async () => {
+    await withFetch((url) => {
+      if (url.includes(BIN_POS) || url.includes(BIN_ORD)) return { status: 503, body: {} };
+      return mine(url) ? { body: {} } : null;
+    }, async () => {
+      const r = await futuresCountOpen(binTarget);
+      eq(r.positions, null, '포지션을 못 읽었는데 0개라고 적었다');
+      eq(r.orders, null, '주문을 못 읽었는데 0건이라고 적었다');
+      assert(!!r.error, '왜 못 셌는지 사유가 없다');
+    });
+  });
+
+  netTest('★ 바이낸스 200 비배열 응답도 0건이 아니다', async () => {
+    await withFetch((url) => {
+      if (url.includes(BIN_POS)) return { body: { code: 0, msg: 'weird' } };
+      if (url.includes(BIN_ORD)) return { body: null };
+      return mine(url) ? { body: {} } : null;
+    }, async () => {
+      const r = await futuresCountOpen(binTarget);
+      eq(r.positions, null);
+      eq(r.orders, null);
+    });
+  });
+
+  netTest('★ 바이낸스 주문 조회만 실패하면 주문 수만 모른다', async () => {
+    await withFetch((url) => {
+      if (url.includes(BIN_POS)) return { body: [] };
+      if (url.includes(BIN_ORD)) return { status: 500, body: { code: -1001, msg: 'Internal error' } };
+      return mine(url) ? { body: {} } : null;
+    }, async () => {
+      const r = await futuresCountOpen(binTarget);
+      eq(r.positions, 0, '포지션은 읽었다');
+      eq(r.orders, null, '주문을 못 읽었는데 0건이라고 적었다');
+    });
+  });
+
+  netTest('★ 바이낸스 수량을 못 읽은 포지션 줄은 버리지 않는다 — 있다·모른다', async () => {
+    await withFetch((url) => {
+      if (url.includes(BIN_POS)) {
+        return { body: [{ symbol: 'BTCUSDT', positionAmt: '1.25junk', entryPrice: '0', markPrice: '0',
+          unRealizedProfit: '0', leverage: '100', marginType: 'isolated', liquidationPrice: '0' }] };
+      }
+      if (url.includes(BIN_ORD)) return { body: [] };
+      return mine(url) ? { body: {} } : null;
+    }, async () => {
+      const r = await futuresCountOpen(binTarget);
+      eq(r.positions, null, '수량을 못 읽은 포지션을 0개로 셌다');
+      eq(r.orders, 0);
+    });
+  });
+
+  netTest('바이낸스가 정말로 비었으면 0 · 0이다', async () => {
+    await withFetch((url) => {
+      if (url.includes(BIN_POS)) {
+        return { body: [{ symbol: 'BTCUSDT', positionAmt: '0', entryPrice: '0', markPrice: '0',
+          unRealizedProfit: '0', leverage: '100', marginType: 'isolated', liquidationPrice: '0' }] };
+      }
+      if (url.includes(BIN_ORD)) return { body: [] };
+      return mine(url) ? { body: {} } : null;
+    }, async () => {
+      const r = await futuresCountOpen(binTarget);
+      eq(r.positions, 0);
+      eq(r.orders, 0);
+      eq(r.error, null);
+    });
+  });
+
+  netTest('바이낸스 잔여가 있으면 그대로 센다', async () => {
+    await withFetch((url) => {
+      if (url.includes(BIN_POS)) {
+        return { body: [
+          { symbol: 'BTCUSDT', positionAmt: '0.01', entryPrice: '63000', markPrice: '63000',
+            unRealizedProfit: '0', leverage: '100', marginType: 'isolated', liquidationPrice: '62500' },
+          { symbol: 'ETHUSDT', positionAmt: '0', entryPrice: '0', markPrice: '0',
+            unRealizedProfit: '0', leverage: '100', marginType: 'isolated', liquidationPrice: '0' },
+        ] };
+      }
+      if (url.includes(BIN_ORD)) {
+        return { body: [{ orderId: 1, symbol: 'BTCUSDT', type: 'STOP_MARKET', side: 'SELL', closePosition: true }] };
+      }
+      return mine(url) ? { body: {} } : null;
+    }, async () => {
+      const r = await futuresCountOpen(binTarget);
+      eq(r.positions, 1);
+      eq(r.orders, 1);
+    });
+  });
+
   // ── 발견만 고치고 제거는 못 고친 자리 ──
   //
   // `futuresCountOpen`은 이제 조건부 주문만 남은 계약을 찾아낸다.
@@ -942,5 +1041,38 @@ export function runFuturesExecTests() {
     });
     eq(sent.length, 1, '규격 조회 실패로 손절이 아예 안 나갔다');
     eq(sent[0], '3.477979');
+  });
+
+  // ── 상태 대조: Gate 포지션 수량이 깨졌을 때 ──
+  //
+  // `getPositionsGateFutures`는 `Number(size) !== 0`으로 거른다. 'NaN'은
+  // 거기를 통과한다. 그 행을 대조가 `qty: 0`으로 옮기면 "읽었고, 0이다"가
+  // 되어 대조가 성공으로 끝난다 — 확인하지 못한 것을 통과로 적는 자리다.
+  netTest('Gate 포지션 수량을 못 읽으면 대조는 도달 불가다 — qty 0으로 적지 않는다', async () => {
+    const { gatherAndReconcile } = await import('../engine/reconcileCheck');
+    // 어떤 체인이든 받아 주고, await하면 빈 결과를 주는 가짜 DB
+    const conn = { exchange_id: 'gate', api_key: 'k', api_secret_enc: '', has_withdrawal: false };
+    const chain = (final: any): any => new Proxy(function () {}, {
+      get: (_t, p) => {
+        if (p === 'then') return (res: any) => res(final);
+        if (p === 'maybeSingle') return () => Promise.resolve({ data: conn, error: null });
+        return () => chain(final);
+      },
+      apply: () => chain(final),
+    });
+    const sb = { from: () => chain({ data: [], error: null }) };
+
+    let r: any = null;
+    await withFetch((url) => {
+      if (!url.startsWith(GATE_T)) return null;
+      if (url.includes('/futures/usdt/positions')) {
+        return { body: [{ contract: 'BTC_USDT', size: 'NaN', leverage: '100' }] };
+      }
+      return { body: [] };
+    }, async () => { r = await gatherAndReconcile(sb, 'u1', true, 'c1'); });
+
+    eq(r.reachable, false,
+      `수량을 모르는 포지션을 대조했다 — ${JSON.stringify(r.exchangePositions)}`);
+    assert(/수량/.test(String(r.error || '')), `이유가 수량을 말하지 않는다: ${r.error}`);
   });
 }

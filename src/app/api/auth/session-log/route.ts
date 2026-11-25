@@ -9,6 +9,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin } from '@/lib/supabase/server';
+import { existingSessionVerdict, currentSessionNote } from '@/lib/auth/sessionLogVerdict';
 import { parseUserAgent } from '@/lib/auth/parseUA';
 import { resolveGeoIP } from '@/lib/auth/geoip';
 
@@ -81,15 +82,27 @@ export async function POST(req: NextRequest) {
   const geo = await resolveGeoIP(req, ip);
 
   // 같은 (user_id, session_token)이 있으면 last_seen_at 갱신만, 없으면 insert
-  const { data: existing } = await (sb.from('user_login_sessions') as any)
+  //
+  // **못 읽은 것을 "없음"으로 읽지 않는다.** 이 표에는 `(user_id, token)`
+  // 유일 제약이 없어서(003_login_sessions.sql) 조회 실패를 "없음"으로 읽고
+  // insert하면 **중복 행이 조용히 생긴다.** 판정은 sessionLogVerdict 한 곳이다.
+  const existRes = await (sb.from('user_login_sessions') as any)
     .select('id')
     .eq('user_id', user.id)
     .eq('session_token', token)
     .maybeSingle();
+  const existing = existRes?.data as { id?: string } | null;
+  const verdict = existingSessionVerdict({ row: existing, failed: !!existRes?.error });
+  if (verdict === 'UNREADABLE') {
+    return NextResponse.json({
+      error: 'session_read_failed',
+      message: '세션 기록을 확인하지 못했습니다 — 중복 기록을 만들지 않기 위해 멈췄습니다',
+    }, { status: 503 });
+  }
 
   const now = new Date().toISOString();
 
-  if (existing?.id) {
+  if (verdict === 'UPDATE' && existing?.id) {
     // 기존 세션 갱신 — country/city는 변경되면 덮어쓰기
     const updateFields: any = {
       last_seen_at: now,
@@ -103,11 +116,18 @@ export async function POST(req: NextRequest) {
       .eq('id', existing.id);
     if (updErr) return NextResponse.json({ error: updErr.message }, { status: 500 });
     // 같은 user의 다른 세션은 is_current=false로
-    await (sb.from('user_login_sessions') as any)
+    //
+    // 실패해도 이 세션 갱신은 이미 됐다. 그래도 **조용히 넘기지 않는다** —
+    // 안 걸리면 「현재 세션」이 여러 개로 보인다.
+    const { error: othErr } = await (sb.from('user_login_sessions') as any)
       .update({ is_current: false })
       .eq('user_id', user.id)
       .neq('id', existing.id);
-    return NextResponse.json({ ok: true, id: existing.id, updated: true });
+    return NextResponse.json({
+      ok: true, id: existing.id, updated: true,
+      othersMarked: !othErr,
+      ...(othErr ? { othersError: String(othErr.message || othErr) } : {}),
+    });
   }
 
   // 신규 세션
@@ -135,13 +155,17 @@ export async function POST(req: NextRequest) {
 
   if (insErr) return NextResponse.json({ error: insErr.message }, { status: 500 });
 
-  // 같은 user의 다른 세션은 is_current=false로
-  await (sb.from('user_login_sessions') as any)
+  // 같은 user의 다른 세션은 is_current=false로 (위와 같은 이유로 결과를 본다)
+  const { error: othErr2 } = await (sb.from('user_login_sessions') as any)
     .update({ is_current: false })
     .eq('user_id', user.id)
     .neq('id', inserted.id);
 
-  return NextResponse.json({ ok: true, id: inserted.id, created: true });
+  return NextResponse.json({
+    ok: true, id: inserted.id, created: true,
+    othersMarked: !othErr2,
+    ...(othErr2 ? { othersError: String(othErr2.message || othErr2) } : {}),
+  });
 }
 
 // ─── DELETE ─────────────────────────────────────────────────────────────
@@ -190,13 +214,20 @@ export async function DELETE(req: NextRequest) {
   if (!id) return NextResponse.json({ error: 'missing_id' }, { status: 400 });
 
   // 현재 세션인지 확인 — 현재 세션 종료는 별도 안내
-  const { data: target } = await (sb.from('user_login_sessions') as any)
+  //
+  // **못 읽은 것을 "현재 아님"으로 단정하지 않는다.** 단정하면 자기 현재
+  // 세션을 끊은 사용자가 「다른 기기는 자동으로 로그아웃됩니다」를 받고
+  // 로그아웃을 안 한다. 판정과 안내는 sessionLogVerdict 한 곳이다.
+  const targetRes = await (sb.from('user_login_sessions') as any)
     .select('is_current')
     .eq('id', id)
     .eq('user_id', user.id)
     .maybeSingle();
 
-  const isCurrent = !!target?.is_current;
+  const verdictNote = currentSessionNote({
+    row: targetRes?.data as { is_current?: boolean } | null,
+    failed: !!targetRes?.error,
+  });
 
   const { error: updErr } = await (sb.from('user_login_sessions') as any)
     .update({ revoked: true, is_current: false })
@@ -207,9 +238,7 @@ export async function DELETE(req: NextRequest) {
 
   return NextResponse.json({
     ok: true,
-    is_current: isCurrent,
-    note: isCurrent
-      ? '현재 세션 표시를 종료했습니다. 실제 로그아웃은 클라이언트에서 별도로 진행해주세요.'
-      : '세션이 종료 표시되었습니다. 다른 기기는 다음 토큰 갱신 시점에 자동으로 로그아웃됩니다.',
+    is_current: verdictNote.isCurrent,
+    note: verdictNote.note,
   });
 }

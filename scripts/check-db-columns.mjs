@@ -23,6 +23,8 @@
 // **못 읽으면 통과시키지 않는다.** 표를 하나도 못 모으면 그건
 // '문제 없음'이 아니라 이 검사가 고장 난 것이다.
 import { readFileSync, globSync } from 'node:fs';
+import { errorDroppedSites, selfTest as errorDropSelfTest }
+  from './lib/error-dropped-supabase.mjs';
 
 // ── 1. 마이그레이션에서 표 → 칸 목록 ──
 const columns = new Map();   // table -> Set(column)
@@ -335,4 +337,72 @@ if (bad === 0) {
   console.error('');
   console.error('   기능이 있고 테스트가 통과해도, 칸 이름 하나가 틀리면 실제로는 한 건도 안 됩니다.');
 }
+// ══════════════════════════════════════════════════════════════
+// `error`를 받지 않은 Supabase 호출 — **개수를 센다**
+// ══════════════════════════════════════════════════════════════
+//
+// 위의 칸 대조는 **이 병에서 태어났다.** `/api/ledger/sync`가 없는 칸을
+// 읽었는데 조회 오류를 안 받고 `Array.isArray(conns) ? conns : []`로
+// 넘어가서 연결 0개로 조용히 끝났다. 칸 이름은 그 한 건을 잡았지만
+// **`error`를 버리는 모양 자체**는 아무도 세지 않았다.
+//
+// 2026-11-20 하루에 같은 병이 세 곳에서 따로 나왔다 — 모의 손절 수정이
+// 포지션 조회 실패를 404로(#718), hooks.ts 다섯 곳이 조회 실패를 빈
+// 목록으로 돌려주고 캐시까지 덮어씀(#719), ai/keys 가 저장·삭제 실패를
+// 성공으로(#720). **셋 다 사람이 우연히 찾았다.**
+//
+// 왜 전부 실패시키지 않는가: 한 번에 고치는 것은 별개의 큰 작업이고,
+// 그렇다고 검사를 빼면 **다음 한 곳이 조용히 들어온다.** 그래서 `tsc`
+// 오류와 같은 방식으로 **기준보다 늘면 실패**시킨다. 줄이는 것은 언제나
+// 환영이고 그때는 아래 숫자를 내린다.
+//
+// ⚠ 이것은 **"받지 않은 자리"의 수이지 확인된 결함의 수가 아니다.**
+//   실패가 정말 무해한 자리도 섞여 있다. 빚 계수기로 읽어야 한다.
+//
+// ⚠ **지금 몇 곳인지를 이 주석에 적지 않는다.** 숫자가 두 자리에 있으면
+//   한쪽만 고쳐지고, 그 순간 주석이 거짓이 된다. 실제 수는 성공 로그가
+//   찍는다. 아래 숫자가 유일한 사본이다.
+//
+// 톱니 기록 — 내린 날과 값만 적는다 (지난 값은 더 낡지 않는다):
+//   2026-11-20 199 (도입, #721)  ·  2026-11-24 184 (#754)
+//   2026-11-25 178 (#757 · #758 · #761이 여섯 곳을 받게 고쳤다)
+const ERROR_DROP_BASELINE = 178;
+
+{
+  const self = errorDropSelfTest();
+  for (const f of self.failed) err(`\`error\` 누락 세기 자기 점검 실패 — ${f}`);
+
+  let read = 0, write = 0;
+  const byFile = new Map();
+  const srcFiles = globSync('{src,worker/src}/**/*.{ts,tsx}')
+    .filter((f) => !/\.test\.tsx?$/.test(f));
+  if (srcFiles.length === 0) {
+    err('제품 소스를 하나도 찾지 못했습니다 — 0건을 통과로 적지 않습니다');
+  }
+  for (const f of srcFiles) {
+    let hits = [];
+    try { hits = errorDroppedSites(readFileSync(f, 'utf8'), f); }
+    catch { err(`${f}를 읽지 못했습니다 — 못 본 것을 0으로 적지 않습니다`); continue; }
+    for (const h of hits) {
+      if (h.kind === 'READ') read += 1; else write += 1;
+      byFile.set(f, (byFile.get(f) || 0) + 1);
+    }
+  }
+  const total = read + write;
+  if (total > ERROR_DROP_BASELINE) {
+    err(`\`error\`를 받지 않은 Supabase 호출이 ${total}곳입니다 — 기준 ${ERROR_DROP_BASELINE}곳보다 `
+      + `${total - ERROR_DROP_BASELINE}곳 늘었습니다. 조회 실패를 '없음'으로, 쓰기 실패를 `
+      + '성공으로 적는 자리입니다');
+    const top = [...byFile.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
+    for (const [f, c] of top) console.error(`   · ${c}곳  ${f}`);
+    console.error('   읽기는 `const { data, error } = …`로 받고, 쓰기는 결과의 `error`를 봅니다.');
+  } else if (bad === 0) {
+    console.log(`✅ \`error\` 미수신 Supabase 호출 ${total}곳 (읽기 ${read} · 쓰기 ${write}) — `
+      + `기준 ${ERROR_DROP_BASELINE}곳 이하 · 자기 점검 ${self.total}/${self.total}`);
+    if (total < ERROR_DROP_BASELINE) {
+      console.log(`   줄었습니다 — ERROR_DROP_BASELINE을 ${total}로 내려 주세요 (빚은 다시 늘지 않게 잠급니다)`);
+    }
+  }
+}
+
 process.exit(bad ? 1 : 0);

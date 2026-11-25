@@ -123,6 +123,10 @@ export async function POST(req: NextRequest) {
       // **읽지 못한 것을 "포지션 없음"으로 읽지 않는다.** 마감으로 넘어가면
       // `086`이 다시 세지만, 여기서 0으로 적으면 보고가 거짓이 된다.
       finalizes.push({ challenge: String(ch.id), code: 'POSITIONS_UNREADABLE', openCount: null });
+      // **초록으로도 답하지 않는다.** 요약은 이것을 정리 중으로도 마감으로도
+      // 세지 않으므로, 여기서 `ok`가 true로 남으면 워커는 아무 줄도 남기지
+      // 않는다 — 그 챌린지는 CLOSING에 머문 채 매 분 같은 침묵이 반복된다.
+      contractBreaks.push(`${ch.id}: 열린 포지션을 읽지 못해 정리하지 못했습니다 — 없다는 뜻이 아닙니다`);
       continue;
     }
 
@@ -159,9 +163,14 @@ export async function POST(req: NextRequest) {
 
       // **보고하는 쪽이 스스로를 한 번 더 본다.**
       if (String(row?.code ?? '') === 'CLOSED') {
-        const { data: after } = await (sb as any).from('paper_challenges')
+        const { data: after, error: afterErr } = await (sb as any).from('paper_challenges')
           .select('close_intent, terminal_status').eq('id', ch.id).maybeSingle();
-        if (after && !terminalMatchesFrozenIntent(after.close_intent, after.terminal_status)) {
+        // **다시 보지 못한 것은 통과가 아니다.** 예전에는 `error`를 버렸고,
+        // 못 읽으면 `after`가 null이라 아래 검사를 조용히 건너뛰었다.
+        if (afterErr || !after) {
+          contractBreaks.push(
+            `${ch.id}: 마감 뒤 최종 상태를 다시 읽지 못했습니다 — 확인되지 않았습니다`);
+        } else if (!terminalMatchesFrozenIntent(after.close_intent, after.terminal_status)) {
           contractBreaks.push(
             `${ch.id}: 최종 상태가 동결된 사유의 복사가 아닙니다`
             + ` (${String(after.close_intent)} → ${String(after.terminal_status)})`);

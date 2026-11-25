@@ -5,13 +5,15 @@ import { T } from '@/lib/constants';
 import { cvt } from '@/lib/utils';
 import { ArrowRightLeft, TrendingDown, Check, Search } from 'lucide-react';
 import { ETF_GROUPS, suggestSwap, findEtf, type SwapSuggestion } from '@/lib/accounts/etfSwap';
+import { valueStoredHoldings } from '@/lib/portfolio/storedHoldings';
 
 const PORT_KEY = 'tg_portfolio_v2';
 
-function loadPositions(): any[] { if (typeof window === 'undefined') return []; try { return JSON.parse(localStorage.getItem(PORT_KEY) || '[]'); } catch { return []; } }
+function loadPositions(): unknown { if (typeof window === 'undefined') return []; try { return JSON.parse(localStorage.getItem(PORT_KEY) || '[]'); } catch { return []; } }
 
-export default function EtfSwapTool({ prices = {}, currency = 'KRW' }: { prices?: Record<string, number>; currency?: string }) {
-  const [positions, setPositions] = useState<any[]>([]);
+// prices: page.tsx는 Asset[]를 넘긴다 — 모양 해석은 valueStoredHoldings 한 곳에서
+export default function EtfSwapTool({ prices = {}, currency = 'KRW' }: { prices?: unknown; currency?: string }) {
+  const [positions, setPositions] = useState<unknown>([]);
   const [demoSym, setDemoSym] = useState('SPY');
   const [demoValue, setDemoValue] = useState(10000000);
 
@@ -20,13 +22,10 @@ export default function EtfSwapTool({ prices = {}, currency = 'KRW' }: { prices?
   // 보유 ETF 중 교체 제안 있는 것
   const heldSuggestions = useMemo(() => {
     const out: { value: number; s: SwapSuggestion }[] = [];
-    for (const p of positions) {
-      const sym = (p.symbol || p.ticker || p.id || '').toUpperCase();
-      if (!findEtf(sym)) continue;
-      const price = prices[sym] || p.curPrice || p.avgPrice || 0;
-      const value = price * (p.quantity || p.qty || 0);
-      const s = suggestSwap(sym, value);
-      if (s) out.push({ value, s });
+    for (const h of valueStoredHoldings(positions, prices)) {
+      if (!findEtf(h.assetId) || h.value === null) continue;   // 금액을 모르면 절감액을 지어내지 않는다
+      const s = suggestSwap(h.assetId, h.value);
+      if (s) out.push({ value: h.value, s });
     }
     return out;
   }, [positions, prices]);
@@ -80,7 +79,7 @@ export default function EtfSwapTool({ prices = {}, currency = 'KRW' }: { prices?
           <div style={{ color: T.muted, fontSize: 11, fontWeight: 700, marginBottom: 8 }}>내 보유 ETF 교체 제안</div>
           {heldSuggestions.map(({ value, s }) => <Card key={s.from.symbol} s={s} value={value} tenYear={s.annualSaved * 10} />)}
         </div>
-      ) : positions.length > 0 ? (
+      ) : Array.isArray(positions) && positions.length > 0 ? (
         <div style={{ display: 'flex', alignItems: 'center', gap: 7, background: '#10B98112', borderRadius: 10, padding: '10px 14px', marginBottom: 14 }}>
           <Check size={15} color="#10B981" />
           <span style={{ color: T.txt, fontSize: 12 }}>보유 ETF는 이미 저보수 최적 상태예요.</span>

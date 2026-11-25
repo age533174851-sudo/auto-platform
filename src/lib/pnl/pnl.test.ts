@@ -2,8 +2,11 @@
 // PnL 엔진 유닛 테스트 — 레버리지/수수료/롱숏/손익분기 검증.
 import { calcTradePnL } from './index';
 import { test, close, gt, lt, assert, eq } from '../../test/harness';
-import { formatKRW } from '../format';
+import { formatKRW, safePercent } from '../format';
+import { fmtPct, fmtPctSafe } from '../utils';
 import { quoteCurrencyOf, estimateCalcTax } from './calcCurrency';
+import { readFileSync, readdirSync, statSync } from 'fs';
+import { resolve, join } from 'path';
 
 const feeCfg = { exchangeId: 'binance', makerRate: 0.001, takerRate: 0.001, slippage: 0.0005 } as any;
 const base = {
@@ -82,6 +85,64 @@ export function runPnlTests() {
     eq(formatKRW(-0), '₩0');
     eq(formatKRW(NaN), '₩0');
     eq(formatKRW(undefined), '₩0');
+  });
+
+  // ── 등락률·수익률 표시: 하락에 '−'를 지우지 않는다 ──
+  //
+  // `fmtPct`는 시세표·홈·포트폴리오 수익률·모의 포지션 손익률이 쓴다.
+  // 예전에는 `Math.abs`를 쓰고 음수에는 부호를 붙이지 않았다 —
+  // −5.2%가 '5.20%'로 그려졌다. 색만 빨간색이고 숫자는 하락을 말하지
+  // 않았다(색을 못 구분하거나 복사해 붙이면 손실이 이익처럼 읽힌다).
+  test('fmtPct: 하락은 −부호를 달고 상승은 +를 단다', () => {
+    eq(fmtPct(-5.2), '-5.20%');
+    eq(fmtPct(-0.01), '-0.01%');
+    eq(fmtPct(3), '+3.00%');
+    eq(fmtPct(0), '+0.00%');
+    eq(fmtPct(undefined), '—');
+    eq(fmtPct(NaN), '—');
+  });
+
+  test('fmtPctSafe: 같은 규칙, 모르는 값은 지정한 자리표시', () => {
+    eq(fmtPctSafe(-12.345), '-12.35%');
+    eq(fmtPctSafe(7.5), '+7.50%');
+    eq(fmtPctSafe(undefined, 'N/A'), 'N/A');
+  });
+
+  // ── 부호를 두 번 달지 않는다 ──
+  //
+  // `fmtPct`·`fmtPctSafe`는 상승에 스스로 '+'를 단다. 화면이 그 앞에
+  // `{v >= 0 ? '+' : ''}`를 또 붙이면 상승 종목이 '++3.00%'로 그려진다
+  // (스캐너 페이지 상승 종목에서 실제로 나던 일). 화면 전체를 훑어
+  // 다시 생기지 않게 막는다.
+  test('fmtPct 앞에 화면이 부호를 또 붙이지 않는다', () => {
+    const roots = ['../../components', '../../app'].map(r => resolve(__dirname, r));
+    const files: string[] = [];
+    const walk = (d: string) => {
+      for (const n of readdirSync(d)) {
+        const f = join(d, n);
+        if (statSync(f).isDirectory()) walk(f);
+        else if (/\.tsx$/.test(n)) files.push(f);
+      }
+    };
+    roots.forEach(walk);
+    assert(files.length > 0, '훑을 화면 파일을 찾지 못했습니다');
+    // `safePercent`(src/lib/format.ts)도 0 이상에 '+'를 스스로 단다.
+    // 템플릿 문자열의 `+${safePercent(...)}`도 같은 실수다 — 가격 알림의
+    // 급등 문구가 'BTC ++5.20% 급등!'으로 나가던 자리가 이것이었다.
+    const doubled = [
+      /'\+'\s*:\s*''\s*\}\s*\{\s*(fmtPct(Safe)?|safePercent)\(/,
+      /\+\$\{\s*(fmtPct(Safe)?|safePercent)\(/,
+    ];
+    const bad = files.filter(f => {
+      const src = readFileSync(f, 'utf8');
+      return doubled.some(re => re.test(src));
+    }).map(f => f.split(/[\\/]src[\\/]/).pop());
+    eq(bad.join(','), '');
+  });
+
+  test('safePercent는 상승에 스스로 + 를 단다 — 화면이 덧붙일 필요가 없다', () => {
+    eq(safePercent(5.2), '+5.20%');
+    eq(safePercent(-5.2), '-5.20%');
   });
   // ── 손익 계산기: 달러로 적은 가격을 원화로 셈하지 않는다 ──
   //

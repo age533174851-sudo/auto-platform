@@ -17,6 +17,9 @@
 // 이 구분이 무너지면 살아 있는 포지션 위로 신규 진입이 나간다.
 
 import { openPositionOf, type OpenPosition } from './positionLifecycle';
+// **주문 번호를 읽는 일은 한 곳에서만 한다.** 여기서 다시 짜면
+// 취소 확인이 장부(`cancelLedger`)와 다른 번호로 비교하게 된다.
+import { orderIdOf } from './protectionLedger';
 
 export interface VenueCreds {
   exchange: 'binance' | 'gate';
@@ -467,6 +470,47 @@ export async function readAllOpenOrdersForSmoke(
 }
 
 /**
+ * 이 **연결 전체**(종목 무관)의 노출을 읽는다. 읽기 전용이다.
+ *
+ * `readAllOpenOrdersForSmoke`는 종목 하나만 본다. 과거 회차의 미확인
+ * 노출은 **다른 종목에 남아 있을 수 있으므로**, 그것을 풀 증거는
+ * 연결 단위여야 한다.
+ *
+ * 셋을 **날것 그대로** 돌려준다 — 여기서 "0건"으로 요약하지 않는다.
+ * 실패를 0으로 바꾸는 자리가 바로 이 저장소에서 가장 자주 난 고장이라,
+ * 성공 여부 판단은 판정 함수(`legacyExposureClearance`) 한 곳에만 둔다.
+ */
+export async function readConnectionExposureForSmoke(c: VenueCreds): Promise<{
+  positionRead: any; regularOrderRead: any; algoOrderRead: any;
+}> {
+  const unread = (what: string) => ({ success: false, message: `${what} 조회 불가` });
+  // 조건부 주문 장부를 읽을 수 없는 경로에서는 **풀지 않는다.**
+  // 일반 주문만 보고 "비어 있다"고 적는 것이 어제 사고의 모양이다.
+  if (c.exchange !== 'binance' || c.testnet !== true) {
+    return {
+      positionRead: unread('포지션'), regularOrderRead: unread('일반 주문'),
+      algoOrderRead: unread('조건부 주문'),
+    };
+  }
+  try {
+    const bf = await import('../exchanges/binanceFutures');
+    const [positionRead, regularOrderRead, algoOrderRead] = await Promise.all([
+      bf.getFuturesPositions(c.apiKey, c.apiSecret, true),
+      bf.getFuturesOpenOrders(c.apiKey, c.apiSecret, true),
+      bf.getFuturesOpenAlgoOrders(c.apiKey, c.apiSecret, true),
+    ]);
+    return { positionRead, regularOrderRead, algoOrderRead };
+  } catch (e: any) {
+    const msg = String(e?.message || e);
+    return {
+      positionRead: { success: false, message: msg },
+      regularOrderRead: { success: false, message: msg },
+      algoOrderRead: { success: false, message: msg },
+    };
+  }
+}
+
+/**
  * **이 id들만** 취소한다. 목록을 통째로 지우지 않는다.
  *
  * `cancelAll`은 같은 계좌의 다른 전략이 걸어 둔 손절까지 지운다.
@@ -514,6 +558,31 @@ export async function cancelProtectiveOrders(
  * `cancelAll`은 쓰지 않는다. 같은 계좌의 다른 전략이 걸어 둔 손절까지
  * 지운다 — 호출부가 내 것이라고 확인한 id만 온다.
  */
+/**
+ * 재조회한 목록에서 **지금 거래소에 남아 있는 주문 번호**를 뽑는다.
+ *
+ * 원래 `cancelExact` 안에 이렇게 있었다:
+ *
+ *     String(row?.id ?? row?.orderId ?? '')
+ *
+ * 그런데 같은 저장소의 `orderIdOf`는 **같은 값을 거부한다** — 안전 정수
+ * 범위를 넘은 `number`는 이미 반올림됐으니 문자열로 만드는 것은
+ * "복구가 아니라 위조"라고 그 파일이 적어 뒀다. 한쪽은 거부하고 한쪽은
+ * 만들어 쓰고 있었다 — 상습 고장 ② "경로가 둘인데 한쪽만 고침".
+ *
+ * 위조된 번호는 요청한 진짜 번호와 영원히 같아지지 않는다. 그래서
+ * `pending`에서 빠지지 않고 취소를 끝까지 다시 보내다 `STILL_PRESENT`가
+ * 된다. 반대로 위조된 값이 다른 주문의 번호와 우연히 같아지면
+ * **남아 있는 주문을 사라진 것으로 센다.**
+ *
+ * 그래서 **번호를 읽는 일은 `orderIdOf` 한 곳에서만 한다.**
+ * 못 읽은 줄은 번호가 없는 줄이다 — 없는 주문으로 세지 않는다.
+ * 그 줄이 요청한 주문일 수 있다는 판정은 `cancelLedger`가 한다.
+ */
+export function presentIdsOf(rows: any[]): string[] {
+  return (Array.isArray(rows) ? rows : []).map(orderIdOf).filter(Boolean);
+}
+
 export async function cancelExact(
   c: VenueCreds, symbol: string, ids: string[],
   opts: { attempts?: number } = {},
@@ -558,7 +627,7 @@ export async function cancelExact(
     // **여기가 핵심이다.** 요청 결과가 아니라 목록을 다시 읽어 확인한다.
     leftover = await readProtectiveOrders(c, symbol);
     if (leftover == null) break;   // 못 읽었다 — 더 지워도 확인할 수 없다
-    const present = leftover.map(row => String((row as any)?.id ?? (row as any)?.orderId ?? '')).filter(Boolean);
+    const present = presentIdsOf(leftover);
     pending = pending.filter(id => present.includes(id));
   }
 

@@ -171,6 +171,15 @@ export interface FakeDbOptions {
   /** select를 실패시킨다 */
   failSelectsOn?: string;
   /**
+   * `sb.rpc(name, args)`의 대답.
+   *
+   * 함수로 주면 **인자를 보고** 대답할 수 있다 — 같은 RPC를 두 번 부르면
+   * 두 번째는 다르게 답하는 경우(예: 같은 예약 재호출)를 그려야 한다.
+   * 등록하지 않은 이름을 부르면 **오류로 답한다.** 조용히 `null`을 주면
+   * "부르지 않았는데 통과"가 된다.
+   */
+  rpc?: Record<string, RpcReply | ((args: any) => RpcReply)>;
+  /**
    * UPDATE의 **결과**를 바꾼다.
    *
    * `error`는 DB가 오류를 돌려준 경우, `zero-rows`는 **오류 없이 0행**인
@@ -189,6 +198,18 @@ export interface FakeDbOptions {
    * "부르지 않았는데 통과"가 된다.
    */
   rpc?: Record<string, RpcReply | ((args: any) => RpcReply)>;
+}
+
+export interface RpcReply {
+  data?: any;
+  error?: any;
+  /** 던지게 한다 — 응답 유실을 그린다 */
+  throws?: string;
+}
+
+export interface RpcCall {
+  name: string;
+  args: any;
 }
 
 export interface RpcReply {

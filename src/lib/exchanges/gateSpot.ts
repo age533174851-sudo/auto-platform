@@ -12,9 +12,10 @@
 //
 // `gateFutures.ts`의 `gateReq`는 이미 testnet 분기·서명·시각 보정을 갖고
 // 있다. 그걸 쓴다 — 서명 코드를 두 벌 두면 한쪽만 고쳐지는 날이 온다.
+import { venueIdOf } from './losslessJson';
 import { gateReq, toGateText } from './gateFutures';
 import { planGateSpotOrder, gateSpotFillOf, toGatePair, type GateSpotPlanInput } from './gateSpotPlan';
-import type { GateSpotPrecision } from './gateSpotPrecision';
+import { gatePriceDecimals, type GateSpotPrecision } from './gateSpotPrecision';
 
 export interface GateSpotBalance {
   currency: string;
@@ -49,7 +50,11 @@ export interface GateSpotPairInfo {
   minBaseAmount: number | null;
   /** 최소 주문 **금액**(quote) */
   minQuoteAmount: number | null;
-  /** 거래 가능한 상태인가. 'tradable'이 아니면 주문이 거절된다 */
+  maxBaseAmount: number | null;
+  maxQuoteAmount: number | null;
+  marketMaxBaseAmount: number | null;
+  marketMaxQuoteAmount: number | null;
+  /** 'tradable'은 양방향, 'buyable'은 매수, 'sellable'은 매도만 가능하다. */
   tradeStatus: string | null;
 }
 
@@ -63,15 +68,38 @@ export async function getGateSpotPair(
   try {
     const d = await gateReq<any>('GET', `/api/v4/spot/currency_pairs/${encodeURIComponent(pair)}`, { testnet });
     if (!d) return null;
-    const n = (v: any) => (v == null || v === '' ? null : (Number.isFinite(Number(v)) ? Number(v) : null));
+    const numberOf = (value: unknown): number | null => {
+      if (typeof value === 'string' && /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(value.trim())) {
+        value = Number(value);
+      }
+      return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+    };
+    /**
+     * **자릿수 축 전용 읽기.** 금액 축에는 쓰지 않는다.
+     *
+     * `gatePriceDecimals`는 음수·비정수·100 초과를 null로 돌린다. 자릿수는
+     * 그래야 맞지만 **금액은 그러면 안 된다** — `min_base_amount`는
+     * `0.0001` 같은 비정수이고, 그걸 자릿수 검증에 넣으면 상한이 통째로
+     * null이 되어 "상한 없음"처럼 읽힌다.
+     *
+     * ★ **이름을 바꾸지 않는다.** `scripts/check-gate-spot-precision.mjs`가
+     *   `pricePrecision: n(d.precision)` 철자로 "가격 자릿수를 거래소에서
+     *   읽는가"를 본다. 개명하면 그 검사기가 빨강이 되고, 그건 검사기가
+     *   틀린 것이 아니라 이 줄이 정본에서 벗어난 것이다.
+     */
+    const n = (value: unknown): number | null => gatePriceDecimals(numberOf(value));
     return {
       pair: String(d.id ?? pair),
       amountPrecision: n(d.amount_precision),
       // Gate는 수량 자릿수를 `amount_precision`, 가격 자릿수를 `precision`으로
       // 준다. **둘 중 하나로 다른 하나를 채우지 않는다** — 없으면 null이다.
       pricePrecision: n(d.precision),
-      minBaseAmount: n(d.min_base_amount),
-      minQuoteAmount: n(d.min_quote_amount),
+      minBaseAmount: numberOf(d.min_base_amount),
+      minQuoteAmount: numberOf(d.min_quote_amount),
+      maxBaseAmount: numberOf(d.max_base_amount),
+      maxQuoteAmount: numberOf(d.max_quote_amount),
+      marketMaxBaseAmount: numberOf(d.market_order_max_stock),
+      marketMaxQuoteAmount: numberOf(d.market_order_max_money),
       tradeStatus: d.trade_status != null ? String(d.trade_status) : null,
     };
   } catch { return null; }
@@ -93,7 +121,9 @@ export interface GateSpotOrderResult {
 
 export async function placeGateSpotOrder(
   key: string, secret: string,
-  input: Omit<GateSpotPlanInput, 'text'> & { clientOrderId?: string },
+  input: Omit<GateSpotPlanInput,
+    'text' | 'maxBaseAmount' | 'maxQuoteAmount' | 'marketMaxBaseAmount' | 'marketMaxQuoteAmount'
+  > & { clientOrderId?: string },
   testnet = false,
 ): Promise<GateSpotOrderResult> {
   const p = toGatePair(input.symbol);
@@ -101,44 +131,55 @@ export async function placeGateSpotOrder(
 
   // 규격을 먼저 읽는다. 못 읽으면 정밀도 없이 진행한다 (거래소가 판단).
   const info = await getGateSpotPair(p.pair, testnet);
-  if (info?.tradeStatus && info.tradeStatus !== 'tradable') {
-    return { success: false, message: `${p.pair}는 지금 거래할 수 없는 상태입니다 (${info.tradeStatus})` };
+  const status = info?.tradeStatus;
+  const sideAllowed = (status === 'buyable' && input.side === 'BUY')
+    || (status === 'sellable' && input.side === 'SELL');
+  if (status && status !== 'tradable' && !sideAllowed) {
+    return { success: false, message: `${p.pair}는 지금 요청한 방향으로 거래할 수 없습니다 (${status})` };
   }
 
   const plan = planGateSpotOrder({
     ...input,
     text: toGateText(input.clientOrderId),
-    // 네 축을 **각각** 넘긴다. 하나로 뭉쳐 넘기면 판정도 하나가 된다.
+    // 자릿수, 최소값, 최대값은 수량과 금액의 규격을 각각 넘긴다.
     amountPrecision: input.amountPrecision ?? info?.amountPrecision ?? null,
     pricePrecision: input.pricePrecision ?? info?.pricePrecision ?? null,
     minBaseAmount: input.minBaseAmount ?? info?.minBaseAmount ?? null,
     minQuoteAmount: input.minQuoteAmount ?? info?.minQuoteAmount ?? null,
+    maxBaseAmount: info?.maxBaseAmount ?? null,
+    maxQuoteAmount: info?.maxQuoteAmount ?? null,
+    marketMaxBaseAmount: info?.marketMaxBaseAmount ?? null,
+    marketMaxQuoteAmount: info?.marketMaxQuoteAmount ?? null,
   });
   if (!plan.ok) return { success: false, message: plan.reason || '주문을 만들지 못했습니다' };
 
+  let response: { id?: unknown };
   try {
-    const d = await gateReq<any>('POST', '/api/v4/spot/orders', { key, secret, body: plan.body, testnet });
-    const fill = gateSpotFillOf(d);
-    return {
-      success: true,
-      orderId: d?.id != null ? String(d.id) : undefined,
-      filledQty: fill.filledQty,
-      avgPrice: fill.avgPrice,
-      status: fill.status,
-      unfilled: fill.unfilled,
-      raw: d,
-      // **맞췄는지를 값으로 내보낸다.** 응답에서 빼면 맞춘 것과 못 맞춘 것이
-      // 화면에서 똑같이 보인다.
-      precision: plan.precision,
-      message: fill.unfilled
-        ? '주문이 체결되지 않고 취소되었습니다 (시장가 IOC)'
-        : plan.note
-          ? `주문 접수 · ${plan.note}`
-          : '주문 접수',
-    };
+    response = await gateReq('POST', '/api/v4/spot/orders', { key, secret, body: plan.body, testnet });
   } catch (e: any) {
     return { success: false, message: `Gate 현물 주문 실패: ${e?.message || e}` };
   }
+
+  // 전송 뒤 식별자를 확인하지 못하면 실행기가 주문을 미확정으로 기록한다.
+  const orderId = venueIdOf(response?.id);
+  if (!orderId) throw new Error('Gate 현물 주문 응답에서 주문 ID를 확인하지 못했습니다');
+
+  const fill = gateSpotFillOf(response);
+  return {
+    success: true,
+    orderId,
+    filledQty: fill.filledQty,
+    avgPrice: fill.avgPrice,
+    status: fill.status,
+    unfilled: fill.unfilled,
+    raw: response,
+    precision: plan.precision,
+    message: fill.unfilled
+      ? '주문이 체결되지 않고 취소되었습니다 (시장가 IOC)'
+      : plan.note
+        ? `주문 접수 · ${plan.note}`
+        : '주문 접수',
+  };
 }
 
 /**
@@ -155,10 +196,13 @@ export async function findGateSpotOrderByText(
   if (!text) return { ok: true, order: null };
   try {
     // Gate는 text로 단건 조회를 지원한다 (order_id 자리에 text를 넣는다).
-    const d = await gateReq<any>(
+    const d = await gateReq<{ id?: unknown }>(
       'GET', `/api/v4/spot/orders/${encodeURIComponent(text)}`,
       { key, secret, qs: `currency_pair=${encodeURIComponent(pair)}`, testnet });
-    return { ok: true, order: d ?? null };
+    if (!d || typeof d !== 'object' || Array.isArray(d) || !venueIdOf(d.id)) {
+      return { ok: false, order: null, error: 'Gate 현물 주문 조회 응답에서 주문 ID를 확인하지 못했습니다' };
+    }
+    return { ok: true, order: d };
   } catch (e: any) {
     const msg = String(e?.message || e);
     // 404 / ORDER_NOT_FOUND는 **정말로 없는 것**이다. 나머지는 모르는 것.

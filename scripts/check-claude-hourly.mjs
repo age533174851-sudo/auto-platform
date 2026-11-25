@@ -309,7 +309,13 @@ if (lane.mode === 'trading') {
     err(`${WF}: 변이 하네스 자기 점검을 **실행 단계에서** 돌리지 않습니다 — `
       + '프롬프트에 적는 것과 실제로 돌리는 것은 다른 사실입니다');
   }
-  if (!/for f in scripts\/check-\*\.mjs/.test(src)) {
+  // 전수 루프는 2026-11-18에 `scripts/run-all-checkers.mjs`로 옮겼다.
+  // **핀의 강도는 그대로다** — 프롬프트에도 나올 수 있는 이름이 아니라
+  // 셸에서만 나오는 `|| fail=1`을 함께 본다. 옮긴 이유는
+  // `scripts/lib/checker-sweep.mjs` 머리말에 있다(제외 목록이 YAML 안에
+  // 있으면 무인 회차가 제가 깨뜨린 것을 못 고친다). 러너가 **정말로**
+  // 전수를 돌고 제외가 정직한지는 `check-checker-sweep`가 따로 센다.
+  if (!/node scripts\/run-all-checkers\.mjs \|\| fail=1/.test(src)) {
     err(`${WF}: 검사기 전수 재확인이 없습니다 — `
       + '에이전트가 "돌렸다"고 적은 것과 실제 통과는 다른 사실입니다');
   }

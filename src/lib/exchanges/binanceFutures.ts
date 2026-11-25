@@ -69,7 +69,14 @@ export interface FuturesBalance { asset: string; balance: number; availableBalan
 export async function getFuturesBalance(key: string, secret: string, testnet = true) {
   try {
     const data = await fapiSigned('GET', '/fapi/v2/balance', key, secret, testnet);
-    const balances: FuturesBalance[] = (Array.isArray(data) ? data : [])
+    // 배열이 아니면 읽은 것이 아니다. `[]`로 접으면 `success: true`와 함께
+    // 나가고, `usdtFromFuturesBalances`가 "USDT 줄이 없다"로 읽어
+    // **잔고 0원**을 사실처럼 돌려준다 (그 함수의 `balances` 없음 관문은
+    // 이 경우를 보지 못한다 — 목록은 있고 비어 있을 뿐이다).
+    if (!Array.isArray(data)) {
+      return { success: false, message: '잔고 응답이 배열이 아닙니다 — 읽지 못했습니다' };
+    }
+    const balances: FuturesBalance[] = data
       .filter((b: any) => parseFloat(b.balance) !== 0 || parseFloat(b.availableBalance) !== 0)
       .map((b: any) => ({
         asset: b.asset, balance: parseFloat(b.balance),
@@ -1753,6 +1760,14 @@ export async function getFuturesOpenOrders(key: string, secret: string, testnet 
     const params: Record<string, string | number> = {};
     if (symbol) params.symbol = symbol.toUpperCase().replace('/', '');
     const data = await fapiSigned('GET', '/fapi/v1/openOrders', key, secret, testnet, params);
+    // 충돌 해소(2026-11-21): 양쪽 다 "비배열을 빈 목록으로 읽지 않는다"를
+    // 고치지만 **들어오는 쪽에 `unaddressable` 집계가 더 있다.** 그 값이
+    // 없으면 `cancelAllOpenOrders`가 주소 없는 행을 버리고 "대상 없음 =
+    // 전부 취소됨"을 적는다. 더 센 쪽을 남긴다.
+    //
+    // 지워진 쪽이 적어 둔 이유도 옮겨 둔다: 빈 목록은 안전한 값이 아니다 —
+    // 이 저장소에서 "미체결 0건"은 보호주문이 없다는 뜻이고, 그 위에서
+    // 정리와 판정이 돈다.
     // `getFuturesPositions`와 **같은 규칙**이다 — 이해하지 못한 본문을
     // "미결 주문 없음"으로 읽지 않는다. 그 빈 목록이 "전부 취소됨"과
     // "기존 TP/SL 없음"으로 번진다.
@@ -2069,7 +2084,26 @@ export async function findOrderByClientId(
       symbol: sym,
       origClientOrderId: clientOrderId,
     });
-    return { found: !!d?.orderId, order: d };
+    // ── 200인데 `orderId`가 없으면 **"없다"가 아니라 "못 읽었다"다** ──
+    //
+    // 이 엔드포인트는 주문이 없으면 **오류 -2013**을 준다(아래 catch가
+    // 받는다). 그러니 200을 받고도 번호가 안 보이는 것은 응답 모양이
+    // 바뀌었거나 중간에서 뭔가 끼어든 것이지, 주문이 없다는 뜻이 아니다.
+    //
+    // 예전에는 `!!d?.orderId`라서 그 경우가 조용히 `found: false`가 됐다.
+    // 그 값의 뜻은 호출부가 정한다 — `orderExecutor`의 중복 확인은
+    // "아직 안 나갔다"로 읽고 **같은 자리에 주문을 보낸다.** 한 번이면
+    // 중복 주문이다.
+    //
+    // 그래서 던진다. 이 함수의 계약은 호출부 주석이 이미 적어 두었다:
+    // "findOrderByClientId는 '없음'(-2013)만 found:false로 돌려주고 그 외
+    //  오류는 던진다. 던진 것은 조회 실패이지 주문 없음이 아니다."
+    // 호출부 다섯 곳이 전부 그 던짐을 `ok: false`나 주문 중단으로 받는다.
+    const id = d?.orderId;
+    if (id == null || String(id).trim() === '') {
+      throw new Error('주문 조회 응답에서 orderId를 읽지 못했습니다 — 존재 여부 확인 불가');
+    }
+    return { found: true, order: d };
   } catch (e: any) {
     const msg = String(e?.message || e);
     // -2013 = Order does not exist → 아직 안 나감
@@ -2090,9 +2124,15 @@ export async function findOrderByClientId(
     if (!/-2015|-2014|-1022|API-key|Invalid API|permissions/i.test(msg)) throw e;
 
     try {
+      // ★ 여기서 `found: false`는 **"그 주문은 안 나갔다"**는 뜻이고,
+      //   호출부는 그 말을 믿고 **같은 자리에 다시 보낸다.** 그래서 이
+      //   두 목록은 "배열로 읽혔을 때만" 근거가 된다. 배열이 아니면
+      //   목록을 못 본 것이고, 못 본 것은 '없음'이 아니다 — 던져서
+      //   바깥의 판단 불가 경로로 보낸다. (예전에는 `? x : []`라서
+      //   모양이 바뀐 응답 하나가 조용히 '안 나갔다'가 됐다.)
       const open = await fapiSigned('GET', '/fapi/v1/openOrders', key, secret, testnet, { symbol: sym });
-      const hitOpen = (Array.isArray(open) ? open : [])
-        .find((o: any) => String(o?.clientOrderId) === clientOrderId);
+      if (!Array.isArray(open)) throw new Error('미체결 목록이 배열이 아닙니다 — 중복 확인 불가');
+      const hitOpen = open.find((o: any) => String(o?.clientOrderId) === clientOrderId);
       if (hitOpen) return { found: true, order: hitOpen };
 
       // 미체결에 없다고 '없음'이 아니다 — 이미 체결됐을 수 있다.
@@ -2100,8 +2140,8 @@ export async function findOrderByClientId(
       const recent = await fapiSigned('GET', '/fapi/v1/allOrders', key, secret, testnet, {
         symbol: sym, limit: 100,
       });
-      const hit = (Array.isArray(recent) ? recent : [])
-        .find((o: any) => String(o?.clientOrderId) === clientOrderId);
+      if (!Array.isArray(recent)) throw new Error('최근 주문 목록이 배열이 아닙니다 — 중복 확인 불가');
+      const hit = recent.find((o: any) => String(o?.clientOrderId) === clientOrderId);
       return hit ? { found: true, order: hit } : { found: false };
     } catch (e2: any) {
       // 두 문 다 막혔다 — 이제는 정말 판단 불가다. 원래 오류를 그대로
