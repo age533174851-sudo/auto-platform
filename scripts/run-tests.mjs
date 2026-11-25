@@ -168,6 +168,7 @@ import { runSizeInputTests } from './src/lib/trading/sizeInput.test';
 import { runCtaVerdictTests } from './src/lib/trading/ctaVerdict.test';
 import { runPaperOrderReviewTests } from './src/lib/trading/paperOrderReview.test';
 import { runPaperCloseReviewTests } from './src/lib/trading/paperCloseReview.test';
+import { runPaperChallengeSweepRouteTests } from './src/lib/trading/paperChallengeSweepRoute.test';
 import { runIndicatorsTests } from './src/lib/trading/indicators.test';
 import { runPaperChallengeApiTests } from './src/lib/engine/paperChallengeApi.test';
 import { runPaperDepositTests } from './src/lib/engine/paperDeposit.test';
@@ -516,7 +517,7 @@ runMigrationPlanTests(); runPaperScopeTests(); runMigrationAdoptionTests(); runP
 runPaperCapabilityTests(); runLegacyLedgerTests(); runOrderBookTests(); runChallengeDisplayTests(); runPositionSizingTests(); runGameMoneyTests(); runCandleSeriesTests(); runIndicatorsTests();
 runStreamEndpointTests(); runMarketStatsTests(); runPaperAvailableTests(); runStopPresetTests(); runChartLoadStateTests(); runSubmitGateTests(); runTradeIntentTests(); runPositionScopeTests();
 runMarketDataContractTests(); runRankingTests(); runInstrumentFieldTests(); runInstrumentRouteTests(); runMarketInstrumentTests(); runSizeInputTests(); runCtaVerdictTests(); runPaperOrderReviewTests();
-runPaperCloseReviewTests(); runPaperDepositTests(); runPaperSpotHoldingsTests(); runTradeContextTests(); runSellPlanTests(); runProductRegistryTests(); runVenueSpecTests(); runSpotPrecisionTests();
+runPaperCloseReviewTests(); runPaperChallengeSweepRouteTests(); runPaperDepositTests(); runPaperSpotHoldingsTests(); runTradeContextTests(); runSellPlanTests(); runProductRegistryTests(); runVenueSpecTests(); runSpotPrecisionTests();
 runMigrationStatusTests(); runWalletTruthTests(); runSmokePlanTests(); runSmokeRunTests(); runCancelRunTests(); runPaperMultiBotTests(); runFeedbackRedactTests(); runFeedbackTicketTests();
 runCachedReadTests(); runFeedbackContextTests(); runProtectiveOrderSupportTests(); runRunSummaryTests(); runExposureAttestationTests(); runExitPolicyTests(); runRunRequestTests(); runBacktestVerdictTests();
 runAiResultSourceTests(); runReconcilePlanTests(); runPersistentRuntimeTests(); runWorkerPlanTests(); runWorkerIdentityTests(); runRuntimeHealthTests(); runSchedulerReportTests(); runDataLocationTests();
