@@ -7,8 +7,12 @@ import { defaultPaperAccountId } from './paperScope';
 
 export interface RiskContext {
   config: RiskConfig;
-  currentOpenRisk: number;
-  consecutiveLosses: number;   // Veto의 CONSECUTIVE_LOSSES 판정용    // 현재 열린 포지션들의 합산 위험액 ($)
+  /**
+   * 현재 열린 포지션들의 합산 위험액($). **null은 '못 읽음'이다** — 0으로
+   * 적으면 planPosition의 전체 위험 상한이 경고 없이 통과한다.
+   */
+  currentOpenRisk: number | null;
+  consecutiveLosses: number;   // Veto의 CONSECUTIVE_LOSSES 판정용
   source: 'exchange' | 'paper' | 'fallback';
   warnings: string[];
 }
@@ -311,20 +315,41 @@ export async function buildRiskContext(
   }
 
   // ── 4) 현재 열린 위험 (승인된 계획 중 아직 청산 안 된 것) ──
-  let currentOpenRisk = 0;
+  //
+  // **못 읽은 것을 0으로 남기지 않는다.** 예전에는 오류를 받지 않고 예외도
+  // 삼켜서, 조회가 실패하면 0이 남았다 — 전체 위험 상한(TOTAL_RISK_LIMIT)이
+  // 한도까지 차 있어도 경고 없이 통과하는 값이다.
+  let currentOpenRisk: number | null = null;
   if (sb && opts.userId) {
     try {
       const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
-      const { data } = await sb
+      const { data, error } = await sb
         .from('position_plans')
         .select('risk_amount')
         .eq('user_id', opts.userId)
         .eq('approved', true)
         .gte('created_at', since);
-      if (Array.isArray(data)) {
-        currentOpenRisk = data.reduce((a: number, r: any) => a + (Number(r.risk_amount) || 0), 0);
+      if (error) {
+        warnings.push(`열린 위험을 확인하지 못했습니다 — 전체 위험 한도를 평가할 수 없습니다 (${error.message || '조회 오류'})`);
+      } else if (!Array.isArray(data)) {
+        warnings.push('열린 위험을 확인하지 못했습니다 — 조회 결과가 배열이 아닙니다');
+      } else {
+        let sum = 0;
+        let unreadable = 0;
+        for (const r of data) {
+          // null도 '못 읽음'이다 — Number(null)은 0이라 따로 본다.
+          const raw = (r as any)?.risk_amount;
+          const v = raw == null || raw === '' ? NaN : Number(raw);
+          if (Number.isFinite(v)) sum += v; else unreadable++;
+        }
+        if (unreadable === 0) currentOpenRisk = sum;
+        else warnings.push(`열린 위험을 확인하지 못했습니다 — 위험액을 읽을 수 없는 승인 계획 ${unreadable}건`);
       }
-    } catch { /* 없으면 0 */ }
+    } catch (e: any) {
+      warnings.push(`열린 위험을 확인하지 못했습니다 — ${e?.message || e}`);
+    }
+  } else {
+    warnings.push('사용자 미지정 — 열린 위험을 확인할 수 없습니다');
   }
 
   // ── 연속 손실 (Veto 입력) ──

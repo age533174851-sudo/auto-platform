@@ -13,6 +13,7 @@ export type RejectCode =
   | 'DAILY_LOSS_LIMIT'
   | 'DAILY_PNL_UNKNOWN'
   | 'TOTAL_RISK_LIMIT'
+  | 'OPEN_RISK_UNKNOWN'
   | 'INVALID_STOP'
   | 'LIQUIDATION_BEFORE_STOP'
   | 'INSUFFICIENT_MARGIN'
@@ -122,7 +123,13 @@ function reject(code: RejectCode, reason: string, symbol: string, side: 'LONG' |
   };
 }
 
-export function planPosition(signal: StandardSignal, cfg: RiskConfig, currentOpenRisk = 0): PositionPlan {
+/**
+ * @param currentOpenRisk 이미 열린 위험액($). **null은 '못 읽음'이다** —
+ *        0('열린 위험 없음')과 다르다. 생략하면 0(백테스트 등 기존 호출부).
+ */
+export function planPosition(
+  signal: StandardSignal, cfg: RiskConfig, currentOpenRisk: number | null = 0,
+): PositionPlan {
   const notes: string[] = [];
   const side: 'LONG' | 'SHORT' = signal.signal === 'SHORT' ? 'SHORT' : 'LONG';
   const bucket: StrategyBucket = signal.bucket || 'swing';
@@ -220,6 +227,14 @@ export function planPosition(signal: StandardSignal, cfg: RiskConfig, currentOpe
 
   // ── 2) 전체 동시 위험 상한 ──
   const maxAccountRisk = cfg.accountEquity * ((cfg.maxAccountRiskPct ?? 5) / 100);
+  // **열린 위험을 모르면 이 상한을 평가할 수 없다.** 0을 넣으면 이미 한도까지
+  // 차 있어도 통과하고, NaN을 넣으면 아래 비교가 false라 역시 통과한다.
+  if (currentOpenRisk === null || !Number.isFinite(currentOpenRisk)) {
+    return reject('OPEN_RISK_UNKNOWN',
+      '이미 열린 위험액을 확인하지 못해 전체 위험 한도를 평가할 수 없습니다 — '
+      + '한도를 모르는 채로는 신규 진입하지 않습니다',
+      signal.symbol, side, notes, { riskAmount });
+  }
   if (currentOpenRisk + riskAmount > maxAccountRisk) {
     return reject('TOTAL_RISK_LIMIT',
       `전체 위험 한도 초과 (보유 $${currentOpenRisk.toFixed(0)} + 신규 $${riskAmount.toFixed(0)} > 한도 $${maxAccountRisk.toFixed(0)})`,
