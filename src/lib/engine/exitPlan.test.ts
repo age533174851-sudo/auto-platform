@@ -58,6 +58,29 @@ export function runExitPlanTests() {
     }
   });
 
+  test('0.005 단위에서 분할 수량을 올림하지 않고 정확히 내린다', () => {
+    // 0.355 * 30% = 0.1065 → 0.005 단위로 0.105 (기존 로직은 0.10으로 잘못 반올림)
+    const p = buildExitPlan({ ...base, quantity: 0.355, qtyStep: 0.005 });
+    const partials = p.orders.filter(o => o.kind === 'PARTIAL_TP');
+    eq(partials.length, 2);
+    for (const o of partials) {
+      close(o.quantity ?? 0, 0.105, 1e-9, '0.005 단위 수량 계산 오류');
+      const units = (o.quantity ?? 0) / 0.005;
+      close(units, Math.round(units), 1e-9, '거래소 단위의 정수배가 아니다');
+    }
+  });
+
+  test('0.0025 및 지수 표기 step도 정확히 내린다', () => {
+    for (const step of [0.0025, 5e-7]) {
+      const p = buildExitPlan({ ...base, quantity: 0.37, qtyStep: step });
+      for (const o of p.orders.filter(o => o.kind === 'PARTIAL_TP')) {
+        const q = o.quantity ?? 0;
+        assert(q <= 0.37 * 0.3 + 1e-9, '분할 수량을 올렸다');
+        close(q / step, Math.round(q / step), 1e-6, '단위의 정수배가 아니다');
+      }
+    }
+  });
+
   test('최소 주문 수량 미만인 분할은 건너뛰고 이유를 남긴다', () => {
     // 0.003 * 30% = 0.0009 < minQty 0.001
     const p = buildExitPlan({ ...base, quantity: 0.003, qtyStep: 0.001, minQty: 0.001 });
