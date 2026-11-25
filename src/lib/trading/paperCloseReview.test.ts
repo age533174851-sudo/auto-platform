@@ -22,6 +22,7 @@ import {
   closeReviewReduce, closeRows, sameClose,
   type ClosePositionView, type CloseReviewEnv, type CloseReviewEvent, type CloseReviewState,
 } from './paperCloseReview';
+import { runPaperChallengeSweepRouteTests } from './paperChallengeSweepRoute.test';
 
 const pos = (id: string, o: Partial<ClosePositionView> = {}): ClosePositionView => ({
   id, symbol: 'ETHUSDT', side: 'LONG',
@@ -285,6 +286,11 @@ export function runPaperCloseReviewTests() {
   // 규칙이다.
   closeRouteFacts();
   modifyRouteFacts();
+
+  // 같은 모의 장부의 **정리 실행자**. 이 자리에서 부르는 이유: 새 시험 파일을
+  // `scripts/run-tests.mjs`에 올리면 그 파일을 이미 잡은 열린 PR들과
+  // 겹친다. 그쪽이 합쳐진 뒤에는 러너로 옮겨도 된다.
+  runPaperChallengeSweepRouteTests();
 }
 
 /** 실제 라우트 핸들러를 가짜 DB에 붙여 한 번 부른다 */
