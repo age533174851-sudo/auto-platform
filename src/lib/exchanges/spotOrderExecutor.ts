@@ -134,10 +134,25 @@ export async function placeSpotOrder(sb: any, args: SpotOrderArgs): Promise<Spot
   }
 
   // ── 연결 소유권 ──
-  const { data: conn } = await (sb.from('exchange_connections') as any)
+  //
+  // **조회 실패를 "연결 없음"으로 적지 않는다.**
+  //
+  // 실패하면 `data`가 null이다. 그 null을 "행이 없음"과 같이 읽으면 사용자는
+  // 「찾을 수 없거나 본인의 연결이 아닙니다」를 받는다 — 연결은 있고 DB를
+  // 못 읽었을 뿐인데. 주문이 안 나가는 쪽이라 안전 구멍은 아니지만
+  // **거짓말**이고, 그 말을 믿은 사용자는 키를 다시 발급하거나 연결을
+  // 다시 만든다. 못 여는 불편에 **헛수고까지** 얹는 것이다.
+  //
+  // 이 저장소가 #718 · #719 · #720 · #742에서 네 번 고친 같은 모양이다.
+  const connRes = await (sb.from('exchange_connections') as any)
     .select('id, exchange_id, api_key, api_secret_enc, encrypted_secret, has_withdrawal, is_testnet')
     .eq('id', args.connectionId).eq('user_id', args.userId).maybeSingle();
 
+  if (connRes?.error) {
+    return bad('connection_unreadable',
+      '거래소 연결 정보를 읽지 못했습니다 — 연결이 없다는 뜻이 아닙니다');
+  }
+  const conn = connRes?.data;
   if (!conn) return bad('connection_not_found', '거래소 연결을 찾을 수 없거나 본인의 연결이 아닙니다');
 
   const exchange = String(conn.exchange_id || '').toLowerCase();

@@ -18,7 +18,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { timingSafeEqual } from 'crypto';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/server';
 import {
-  listActiveWatches, updateWatchStop, touchWatch, closeWatch,
+  listActiveWatches, updateWatchStop, touchWatch, closeWatchWithRetry,
   CHECK_INTERVAL_MIN, type Watch,
 } from '@/lib/strategies/watchStore';
 import { updateTrailing, checkReserved } from '@/lib/strategies/spotOrderPlan';
@@ -62,7 +62,7 @@ async function runTick(sb: any, userId?: string) {
   const prices = await fetchPrices(Array.from(new Set(watches.map(w => w.symbol))));
 
   const results: any[] = [];
-  let moved = 0, triggered = 0, ordered = 0, skipped = 0;
+  let moved = 0, triggered = 0, ordered = 0, skipped = 0, notClosed = 0;
 
   for (const w of watches) {
     const price = prices.get(w.symbol) ?? null;
@@ -97,6 +97,7 @@ async function runTick(sb: any, userId?: string) {
       triggered++;
       const r = await fire(sb, w, price, u.note);
       if (r.ok) ordered++;
+      if (!r.closed) notClosed++;
       results.push(r.entry);
       continue;
     }
@@ -121,12 +122,15 @@ async function runTick(sb: any, userId?: string) {
     triggered++;
     const r = await fire(sb, w, price, c.reason);
     if (r.ok) ordered++;
+    if (!r.closed) notClosed++;
     results.push(r.entry);
   }
 
   return {
     checked: watches.length,
-    moved, triggered, ordered, skipped,
+    // **닫지 못한 감시 수를 값으로 내보낸다.** 이 숫자가 0이 아니면
+    // 다음 주기에 같은 감시가 또 발동할 수 있다는 뜻이다.
+    moved, triggered, ordered, skipped, notClosed,
     tookMs: Date.now() - started,
     checkIntervalMin: CHECK_INTERVAL_MIN,
     results,
@@ -149,17 +153,26 @@ async function fire(sb: any, w: Watch, price: number, why: string) {
 
   // 실패해도 되살리지 않는다. 되살리면 다음 주기에 또 시도하고,
   // 그 사이 가격이 더 내려가 훨씬 나쁜 값에 팔린다.
-  await closeWatch(
+  //
+  // **닫혔는지를 확인한다.** 못 닫으면 행이 ACTIVE로 남아 다음 주기에
+  // 같은 감시가 또 발동하고, `clientOrderId`가 매번 달라서 거래소
+  // 멱등성도 그것을 막지 못한다 — 시장가 주문이 두 번 나간다.
+  // 닫기를 보장할 수는 없지만 **모른 채 넘어가지는 않는다.**
+  const closed = await closeWatchWithRetry(
     sb, w.id,
     r.ok ? 'TRIGGERED' : 'FAILED',
     `${why} / 주문: ${r.message}`);
 
   return {
     ok: r.ok,
+    closed: closed.ok,
     entry: {
       id: w.id, symbol: w.symbol,
-      action: r.ok ? 'ORDERED' : 'ORDER_FAILED',
+      // 주문은 나갔을 수도 있다 — 그래서 `ordered` 집계는 `ok`가 센다.
+      // 여기 `action`은 **다음 주기의 위험**을 말한다.
+      action: !closed.ok ? 'WATCH_NOT_CLOSED' : (r.ok ? 'ORDERED' : 'ORDER_FAILED'),
       price, reason: why, orderMessage: r.message,
+      ...(closed.ok ? {} : { watchCloseError: closed.reason }),
     },
   };
 }
