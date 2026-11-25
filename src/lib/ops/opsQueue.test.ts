@@ -5,7 +5,7 @@
 
 import { test, eq, assert } from '../../test/harness';
 import {
-  claimDecision, runOutcomeOf, CLAIM_TTL_MS, REQUEST_TTL_MS, type QueueRow,
+  claimDecision, claimUpdateGuardSql, runOutcomeOf, CLAIM_TTL_MS, REQUEST_TTL_MS, type QueueRow,
 } from './opsQueue';
 
 const NOW = 1_800_000_000_000;
@@ -74,7 +74,25 @@ export function runOpsQueueTests() {
     eq(claimDecision({ rows: [row({ status: 'DONE' }), row({ status: 'FAILED' })], me: 'r', nowMs: NOW }).code, 'NOTHING');
   });
 
-  // ── 결과 ──
+  // ── DB 선점은 읽은 시점의 판정만 믿지 않는다 ──
+  test('원자적 UPDATE가 PENDING만 새로 집고, 유효한 CLAIMED를 다시 집지 않는다', () => {
+    const sql = claimUpdateGuardSql();
+    assert(sql.includes("status = 'PENDING'"), sql);
+    assert(sql.includes("status = 'CLAIMED'"), sql);
+    assert(sql.includes("claimed_at <= now() - INTERVAL"), sql);
+    assert(sql.includes(`INTERVAL '${CLAIM_TTL_MS / 1000} seconds'`), sql);
+    // 예전 WHERE status IN ('PENDING','CLAIMED')은 두 실행기가 모두 성공했다.
+    assert(!/status\s+IN\s*\(\s*'PENDING'\s*,\s*'CLAIMED'\s*\)/i.test(sql), sql);
+  });
+
+  test('쓰기 시점에도 만료·명령 허용 목록·실계좌 승인 상태를 확인한다', () => {
+    const sql = claimUpdateGuardSql();
+    assert(sql.includes(`INTERVAL '${REQUEST_TTL_MS / 1000} seconds'`), sql);
+    assert(sql.includes("command IN ('DEPLOY', 'RECOVER', 'APPROVE_LIVE_SMALL')"), sql);
+    assert(sql.includes("approved IS TRUE"), sql);
+  });
+
+  // ── 결과 ─
 
   test('전부 성공해야 DONE이다', () => {
     const o = runOutcomeOf([{ step: '마이그레이션', ok: true, detail: '' }, { step: '워커', ok: true, detail: '' }]);
