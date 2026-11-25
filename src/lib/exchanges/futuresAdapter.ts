@@ -288,19 +288,25 @@ export async function futuresEquityUsd(
       return { equity: null, error: String(bal?.message || '잔고 조회 실패') };
     }
     const rows: any[] = Array.isArray(bal.balances) ? bal.balances : [];
+    // ★ **`|| 0`으로 채우지 않는다.** `getFuturesBalance`는
+    //   `parseFloat`로 읽으므로 칸이 없거나 숫자가 아니면 NaN이고,
+    //   `NaN || 0`은 0이다. 그러면 위 `Number.isFinite` 관문이 아무것도
+    //   못 막고 **못 읽은 잔고가 총자산 0원**으로 나간다 — 킬스위치가
+    //   그것을 낙폭 -100%로 읽는다. 하나라도 못 읽었으면 총자산을 모른다.
+    const equityOf = (b: any): number => Number(b?.balance) + Number(b?.unrealizedPnl);
     const u = rows.find(b => b?.asset === 'USDT');
     if (u) {
-      const v = Number(u.balance || 0) + Number(u.unrealizedPnl || 0);
+      const v = equityOf(u);
       return Number.isFinite(v)
         ? { equity: v, error: null }
-        : { equity: null, error: 'USDT 잔고를 숫자로 읽지 못했습니다' };
+        : { equity: null, error: 'USDT 잔고 또는 미실현 손익을 숫자로 읽지 못했습니다 — 0원이라는 뜻이 아닙니다' };
     }
     if (rows.length === 0) {
       // **빈 목록을 0으로 읽지 않는다.** 권한이 없거나 응답 모양이
       // 바뀌었을 때도 빈 배열이 온다.
       return { equity: null, error: '잔고 목록이 비어 있습니다 — 0이라는 뜻이 아닙니다' };
     }
-    const sum = rows.reduce((a, b) => a + Number(b?.balance || 0) + Number(b?.unrealizedPnl || 0), 0);
+    const sum = rows.reduce((a, b) => a + equityOf(b), 0);
     return Number.isFinite(sum) ? { equity: sum, error: null } : { equity: null, error: '잔고 합산 실패' };
   } catch (e: any) {
     return { equity: null, error: String(e?.message || e) };
