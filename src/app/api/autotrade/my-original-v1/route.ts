@@ -683,6 +683,9 @@ export async function POST(req: NextRequest) {
         position: { ok: before.ok, found: before.found, qty: before.qty },
         myStrategyId: STRATEGY_MY_ORIGINAL_V1,
         ownedIds: ownedProtectionIds,
+        // **못 읽은 회차를 "번호 없음"으로 넘기지 않는다.** 그러면 내
+        // 보호주문이 불명으로 분류되고, 그 위로 진입이 나간다.
+        ownedIdsKnown: owned.idsKnown,
       });
       lifecycle.flatCleanup = {
         code: flat.code, ok: flat.ok, blockEntry: flat.blockEntry,

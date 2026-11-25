@@ -13,6 +13,7 @@
 
 import { test, eq, assert } from '../../test/harness';
 import { flatCleanupPlan, flatCleanupVerdict } from './flatCleanup';
+import { loadOwnedProtectionIds } from './protectionCleanup';
 import { cancelLedger } from './protectionLedger';
 import { ownedClientOrderId } from './orderOwnership';
 
@@ -35,6 +36,20 @@ const order = (id: string, text: string) => ({
   initial: { contract: 'BTC_USDT', size: -1, price: '0', reduce_only: true, text },
   trigger: { price: '60000', rule: 1 },
 });
+
+/**
+ * `loadOwnedProtectionIds`가 쓰는 Supabase 체인만 흉내 낸다.
+ *
+ * `limit()`이 실제 조회다 — 거기까지 가야 `onRead`가 불린다. 그래서
+ * "체인을 만들었다"와 "장부를 읽었다"를 구별할 수 있다.
+ */
+const chain = (reply: { data: any; error: any }, onRead?: () => void): any => {
+  const c: any = {
+    select: () => c, eq: () => c, order: () => c,
+    limit: async () => { onRead?.(); return reply; },
+  };
+  return c;
+};
 
 /** 취소가 전부 확인된 장부 */
 const confirmed = (ids: string[]) => cancelLedger({
@@ -220,5 +235,115 @@ export function runFlatCleanupTests() {
     const numeric = { id: Number(SL_ID), initial: { text: myText('STOP_LOSS') }, trigger: {} };
     const plan = flatCleanupPlan({ position: FLAT, orders: [numeric], myStrategyId: MY });
     eq(plan.cancel.length, 0);
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // 소유 번호를 **못 읽은** 회차 — 0건과 같지 않다
+  // ══════════════════════════════════════════════════════════
+  //
+  //   `loadOwnedProtectionIds`는 `live_orders`에서 걸어 둔 보호주문 번호를
+  //   읽는다. 그 조회가 실패하면 빈 배열이 나오고, 그러면 **내 주문이
+  //   UNKNOWN으로 분류되어 `keep`에 남는다.** 그 상태의 판정이
+  //   `NOTHING_TO_DO`(blockEntry: false)여서 신규 진입이 그 위로 나갔다.
+  //
+  //   이 파일 머리말의 규칙 그대로다: "목록을 못 읽었거나 취소를 확인
+  //   못 했으면 신규 진입을 막는다." 소유 번호 목록도 그 목록이다.
+
+  test('★ 소유 번호를 못 읽었는데 불명 주문이 남아 있으면 신규 진입을 막는다', () => {
+    const plan = flatCleanupPlan({
+      position: FLAT, orders: [order(SL_ID, 'api')], myStrategyId: MY,
+      ownedIds: [], ownedIdsKnown: false,
+    });
+    eq(plan.blockEntry, true,
+      '★ 내 것일 수도 있는 보호주문 위로 신규 진입이 나갔다');
+    eq(plan.cancel.length, 0, '모르는 주문을 취소하지도 않는다');
+    assert(plan.reason.includes('읽지 못'), plan.reason);
+  });
+
+  test('★ 그 판정이 CLEAN으로 뒤집히지 않는다', () => {
+    const plan = flatCleanupPlan({
+      position: FLAT, orders: [order(SL_ID, 'api')], myStrategyId: MY,
+      ownedIds: [], ownedIdsKnown: false,
+    });
+    const v = flatCleanupVerdict({ plan, ledger: null });
+    eq(v.ok, false);
+    eq(v.blockEntry, true, '★ 최종 판정이 진입을 열었다');
+    eq(v.code, 'OWNERSHIP_UNKNOWN');
+  });
+
+  test('못 읽었어도 **남은 주문이 없으면** 막지 않는다', () => {
+    // 치울 것도 없고 모를 것도 없다. 여기서 막으면 영원히 못 여는 상태가 된다.
+    const plan = flatCleanupPlan({
+      position: FLAT, orders: [], myStrategyId: MY,
+      ownedIds: [], ownedIdsKnown: false,
+    });
+    eq(plan.blockEntry, false);
+    eq(plan.code, 'NOTHING_TO_DO');
+    eq(flatCleanupVerdict({ plan, ledger: null }).blockEntry, false);
+  });
+
+  test('못 읽었어도 남은 것이 **남의 것으로 증명되면** 막지 않는다', () => {
+    // FOREIGN은 소유 번호와 무관하게 확정이다 — 그것 때문에 영원히 막으면
+    // 남의 주문 하나가 내 전략을 멈춘다.
+    const plan = flatCleanupPlan({
+      position: FLAT, orders: [order(TP_ID, myText('TAKE_PROFIT', 'someone-else'))],
+      myStrategyId: MY, ownedIds: [], ownedIdsKnown: false,
+    });
+    eq(plan.keep.length, 1);
+    eq(plan.keep[0].class, 'FOREIGN');
+    eq(plan.blockEntry, false);
+  });
+
+  test('읽었는데 정말 0건이면 예전과 같다 (하위 호환)', () => {
+    const plan = flatCleanupPlan({
+      position: FLAT, orders: [order(SL_ID, 'api')], myStrategyId: MY,
+      ownedIds: [], ownedIdsKnown: true,
+    });
+    eq(plan.blockEntry, false, '읽은 결과가 0건인 것은 모르는 것이 아니다');
+    const noFlag = flatCleanupPlan({
+      position: FLAT, orders: [order(SL_ID, 'api')], myStrategyId: MY, ownedIds: [],
+    });
+    eq(noFlag.blockEntry, false, '플래그를 안 주면 "읽었다"로 본다');
+  });
+
+  test('★ 소유 번호를 못 읽었어도 **취소는 번호로만** 한다', () => {
+    // 막는 것과 지우는 것은 다른 질문이다. 모르면 막되, 모른다고
+    // 아무 번호나 지우지 않는다 — Cancel All 금지가 여기서도 그대로다.
+    const plan = flatCleanupPlan({
+      position: FLAT, orders: [order(SL_ID, myText('STOP_LOSS'))], myStrategyId: MY,
+      ownedIds: [], ownedIdsKnown: false,
+    });
+    eq(plan.cancel.length, 0, '★ 모르는 회차에 취소가 나갔다');
+  });
+
+  console.log('[고아 정리 — 소유 번호 조회 실패]');
+
+  test('★ 조회가 실패하면 idsKnown이 false다 — 빈 배열과 구별된다', async () => {
+    const failing: any = { from: () => chain({ data: null, error: { message: '조회 실패' } }) };
+    const r = await loadOwnedProtectionIds(failing, { connectionId: 'c1', symbol: 'BTCUSDT' });
+    eq(r.ids.length, 0);
+    eq(r.idsKnown, false, '★ 못 읽은 것이 "번호 없음"과 같아졌다');
+  });
+
+  test('★ 조회가 던져도 idsKnown이 false다', async () => {
+    const thrower: any = { from: () => { throw new Error('연결 끊김'); } };
+    const r = await loadOwnedProtectionIds(thrower, { connectionId: 'c1', symbol: 'BTCUSDT' });
+    eq(r.idsKnown, false);
+  });
+
+  test('읽혔으면 idsKnown이 true다 — 0건이어도 그렇다', async () => {
+    const empty: any = { from: () => chain({ data: [], error: null }) };
+    const r = await loadOwnedProtectionIds(empty, { connectionId: 'c1', symbol: 'BTCUSDT' });
+    eq(r.ids.length, 0);
+    eq(r.idsKnown, true);
+  });
+
+  test('연결도 사용자도 없으면 장부를 읽지 않는다 — 그때도 "모른다"다', async () => {
+    let awaited = false;
+    const watch: any = { from: () => chain({ data: [], error: null }, () => { awaited = true; }) };
+    const r = await loadOwnedProtectionIds(watch, { symbol: 'BTCUSDT' });
+    eq(awaited, false, '누구 것인지 모르는 채로 장부를 읽지 않는다');
+    eq(r.idsKnown, false, '묻지 않았으면 "없다"가 아니라 "모른다"다');
+    eq(r.ids.length, 0);
   });
 }
