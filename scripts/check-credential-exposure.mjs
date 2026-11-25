@@ -44,7 +44,35 @@ function walk(dir, out = []) {
   return out;
 }
 
-const files = ROOTS.flatMap((r) => { try { return walk(r); } catch { return []; } });
+/**
+ * 뿌리마다 **따로** 센다 — 못 걸은 뿌리를 0으로 적지 않는다.
+ *
+ * 전에는 뿌리 전체를 한 번에 펼치면서 걷기 실패를 빈 배열로 삼켰다. 뿌리가
+ * 둘(`src` · `worker/src`)이므로 `worker/src`가 사라지거나 옮겨지면
+ * `src`가 내놓는 1003개로 아래 `files.length === 0`을 통과하고, 워커 파일을
+ * **한 개도 안 본 채** "✅ 자격증명 노출"이 찍혔다. 실측했다 — 뿌리 하나를
+ * 없애고 돌리면 종료코드 0이고 개수만 1008에서 1003으로 줄어서, 그 숫자를
+ * 읽는 사람이 없으면 아무도 모른다.
+ *
+ * 하필 워커가 거래소 키를 실제로 쥐는 쪽이고 자기 `crypto.ts`를 따로 가진다.
+ */
+const perRoot = ROOTS.map((root) => {
+  try {
+    return { root, files: walk(root), failure: null };
+  } catch (e) {
+    const code = e && typeof e === 'object' && 'code' in e ? String(e.code) : String(e);
+    return { root, files: [], failure: code.slice(0, 80) };
+  }
+});
+for (const { root, files: found, failure } of perRoot) {
+  if (failure !== null) {
+    err(`${root}: 뿌리를 걷지 못했습니다 (${failure}) — 못 본 것은 통과가 아닙니다`);
+  } else if (found.length === 0) {
+    err(`${root}: 검사 대상 .ts 파일이 0개입니다 — 경로가 바뀌었는지 확인해야 합니다`);
+  }
+}
+
+const files = perRoot.flatMap((p) => p.files);
 if (files.length === 0) {
   err('검사할 파일을 하나도 찾지 못했습니다 — 경로가 바뀌었는지 확인해야 합니다');
 }
@@ -105,5 +133,6 @@ if (errors.length) {
   for (const e of errors) console.error(`❌ ${e}`);
   process.exit(1);
 }
-console.log(`✅ 자격증명 노출 — ${scanned}개 파일에서 키·시크릿·토큰 값의 조각을 만들거나`
+const tally = perRoot.map((p) => `${p.root} ${p.files.length}개`).join(' · ');
+console.log(`✅ 자격증명 노출 — ${scanned}개 파일(${tally})에서 키·시크릿·토큰 값의 조각을 만들거나`
   + ' 로그·응답에 담는 자리가 없습니다 (지문만 씁니다)');
