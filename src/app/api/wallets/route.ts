@@ -10,6 +10,7 @@
 // "한쪽이라도 모르면 null"로 처리한다.
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/server';
+import { connectionLookupVerdict } from '@/lib/exchanges/connectionLookup';
 import { readConnectionWallet } from '@/lib/markets/readWallet';
 
 export const dynamic = 'force-dynamic';
@@ -26,11 +27,16 @@ export async function GET(req: NextRequest) {
   const connectionId = req.nextUrl.searchParams.get('connectionId');
   if (!connectionId) return NextResponse.json({ error: 'missing_connectionId' }, { status: 400 });
 
-  const { data: conn } = await (sb.from('exchange_connections') as any)
+  const { data: conn, error: connErr } = await (sb.from('exchange_connections') as any)
     .select('id, exchange_id, api_key, api_secret_enc, encrypted_secret, has_withdrawal, is_testnet')
     .eq('id', connectionId).eq('user_id', uid).maybeSingle();
 
-  if (!conn) return NextResponse.json({ error: 'connection_not_found' }, { status: 404 });
+  // **못 읽은 것을 "없다"로 적지 않는다.** 판정은 한 곳에 있다 —
+  // maybeSingle의 빈 응답만 0행이고, 오류는 전부 503이다.
+  const look = connectionLookupVerdict({ data: conn, error: connErr, shape: 'maybeSingle' });
+  if (look.kind !== 'FOUND') {
+    return NextResponse.json({ error: look.code, message: look.reason }, { status: look.status });
+  }
 
   // **조회는 readWallet 한 곳에 있다.** 지갑 개요(연결 여럿)가 같은
   // 함수를 쓴다 — 라우트 안에 두면 개요 쪽이 사본을 갖게 되고,

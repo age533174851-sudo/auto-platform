@@ -20,6 +20,7 @@ import {
   type SpotWallet, type FuturesWallet,
 } from './wallets';
 import { priceAssets } from './pricing';
+import { connectionLookupVerdict } from '../exchanges/connectionLookup';
 
 export interface WalletRead {
   /**
@@ -69,11 +70,16 @@ export async function readConnectionWallet(
 ): Promise<WalletRead> {
   if (!connectionId) return fail('', 'missing_connectionId', 400);
 
-  const { data: conn } = await (sb.from('exchange_connections') as any)
+  const { data: conn, error: connErr } = await (sb.from('exchange_connections') as any)
     .select('id, exchange_id, api_key, api_secret_enc, encrypted_secret, has_withdrawal, is_testnet')
     .eq('id', connectionId).eq('user_id', userId).maybeSingle();
 
-  if (!conn) return fail(connectionId, 'connection_not_found', 404);
+  // **이 파일의 머리글이 적어 둔 규칙을 첫 단계에서 지킨다.**
+  // 예전에는 `error`를 받지도 않고 `if (!conn)`으로 404를 돌려줬다 —
+  // DB가 죽어도 "그런 연결 없다"가 됐고, 이 한 곳을 `/api/wallets`와
+  // 지갑 개요·walletRead가 함께 지나므로 셋이 같이 거짓말을 했다.
+  const look = connectionLookupVerdict({ data: conn, error: connErr, shape: 'maybeSingle' });
+  if (look.kind !== 'FOUND') return fail(connectionId, look.code, look.status, look.reason);
 
   // 지원 거래소인가.
   //
