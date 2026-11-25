@@ -12,6 +12,22 @@ import { Card, Dot, Spark, Pill, Bdg, Toggle, AreaChart, WorldClock, Heatmap,
          DonutChart, MiniBar, GlobalSearch, getLeverageRec,
          LiquidationCalc, PositionSizer, RiskDashboard,
          InlineTVChart } from './SharedUI';
+import { SliderField } from '@/components/ui/SettingField';
+
+// 환전 통화별 숫자칸 범위.
+// ──────────────────────────────────────────────────────────────
+// 원화는 '만원' 단위, 달러·유로는 '백 단위'로 움직이는 게 보통이다 — 같은
+// 10,000을 입력해도 ₩1만과 $10,000은 자릿수가 다르다. 슬라이더에 공통
+// 범위를 주면 폰에서 한 칸이 수십만 원을 움직이거나(KRW) 수십 달러를
+// 움직이게 된다(USD). 그래서 '어디서 출발하는 통화인가'로 범위를 가른다.
+// 범위 밖에서 자릿수가 하나 어긋난 입력은 SliderField가 그대로 clamp해서
+// 들어 가므로, 의도한 값보다 10배 큰 송금이 조용히 통과하는 자리가 없다.
+function fxRangeFor(from: string): { min: number; max: number; step: number } {
+  if (from === 'KRW') return { min: 10_000, max: 10_000_000, step: 10_000 };
+  // USD · EUR · JPY 등. JPY는 KRW처럼 단위가 크지만 실제 리스트에는 KRW→JPY만
+  // 있어 fxAmount의 from이 JPY인 경우가 없다 — 그래서 여기서는 양쪽 한도만 넉넉히.
+  return { min: 10, max: 100_000, step: 10 };
+}
 
 
 const EXCHANGE_FUNDING:ExchangeFunding[] = [
@@ -94,7 +110,19 @@ function FundingPage({currency}:{currency:string}) {
                 {DESTS.map(d=><button key={d.id} onClick={()=>setToAcc(d.id)} style={{background:toAcc===d.id?T.acg:T.alt,color:toAcc===d.id?T.acl:T.txt,border:`1px solid ${toAcc===d.id?T.acl:T.border}`,borderRadius:8,padding:'7px 10px',fontSize:11,fontWeight:600,cursor:'pointer'}}>{d.icon} {d.label}</button>)}
               </div>
             </div>
-            <input type="number" value={amount} onChange={e=>setAmount(e.target.value)} placeholder="금액 입력 (₩)" style={{width:'100%',background:T.alt,border:`1px solid ${T.border}`,borderRadius:8,padding:'10px 12px',color:T.txt,fontSize:14,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',fontWeight:700,outline:'none',marginBottom:10}}/>
+            {/* 숫자칸 혼자였을 때는 폰에서 '1000000'을 치다 0 한 자리를 더 눌러도
+                알아채기 어려웠다. 슬라이더로 1만 단위로 끊어 감을 잡고, 숫자칸으로
+                정확히 넣고, 범위 밖 입력(1만 미만·1000만 초과)은 clamp가 들어 잡는다.
+                아래의 10만·50만·100만·전액 빠른 선택은 그대로 둔다 — 자주 쓰는 값은
+                슬라이더보다 두 번 두드리는 쪽이 빠르다. */}
+            <SliderField
+              label="이체 금액"
+              value={Number(amount) || 0}
+              unit="원"
+              min={10_000} max={10_000_000} step={10_000}
+              onChange={v => setAmount(v > 0 ? String(v) : '')}
+              hint="1만원 ~ 1,000만원. 더 큰 금액은 여러 번 나눠 보낸다."
+            />
             <div style={{display:'flex',gap:5,marginBottom:12}}>
               {['10만','50만','100만','전액'].map(v=><button key={v} onClick={()=>setAmount(v==='전액'?'5240000':v==='10만'?'100000':v==='50만'?'500000':'1000000')} style={{flex:1,background:T.alt,color:T.sub,border:`1px solid ${T.border}`,borderRadius:6,padding:'5px',fontSize:10,fontWeight:700,cursor:'pointer'}}>{v}</button>)}
             </div>
@@ -208,9 +236,24 @@ function FundingPage({currency}:{currency:string}) {
               <div style={{color:T.txt,fontSize:18,fontWeight:900,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>1 {fxPair.from} = {fxPair.rate.toFixed(4)} {fxPair.to}</div>
               <div style={{color:T.muted,fontSize:10,marginTop:2}}>수수료 {fxPair.fee}% · 실시간 (모의)</div>
             </div>
+            {/* 출발 통화가 KRW면 '만원' 단위로, USD·EUR면 '10단위'로 움직인다 —
+                같은 10,000이 ₩1만과 $10,000만큼 떨어진 값이기 때문. 범위는
+                fxRangeFor가 통화를 보고 정한다. */}
             <div style={{marginBottom:10}}>
-              <div style={{color:T.muted,fontSize:11,fontWeight:700,marginBottom:4}}>환전 금액 ({fxPair.from})</div>
-              <input type="number" value={fxAmount} onChange={e=>setFxAmount(e.target.value)} placeholder={`금액 입력 (${fxPair.from})`} style={{width:'100%',background:T.alt,border:`1px solid ${T.border}`,borderRadius:8,padding:'10px 12px',color:T.txt,fontSize:14,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',fontWeight:700,outline:'none'}}/>
+              <SliderField
+                label={`환전 금액 (${fxPair.from})`}
+                value={Number(fxAmount) || 0}
+                unit={fxPair.from}
+                min={fxRangeFor(fxPair.from).min}
+                max={fxRangeFor(fxPair.from).max}
+                step={fxRangeFor(fxPair.from).step}
+                onChange={v => setFxAmount(v > 0 ? String(v) : '')}
+                hint={
+                  fxPair.from === 'KRW'
+                    ? '1만원 ~ 1,000만원.'
+                    : `10 ~ 100,000 ${fxPair.from}.`
+                }
+              />
             </div>
             {fxAmount&&(
               <div style={{background:T.acg,border:`1px solid ${A(T.acl,'30')}`,borderRadius:10,padding:'12px 14px',marginBottom:12}}>
