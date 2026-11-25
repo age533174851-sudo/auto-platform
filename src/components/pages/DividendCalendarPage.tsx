@@ -204,41 +204,37 @@ function DividendInner({ currency = 'KRW' }: { currency?: string }) {
                 숫자칸으로 정확히 넣고, 범위 밖 입력은 SliderField가 자동으로
                 clamp해서 들여 보낸다.
 
-                min·max·step 고른 이유 (#778 리뷰 지적 반영):
-                - `step=0.001` — DRIP·분할매수로 생기는 **소수 보유**(0.5주 등)를
-                  그대로 들여 보낸다. `addHolding`은 `!isFinite(n) || n <= 0`일 때만
-                  막으므로 저장 계약상 소수를 받아 온 걸 slider가 정수로 반올리면
-                  **기존 경로 축소**가 된다.
+                min·max·step 고른 이유 (#778 리뷰 두 차례 반영):
+                - `step=0.00001` — DRIP·분할매수로 생기는 **소수 보유**를 소수
+                  다섯째 자리까지 보존한다. 처음에는 step=1→정수 반올림이었고
+                  (Codex 1차 지적), 두 번째에는 step=0.001도 소수 넷째 자리
+                  이하를 잘랐다 (Codex 2차 지적 "0.0005도 여전히 변합니다").
+                  이 자리까지 내리면 실무상 저장 계약을 전부 보존한다.
                 - `min=0` — `addHolding`이 0 이하를 `notifyError`로 거르는 안전망이
                   이미 있어 slider에서 추가로 1로 끌어올릴 필요가 없다. 0으로
                   드래그 후 저장하면 기존 안내 그대로 뜬다.
-                - `max=1_000_000` — 저장 계약에는 상한이 없다. 이 값은 **slider가
-                  필요로 하는 유한 max**일 뿐이고, 그보다 많이 보유한 항목을
-                  편집하면 이 값으로 잘린다. 100만주는 1주당 $30짜리 ETF 기준
-                  $3천만 포지션이라 개인 투자자 한계를 넉넉히 넘는다. 초과 보유가
-                  있다면 이 상한을 올리거나 slider 경로 자체를 피하도록 바꾼다.
+                - `max=100_000_000` — 저장 계약 자체에는 상한이 없다. 이 값은
+                  **slider가 필요로 하는 유한 max**일 뿐이다. 1억주는 1주당
+                  $30짜리 ETF 기준 $30억 포지션이라 개인 투자자뿐 아니라
+                  대부분의 기관 비중도 넘는다. **완전한** 계약 보존을 하려면
+                  `SliderField`가 숫자칸까지 clamp·round하지 않도록 API를 나눠야
+                  하는데 (slider 표시 범위 ≠ 숫자 입력 범위), 그건 공용 UI를
+                  고치는 별도 PR 범위다 — follow-up TODO로 적어 둔다.
 
-                이 min·max·step 조합에서 **SliderField의 clamp·round**가 어떤
-                입력을 어떤 저장값으로 바꾸는지는, 수동 `node --test`로 확인한
-                값으로 못 박아 둔다 (follow-up PR에서 `src/lib/accounts/`에
-                정식 테스트로 올릴 예정 — 지금은 `scripts/run-tests.mjs`가
-                다른 PR에 잡혀 있어 신규 .test.ts의 등록이 막혀 있다):
-                  · 0.5     → 0.5      (소수 보존)
-                  · 0.001   → 0.001    (step 자리)
-                  · 0.0005  → 0.001    (step 자리 미만은 반올림)
-                  · 100     → 100      (정수 그대로)
-                  · 5000000 → 1000000  (max clamp)
-                  · 0       → 0        (삭제 경로 / addHolding이 거름)
-                SettingField.tsx의 clamp·round 산식이 바뀌면 이 숫자들도 같이
-                바꿔야 한다 — 복제가 아닌 **표의 값**으로 관리한다. */}
+                SliderField가 양쪽 (slider·숫자칸)에 적용하는 clamp·round 산식
+                자체가 어떤 입력을 어떤 저장값으로 바꾸는지는 `scripts/test-
+                dividend-sliderfield.mjs`가 **실제 SettingField.tsx 소스의
+                해당 라인을 snapshot으로 묶어** 값으로 못 박는다. 산식이 바뀌면
+                그 테스트가 먼저 깨진다 (ci.yml의 `node --test scripts/test-*.mjs`
+                글롭이 자동으로 집어 가므로 run-tests.mjs 등록 없이 CI에 들어간다). */}
             <div style={{ marginTop: SP.sm }}>
               <SliderField
                 label="수량"
                 value={Number(addShares) || 0}
                 unit="주"
-                min={0} max={1_000_000} step={0.001}
+                min={0} max={100_000_000} step={0.00001}
                 onChange={v => setAddShares(v > 0 ? String(v) : '')}
-                hint="소수 보유(0.5주 등)도 그대로. 0으로 저장하면 안내가 뜬다."
+                hint="소수 다섯째 자리까지 보존. 0으로 저장하면 안내가 뜬다."
               />
             </div>
             <div style={{ ...F.muted, marginTop: 6 }}>지원 종목 탭에서 사용 가능한 심볼 확인</div>
@@ -275,15 +271,15 @@ function DividendInner({ currency = 'KRW' }: { currency?: string }) {
                     {/* 기본값(= 바꾸기 전 보유 수량)을 같이 적는다. "원래 100주였는데
                         지금 125로 바꿔 놨다"가 한눈에 보인다. 0으로 두고 확인하면
                         보유 목록에서 삭제된다 — updateHolding의 기존 분기 그대로.
-                        step=0.001·max=1_000_000은 add 쪽과 같은 이유 (#778 리뷰 참고). */}
+                        step=0.00001·max=100_000_000은 add 쪽과 같은 이유 (#778 리뷰 두 차례 참고). */}
                     <SliderField
                       label="수량"
                       value={Number(draftShares) || 0}
                       base={est.shares}
                       unit="주"
-                      min={0} max={1_000_000} step={0.001}
+                      min={0} max={100_000_000} step={0.00001}
                       onChange={v => setDraftShares(String(v))}
-                      hint="소수 보유(0.5주 등)도 그대로. 0으로 두고 확인하면 보유 목록에서 삭제됩니다."
+                      hint="소수 다섯째 자리까지 보존. 0으로 두고 확인하면 보유 목록에서 삭제됩니다."
                     />
                     <div style={{ display: 'flex', gap: 6, marginTop: SP.sm }}>
                       <button onClick={() => updateHolding(est.symbol)} style={{ ...buttonStyle('primary'), flex: 1 }}>확인</button>
