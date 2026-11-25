@@ -21,6 +21,22 @@ export interface AIPortfolioInput {
   riskTolerance: number;     // 위험허용도 0~100
 }
 
+/**
+ * 포트폴리오 설계 입력창의 **기본값**.
+ *
+ * 상수로 빼는 이유: 화면이 "이 값이 기본과 다릅니다"를 말하려면 기본이
+ * 무엇인지 알아야 한다. useState 안에만 숫자가 있으면 되돌리기 버튼이
+ * 자기 사본을 들게 되고, 둘이 어긋나면 **틀린 기본값을 알려준다.**
+ *
+ * `riskTolerance`는 범위 슬라이더(`<input type="range">`)로 이미
+ * 바로 다룰 수 있는 값이라 이번 PR에선 손대지 않는다 — 여기 기본은
+ * 숫자칸을 슬라이더로 바꾸는 두 값만 적는다.
+ */
+export const AI_PORTFOLIO_DEFAULTS = {
+  goal:    100_000_000, // 1억원 — 개인 투자자 평균 목표 범위의 낮은 끝
+  monthly:   1_000_000, // 월 100만원 — 보통 가계의 저축 가능선
+} as const;
+
 export interface AllocItem {
   symbol: string;
   name: string;
