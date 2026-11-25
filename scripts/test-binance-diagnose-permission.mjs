@@ -29,6 +29,7 @@ const readiness = load(compile('src/lib/engine/testnetReadiness.ts'), {
 });
 const verdict = load(compile('src/lib/engine/testnetDiagnoseVerdict.ts'));
 const evidence = load(compile('src/lib/engine/testnetVenueEvidence.ts'));
+const connLookup = load(compile('src/lib/exchanges/connectionLookup.ts'));
 
 function diagnose(storedPermission, testFuturesConnection, getFuturesBalance =
   async () => ({ success: true, balances: [], message: '0개 자산' })) {
@@ -51,6 +52,7 @@ function diagnose(storedPermission, testFuturesConnection, getFuturesBalance =
     '@/lib/engine/testnetReadiness': readiness,
     '@/lib/engine/testnetDiagnoseVerdict': verdict,
     '@/lib/engine/testnetVenueEvidence': evidence,
+    '@/lib/exchanges/connectionLookup': connLookup,
     '@/lib/strategies/profilePreset': { overrideOf: () => ({ leverage: 100 }) },
     '@/lib/exchanges/binanceFutures': {
       testFuturesConnection: async (_key, _secret, testnet) => {
