@@ -384,4 +384,45 @@ export function runFailureRecoveryTests() {
     eq(r.flatVerified, null, '못 읽은 것을 "0 확인"으로 적었다');
     eq(r.needsReconcile, true);
   });
+
+  // ── 바이낸스 5xx 본문에 code가 있으면 HTTP 상태가 사라진다 ──
+  //
+  //   binanceFutures.ts의 오류 문구는 본문에 msg가 있으면
+  //   `[${code}] ${msg}`만 남기고 **HTTP 상태를 버린다.** 그래서 바이낸스
+  //   5xx가 `{code:-1000, msg}`를 실어 오면 5xx 규칙(`HTTP 503` → 모름)은
+  //   닿지 않고 `[-1000] …`이 "거절 모양"으로 읽혔다 → REJECTED → 재시도.
+  //   바이낸스 공식 문서: 5XX는 "execution status is UNKNOWN and could have
+  //   been a success". 503 "Unknown error, please check your request or try
+  //   again later."도 같다. -1000의 이름 자체가 UNKNOWN이다.
+  console.log('[장애 복구 — 바이낸스 5xx + 본문 code]');
+
+  test('★ 바이낸스 -1000 UNKNOWN·"Unknown error" 문구는 거절이 아니다', () => {
+    for (const s of [
+      '[-1000] An unknown error occured while processing the request.',
+      '[-1000] Internal error',
+      '[-1000] Service unavailable',
+      '[0] Unknown error, please check your request or try again later.',
+    ]) {
+      const v = unknownResultVerdict(s);
+      assert(v.unknown, `결과 모름인데 거절로 읽힘: ${s}`);
+      eq(v.evidence, 'AMBIGUOUS_CODE', s);
+    }
+  });
+
+  test('★ 진짜 거절 코드는 그대로 거절이다 — 모름을 넓히다 재시도를 다 막지 않는다', () => {
+    for (const s of ['[-2019] Margin is insufficient.', '[-1111] Precision is over the maximum defined for this asset.',
+      '[-4164] Order\'s notional must be no smaller than 5']) {
+      eq(unknownResultVerdict(s).unknown, false, s);
+    }
+  });
+
+  test('★ 503 + [-1000]을 받은 주문은 대조 전까지 다시 보내지 않는다', () => {
+    // futuresPlaceOrder가 실제로 받는 문구 그대로다 (binanceFutures.ts의 `[code] msg`).
+    const v = unknownResultVerdict('[-1000] An unknown error occured while processing the request.');
+    eq(v.unknown, true, 'REJECTED로 읽히면 재시도가 열린다');
+    // 대조 조회가 실패하면 여전히 다시 보내지 않는다.
+    eq(reconcileDecision({ ok: false, found: false }).mayResend, false);
+    // 이미 나가 있었으면 다시 보내지 않는다 — 5xx 뒤 실제로 접수된 경우.
+    eq(reconcileDecision({ ok: true, found: true }).mayResend, false);
+  });
 }
