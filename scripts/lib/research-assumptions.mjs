@@ -16,6 +16,11 @@
 /** 연구·시뮬레이션 전용 모듈. 실행이 읽으면 안 된다 */
 export const RESEARCH_MODULES = [
   'simModel', 'profileMonteCarlo', 'profileSim', 'monteCarlo', 'edgeSweep',
+  // 연구 입력의 출처 기록(`src/lib/research/`). 실행은 이것을 읽지 않는다 —
+  // 출처 기록은 연구 성적표를 감사하기 위한 것이고, 주문 한 건도 거기에
+  // 기대지 않는다. `check-research-isolation.mjs` 가 `src/lib/research/` 의
+  // 파일이 전부 이 목록에 있는지 대조한다.
+  'barProvenance',
 ];
 
 /** 가정값의 이름들 — 잰 값이 아니라 넣은 값이다 */

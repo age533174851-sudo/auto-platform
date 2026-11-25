@@ -17,7 +17,7 @@
 // 연구는 좋은 전략을 찾는 공장이고, 운용은 검증된 전략을 돌리는 공장이다.
 // **연구 코드 한 곳이 깨졌다고 실제 돈 굴리는 엔진이 같이 멈추면 안 된다.**
 // 그래서 실행 경로가 연구 모듈을 import 하는 것 자체를 막는다.
-import { readFileSync, globSync } from 'node:fs';
+import { readFileSync, globSync, readdirSync, existsSync } from 'node:fs';
 
 /** 실제 돈이 움직이는 경로 */
 const EXECUTION_GLOBS = [
@@ -123,6 +123,54 @@ for (const f of MONEY_SCREENS) {
       }
     }
   });
+}
+
+// ── 연구 모듈이 **등록돼 있는가** ──
+//
+// 위 검사는 `RESEARCH_MODULES` 에 적힌 이름만 막는다. 그래서 **새 연구
+// 모듈을 만들고 그 목록에 적지 않으면 아무것도 막지 않는다** — 실행
+// 경로가 그것을 import 해도 이 검사는 조용히 통과한다. 목록이 손으로
+// 적는 것인 동안 그 구멍은 계속 열려 있다.
+//
+// `src/lib/research/` 는 연구 전용 디렉터리다. 거기 있는 파일은 **전부**
+// 그 목록에 있어야 한다. 이름이 없으면 실패다.
+//
+// `check-wiring.mjs` 와의 관계 — **처음 적은 것이 틀렸다.**
+//
+// 여기 "그쪽 검사의 WATCH_DIRS 에 넣지 않는다"고 적어 뒀었다. 그런데
+// 그 목록은 손으로 적는 것이 아니다. `src/lib` 를 읽어서 자동으로
+// 만든다. 그래서 `src/lib/research/` 를 만든 순간 **빠질 수 없게**
+// 감시에 들어왔고, 그 검사가 barProvenance.ts 를 고아로 잡았다
+// (#616 의 verify 빨강이 그것이었다).
+//
+// 그래서 그쪽에는 사유를 적은 면제로 들어가 있다. 그 면제는
+// 소비자가 생기는 순간 stale 검사가 지우라고 실패시킨다.
+//
+// 바뀌지 않는 것: 연구 모듈은 **제품 소비자가 0곳인 것이 정상이다**
+// (실행이 읽으면 안 되니까). 그 보증은 "아무도 안 부른다"가 아니라
+// **"실행이 못 부른다"** 이고, 그것을 보는 곳은 여기다.
+const RESEARCH_DIR = 'src/lib/research';
+if (existsSync(RESEARCH_DIR)) {
+  const names = readdirSync(RESEARCH_DIR)
+    .filter(f => f.endsWith('.ts') && !f.endsWith('.test.ts') && !f.endsWith('.d.ts'))
+    .map(f => f.replace(/\.ts$/, ''))
+    .sort();
+  // 디렉터리가 있는데 파일이 0개면 **통과가 아니다.** 0개를 보고 초록을
+  // 켜는 검사는 막는 것처럼 보이면서 아무것도 막지 않는다.
+  if (names.length === 0) {
+    err(`${RESEARCH_DIR}/ 에 연구 모듈이 하나도 없습니다 — 디렉터리를 지웠다면 이 규칙도 같이 지우세요`);
+  }
+  for (const n of names) {
+    if (!RESEARCH_MODULES.includes(n)) {
+      err(`${RESEARCH_DIR}/${n}.ts 가 RESEARCH_MODULES 에 없습니다`
+        + '\n     등록하지 않으면 실행 경로가 이것을 import 해도 이 검사가 통과합니다'
+        + '\n     scripts/lib/research-assumptions.mjs 의 RESEARCH_MODULES 에 '
+        + `'${n}' 을 추가하세요`);
+    }
+  }
+  if (bad === 0) {
+    console.log(`✅ 연구 모듈 ${names.length}개 전부 RESEARCH_MODULES 에 등록돼 있습니다`);
+  }
 }
 
 if (bad === 0) {

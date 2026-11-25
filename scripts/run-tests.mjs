@@ -184,6 +184,7 @@ import { runExitPolicyTests } from './src/lib/strategies/exitPolicy.test';
 import { runRunRequestTests } from './src/lib/strategies/runRequest.test';
 import { runScalpSignalDiagnosisTests } from './src/lib/strategies/scalpSignalDiagnosis.test';
 import { runRunStrategyDiagnosisTests } from './src/lib/strategies/runStrategyDiagnosis.test';
+import { runBarProvenanceTests } from './src/lib/research/barProvenance.test';
 import { runExcursionTests } from './src/lib/backtest/excursion.test';
 import { runPositionGuardTests } from './src/lib/engine/positionGuard.test';
 import { runStateReconcileTests } from './src/lib/engine/stateReconcile.test';
@@ -533,6 +534,7 @@ runExitLifecycleTests(); runStopMoveTests(); runScheduleCancelTests(); runDeploy
 runTradeVenueTests(); runHighWaterTests(); runOrphanSweepTests(); runPaperAccountTests(); runPaperWiringTests(); runPaperOrderTelemetryTests(); runPaperUnifyTests(); runIngestPipelineTests();
 runScheduledExitRunnerTests(); runScalpSignalDiagnosisTests(); runRunStrategyDiagnosisTests(); runEntryWindowDueTests(); runForcedEntryWindowWakeTests(); runDailyForcedEntryTests(); runPaperBotPerfTests(); runPaperBotPerfViewTests();
 runNextRunTextTests(); runSyntheticSweepTests(); runCollectLimitsTests(); runVenuePositionOpsTests(); runCancelReceiptTests(); runKillSwitchSelfHealTests(); runProtectiveReadbackTests(); runStrategyFactoryTests();
+runBarProvenanceTests();
 // 비동기 테스트가 끝나기 전에 집계하면 실패가 통과로 잡힌다.
 // CommonJS로 컴파일되므로 최상위 await을 못 쓴다 — 즉시 실행 함수로 감싼다.
 (async () => {
