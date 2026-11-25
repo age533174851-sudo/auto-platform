@@ -365,7 +365,8 @@ if (bad === 0) {
 //
 // 톱니 기록 — 내린 날과 값만 적는다 (지난 값은 더 낡지 않는다):
 //   2026-11-20 199 (도입, #721)  ·  2026-11-24 184 (#754)
-const ERROR_DROP_BASELINE = 184;
+//   2026-11-25 178 (#757 · #758 · #761이 여섯 곳을 받게 고쳤다)
+const ERROR_DROP_BASELINE = 178;
 
 {
   const self = errorDropSelfTest();
