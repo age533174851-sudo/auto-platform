@@ -362,6 +362,7 @@ import { runAiKeysRouteIntegrationTests } from './src/test/integration/aiKeysRou
 import { runKillSwitchLookupTests } from './src/test/integration/killSwitchLookupIntegration.test';
 import { runWalletLookupTests } from './src/test/integration/walletLookupIntegration.test';
 import { runFuturesLookupTests } from './src/test/integration/futuresLookupIntegration.test';
+import { runKisLookupTests } from './src/test/integration/kisLookupIntegration.test';
 import { runGateCloseTests } from './src/test/integration/gateCloseIntegration.test';
 import { runGateOrderReadTests } from './src/test/integration/gateOrderReadIntegration.test';
 import { runKillAlertTests } from './src/lib/risk/killAlert.test';
@@ -590,6 +591,9 @@ runNextRunTextTests(); runSyntheticSweepTests(); runCollectLimitsTests(); runVen
   await flushAsync();
   // 같은 이유로 또 비운다 — 이 시험도 admin 모듈 캐시를 바꾼다.
   await runFuturesLookupTests();
+  await flushAsync();
+  // 같은 이유로 또 비운다 — 이 시험도 admin 모듈 캐시를 바꾼다.
+  await runKisLookupTests();
   await flushAsync();
   const s = summary();
   console.log('\\n결과: ' + s.passed + ' 통과 / ' + s.failed + ' 실패');
