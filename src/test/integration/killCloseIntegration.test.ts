@@ -37,6 +37,8 @@ interface VOpts {
   positions?: any[];
   /** 전송 뒤에도 남아 있는가 */
   leftAfter?: boolean;
+  /** 전송 뒤 positionRisk 응답을 직접 정한다 (`leftAfter`보다 우선) */
+  positionsAfter?: any[];
   openOrders?: any[];
   /** 미체결 조회가 실패한다 */
   openOrdersFail?: boolean;
@@ -83,6 +85,7 @@ function venueFor(o: VOpts = {}): FakeVenue {
     ? { status: 500, json: { code: -1000, msg: 'down' } }
     : { json: () => {
         const sent = v.orderSends().length > 0;
+        if (sent && o.positionsAfter) return o.positionsAfter;
         const open = !sent || o.leftAfter === true;
         const rows = o.positions ?? [{ symbol: 'BTCUSDT', positionAmt: '0.010',
           entryPrice: '100000', markPrice: '100000', leverage: '10',
@@ -470,6 +473,39 @@ export async function runKillCloseIntegrationTests() {
     });
   }
 
+  // ══════════ ⑨-b 수량을 못 읽은 줄이 남았는데 "전부 닫혔다"로 적었다 ══════════
+  //
+  //   계획(`planKillClose`)은 수량을 못 읽은 줄을 **플랫이라고 말할 수
+  //   없다**며 `unusableTargets`로 세고 닫지 않는다. 그런데 종료 뒤
+  //   잔여를 세는 `readLeftover`는 같은 줄을 `Number(null) === 0`으로
+  //   읽어 **잔여에서 뺐다.** 읽을 수 있던 BTC만 닫히면 잔여 0 →
+  //   `CLOSED_VERIFIED` · "포지션 0을 거래소에서 확인했습니다" — ETH
+  //   포지션은 거래소에 그대로 열려 있는데.
+  {
+    const ETH_UNREADABLE = { symbol: 'ETHUSDT', positionAmt: 'garbage',
+      entryPrice: '3000', markPrice: '3000', leverage: '10',
+      marginType: 'isolated', liquidationPrice: '2700', unRealizedProfit: '0' };
+    const BTC = { symbol: 'BTCUSDT', positionAmt: '0.010',
+      entryPrice: '100000', markPrice: '100000', leverage: '10',
+      marginType: 'isolated', liquidationPrice: '90000', unRealizedProfit: '0' };
+    const v = venueFor({
+      positions: [BTC, ETH_UNREADABLE],
+      positionsAfter: [{ ...BTC, positionAmt: '0' }, ETH_UNREADABLE],
+    });
+    const { r } = await exec(v, 'ABCD');
+
+    test('★★ ⑨-b 수량을 못 읽은 포지션이 남았으면 닫혔다고 적지 않는다', () => {
+      eq(r.safety?.planCode, 'PROCEED_PARTIAL', '읽을 수 있는 BTC만 닫는 계획');
+      eq(r.safety?.unusableTargets, 1, 'ETH 줄은 수량을 못 읽었다');
+      eq(v.orderSends().length, 1, 'BTC 종료 1건만 — 모르는 수량으로 보내지 않는다');
+      eq(r.close?.success, false, '★ ETH가 남았는데 성공으로 적었다');
+      eq(r.close?.remaining, 1, '★ 못 읽은 줄은 잔여 0이 아니다');
+      assert(r.safety?.protectionCode !== 'CLOSED',
+        `★ "포지션 0을 확인했다"고 적었다 (${r.safety?.protectionCode})`);
+      eq(r.safety?.manualInterventionRequired, true);
+    });
+  }
+
   // ══════════ ⑩ 닫지 않는 단계(C만) — 보호주문을 남긴다 ══════════
   {
     const v = venueFor({ openOrders: [
@@ -534,4 +570,78 @@ export async function runKillCloseIntegrationTests() {
       eq(p.cancelIds.length, 0);
     }
   });
+
+  await runCancelProtectionCountTests();
+}
+
+// ══════════ 전량 청산 뒤 보호주문 정리 — 거절된 취소를 "취소됨"으로 세지 않는다 ══════════
+//
+// 실제로 도는 것: `futuresCancelProtection` → `getFuturesOpenOrders` →
+//   `cancelFuturesOrder` → 서명 생성 · 응답 파싱. 가짜는 `fetch` 한 겹.
+//
+// `cancelFuturesOrder`는 **던지지 않는다** — 거래소 거절을 받으면
+// `{ success: false }`를 돌려준다. 그런데 정리 루프는
+// `try { await cancel(); n++ } catch {}`였다. catch는 한 번도 발동하지
+// 않으므로 **거절된 취소가 전부 "취소됨"으로 세어졌다.** 결과는
+// `cancelled: 1 · " · 남은 보호 주문 1건 취소"` — 평탄해진 포지션 위에
+// 손절이 무장된 채 남아 있는데(트리거에 닿으면 반대 포지션이 열린다)
+// 화면은 "정리했다"고 말한다.
+const CP_STOP = {
+  orderId: 8801, symbol: 'BTCUSDT', type: 'STOP_MARKET', side: 'SELL',
+  stopPrice: '99000', closePosition: true, reduceOnly: false,
+  origQty: '0', price: '0', workingType: 'MARK_PRICE', status: 'NEW',
+};
+const CP_TP = { ...CP_STOP, orderId: 8802, type: 'TAKE_PROFIT_MARKET', stopPrice: '120000' };
+
+async function runCancelProtectionCountTests() {
+  const { futuresCancelProtection } = await import('../../lib/exchanges/futuresAdapter');
+  const run = async (v: FakeVenue) => {
+    const restore = v.install();
+    try { return await futuresCancelProtection('binance', KEY, SECRET, true, 'BTCUSDT'); }
+    finally { restore(); }
+  };
+
+  // ── ⑭ 거래소가 취소를 거절하면 0건이다 ──
+  {
+    const v = new FakeVenue()
+      .on(OPEN, { json: [CP_STOP] })
+      .on(ORDER, { status: 500, json: { code: -1000, msg: 'Internal error' } }, 'DELETE');
+    const r = await run(v);
+    test('★ ⑭ 거절된 취소를 "취소됨"으로 세지 않는다', () => {
+      eq(v.countOf(ORDER, 'DELETE'), 1, '취소 시도는 실제로 나가야 한다');
+      eq(r.cancelled, 0, '거래소가 거절했는데 1건 취소로 적었다');
+      assert(r.note.includes('⚠'),
+        `남은 손절을 사람에게 알리지 않았다: ${JSON.stringify(r.note)}`);
+      assert(!/^ · 남은 보호 주문 \d+건 취소$/.test(r.note), '성공 문구가 나갔다');
+    });
+  }
+
+  // ── ⑮ 둘 중 하나만 거절되면 "1건만"이다 ──
+  {
+    const v = new FakeVenue()
+      .on(OPEN, { json: [CP_STOP, CP_TP] })
+      .onParams(ORDER, 'DELETE', { orderId: '8801' },
+        { json: { orderId: 8801, status: 'CANCELED' } })
+      .onParams(ORDER, 'DELETE', { orderId: '8802' },
+        { status: 400, json: { code: -1003, msg: 'Too many requests' } });
+    const r = await run(v);
+    test('★ ⑮ 일부만 취소되면 실제로 취소된 수만 센다', () => {
+      eq(v.countOf(ORDER, 'DELETE'), 2);
+      eq(r.cancelled, 1);
+      assert(r.note.includes('⚠') && r.note.includes('2건 중 1건'),
+        `부분 실패 문구가 아니다: ${JSON.stringify(r.note)}`);
+    });
+  }
+
+  // ── ⑯ 받아들여진 취소는 그대로 센다 (⑭가 공허하지 않다) ──
+  {
+    const v = new FakeVenue()
+      .on(OPEN, { json: [CP_STOP] })
+      .on(ORDER, { json: { orderId: 8801, status: 'CANCELED' } }, 'DELETE');
+    const r = await run(v);
+    test('★ ⑯ 받아들여진 취소는 1건으로 센다', () => {
+      eq(r.cancelled, 1);
+      eq(r.note, ' · 남은 보호 주문 1건 취소');
+    });
+  }
 }

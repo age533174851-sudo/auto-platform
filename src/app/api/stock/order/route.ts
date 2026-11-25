@@ -134,7 +134,10 @@ export async function POST(req: NextRequest) {
   const { runChecklist } = await import('@/lib/engine/preTradeChecklist');
   const { fromLegacyMode, gateOrder } = await import('@/lib/engine/operatingMode');
 
-  const notional = refPrice != null && Number.isFinite(quantity) ? refPrice * quantity : 0;
+  // **시세나 수량을 못 읽었으면 null이다 — 0으로 적지 않는다.**
+  const notional = refPrice != null && Number.isFinite(quantity)
+    ? refPrice * quantity
+    : null;
   const mode = fromLegacyMode(process.env.NEXT_PUBLIC_APP_MODE ?? null);
   const g = gateOrder(mode, notional);
 

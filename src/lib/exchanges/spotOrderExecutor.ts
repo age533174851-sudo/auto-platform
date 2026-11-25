@@ -134,10 +134,25 @@ export async function placeSpotOrder(sb: any, args: SpotOrderArgs): Promise<Spot
   }
 
   // ── 연결 소유권 ──
-  const { data: conn } = await (sb.from('exchange_connections') as any)
+  //
+  // **조회 실패를 "연결 없음"으로 적지 않는다.**
+  //
+  // 실패하면 `data`가 null이다. 그 null을 "행이 없음"과 같이 읽으면 사용자는
+  // 「찾을 수 없거나 본인의 연결이 아닙니다」를 받는다 — 연결은 있고 DB를
+  // 못 읽었을 뿐인데. 주문이 안 나가는 쪽이라 안전 구멍은 아니지만
+  // **거짓말**이고, 그 말을 믿은 사용자는 키를 다시 발급하거나 연결을
+  // 다시 만든다. 못 여는 불편에 **헛수고까지** 얹는 것이다.
+  //
+  // 이 저장소가 #718 · #719 · #720 · #742에서 네 번 고친 같은 모양이다.
+  const connRes = await (sb.from('exchange_connections') as any)
     .select('id, exchange_id, api_key, api_secret_enc, encrypted_secret, has_withdrawal, is_testnet')
     .eq('id', args.connectionId).eq('user_id', args.userId).maybeSingle();
 
+  if (connRes?.error) {
+    return bad('connection_unreadable',
+      '거래소 연결 정보를 읽지 못했습니다 — 연결이 없다는 뜻이 아닙니다');
+  }
+  const conn = connRes?.data;
   if (!conn) return bad('connection_not_found', '거래소 연결을 찾을 수 없거나 본인의 연결이 아닙니다');
 
   const exchange = String(conn.exchange_id || '').toLowerCase();
@@ -577,11 +592,11 @@ async function placeGateSpot(
       clientOrderId,
     }, ctx.testnet);
   } catch (e: any) {
-    // 응답을 못 받았다. 나갔는지 안 나갔는지 **모른다** — 재시도하지 않는다.
-    await patch({ status: 'UNKNOWN', error_message: `응답 없음: ${e?.message || e}` });
+    // 전송 후 결과를 확인하지 못했다. 기존 주문을 대조할 때까지 재시도를 보류한다.
+    await patch({ status: 'UNKNOWN', error_message: `결과 확인 실패: ${e?.message || e}` });
     return {
       ok: false, status: 'UNKNOWN', clientOrderId,
-      message: '주문 전송 후 응답을 받지 못했습니다. 재시도하지 말고 Gate 현물 내역을 확인하세요.',
+      message: '주문 전송 후 결과를 확인하지 못했습니다. 재시도하지 말고 Gate 현물 내역을 확인하세요.',
     };
   }
 

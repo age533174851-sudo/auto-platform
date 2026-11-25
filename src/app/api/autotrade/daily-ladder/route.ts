@@ -345,7 +345,8 @@ export async function POST(req: NextRequest) {
 
   // ── 모드 관문 ──
   // 다른 모든 검사를 통과했어도 여기서 막힐 수 있다. 모드는 가장 바깥 관문이다.
-  const notionalUsd = result.plan?.positionSize ?? 0;
+  // **계획 크기를 못 읽었으면 null이다 — 0으로 적지 않는다.**
+  const notionalUsd = result.plan?.positionSize ?? null;
   // **상한을 자산에 붙인다.** 고정 $1,000짜리 상한은 100배 전략의
   // 명목가(자산의 10배)를 언제나 막는다 — 계좌가 아무리 커져도.
   // 자산을 못 읽었으면 넘기지 않는다: 그때는 고정 금액만 남는다.
@@ -906,7 +907,12 @@ export async function POST(req: NextRequest) {
         blockNewOrders: !gate.allowed,
         summary: gate.verdict?.summary || gate.reason || '일치',
       },
-      unresolvedOrderCount: gate.gather.unresolvedOrders.length,
+      // **`.length`를 적지 않는다.** 다른 세 경로는 `reachable`로 가리고
+      // 있었는데 여기만 빠져 있었다 — 거래소에 못 닿은 회차의 점검이
+      // "미확정 주문: 없음"으로 적혔다. 못 물어본 것이 통과로 적히는 것이
+      // 이 체크리스트가 막으려는 바로 그 실패다. 이제 가림은 수집기가
+      // 한 곳에서 한다.
+      unresolvedOrderCount: gate.gather.unresolvedOrderCount,
       marginType: risk?.marginType ?? null,
       leverage: risk?.leverage != null
         ? { actual: risk.leverage, intended: result.plan!.leverage }

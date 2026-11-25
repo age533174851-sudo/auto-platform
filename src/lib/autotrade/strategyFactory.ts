@@ -8,8 +8,21 @@ import type { LearningMatrix } from './learning';
 
 export type ProposalStatus = 'proposed' | 'shadow' | 'promoted' | 'rejected';
 
+// **성과의 출처.** 데모 숫자와 실측 성과를 한 글자로 가른다.
+//
+// 이게 없던 동안 화면은 하드코딩된 `DEMO_STATS`와 생성된 가상 손익으로
+// `promoted` + "승격 권장"을 받아 냈고, 반환값 어디에도 그것이 데모였다는
+// 흔적이 없었다. 호출자도 화면도 검토자도 구분할 방법이 없었다.
+//
+// 출처는 **제안이 태어날 때** 정해지고 이후 인자로 바뀌지 않는다
+// (`updateShadow`가 세탁을 막는다). 실측이 아니면 승격 판정을 하지 않는다 —
+// 데모 표시를 지우는 것이 아니라 **라벨을 정확히 하는 것**이다.
+export type EvidenceSource = 'DEMO' | 'MEASURED';
+
 export interface StrategyProposal {
   id: string;
+  evidence: EvidenceSource;  // 이 제안과 판정이 무엇에서 나왔는가
+
   baseName: string;          // 원본 전략
   baseType: string;
   title: string;             // 개선안 이름
@@ -31,6 +44,8 @@ const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v
 export interface WeaknessInput {
   strategyId: string; name: string; type: string;
   params: Record<string, any>;
+  // **필수다.** 기본값을 두면 부르는 쪽이 잊었을 때 조용히 실측이 된다.
+  evidence: EvidenceSource;
   regimeStats?: LearningMatrix;    // 국면별 성과 (learning)
   recentPnls?: number[];           // 최근 손익
 }
@@ -82,6 +97,7 @@ export function diagnoseAndPropose(input: WeaknessInput): StrategyProposal | nul
 
   return {
     id: 'prop_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
+    evidence: input.evidence,
     baseName: input.name, baseType: input.type,
     title: `${input.name} v2 (${change.note.split(' ')[0]} 추가)`,
     hypothesis, change,
@@ -90,7 +106,11 @@ export function diagnoseAndPropose(input: WeaknessInput): StrategyProposal | nul
 }
 
 // Shadow Trading 성과 갱신 — 원본 vs 개선안 병렬 성과 비교
-export function updateShadow(p: StrategyProposal, basePnls: number[], shadowPnls: number[], daysPassed: number): StrategyProposal {
+export function updateShadow(
+  p: StrategyProposal, basePnls: number[], shadowPnls: number[], daysPassed: number,
+  // **필수다.** 그리고 제안이 DEMO로 태어났으면 여기서 MEASURED라고 불러도 바뀌지 않는다.
+  evidence: EvidenceSource,
+): StrategyProposal {
   const bm = computeMetrics(basePnls);
   const sm = computeMetrics(shadowPnls);
   const baseMetrics = { winRate: bm.winRate, profitFactor: bm.profitFactor, score: Math.round(bm.winRate * 0.5 + clamp(bm.profitFactor, 0, 3) / 3 * 50) };
@@ -99,6 +119,20 @@ export function updateShadow(p: StrategyProposal, basePnls: number[], shadowPnls
   const shadowDays = clamp(daysPassed, 0, p.shadowTarget);
   let status: ProposalStatus = 'shadow';
   let verdict = `검증 ${shadowDays}/${p.shadowTarget}일 진행 중`;
+
+  // 출처 세탁 방지: 둘 중 하나라도 데모면 데모다.
+  const source: EvidenceSource =
+    p.evidence === 'MEASURED' && evidence === 'MEASURED' ? 'MEASURED' : 'DEMO';
+
+  if (source !== 'MEASURED') {
+    // 숫자는 그대로 보여 준다 — 지우면 데모 화면이 망가진다. 다만
+    // **승격 판정을 하지 않고**, 판정문에 데모라고 적는다.
+    return {
+      ...p, evidence: 'DEMO', status: 'shadow', shadowDays,
+      baseMetrics, shadowMetrics,
+      verdict: `데모 데이터 (점수 ${baseMetrics.score}→${shadowMetrics.score}) — 실측 성과가 아니므로 판정하지 않습니다`,
+    };
+  }
 
   if (shadowDays >= p.shadowTarget) {
     // 검증 완료: 개선안이 유의미하게 우위일 때만 승격 (점수 +8 이상 AND PF 우위)
@@ -109,5 +143,5 @@ export function updateShadow(p: StrategyProposal, basePnls: number[], shadowPnls
     else { status = 'rejected'; verdict = `개선 효과 부족 (점수 ${baseMetrics.score}→${shadowMetrics.score}) — 기존 유지`; }
   }
 
-  return { ...p, status, shadowDays, baseMetrics, shadowMetrics, verdict };
+  return { ...p, evidence: source, status, shadowDays, baseMetrics, shadowMetrics, verdict };
 }

@@ -94,6 +94,27 @@ for (const f of FILES) {
   }
   if (!/isTradableLedger\(/.test(body)) {
     err(`${f}가 옛 장부에 쓰면서 거래 가능 여부를 확인하지 않습니다`);
+    continue;
+  }
+
+  // **파일 어딘가에 관문이 있는 것으로는 부족하다.** 처음에는 파일 단위로만
+  // 봤고, 그 사이 `PaperTradingPage`의 "초기화"(`resetAccount`)가 관문 없이
+  // 옛 장부를 통째로 덮어쓰고 있었다 — 같은 파일의 주문·청산에 관문이 있어서
+  // 검사가 초록이었다. 정책은 `erase: false`인데.
+  //
+  // 그래서 **쓰기 호출 하나하나**가 직전 쓰기 이후에 자기 관문을 가져야 한다.
+  // 관문 하나가 쓰기 둘을 지키지 않는다.
+  const writeRe = new RegExp(`\\b(${LEGACY_WRITES.filter(w => imported.has(w)).join('|')})\\(`, 'g');
+  const calls = [...body.matchAll(writeRe)];
+  let prevEnd = 0;
+  for (const c of calls) {
+    const span = body.slice(prevEnd, c.index);
+    if (!/isTradableLedger\(/.test(span)) {
+      const line = body.slice(0, c.index).split('\n').length;
+      err(`${f}의 ${c[1]}(…)(정리된 본문 ${line}행)가 자기 관문 없이 옛 장부에 씁니다`
+        + ' — 바로 앞에서 isTradableLedger를 확인해야 합니다');
+    }
+    prevEnd = c.index + c[0].length;
   }
 }
 

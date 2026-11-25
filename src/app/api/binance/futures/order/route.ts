@@ -324,7 +324,8 @@ export async function POST(req: NextRequest) {
     const refPriceRaw = Number(price ?? risk?.markPrice ?? 0);
     const refPrice = Number.isFinite(refPriceRaw) && refPriceRaw > 0 ? refPriceRaw : null;
     preflightRef = refPrice;
-    const notionalUsd = refPrice ? orderQty * refPrice : 0;
+    // **시세를 못 읽었으면 null이다 — 0으로 적지 않는다.**
+    const notionalUsd = refPrice ? orderQty * refPrice : null;
 
     // **관문은 목적지를 기준으로 정한다.**
     //
@@ -436,7 +437,7 @@ export async function POST(req: NextRequest) {
         blockNewOrders: !!gate.verdict?.blockNewOrders,
         summary: gate.reason || gate.verdict?.summary,
       },
-      unresolvedOrderCount: gate.gather.reachable ? gate.gather.unresolvedOrders.length : null,
+      unresolvedOrderCount: gate.gather.unresolvedOrderCount,
       marginType: risk?.marginType ?? null,
       leverage: (risk?.leverage != null && leverage != null)
         ? { actual: risk.leverage, intended: Number(leverage) } : null,
