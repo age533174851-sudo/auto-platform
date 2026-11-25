@@ -314,6 +314,7 @@ import { runPaperDailyLossTests } from './src/lib/risk/dailyLossCheck.test';
 import { runRegimeCollectTests } from './src/lib/risk/regimeCheck.test';
 import { runCollectLimitsTests } from './src/lib/risk/collectLimits.test';
 import { runSleeveLedgerTests } from './src/lib/strategies/sleeveLedger.test';
+import { runSmokeStatusRouteTests } from './src/test/integration/smokeStatusRouteIntegration.test';
 import { runOrderIntentTests } from './src/lib/engine/orderIntent.test';
 import { runProtectionRepairTests } from './src/lib/engine/protectionRepair.test';
 import { runPriceBasisTests } from './src/lib/markets/priceBasis.test';
@@ -556,6 +557,7 @@ runNextRunTextTests(); runSyntheticSweepTests(); runCollectLimitsTests(); runVen
   await runGateTpslRouteTests();
   await runGateExecIntegrationTests();
   await runGateDupIntegrationTests();
+  await runSmokeStatusRouteTests();
   await runNoFixedTpIntegrationTests();
   await runPrecisionIntegrationTests();
   await runPrecisionMatrixTests();
