@@ -70,9 +70,18 @@ export function concurrencyOf(src) {
     body.push(l);
   }
   const blob = body.join('\n');
-  const gm = /group:\s*(?:>-|>|\|-|\|)?\s*\n?([\s\S]*?)(?=\n\s*cancel-in-progress:|\n\S|$)/.exec(blob)
-    || /group:\s*(.+)/.exec(blob);
-  const cm = /cancel-in-progress:\s*(\S+)/.exec(blob);
+  // **키 자리에 있는 것만 센다.** 전에는 블록 안 아무 데나 그 문구가
+  // 있으면 읽었다 — 실측(ed00c1a4): `cancel-in-progress: false` 를 지우고
+  // `DUMMY: "cancel-in-progress: false"` 를 넣으면 rc=0 ✅ 였다.
+  // `auto-merge-gate` 는 main 의 필수 검사이고, 그 검사를 "생기지도
+  // 않게" 만든 것이 바로 이 설정이다.
+  //
+  // `m` 플래그는 쓰지 않는다 — `$` 가 줄 끝이 되어 여러 줄 `group: >-` 의
+  // 이어진 줄을 잘라 먹는다 (내 첫 수정이 실제로 그래서 원문을 깨뜨렸고,
+  // 대조 시험이 그것을 잡았다). 줄머리는 `(?:^|\n)` 로만 고정한다.
+  const gm = /(?:^|\n)[ \t]*group:\s*(?:>-|>|\|-|\|)?\s*\n?([\s\S]*?)(?=\n[ \t]*cancel-in-progress:|\n\S|$)/.exec(blob)
+    || /(?:^|\n)[ \t]*group:\s*(.+)/.exec(blob);
+  const cm = /(?:^|\n)[ \t]*cancel-in-progress:\s*(\S+)/.exec(blob);
   const group = gm ? gm[1].replace(/^['"]|['"]$/g, '').split('\n').map((s) => s.trim()).join('').trim() : null;
   return { group, cancelInProgress: cm ? cm[1].trim() : null };
 }

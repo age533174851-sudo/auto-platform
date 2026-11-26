@@ -15,6 +15,7 @@
 // 판정은 `scripts/lib/workflow-concurrency.mjs` 한 곳에 있다.
 
 import { readFileSync, readdirSync } from 'node:fs';
+import { stripYamlComments } from './lib/strip-comments.mjs';
 import { join } from 'node:path';
 import { concurrencyOf, concurrencyFindings, triggerFindings, aggregatorFindings,
   prBaseFilterFindings, selfTest } from './lib/workflow-concurrency.mjs';
@@ -28,6 +29,24 @@ const WF_DIR = '.github/workflows';
  * 곧 무시당한다. `main` ruleset 의 필수 검사를 만드는 것만 센다.
  */
 const REQUIRED_CHECK_WORKFLOWS = ['auto-merge.yml'];
+/**
+ * 워크플로를 읽는다 — **주석을 걷어서.**
+ *
+ * 주석을 안 걷으면 이 검사기가 막으려는 바로 그 고장을 주석 한 줄로
+ * 되돌릴 수 있다. 실측(ed00c1a4), `auto-merge.yml` 에서 들여쓰기를
+ * 지킨 채 주석 처리했을 때:
+ *
+ *   :89  `group: >-`              → rc=0 ✅ (지우면 rc=1)
+ *   :90  `auto-merge-${{ … }}`    → rc=0 ✅
+ *   :95  `cancel-in-progress: false` → rc=0 ✅
+ *
+ * `auto-merge-gate` 는 main 의 **필수 검사**다. 그 검사를 "생기지도
+ * 않게" 만든 것이 바로 concurrency 설정이었고(PR #576), 그래서 이
+ * 관문이 생겼다. 그 관문이 주석으로 열린다면 없는 것과 같다.
+ */
+const readWorkflow = (name) =>
+  stripYamlComments(readFileSync(join(WF_DIR, name), 'utf8'));
+
 
 /**
  * **필수 체크를 만드는 워크플로 전부.**
@@ -86,7 +105,7 @@ for (const name of REQUIRED_CHECK_WORKFLOWS) {
     err(`${WF_DIR}/${name} 이 없습니다 — 필수 체크를 만드는 워크플로가 사라졌거나 이름이 바뀌었습니다`);
     continue;
   }
-  const src = readFileSync(join(WF_DIR, name), 'utf8');
+  const src = readWorkflow(name);
 
   // 실패하는 길이 둘이다 — ① 깨어나지 않거나 ② 깨어났다가 밀려나거나.
   // 한쪽만 보면 다른 쪽으로 같은 증상이 난다.
@@ -110,7 +129,7 @@ for (const name of BASE_FILTER_WORKFLOWS) {
     continue;
   }
   baseChecked += 1;
-  const src = readFileSync(join(WF_DIR, name), 'utf8');
+  const src = readWorkflow(name);
   for (const f of prBaseFilterFindings(src, `${WF_DIR}/${name}`)) err(f);
 }
 if (bad === 0 && baseChecked === 0) {
@@ -124,7 +143,7 @@ for (const name of SHARDED_WORKFLOWS) {
     continue;
   }
   shardChecked += 1;
-  const src = readFileSync(join(WF_DIR, name), 'utf8');
+  const src = readWorkflow(name);
   for (const f of aggregatorFindings(src, `${WF_DIR}/${name}`)) err(f);
 }
 if (bad === 0 && shardChecked === 0) {
