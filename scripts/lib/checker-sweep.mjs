@@ -278,9 +278,25 @@ export function sweepFindings({ exclusions = SWEEP_EXCLUSIONS, exists, read }) {
     //    주장만으로 통과시키면 제외 목록이 검사기를 숨기는 자리가 된다.
     if (hasCover) {
       if (!exists(e.coveredBy)) { out.push(`${f}: 덮는다고 적은 \`${e.coveredBy}\` 가 없습니다`); continue; }
+      // **문구가 있는 것과 부르는 것은 다르다.** 전에는 `includes(이름)` 이었다.
+      // 그래서 덮는다고 적은 워크플로에서 그 호출 줄을 **주석 처리해도**
+      // 이 관문은 통과했다. 기계 탐침 실측 (3cc3fd14, 들여쓰기 유지 주석):
+      //
+      //   autotrade-tick.yml:110        `node scripts/check-autotrade-tick-response.mjs "$body"`
+      //   claude-hourly-trading.yml:345 `node scripts/check-autodev-safety.mjs --base … --mode trading`
+      //
+      // 둘 다 지우면 rc=1 인데 주석 처리하면 rc=0 이었다. 이 질문에는 이미
+      // 답이 있다 — 같은 파일의 `ciInvokes` 가 셸 명령 위치만 센다.
+      if (!/\.ya?ml$/.test(e.coveredBy)) {
+        out.push(`${f}: \`coveredBy\` 는 워크플로(.yml)여야 합니다`
+          + ' — 지금 확인할 수 있는 것은 YAML 의 `run:` 명령 위치뿐입니다');
+        continue;
+      }
       const src = read(e.coveredBy) ?? '';
-      if (!src.includes(baseName(f))) {
-        out.push(`${f}: \`${e.coveredBy}\` 가 이 검사기를 부르지 않습니다 — 덮인다는 말이 사실이 아닙니다`);
+      if (!ciInvokes(src, f)) {
+        out.push(`${f}: \`${e.coveredBy}\` 가 이 검사기를 **명령 위치에서** 부르지 않습니다`
+          + ' — 주석·인용 안에 적혀 있는 것은 부르는 것이 아니고,'
+          + ' 덮인다는 말이 사실이 아닙니다');
       }
     }
   }

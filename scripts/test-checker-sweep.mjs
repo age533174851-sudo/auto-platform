@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import {
   SWEEP_EXCLUSIONS, sweepPlan, sweepFindings, baseName,
   CI_UNCOVERED, ciCoverageFindings, ciInvokes,
@@ -320,4 +320,49 @@ test('실제 저장소에서 PR CI 밖 검사기가 전부 선언돼 있다', ()
   const ciText = readFileSync('.github/workflows/ci.yml', 'utf8');
   assert.deepEqual(ciCoverageFindings({ files, ciText }), []);
   assert.ok(CI_UNCOVERED.length > 0, '선언 목록이 비어 있습니다 — 실측과 다릅니다');
+});
+
+// ── 덮는다고 적은 곳이 **실제로 부르는가** ───────────────────
+//
+// 기계 탐침으로 찾았다 (3cc3fd14). `coveredBy` 검증이 `includes(이름)`
+// 이어서, 덮는다고 적은 워크플로에서 그 호출 줄을 **주석 처리해도**
+// 통과했다:
+//
+//   autotrade-tick.yml:110        지우면 rc=1 · 주석 처리하면 rc=0 ❌
+//   claude-hourly-trading.yml:345 지우면 rc=1 · 주석 처리하면 rc=0 ❌
+//
+// 이 관문의 존재 이유가 "제외 목록이 검사기를 숨기는 자리가 되지 않게"
+// 인데, 주석 한 줄로 숨길 수 있었다. 같은 질문에는 이미 답이 있다 —
+// `ciInvokes` 가 셸 명령 위치만 센다.
+
+test('★ 덮는 워크플로에서 호출 줄을 주석 처리하면 실패한다', () => {
+  const wf = '      - run: node scripts/check-x.mjs --flag\n';
+  const ex = [{ file: 'scripts/check-x.mjs', why: '이유', runWith: null,
+    coveredBy: '.github/workflows/w.yml' }];
+  const exists = () => true;
+  const live = sweepFindings({ exclusions: ex, exists, read: () => wf });
+  assert.deepEqual(live, [], live.join('\n'));
+  const muted = sweepFindings({ exclusions: ex, exists, read: () => '      # - run: node scripts/check-x.mjs --flag\n' });
+  assert.match(muted.join('\n'), /명령 위치에서/);
+});
+
+test('★ 인용 안에 적힌 것은 덮는 것이 아니다', () => {
+  const ex = [{ file: 'scripts/check-x.mjs', why: '이유', runWith: null,
+    coveredBy: '.github/workflows/w.yml' }];
+  const faked = sweepFindings({ exclusions: ex, exists: () => true,
+    read: () => '      - run: echo "x; node scripts/check-x.mjs --flag"\n' });
+  assert.match(faked.join('\n'), /명령 위치에서/);
+});
+
+test('coveredBy 는 워크플로여야 한다 — 확인할 수 없는 꼴을 통과시키지 않는다', () => {
+  const ex = [{ file: 'scripts/check-x.mjs', why: '이유', runWith: null,
+    coveredBy: 'scripts/run-all-checkers.mjs' }];
+  const out = sweepFindings({ exclusions: ex, exists: () => true, read: () => 'check-x.mjs' });
+  assert.match(out.join('\n'), /워크플로\(\.yml\)여야 합니다/);
+});
+
+test('실제 저장소의 제외 3건이 전부 명령 위치에서 불린다', () => {
+  const out = sweepFindings({ exclusions: SWEEP_EXCLUSIONS, exists: existsSync,
+    read: (p) => (existsSync(p) ? readFileSync(p, 'utf8') : null) });
+  assert.deepEqual(out, [], out.join('\n'));
 });
