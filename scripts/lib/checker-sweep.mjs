@@ -36,6 +36,7 @@
 // 둘 다 없으면 그건 조용히 버리는 것이므로 **실패**다.
 
 import { stripYamlComments } from './strip-comments.mjs';
+import { shellScriptLines, shellSegments, stripEnvPrefix } from './workflow-shell.mjs';
 
 /** 제외 대상의 기준 이름 (`scripts/check-x.mjs` → `check-x.mjs`) */
 export function baseName(p) {
@@ -177,84 +178,20 @@ export const CI_UNCOVERED = [
  * (지금 `ci.yml` 에는 그런 꼴이 없다). 그건 알고 남겨 둔 쪽이다.
  */
 /**
- * `ci.yml` 에서 **셸이 실제로 실행하는 줄만** 뽑는다.
+ * 셸 실행 위치 판정은 `./workflow-shell.mjs` 한 곳에 있다.
  *
- * 세 번째 검수(#792 코멘트 7199259371)가 또 반례를 냈다. 꼴마다 하나씩
- * 막는 것을 그만두고, "셸이 무엇을 실행하는가"를 한 번 계산한다.
- *
- *   ① `run:` 인 블록의 본문만 본다 — 다른 키의 `|` 블록(`env: HINT: |`)은
- *      명령이 아니다. 그 본문에 `run:` 이라 적어도 명령이 되지 않는다.
- *   ② **heredoc 본문은 자료다.** `cat <<'SH'` 와 그 닫는 줄 사이의 줄은
- *      셸이 실행하지 않는다 (여는 줄 자체는 명령이라 남긴다).
+ * 처음에는 이 파일 안에 있었다. 같은 판정을 `check-audit-readonly`
+ * 도 필요하게 되어 **복제하지 않고 모듈로 옮겼다** — 같은 판단이 두
+ * 곳에 있으면 언젠가 갈린다.
  */
-export function shellScriptLines(ciText) {
-  const out = [];
-  let block = null;   // { indent, isRun }
-  for (const raw of String(ciText ?? '').split('\n')) {
-    const line = raw.replace(/\s+$/, '');
-    if (block) {
-      const indent = line.length - line.replace(/^\s*/, '').length;
-      if (line.trim() === '') { if (block.isRun) out.push(''); continue; }
-      if (indent > block.indent) {
-        if (block.isRun) out.push(line.slice(block.indent + 1));
-        continue;
-      }
-      block = null;   // 블록이 끝났다 — 이 줄은 아래에서 다시 본다
-    }
-    const head = line.match(/^(\s*)(?:-\s+)?([A-Za-z_][\w.-]*)\s*:\s*[|>][+-]?\d*\s*$/);
-    if (head) { block = { indent: head[1].length, isRun: head[2] === 'run' }; continue; }
-    const inline = line.match(/^\s*(?:-\s+)?run\s*:\s*(\S.*)$/);
-    if (inline) out.push(inline[1].trim());
-  }
-  return dropHeredocBodies(out);
-}
-
-function dropHeredocBodies(lines) {
-  const out = [];
-  let delim = null;
-  for (const line of lines) {
-    if (delim !== null) {
-      if (line.trim() === delim) delim = null;
-      continue;
-    }
-    out.push(line);
-    const m = line.match(/<<-?\s*(['"]?)([A-Za-z_][\w-]*)\1/);
-    if (m) delim = m[2];
-  }
-  return out;
-}
-
-/**
- * 셸 한 줄을 **명령 토막**으로 나눈다 — 인용 안에서는 나누지 않는다.
- *
- * 이것이 세 번째 반례의 원인이었다. `;`·`|`·`&&` 로 raw 문자열을 나누면
- * `echo "literal; node scripts/check-x.mjs --flag"` 의 둘째 토막이
- * `node …` 로 시작한다. 셸은 그 문장을 **출력만** 하는데 "부른다"로 셌다.
- */
-export function shellSegments(line) {
-  const segs = [];
-  let cur = '', quote = null, esc = false;
-  const push = () => { const t = cur.trim(); if (t) segs.push(t); cur = ''; };
-  for (const c of String(line ?? '')) {
-    if (esc) { cur += c; esc = false; continue; }
-    if (c === '\\') { cur += c; esc = true; continue; }
-    if (quote) { cur += c; if (c === quote) quote = null; continue; }
-    if (c === '"' || c === "'") { cur += c; quote = c; continue; }
-    if (c === ';' || c === '|' || c === '&' || c === '\n') { push(); continue; }
-    cur += c;
-  }
-  push();
-  return segs;
-}
-
 export function ciInvokes(ciText, file) {
   const name = baseName(file).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const call = new RegExp(`^node\\s+scripts/${name}(\\s|$)`);
   const script = stripYamlComments(shellScriptLines(ciText).join('\n'));
   for (const line of script.split('\n')) {
     for (const seg of shellSegments(line)) {
-      // 앞에 붙는 환경변수 지정은 명령 위치를 바꾸지 않는다
-      const cmd = seg.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*/, '');
+      // 앞에 붙는 환경변수 지정은 명령 위치를 바꾸지 않는다 (공용 helper)
+      const cmd = stripEnvPrefix(seg);
       if (call.test(cmd)) return true;
     }
   }
@@ -349,3 +286,5 @@ export function sweepFindings({ exclusions = SWEEP_EXCLUSIONS, exists, read }) {
   }
   return out;
 }
+
+export { shellScriptLines, shellSegments } from './workflow-shell.mjs';

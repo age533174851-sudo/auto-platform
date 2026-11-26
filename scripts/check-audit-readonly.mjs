@@ -15,6 +15,8 @@
 //   ④ 수동 실행 문이 열렸다면 소유자 확인과 확인 문구가 **둘 다** 있다
 
 import { readFileSync } from 'node:fs';
+import { stripYamlComments } from './lib/strip-comments.mjs';
+import { shellText, shellCommands } from './lib/workflow-shell.mjs';
 
 const F = '.github/workflows/audit-production-exact100x-testnet-readiness.yml';
 const errors = [];
@@ -24,8 +26,34 @@ let src = null;
 try { src = readFileSync(F, 'utf8'); }
 catch { err(`${F}을(를) 읽지 못했습니다`); }
 
+// ── 「적혀 있다」와 「돈다」를 나눈다 ──
+//
+// 이 검사기의 관문 셋을 **주석 처리해도 ✅ 였다** (ed00c1a4 실측):
+//
+//   #          if ! printf '%s' "${out}" | grep -q 'READ_ONLY=on'; then
+//   #          if [ "${ACTOR}" != "${OWNER}" ]; then
+//   #          if [ "${CONFIRM}" != "READ-ONLY-AUDIT" ]; then
+//
+// 세 줄 다 `run:` 블록 안이므로 `#` 는 셸 주석이고, 그 단계는 돌지
+// 않는다. 그런데 `src.includes(...)` 에는 그대로 남아 있었다. 이
+// 파일이 "문구가 파일 어딘가에 있는 것으로는 부족하다"고 적어 둔
+// 바로 그 구분이 이 파일 안에서 깨져 있었다.
+//
+//   shellCmds  셸이 **명령 위치에서** 실행하는 토막 (주석·인용·heredoc 제외)
+//   shellSrc   셸이 실행하는 줄 전체 (주석 걷힘)
+//   yamlSrc    YAML 쪽 단정용 — 주석만 걷은 원문
+//
+// 판정은 `scripts/lib/workflow-shell.mjs` 한 곳에 있다 (#792 와 공용).
+const shellSrc = src == null ? '' : shellText(src);
+const shellCmds = src == null ? [] : shellCommands(src);
+const yamlSrc = src == null ? '' : stripYamlComments(src);
+const inShell = (re) => re.test(shellSrc);
+const inCommandPosition = (re) => shellCmds.some((c) => re.test(c));
+
 if (src) {
   // SQL 블록만 떼어 온다 — YAML 주석·요약 문구를 쓰기 구문으로 오인하지 않게.
+  // (heredoc 본문은 셸 명령이 아니지만 **SQL 로는 실행된다** — 그래서
+  //  여기만 원문 `src` 를 쓴다.)
   const begin = src.indexOf("cat > /tmp/audit.sql <<'SQL'");
   const end = src.indexOf('\n          SQL', begin < 0 ? 0 : begin);
   const sql = begin >= 0 && end > begin ? src.slice(begin, end) : null;
@@ -45,8 +73,9 @@ if (src) {
       err("transaction_read_only를 값으로 확인하지 않습니다 — 선언만으로는 증거가 아닙니다");
     }
     // 그 증거를 **실제로 검사**하는지도 본다 (워크플로 쉘 쪽).
-    if (!src.includes("grep -q 'READ_ONLY=on'")) {
-      err('READ_ONLY=on을 확인하는 단계가 없습니다 — 증명을 찍고 보지 않으면 증명이 아닙니다');
+    if (!inCommandPosition(/^grep\b[\s\S]*READ_ONLY=on/)) {
+      err('READ_ONLY=on을 확인하는 단계가 셸에서 실제로 돌지 않습니다'
+        + ' — 증명을 찍고 보지 않으면 증명이 아닙니다 (주석·인용 안은 돌지 않습니다)');
     }
 
     // ── ② 쓰기 구문이 없다 ──
@@ -98,32 +127,32 @@ if (src) {
   }
 
   // ── ④ 수동 실행 문을 열었다면 두 겹이 다 있어야 한다 ──
-  if (/^\s*workflow_dispatch:/m.test(src)) {
-    if (!/github\.actor/.test(src) || !/github\.repository_owner/.test(src)) {
+  if (/^\s*workflow_dispatch:/m.test(yamlSrc)) {
+    if (!/github\.actor/.test(yamlSrc) || !/github\.repository_owner/.test(yamlSrc)) {
       err('수동 실행을 열었는데 소유자 확인이 없습니다');
     }
     // **문구가 파일 어딘가에 있는 것으로는 부족하다.** 설명문·주석에
     //   남아 있어도 비교가 다른 값을 보면 관문은 열린 것이다. 그래서
     //   비교하는 줄 자체를 확인한다 (HX26이 정확히 이렇게 새 나갔다).
-    if (!/\[\s*"\$\{CONFIRM\}"\s*!=\s*"READ-ONLY-AUDIT"\s*\]/.test(src)) {
-      err('확인 문구를 READ-ONLY-AUDIT와 비교하지 않습니다'
+    if (!inShell(/\[\s*"\$\{CONFIRM\}"\s*!=\s*"READ-ONLY-AUDIT"\s*\]/)) {
+      err('확인 문구를 READ-ONLY-AUDIT와 비교하는 줄이 셸에서 돌지 않습니다'
         + ' — 파일에 문구가 적혀 있는 것과 그것으로 막는 것은 다릅니다');
     }
-    if (!/inputs\.confirm/.test(src)) {
+    if (!/inputs\.confirm/.test(yamlSrc)) {
       err('확인 문구 입력(inputs.confirm)을 받지 않습니다');
     }
     // 소유자 비교도 같은 방식으로 **비교하는 줄**을 본다.
-    if (!/\[\s*"\$\{ACTOR\}"\s*!=\s*"\$\{OWNER\}"\s*\]/.test(src)) {
-      err('실행자를 저장소 소유자와 비교하지 않습니다');
+    if (!inShell(/\[\s*"\$\{ACTOR\}"\s*!=\s*"\$\{OWNER\}"\s*\]/)) {
+      err('실행자를 저장소 소유자와 비교하는 줄이 셸에서 돌지 않습니다');
     }
     // 관문이 DB 접속 단계보다 **앞에** 있어야 한다.
-    const gate = src.indexOf('수동 실행 관문');
-    const db = src.indexOf('DB 접속 정보 확인');
+    const gate = yamlSrc.indexOf('수동 실행 관문');
+    const db = yamlSrc.indexOf('DB 접속 정보 확인');
     if (gate < 0) err('수동 실행 관문 단계를 찾지 못했습니다');
     else if (db >= 0 && gate > db) {
       err('수동 실행 관문이 DB 접속 단계보다 뒤에 있습니다');
     }
-    if (!/if:\s*github\.event_name == 'workflow_dispatch'/.test(src)) {
+    if (!/if:\s*github\.event_name == 'workflow_dispatch'/.test(yamlSrc)) {
       err('수동 실행 관문이 workflow_dispatch에만 걸려 있지 않습니다');
     }
   }
@@ -133,14 +162,14 @@ if (src) {
   //   여기서도 "문구가 있는가"가 아니라 **치환이 실제로 일어나는가**를
   //   본다. psql 오류 메시지에는 접속 URL이 섞여 나오고, 그것을 그대로
   //   로그에 흘리면 비밀이 로그에 남는다.
-  if (!/scrubbed="\$\{scrubbed\/\/"\$\{_u\}"\//.test(src)) {
+  if (!inShell(/scrubbed="\$\{scrubbed\/\/"\$\{_u\}"\//)) {
     err('접속 문자열 치환이 없습니다 — psql 오류 메시지에 URL이 섞여 나옵니다');
   }
-  if (!/sed -E/.test(src) || !/postgres\(ql\)\?:/.test(src)) {
+  if (!inCommandPosition(/^sed\s+-E/) || !inShell(/postgres\(ql\)\?:/)) {
     err('postgres:// 형태를 지우는 sed 단계가 없습니다');
   }
   // 가린 것을 출력하는가 — 원본(out)을 그대로 찍으면 가림이 무의미하다.
-  if (/printf '%s\\n' "\$\{out\}"/.test(src)) {
+  if (inShell(/printf '%s\\n' "\$\{out\}"/)) {
     err('가리지 않은 원본(out)을 출력합니다');
   }
 }
