@@ -21,10 +21,10 @@
 // ④ 가 이 관문의 핵심이다. 이것이 없으면 다음 사람이 워크플로에 루프를
 // 다시 적고, 그 순간 "무인 회차가 제가 깨뜨린 것을 못 고치는" 모양이
 // 그대로 돌아온다.
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
-import { SWEEP_EXCLUSIONS, sweepFindings } from './lib/checker-sweep.mjs';
+import { SWEEP_EXCLUSIONS, sweepFindings, CI_UNCOVERED, ciCoverageFindings } from './lib/checker-sweep.mjs';
 import { stripYamlComments } from './lib/strip-comments.mjs';
 
 const RUNNER = 'scripts/run-all-checkers.mjs';
@@ -55,12 +55,41 @@ export function inlineSweepFindings(src, where) {
   return out;
 }
 
-export function allFindings({ exists = existsSync, read = (p) => (existsSync(p) ? readFileSync(p, 'utf8') : null) } = {}) {
+/** `scripts/check-*.mjs` 본체 — 시험 파일은 검사기가 아니다 */
+const CI_YML = '.github/workflows/ci.yml';
+function checkerBodies(list = readdirSync('scripts')) {
+  return list
+    .filter((n) => /^check-.+\.mjs$/.test(n) && !/\.test\.mjs$/.test(n))
+    .sort()
+    .map((n) => `scripts/${n}`);
+}
+
+export function allFindings({
+  exists = existsSync,
+  read = (p) => (existsSync(p) ? readFileSync(p, 'utf8') : null),
+  files = null,
+} = {}) {
   const out = sweepFindings({ exclusions: SWEEP_EXCLUSIONS, exists, read });
   if (!exists(RUNNER)) out.push(`${RUNNER} 가 없습니다 — 전수를 돌 자리가 없습니다`);
   for (const w of SWEEP_WORKFLOWS) {
     if (!exists(w)) { out.push(`${w} 가 없습니다`); continue; }
     out.push(...inlineSweepFindings(read(w), w));
+  }
+
+  // ── PR CI 가 부르지 않는 검사기가 전부 선언돼 있는가 ──
+  //
+  // **못 읽으면 통과로 적지 않는다.** `ci.yml` 을 못 읽었는데 "전부
+  // 덮여 있다"고 적으면, 그 순간 이 관문은 아무것도 지키지 않는다.
+  const ciText = read(CI_YML);
+  if (ciText == null) {
+    out.push(`${CI_YML} 을 읽지 못했습니다 — PR CI 가 무엇을 부르는지 확인하지 못했습니다`);
+  } else {
+    const bodies = files ?? checkerBodies();
+    if (bodies.length === 0) {
+      out.push('검사기 본체를 하나도 찾지 못했습니다 — 발견이 0이면 "전부 덮여 있다"는 참이 아닙니다');
+    } else {
+      out.push(...ciCoverageFindings({ files: bodies, ciText }));
+    }
   }
   return out;
 }
@@ -74,5 +103,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     process.exitCode = 1;
   } else {
     console.log(`✅ 검사기 전수 제외 ${SWEEP_EXCLUSIONS.length}건 — 전부 이유와 "대신 도는 곳"이 있고, 그 곳이 실제로 부른다 · YAML 에 전수 루프 없음`);
+    console.log(`   PR CI 밖 검사기 ${CI_UNCOVERED.length}건 — 전부 이유와 실제로 도는 곳이 적혀 있고, 선언 없이 빠진 것은 0건`);
   }
 }

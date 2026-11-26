@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { SWEEP_EXCLUSIONS, sweepPlan, sweepFindings, baseName } from './lib/checker-sweep.mjs';
+import {
+  SWEEP_EXCLUSIONS, sweepPlan, sweepFindings, baseName,
+  CI_UNCOVERED, ciCoverageFindings, ciInvokes,
+} from './lib/checker-sweep.mjs';
 import { inlineSweepFindings, allFindings } from './check-checker-sweep.mjs';
 import { checkerFiles } from './run-all-checkers.mjs';
 
@@ -130,4 +133,110 @@ test('baseName 은 경로를 벗긴다', () => {
 test('워크플로가 러너를 실제로 부른다 — 배선 확인', () => {
   const y = readFileSync('.github/workflows/claude-hourly-trading.yml', 'utf8');
   assert.match(y, /node scripts\/run-all-checkers\.mjs \|\| fail=1/);
+});
+
+// ───────────────────────────────────────────────────────────────────
+// PR CI 가 부르지 않는 검사기가 **전부 선언돼 있는가**
+//
+// `ci.yml` 은 검사기를 이름으로 하나하나 부른다. 새 검사기를 더하고 그
+// 줄을 넣지 않으면 **PR 에서 한 번도 돌지 않는다.** 실제로 그렇게 된
+// 것이 있고(`scripts/run-tests.mjs` 가 그 사실을 주석으로 적어 두기까지
+// 했다), 그걸 세는 곳이 없었다.
+// ───────────────────────────────────────────────────────────────────
+
+const CI_WITH = (names) => names.map((n) => `        run: node scripts/${n}`).join('\n');
+
+test('★ 선언 없이 PR CI 밖에 있으면 실패한다 — 새 검사기가 조용히 안 돈다', () => {
+  const f = ciCoverageFindings({
+    files: ['scripts/check-a.mjs', 'scripts/check-b.mjs'],
+    ciText: CI_WITH(['check-a.mjs']),
+    declared: [],
+  });
+  assert.equal(f.length, 1);
+  assert.match(f[0], /check-b\.mjs/);
+  assert.match(f[0], /PR 에서 한 번도 돌지 않습니다/);
+});
+
+test('선언하면 통과한다 — 이유와 실제로 도는 곳을 값으로 적는다', () => {
+  assert.deepEqual(ciCoverageFindings({
+    files: ['scripts/check-a.mjs', 'scripts/check-b.mjs'],
+    ciText: CI_WITH(['check-a.mjs']),
+    declared: [{ file: 'scripts/check-b.mjs', why: '인자가 필요하다', runsIn: '.github/workflows/w.yml' }],
+  }), []);
+});
+
+test('★ 이유나 도는 곳이 비면 실패한다 — 다음 사람이 되돌릴 수 없다', () => {
+  const f = ciCoverageFindings({
+    files: ['scripts/check-b.mjs'],
+    ciText: '',
+    declared: [{ file: 'scripts/check-b.mjs', why: '  ', runsIn: '' }],
+  });
+  assert.equal(f.length, 2);
+  assert.match(f.join('\n'), /왜 PR 밖인지가 비어 있습니다/);
+  assert.match(f.join('\n'), /실제로 어디서 도는지가 비어 있습니다/);
+});
+
+test('★ 썩은 선언 — 파일이 없으면 실패한다', () => {
+  const f = ciCoverageFindings({
+    files: ['scripts/check-a.mjs'],
+    ciText: CI_WITH(['check-a.mjs']),
+    declared: [{ file: 'scripts/check-gone.mjs', why: '이유', runsIn: '어딘가' }],
+  });
+  assert.equal(f.length, 1);
+  assert.match(f[0], /선언이 썩었습니다/);
+});
+
+test('★ ci.yml 이 이제 부르는데 선언이 남아 있으면 실패한다 — 면제가 쌓인다', () => {
+  const f = ciCoverageFindings({
+    files: ['scripts/check-a.mjs'],
+    ciText: CI_WITH(['check-a.mjs']),
+    declared: [{ file: 'scripts/check-a.mjs', why: '이유', runsIn: '어딘가' }],
+  });
+  assert.equal(f.length, 1);
+  assert.match(f[0], /지우세요/);
+});
+
+test('같은 파일을 두 번 선언하면 실패한다', () => {
+  const d = { file: 'scripts/check-b.mjs', why: '이유', runsIn: '어딘가' };
+  const f = ciCoverageFindings({ files: ['scripts/check-b.mjs'], ciText: '', declared: [d, d] });
+  assert.match(f.join('\n'), /두 번 적혀 있습니다/);
+});
+
+test('"적혀 있는 것"과 "부르는 것"을 구분한다 — paths 목록은 부르는 것이 아니다', () => {
+  // `paths:` 필터에 경로가 적혀 있는 것은 돌리는 것이 아니다. 이 구분이
+  // 없으면 `paths:` 한 줄로 관문을 통과시킬 수 있다.
+  assert.equal(ciInvokes("      - 'scripts/check-a.mjs'", 'scripts/check-a.mjs'), false);
+  assert.equal(ciInvokes('        run: node scripts/check-a.mjs', 'scripts/check-a.mjs'), true);
+  assert.equal(ciInvokes('        run: node scripts/check-a.mjs --self-test', 'scripts/check-a.mjs'), true);
+});
+
+test('이름이 겹치지 않게 본다 — check-a 선언이 check-ab 를 덮지 않는다', () => {
+  assert.equal(ciInvokes('        run: node scripts/check-ab.mjs', 'scripts/check-a.mjs'), false);
+});
+
+test('★ ci.yml 을 못 읽으면 실패한다 — 못 읽은 것을 "전부 덮였다"로 적지 않는다', () => {
+  const f = allFindings({
+    exists: (p) => p !== '.github/workflows/ci.yml',
+    read: (p) => (p === '.github/workflows/ci.yml' ? null : ''),
+    files: ['scripts/check-a.mjs'],
+  });
+  assert.match(f.join('\n'), /ci\.yml 을 읽지 못했습니다/);
+});
+
+test('★ 검사기 본체를 하나도 못 찾으면 실패한다', () => {
+  const f = allFindings({
+    exists: () => true,
+    read: () => 'run: node scripts/run-all-checkers.mjs',
+    files: [],
+  });
+  assert.match(f.join('\n'), /검사기 본체를 하나도 찾지 못했습니다/);
+});
+
+test('실제 저장소에서 PR CI 밖 검사기가 전부 선언돼 있다', () => {
+  // 이 시험이 빨개지면 둘 중 하나다 — 새 검사기를 ci.yml 에 안 넣었거나,
+  // CI_UNCOVERED 선언이 낡았거나. 둘 다 사람이 고쳐야 한다.
+  const files = checkerFiles();
+  const ciText = readFileSync('.github/workflows/ci.yml', 'utf8');
+  assert.deepEqual(ciCoverageFindings({ files, ciText }), []);
+  assert.ok(CI_UNCOVERED.length > 0, '선언 목록이 비어 있습니다 — 실측과 다릅니다');
 });

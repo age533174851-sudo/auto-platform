@@ -76,6 +76,96 @@ export const SWEEP_EXCLUSIONS = [
 ];
 
 /**
+ * **PR CI 가 부르지 않는 검사기.** 위의 `SWEEP_EXCLUSIONS` 와 다른 질문이다.
+ *
+ *   SWEEP_EXCLUSIONS  러너가 **인자 없이** 돌릴 수 있는가
+ *   CI_UNCOVERED      **PR 에서** 도는가
+ *
+ * 한 파일이 양쪽에 있을 수도, 한쪽에만 있을 수도 있다. 그래서 목록을
+ * 합치지 않는다 — 합치면 둘 중 한 질문의 답이 사라진다.
+ *
+ * ## 왜 세는가
+ *
+ * `ci.yml` 은 검사기를 **이름으로 하나하나** 부른다(실측 2026-11-26:
+ * `node scripts/check-*.mjs` 90줄 · 검사기 본체 95개 중 91개). 새 검사기를
+ * 더해도 그 목록에 줄을 넣지 않으면 **PR 에서는 한 번도 돌지 않는다.**
+ * 그리고 지금까지 그걸 세는 곳이 없었다.
+ *
+ * 실제로 그렇게 된 것이 있다. `scripts/run-tests.mjs` 가 그 사실을 적어
+ * 두기까지 했다 — "그 검사기는 `ci.yml` 의 명시 목록에 없어서 … 판정만이라도
+ * 여기서 돈다". 주석으로 적는 것은 다음 사람에게 전해지지 않는다.
+ *
+ * ## 늘면 빨강이다
+ *
+ * **이 목록은 올라가지 않는다.** 새 검사기는 `ci.yml` 에 줄을 넣는 것이
+ * 정답이고, 그 줄은 `.github/workflows/` 라 승인이 필요하다. 승인 없이
+ * 여기에 적어 넣어 통과시키는 것이 바로 이 관문이 막는 일이다.
+ *
+ * 각 항목은 **왜** PR 밖인지와 **실제로 어디서 도는지**를 값으로 적는다.
+ * "넷 있다"가 아니라 어느 것이고 무엇이 그것을 돌리는가를 적는다.
+ */
+export const CI_UNCOVERED = [
+  {
+    file: 'scripts/check-autodev-safety.mjs',
+    why: 'PR 에는 무인 회차의 변경이 없다 — 이 검사기는 무인 회차가 제 울타리를 넘었는지 보는 것이다',
+    runsIn: '.github/workflows/claude-hourly-dev.yml · claude-hourly-trading.yml',
+  },
+  {
+    file: 'scripts/check-autotrade-tick-response.mjs',
+    why: '응답 본문 파일을 인자로 받는 CLI 다 — PR 에는 그 본문이 없다 (ci.yml 은 시험 파일만 돌린다)',
+    runsIn: '.github/workflows/autotrade-tick.yml',
+  },
+  {
+    file: 'scripts/check-auto-merge-switches.mjs',
+    why: '전수는 매시 trading 갈래에서 돈다. PR 에서는 `run-tests.mjs` 가 `--self-test` 로 판정만 돌린다',
+    runsIn: 'scripts/run-all-checkers.mjs (claude-hourly-trading.yml) · scripts/run-tests.mjs --self-test',
+  },
+  {
+    file: 'scripts/check-undefined.mjs',
+    why: 'tsc 전체를 다시 돌려 느리다. PR 에서는 `run-tests.mjs` 가 그 **판정 시험**만 돌린다 — 본체는 PR 에서 저장소를 훑지 않는다',
+    runsIn: 'scripts/run-all-checkers.mjs (claude-hourly-trading.yml)',
+  },
+];
+
+/** `ci.yml` 이 `node scripts/<이름>` 으로 부르는가 — 적혀 있는 것이 아니라 **부르는** 것을 본다 */
+export function ciInvokes(ciText, file) {
+  const name = baseName(file).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`node\\s+scripts/${name}(\\s|$)`, 'm').test(String(ciText ?? ''));
+}
+
+/**
+ * PR CI 밖에 있는 검사기가 **전부 선언돼 있는지** 센다.
+ *
+ * 세 가지를 본다:
+ *   ① 선언 없이 PR 밖에 있는 검사기 — 새로 생긴 것이 조용히 안 돌고 있다
+ *   ② 썩은 선언 — 파일이 없거나, `ci.yml` 이 이제 부르는데 선언이 남아 있다
+ *   ③ 이유·도는 곳이 비어 있는 선언 — 다음 사람이 되돌릴 수 없다
+ */
+export function ciCoverageFindings({ files, ciText, declared = CI_UNCOVERED }) {
+  const out = [];
+  const byFile = new Map();
+  for (const d of declared) {
+    const f = d?.file;
+    if (typeof f !== 'string' || f === '') { out.push('CI_UNCOVERED 항목에 `file` 이 없습니다'); continue; }
+    if (byFile.has(f)) out.push(`${f}: CI_UNCOVERED 에 두 번 적혀 있습니다`);
+    byFile.set(f, d);
+    if (typeof d.why !== 'string' || d.why.trim() === '') out.push(`${f}: 왜 PR 밖인지가 비어 있습니다`);
+    if (typeof d.runsIn !== 'string' || d.runsIn.trim() === '') out.push(`${f}: 실제로 어디서 도는지가 비어 있습니다`);
+  }
+  const have = new Set(files);
+  for (const f of byFile.keys()) {
+    if (!have.has(f)) { out.push(`${f}: CI_UNCOVERED 에 있는데 검사기 파일이 없습니다 — 선언이 썩었습니다`); continue; }
+    if (ciInvokes(ciText, f)) out.push(`${f}: ci.yml 이 이제 부릅니다 — CI_UNCOVERED 에서 지우세요`);
+  }
+  for (const f of files) {
+    if (ciInvokes(ciText, f) || byFile.has(f)) continue;
+    out.push(`${f}: ci.yml 이 부르지 않습니다 — PR 에서 한 번도 돌지 않습니다.`
+      + ' ci.yml 에 줄을 넣으십시오(승인 필요). 그 전까지 CI_UNCOVERED 에 이유와 도는 곳을 적지 않으면 통과하지 않습니다');
+  }
+  return out;
+}
+
+/**
  * 무엇을 어떻게 돌릴지 정한다. **러너는 이 결과만 따른다** — 러너 안에
  * 또 다른 제외 분기를 두지 않는다 (같은 판단이 두 곳에 있으면 갈린다).
  */
