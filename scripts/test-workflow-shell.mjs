@@ -12,7 +12,10 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, cpSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { shellText, shellCommands, shellScriptLines } from './lib/workflow-shell.mjs';
 
 const AUDIT = '.github/workflows/audit-production-exact100x-testnet-readiness.yml';
@@ -87,4 +90,72 @@ test('★ 검사기가 그 판정을 실제로 쓴다 — 만들어 놓고 배�
   for (const re of [/READ-ONLY-AUDIT[\s\S]{0,40}\.test\(src\)/, /\$\{OWNER\}[\s\S]{0,40}\.test\(src\)/]) {
     assert.doesNotMatch(chk, re, '관문을 raw src 로 보고 있습니다');
   }
+});
+
+// ── 감사 SQL 앵커도 셸에서 실행되는 줄이어야 한다 ──────────────
+//
+// 기계 탐침으로 다시 재니 이 검사기의 구멍이 `ed00c1a4` 에서 **14개**
+// 였다. 앞선 커밋이 13개를 닫고 하나가 남았다 — SQL 블록을 만드는
+// 앵커를 raw `src.indexOf` 로 찾는 자리다. 자르는 일은 원문이 맞지만
+// **그 줄이 실제로 도는가**는 셸에게 물어야 한다.
+
+const AUDIT_WF = '.github/workflows/audit-production-exact100x-testnet-readiness.yml';
+const commentOut = (line) => {
+  const t = line.trimStart();
+  return line.slice(0, line.length - t.length) + '# ' + t;
+};
+
+/** 워크플로 **전부**를 복사한 임시 트리에서 검사기를 돌린다 */
+function runAudit(mutate) {
+  const dir = mkdtempSync(join(tmpdir(), 'auditwf-'));
+  cpSync('.github/workflows', join(dir, '.github/workflows'), { recursive: true });
+  const path = join(dir, AUDIT_WF);
+  const src = readFileSync(path, 'utf8');
+  writeFileSync(path, mutate(src));
+  const r = spawnSync(process.execPath,
+    [join(process.cwd(), 'scripts/check-audit-readonly.mjs')], { cwd: dir, encoding: 'utf8' });
+  return { code: r.status, out: `${r.stdout}${r.stderr}` };
+}
+
+const anchorLine = (src) => {
+  const l = src.split('\n').find((x) => x.includes('cat > /tmp/audit.sql') && !x.trimStart().startsWith('#'));
+  assert.ok(l, '앵커 줄을 찾지 못했습니다 — 앵커가 바뀌었습니다');
+  return l;
+};
+
+test('감사 검사기 — 원문 복사본은 통과한다 (대조)', () => {
+  const r = runAudit((s2) => s2);
+  assert.equal(r.code, 0, r.out);
+});
+
+test('★ 감사 SQL 앵커를 주석 처리하면 그 이유로 실패한다', () => {
+  // 주석 처리하면 `/tmp/audit.sql` 이 아예 만들어지지 않는다. 그런데
+  // raw 텍스트에는 남아 있어 통과했다 (b3f2fa93 실측 rc=0).
+  const r = runAudit((s2) => {
+    const l = anchorLine(s2);
+    return s2.replace(l, commentOut(l));
+  });
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /셸에서 실제로 돌지 않습니다/,
+    '실패는 했지만 이유가 이 관문이 아닙니다');
+});
+
+test('★ 앵커를 다른 키의 인용된 값에 적어도 통과하지 않는다', () => {
+  const r = runAudit((s2) => {
+    const l = anchorLine(s2);
+    const t = l.trimStart();
+    const pad = l.slice(0, l.length - t.length);
+    return s2.replace(l, `${pad}DUMMY: "${t}"`);
+  });
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /셸에서 실제로 돌지 않습니다/);
+});
+
+test('SQL 본문은 원문에서 자른다 — 쓰기 구문 검사가 그대로 돈다', () => {
+  // heredoc 본문은 셸 명령이 아니지만 psql 에는 SQL 로 들어간다.
+  // 그 구분이 깨지면 쓰기 구문 검사가 아무것도 못 본다.
+  const r = runAudit((s2) => s2.replace('BEGIN TRANSACTION READ ONLY;',
+    'BEGIN TRANSACTION READ ONLY;\n          INSERT INTO live_orders VALUES (1);'));
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /쓰기로 읽히는 구문/);
 });

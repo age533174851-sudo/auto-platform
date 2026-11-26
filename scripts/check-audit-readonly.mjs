@@ -54,7 +54,24 @@ if (src) {
   // SQL 블록만 떼어 온다 — YAML 주석·요약 문구를 쓰기 구문으로 오인하지 않게.
   // (heredoc 본문은 셸 명령이 아니지만 **SQL 로는 실행된다** — 그래서
   //  여기만 원문 `src` 를 쓴다.)
-  const begin = src.indexOf("cat > /tmp/audit.sql <<'SQL'");
+  // **앵커도 셸에서 실행되는 줄이어야 한다.**
+  //
+  // 본문을 원문에서 자르는 것은 맞다 — heredoc 본문은 셸 명령이 아니지만
+  // psql 에는 SQL 로 들어간다. 그런데 **앵커를 찾는 일까지** 원문으로
+  // 했더니, 앵커 줄을 주석 처리해도(= SQL 파일이 아예 만들어지지 않아도)
+  // 통과했다. 기계 탐침 실측 (b3f2fa93):
+  //
+  //   `# cat > /tmp/audit.sql <<'SQL'`            → rc=0 ✅ 였다
+  //   `DUMMY: "cat > /tmp/audit.sql <<'SQL'"`     → rc=0 ✅ 였다
+  //
+  // 자르는 일과 "그 줄이 실제로 도는가"는 다른 질문이다. 뒤쪽만 셸로
+  // 옮긴다.
+  const ANCHOR = "cat > /tmp/audit.sql <<'SQL'";
+  if (!inCommandPosition(/^cat\b[\s\S]*\/tmp\/audit\.sql[\s\S]*<<'SQL'/)) {
+    err(`${F}: 감사 SQL 을 만드는 줄이 셸에서 실제로 돌지 않습니다`
+      + ' — 주석·인용 안에 있으면 그 파일은 만들어지지 않습니다');
+  }
+  const begin = src.indexOf(ANCHOR);
   const end = src.indexOf('\n          SQL', begin < 0 ? 0 : begin);
   const sql = begin >= 0 && end > begin ? src.slice(begin, end) : null;
   if (sql == null) err(`${F}: 감사 SQL 블록을 찾지 못했습니다 — 앵커가 바뀌었습니다`);
