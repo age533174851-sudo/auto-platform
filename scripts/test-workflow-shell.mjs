@@ -16,7 +16,7 @@ import { readFileSync, writeFileSync, mkdtempSync, cpSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { shellText, shellCommands, shellScriptLines } from './lib/workflow-shell.mjs';
+import { shellText, shellCommands, shellScriptLines, heredocText, heredocBodies, stripWorkflowComments } from './lib/workflow-shell.mjs';
 
 const AUDIT = '.github/workflows/audit-production-exact100x-testnet-readiness.yml';
 
@@ -158,4 +158,77 @@ test('SQL 본문은 원문에서 자른다 — 쓰기 구문 검사가 그대로
     'BEGIN TRANSACTION READ ONLY;\n          INSERT INTO live_orders VALUES (1);'));
   assert.equal(r.code, 1, r.out);
   assert.match(r.out, /쓰기로 읽히는 구문/);
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// heredoc 본문 — **셸이 실행하지 않지만 자료로 그대로 넘기는 것**
+//
+// `psql <<'SQL'` 의 본문이 실제로 돌 SQL 이다. 그래서 SQL 단정은 워크플로
+// 전체가 아니라 이쪽에서 봐야 한다. 실측(감사 워크플로):
+// `BEGIN TRANSACTION READ ONLY` 5개 중 실제 SQL 은 2개뿐이고 나머지는
+// 머리말 주석 1 + `- name:` 단계 제목 2 였다.
+// ═══════════════════════════════════════════════════════════════════
+
+test('heredoc 본문만 뽑는다 — 여는 줄은 명령이고 본문은 자료다', () => {
+  const yaml = [
+    '      - run: |',
+    '          cat > /tmp/a.sql <<\'SQL\'',
+    '          BEGIN TRANSACTION READ ONLY;',
+    '          SELECT 1;',
+    '          SQL',
+    '          psql -f /tmp/a.sql',
+    '',
+  ].join('\n');
+  const sql = heredocText(yaml);
+  assert.match(sql, /BEGIN TRANSACTION READ ONLY;/);
+  assert.doesNotMatch(sql, /psql -f/);          // 명령은 본문이 아니다
+  assert.doesNotMatch(sql, /cat > \/tmp\/a\.sql/);
+  // 반대쪽: 셸 쪽에는 본문이 없고 명령만 있다.
+  const sh = shellText(yaml);
+  assert.match(sh, /psql -f \/tmp\/a\.sql/);
+  assert.doesNotMatch(sh, /BEGIN TRANSACTION READ ONLY/);
+});
+
+test('★ 주석 처리된 heredoc 여는 줄은 heredoc 이 아니다', () => {
+  // 실측된 구멍(감사 워크플로 :139 · :427). 셸은 이 줄을 주석으로 읽어
+  // **그 SQL 파일을 만들지 않는다.** 원문에서 `<<TAG` 를 찾으면 본문이
+  // 그대로 "도는 SQL" 로 잡혀, 질의를 하나도 만들지 않는데도 통과한다.
+  const live = '      - run: |\n          cat > /tmp/a.sql <<\'SQL\'\n          BEGIN TRANSACTION READ ONLY;\n          SQL\n';
+  const dead = '      - run: |\n          # cat > /tmp/a.sql <<\'SQL\'\n          BEGIN TRANSACTION READ ONLY;\n          SQL\n';
+  assert.match(heredocText(live), /BEGIN TRANSACTION READ ONLY/);
+  assert.equal(heredocBodies(live).length, 1);
+  assert.doesNotMatch(heredocText(dead), /BEGIN TRANSACTION READ ONLY/);
+  assert.equal(heredocBodies(dead).length, 0);
+});
+
+test('heredoc 안의 `#` 은 주석이 아니다 — 본문을 자르지 않는다', () => {
+  const yaml = '      - run: |\n          cat > /tmp/a.sql <<\'SQL\'\n          SELECT 1; -- 설명\n          SELECT \'a#b\' AS x;\n          SQL\n';
+  assert.match(heredocText(yaml), /a#b/);
+  assert.match(heredocText(yaml), /-- 설명/);   // 걷는 것은 쓰는 쪽의 몫이다
+});
+
+test('★ 주석 글자는 자리마다 다르다 — stripWorkflowComments', () => {
+  // `#` 하나로 걷으면 SQL 의 `sed -E 's#…'` 가 잘리고, YAML 규칙으로
+  // 걷으면 heredoc 안의 `--` 설명이 남아 **금지 구문이 주석에 적혀 있다는
+  // 이유로** 관문이 불평한다 (감사 워크플로 :153 이 실제로 그랬다).
+  const yaml = [
+    '      - run: |',
+    '          cat > /tmp/a.sql <<\'SQL\'',
+    '          -- 전에는 INSERT INTO public.x 를 썼다',
+    '          SELECT 1;',
+    '          SQL',
+    '          sed -E \'s#postgres://[^ ]*#***#\' log.txt   # 가린다',
+    '',
+  ].join('\n');
+  const code = stripWorkflowComments(yaml);
+  assert.doesNotMatch(code, /INSERT INTO/);     // heredoc 안의 `--` 주석은 걷힌다
+  assert.doesNotMatch(code, /가린다/);          // 셸의 `#` 주석도 걷힌다
+  assert.match(code, /sed -E 's#postgres/);     // 인용 안의 `#` 은 주석이 아니다
+  assert.match(code, /SELECT 1;/);
+});
+
+test('닫히지 않은 heredoc 의 본문은 끝까지 센다 — 금지 구문이 숨지 않게', () => {
+  const yaml = '      - run: |\n          cat > /tmp/a.sql <<\'SQL\'\n          INSERT INTO public.x VALUES (1);\n';
+  assert.match(heredocText(yaml), /INSERT INTO public\.x/);
+  assert.match(stripWorkflowComments(yaml), /INSERT INTO public\.x/);
 });

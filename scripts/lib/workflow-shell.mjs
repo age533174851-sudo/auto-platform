@@ -32,15 +32,60 @@ import { stripYamlComments } from './strip-comments.mjs';
  *      셸이 실행하지 않는다 (여는 줄 자체는 명령이라 남긴다).
  */
 export function shellScriptLines(ciText) {
+  return runBlockMap(ciText).filter(l => !l.inHeredoc).map(l => l.text);
+}
+
+/**
+ * `run:` 블록의 줄마다 **heredoc 본문인지**를 붙여서 돌려준다.
+ *
+ * 이 질문("이 줄은 셸이 실행하는가, 자료로 넘기는가")에 답하는 자리는
+ * 여기 하나뿐이다. 전에는 `shellScriptLines` 와 `heredocBodies` 가 각자
+ * `<<TAG` 를 찾았는데, 그러면 **주석 처리된 여는 줄**에서 둘이 갈린다.
+ *
+ * 실측으로 그 구멍이 났다 (감사 워크플로 :139 · :427):
+ *
+ *     # cat > "${RUNNER_TEMP}/audit-spot-shape.sql" <<'SQL'
+ *
+ * 셸은 이것을 **주석으로** 읽는다 — heredoc 은 열리지 않고 그 SQL 파일은
+ * 만들어지지 않는다. 그런데 여는 줄을 원문에서 찾으면 본문이 그대로
+ * "도는 SQL" 로 잡혀서, 감사가 질의를 하나도 만들지 않는데도 관문이
+ * 통과를 적었다. 그래서 **여는 줄은 주석을 걷고** 찾는다.
+ *
+ * heredoc 안에서는 걷지 않는다 — 거기서 `#` 는 주석이 아니다.
+ */
+function runBlockMap(ciText) {
   const out = [];
+  let delim = null;
+  for (const line of runBlockLines(ciText)) {
+    if (delim !== null) {
+      if (line.text.trim() === delim) { delim = null; out.push({ ...line, inHeredoc: false }); continue; }
+      out.push({ ...line, inHeredoc: true, tag: delim });
+      continue;
+    }
+    out.push({ ...line, inHeredoc: false });
+    const m = stripYamlComments(line.text).match(/<<-?\s*(['"]?)([A-Za-z_][\w-]*)\1/);
+    if (m) delim = m[2];
+  }
+  return out;
+}
+
+/**
+ * `run:` 블록의 본문 줄 — heredoc 본문까지 **그대로** 담아서.
+ *
+ * `shellScriptLines` 와 `heredocBodies` 가 같은 질문("어느 줄이 run: 블록
+ * 안인가")을 각자 풀면 언젠가 갈린다. 그 계산은 여기 한 번만 있다.
+ */
+function runBlockLines(ciText) {
+  const out = [];     // { i, text } — i 는 원본 줄 번호(0부터)
   let block = null;   // { indent, isRun }
-  for (const raw of String(ciText ?? '').split('\n')) {
-    const line = raw.replace(/\s+$/, '');
+  const src = String(ciText ?? '').split('\n');
+  for (let i = 0; i < src.length; i += 1) {
+    const line = src[i].replace(/\s+$/, '');
     if (block) {
       const indent = line.length - line.replace(/^\s*/, '').length;
-      if (line.trim() === '') { if (block.isRun) out.push(''); continue; }
+      if (line.trim() === '') { if (block.isRun) out.push({ i, text: '' }); continue; }
       if (indent > block.indent) {
-        if (block.isRun) out.push(line.slice(block.indent + 1));
+        if (block.isRun) out.push({ i, text: line.slice(block.indent + 1) });
         continue;
       }
       block = null;   // 블록이 끝났다 — 이 줄은 아래에서 다시 본다
@@ -48,24 +93,73 @@ export function shellScriptLines(ciText) {
     const head = line.match(/^(\s*)(?:-\s+)?([A-Za-z_][\w.-]*)\s*:\s*[|>][+-]?\d*\s*$/);
     if (head) { block = { indent: head[1].length, isRun: head[2] === 'run' }; continue; }
     const inline = line.match(/^\s*(?:-\s+)?run\s*:\s*(\S.*)$/);
-    if (inline) out.push(inline[1].trim());
-  }
-  return dropHeredocBodies(out);
-}
-
-function dropHeredocBodies(lines) {
-  const out = [];
-  let delim = null;
-  for (const line of lines) {
-    if (delim !== null) {
-      if (line.trim() === delim) delim = null;
-      continue;
-    }
-    out.push(line);
-    const m = line.match(/<<-?\s*(['"]?)([A-Za-z_][\w-]*)\1/);
-    if (m) delim = m[2];
+    if (inline) out.push({ i, text: inline[1].trim() });
   }
   return out;
+}
+
+/**
+ * heredoc **본문**만 — `shellScriptLines` 가 버리는 쪽.
+ *
+ * 셸은 이 줄들을 실행하지 않지만 **자료로 그대로 넘긴다.** `psql <<'SQL'`
+ * 의 본문이 실제로 돌 SQL 이다. 그래서 SQL 단정은 이쪽에서 봐야 한다 —
+ * 워크플로 전체에 `.test()` 를 걸면 `- name:` 단계 제목이나 머리말 주석에
+ * 적힌 같은 글자가 그 단정을 만족시킨다. 실측(#792 회차): 감사 워크플로의
+ * `BEGIN TRANSACTION READ ONLY` 5개 중 실제 SQL 은 2개뿐이고, 나머지는
+ * 주석 1 + 단계 제목 2 였다. 그래서 **실제 SQL 두 줄을 다 지워도**
+ * `>= 2` 를 만족해 관문이 통과를 적었다.
+ *
+ * 닫히지 않은 heredoc 은 본문을 **끝까지** 담는다 — 셸이 그렇게 읽는다.
+ * 여기서 버리면 금지 구문(쓰기 SQL)이 그 안에 숨을 수 있다.
+ */
+export function heredocBodies(yamlText) {
+  const out = [];
+  let cur = null;
+  for (const line of runBlockMap(yamlText)) {
+    if (line.inHeredoc) {
+      if (!cur || cur.tag !== line.tag) { cur = { tag: line.tag, rows: [], lines: [] }; out.push(cur); }
+      cur.rows.push(line.text); cur.lines.push(line.i);
+      continue;
+    }
+    cur = null;
+  }
+  return out.map(h => ({ tag: h.tag, body: h.rows.join('\n'), lines: h.lines }));
+}
+
+/** SQL 주석만 걷는다. `#` 는 건드리지 않는다 — SQL 에서 주석이 아니다. */
+export function stripSqlComments(text) {
+  return String(text ?? '')
+    .replace(/--[^\n]*/g, ' ')
+    .replace(/\/\*[\s\S]*?\*\//g, ' ');
+}
+
+/**
+ * 주석만 걷은 워크플로 전체 — **영역마다 주석 글자가 다르다.**
+ *
+ * 금지 구문(쓰기 SQL·돈 움직이는 RPC)은 어느 자리에 있어도 잡아야 하므로
+ * 자리로 좁히면 안 된다. 그런데 한 가지 규칙으로 걷으면 틀린다. 실측으로
+ * 둘 다 당했다:
+ *
+ *   · `#` 로 걷으면 SQL 의 `sed -E 's#postgres…'` 같은 줄이 잘린다
+ *   · YAML 규칙으로 걷으면 heredoc 안의 `--   처음에는 …` 설명 주석이
+ *     그대로 남아, **금지 구문이 주석에 적혀 있다는 이유로** 관문이 불평한다
+ *     (감사 워크플로 :153 이 실제로 그랬다)
+ *
+ * 그래서 heredoc 본문은 SQL 규칙으로, 나머지는 YAML/셸 규칙으로 걷는다.
+ * 줄 번호는 유지한다 — 자리로 잘라 보는 단정이 줄 구조에 기댄다.
+ */
+export function stripWorkflowComments(yamlText) {
+  const src = String(yamlText ?? '').split('\n');
+  const body = new Set();
+  for (const h of heredocBodies(yamlText)) for (const i of (h.lines ?? [])) body.add(i);
+  const yamlPart = src.map((l, i) => (body.has(i) ? '' : l)).join('\n');
+  const sqlPart  = src.map((l, i) => (body.has(i) ? l : '')).join('\n');
+  return `${stripYamlComments(yamlPart)}\n${stripSqlComments(sqlPart)}`;
+}
+
+/** heredoc 본문 전부를 한 덩어리로. 주석은 걷지 않는다 — 언어마다 다르다. */
+export function heredocText(yamlText) {
+  return heredocBodies(yamlText).map(h => h.body).join('\n');
 }
 
 /**
