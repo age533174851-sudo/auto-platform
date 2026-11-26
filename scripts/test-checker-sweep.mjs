@@ -210,6 +210,30 @@ test('"적혀 있는 것"과 "부르는 것"을 구분한다 — paths 목록은
   assert.equal(ciInvokes('        run: node scripts/check-a.mjs --self-test', 'scripts/check-a.mjs'), true);
 });
 
+test('★ 주석 안의 호출은 부르는 것이 아니다 (독립 검수 반례 ①)', () => {
+  // 단계를 주석 처리하면 그 단계는 사라진다. 그런데 문자열은 남는다.
+  // 실제 `ci.yml` 로 재현된 반례다 — `# run: node scripts/check-x.mjs`.
+  // 지금 `ci.yml` 에도 주석 안에 `node scripts/check-100x-mutations.mjs`
+  // 안내가 있고, 그 검사기는 같은 파일의 `--self-test` 줄로 실제로 돈다.
+  assert.equal(ciInvokes('        # run: node scripts/check-a.mjs', 'scripts/check-a.mjs'), false);
+  assert.equal(ciInvokes('      # 전수 실행: node scripts/check-a.mjs (사람이 부른다)', 'scripts/check-a.mjs'), false);
+});
+
+test('★ echo 는 부르는 것이 아니다 (독립 검수 반례 ②)', () => {
+  // `echo node scripts/check-x.mjs` 는 문장만 출력한다. 명령 위치에
+  // 있는 것만 센다 — 토막이 `node` 로 시작해야 한다.
+  assert.equal(ciInvokes('        run: echo node scripts/check-a.mjs', 'scripts/check-a.mjs'), false);
+  assert.equal(ciInvokes('        run: printf "node scripts/check-a.mjs"', 'scripts/check-a.mjs'), false);
+});
+
+test('환경변수 접두와 명령 이어붙이기는 부르는 것이다 — 잘못 막으면 그것도 고장이다', () => {
+  assert.equal(ciInvokes('        run: FOO=1 node scripts/check-a.mjs', 'scripts/check-a.mjs'), true);
+  assert.equal(ciInvokes('        run: node scripts/check-b.mjs && node scripts/check-a.mjs',
+    'scripts/check-a.mjs'), true);
+  // 다중행 `run: |` 블록 안의 줄도 같게 본다.
+  assert.equal(ciInvokes('        run: |\n          node scripts/check-a.mjs\n', 'scripts/check-a.mjs'), true);
+});
+
 test('이름이 겹치지 않게 본다 — check-a 선언이 check-ab 를 덮지 않는다', () => {
   assert.equal(ciInvokes('        run: node scripts/check-ab.mjs', 'scripts/check-a.mjs'), false);
 });

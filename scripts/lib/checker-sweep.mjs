@@ -35,6 +35,8 @@
 //
 // 둘 다 없으면 그건 조용히 버리는 것이므로 **실패**다.
 
+import { stripYamlComments } from './strip-comments.mjs';
+
 /** 제외 대상의 기준 이름 (`scripts/check-x.mjs` → `check-x.mjs`) */
 export function baseName(p) {
   const s = String(p ?? '');
@@ -127,10 +129,44 @@ export const CI_UNCOVERED = [
   },
 ];
 
-/** `ci.yml` 이 `node scripts/<이름>` 으로 부르는가 — 적혀 있는 것이 아니라 **부르는** 것을 본다 */
+/**
+ * `ci.yml` 이 `node scripts/<이름>` 으로 **부르는가.**
+ *
+ * **적혀 있는 것과 부르는 것은 다르다.** 처음 판은 raw 텍스트에서
+ * `node\s+scripts/<이름>` 을 찾았다. 독립 검수(#792 코멘트 7197793263)가
+ * 반례 둘을 실제 `ci.yml` 로 재현했고, 직접 확인했다 (HEAD aa445469):
+ *
+ *   원래 단계                                      → rc=0 · 부름 (맞다)
+ *   `# run: node scripts/check-reconcile-truth.mjs` → rc=0 · **부름으로 셌다**
+ *   `run: echo node scripts/check-reconcile-truth.mjs` → rc=0 · **부름으로 셌다**
+ *   그 줄을 `run: true` 로 바꿈                     → rc=1 · 안 부름 (맞다)
+ *
+ * 주석 두 줄로 단계가 사라지고, `echo` 는 문장만 출력한다. 둘 다 검사기를
+ * 돌리지 않는데 "선언 없이 빠진 것은 0건"이 찍혔다 — 제가 이 관문에
+ * 적어 둔 바로 그 구분이 깨져 있었다.
+ *
+ * 그래서 두 가지를 본다:
+ *
+ *   ① **주석을 걷는다.** `ci.yml` 에는 지금도 주석 안에
+ *      `node scripts/check-100x-mutations.mjs` 가 있다(전수 실행 안내).
+ *      그 검사기는 같은 파일의 `--self-test` 줄로 실제로 돈다.
+ *   ② **명령 위치만 센다.** 세미콜론·`&&`·`||`·파이프로 나눈 각 토막이
+ *      `node` 로 시작해야 한다. `echo node …` 는 `echo` 로 시작하므로
+ *      부름이 아니다. 앞에 붙는 환경변수 지정(`FOO=bar node …`)은
+ *      명령 위치를 바꾸지 않으므로 허용한다.
+ */
 export function ciInvokes(ciText, file) {
   const name = baseName(file).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`node\\s+scripts/${name}(\\s|$)`, 'm').test(String(ciText ?? ''));
+  const call = new RegExp(`^node\\s+scripts/${name}(\\s|$)`);
+  for (const raw of stripYamlComments(String(ciText ?? '')).split('\n')) {
+    // `run: node …` 와 다중행 `run: |` 블록 안의 `node …` 를 같게 본다.
+    const line = raw.replace(/^\s*-?\s*run\s*:\s*/, '');
+    for (const seg of line.split(/&&|\|\||[;|]/)) {
+      const cmd = seg.trim().replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*/, '');
+      if (call.test(cmd)) return true;
+    }
+  }
+  return false;
 }
 
 /**
