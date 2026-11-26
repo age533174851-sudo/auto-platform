@@ -11,6 +11,7 @@
 // 화면에도 그렇게 적는다.
 import React, { useCallback, useEffect, useState } from 'react';
 import { errorTextOf } from '@/lib/http/errorText';
+import { paperAccountReadOf } from '@/lib/trading/paperAccountRead';
 import { C, FS, NUM, ghostBtn, input, fmtPrice, pnlColor } from './theme';
 import { useTerminal } from './TerminalContext';
 
@@ -41,23 +42,22 @@ export function usePaperAccount(enabled: boolean) {
   const [err, setErr] = useState('');
 
   const load = useCallback(async () => {
-    if (!enabled || !auth) { setAcct(null); return; }
+    // **계좌와 포지션은 한 결과에서 함께 바뀐다.** 계좌만 비우고 포지션을
+    // 남기면, 조회가 실패한 뒤에도 옛 포지션이 오류 표시 없이 현재처럼
+    // 보인다(`paperAccountReadOf`).
+    const apply = (s: { acct: any; positions: any[]; err: string }) => {
+      setAcct(s.acct); setPositions(s.positions); setErr(s.err);
+    };
+    if (!enabled || !auth) { apply(paperAccountReadOf({ kind: 'DISABLED' })); return; }
     try {
       const r = await fetch('/api/paper/account', { headers: { Authorization: auth } });
-      const j = await r.json();
-      if (!r.ok || !j?.ok) {
-        // 조회 실패를 잔고 0으로 그리지 않는다. 0은 '돈이 없다'이고
-        // 실패는 '모른다'인데, 화면에서는 둘이 똑같이 보인다.
-        setAcct(null);
-        setErr(errorTextOf(j, `조회 실패 (${r.status})`));
-        return;
-      }
-      setErr('');
-      setAcct(j.account);
-      setPositions(Array.isArray(j.positions) ? j.positions : []);
+      const j = await r.json().catch(() => null);
+      apply(paperAccountReadOf({
+        kind: 'RESPONSE', httpOk: r.ok, body: j,
+        failText: errorTextOf(j, `조회 실패 (${r.status})`),
+      }));
     } catch (e: any) {
-      setAcct(null);
-      setErr(`모의 계좌를 읽지 못했습니다 (${e?.message || e})`);
+      apply(paperAccountReadOf({ kind: 'THROWN', message: String(e?.message || e) }));
     }
   }, [enabled, auth]);
 

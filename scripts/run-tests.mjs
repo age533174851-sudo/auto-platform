@@ -159,6 +159,7 @@ import { runChartLoadStateTests } from './src/lib/trading/chartLoadState.test';
 import { runSubmitGateTests } from './src/lib/trading/submitGate.test';
 import { runTradeIntentTests } from './src/lib/trading/tradeIntent.test';
 import { runPositionScopeTests } from './src/lib/trading/positionScope.test';
+import { runPaperAccountReadTests } from './src/lib/trading/paperAccountRead.test';
 import { runMarketDataContractTests } from './src/lib/markets/marketDataContract.test';
 import { runRankingTests } from './src/lib/markets/ranking.test';
 import { runInstrumentFieldTests } from './src/lib/markets/instrumentFields.test';
@@ -516,7 +517,7 @@ runAttributionTests(); runLeverageLadderTests(); runSchedulePlanTests(); runStra
 runProtectionLedgerTests(); runStopLedgerTests(); runFlatCleanupTests(); runTradeIdentityTests(); runLedgerEventTests(); runAutoRuntimeViewTests(); runFingerprintTests(); runServerFetchTests();
 runMigrationPlanTests(); runPaperScopeTests(); runMigrationAdoptionTests(); runPaperChallengeTests(); runPaperChallengeScopeTests(); runPaperChallengeApiTests(); runPaperPriceSourceTests(); runPaperTargetTests();
 runPaperCapabilityTests(); runLegacyLedgerTests(); runOrderBookTests(); runChallengeDisplayTests(); runPositionSizingTests(); runGameMoneyTests(); runCandleSeriesTests(); runIndicatorsTests();
-runStreamEndpointTests(); runMarketStatsTests(); runPaperAvailableTests(); runStopPresetTests(); runChartLoadStateTests(); runSubmitGateTests(); runTradeIntentTests(); runPositionScopeTests();
+runStreamEndpointTests(); runMarketStatsTests(); runPaperAvailableTests(); runStopPresetTests(); runChartLoadStateTests(); runSubmitGateTests(); runTradeIntentTests(); runPositionScopeTests(); runPaperAccountReadTests();
 runMarketDataContractTests(); runRankingTests(); runInstrumentFieldTests(); runInstrumentRouteTests(); runMarketInstrumentTests(); runSizeInputTests(); runCtaVerdictTests(); runPaperOrderReviewTests();
 runPaperCloseReviewTests(); runPaperChallengeSweepRouteTests(); runPaperDepositTests(); runPaperSpotHoldingsTests(); runTradeContextTests(); runSellPlanTests(); runProductRegistryTests(); runVenueSpecTests(); runSpotPrecisionTests();
 runMigrationStatusTests(); runWalletTruthTests(); runSmokePlanTests(); runSmokeRunTests(); runCancelRunTests(); runPaperMultiBotTests(); runFeedbackRedactTests(); runFeedbackTicketTests();
