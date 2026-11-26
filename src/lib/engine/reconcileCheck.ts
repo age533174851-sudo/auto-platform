@@ -165,11 +165,18 @@ export async function gatherAndReconcile(
       return { reachable: false, verdict: null, error: posRes?.message || '거래소 조회 실패', ...empty };
     }
 
+    // `getFuturesOpenOrders`는 배열이 아니라 `{ success, orders }`를 준다.
+    // 예전 `Array.isArray(open)`는 그 객체를 언제나 `[]`로 읽어서, 손절이
+    // 걸려 있어도 모든 Binance 포지션이 '손절 소실'(critical)이 됐다.
+    // 모양 판정은 `confirmedBinanceOpenOrders` 한 곳에 둔다. 못 읽으면(null)
+    // Gate 갈래와 같이 **있다고 가정하지 않는다.**
+    const { confirmedBinanceOpenOrders } = await import('./venuePositionOps');
     for (const p of (posRes.positions as any[])) {
       let hasStop = false;
       try {
-        const open = await bf.getFuturesOpenOrders(key, secret, testnet, p.symbol);
-        hasStop = (Array.isArray(open) ? open : []).some((o: any) =>
+        const open = confirmedBinanceOpenOrders(
+          await bf.getFuturesOpenOrders(key, secret, testnet, p.symbol));
+        hasStop = (open ?? []).some((o: any) =>
           String(o?.type || '').toUpperCase() === 'STOP_MARKET');
       } catch { hasStop = false; }
 

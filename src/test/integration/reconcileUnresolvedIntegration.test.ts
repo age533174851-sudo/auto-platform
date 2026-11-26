@@ -459,6 +459,71 @@ export async function runReconcileUnresolvedTests(): Promise<void> {
     });
   }
 
+  // ══════════ ⑥ Binance 손절 판정이 미체결 응답의 모양을 읽는가 ══════════
+  //
+  // `getFuturesOpenOrders`는 배열이 아니라 `{ success, orders }`를
+  // 돌려준다(2285f809 이후). 그런데 대조는 그 값을 `Array.isArray(open)`로
+  // 읽고 있었다 — 객체라서 언제나 `[]`가 되고, **손절이 걸려 있어도**
+  // 모든 Binance 포지션이 `PROTECTIVE_ORDER_MISSING`(critical)으로 잡혀
+  // 신규 주문이 막혔다. 반대로 말하면 이 판정은 손절이 정말 없어진
+  // 경우와 걸려 있는 경우를 **한 번도 가르지 못했다.**
+  {
+    const appPos = {
+      user_id: 'u1', client_order_id: 'pos-1', symbol: 'BTCUSDT', side: 'LONG',
+      filled_qty: 0.01, status: 'FILLED', reduce_only: false,
+      connection_id: 'fixture-connection',
+    };
+    const longPos = [{
+      symbol: 'BTCUSDT', positionAmt: '0.01', entryPrice: '60000', markPrice: '60000',
+      unRealizedProfit: '0', leverage: '100', marginType: 'isolated',
+      liquidationPrice: '59500', positionSide: 'BOTH',
+    }];
+    const stop = {
+      orderId: 9001, symbol: 'BTCUSDT', type: 'STOP_MARKET', side: 'SELL',
+      stopPrice: '59700', closePosition: true, reduceOnly: true,
+      origQty: '0', price: '0', status: 'NEW', time: 1,
+    };
+    const stopMissing = (g: any) => ((g.verdict?.mismatches ?? []) as any[])
+      .filter((m: any) => m.code === 'PROTECTIVE_ORDER_MISSING').length;
+
+    const withStop = await run(new FakeVenue()
+      .on(BN_POS, { json: longPos }).on(BN_OPEN, { json: [stop] }), { live_orders: [appPos] });
+    test('⑥ Binance 손절이 걸려 있으면 "손절 없음"으로 적지 않는다', () => {
+      eq(withStop.g.reachable, true, '정상 조회다');
+      eq(withStop.g.exchangePositions?.[0]?.hasProtectiveStop, true,
+        '거래소 미체결에 STOP_MARKET이 있으면 손절이 있는 것이다');
+      eq(stopMissing(withStop.g), 0, '걸린 손절을 소실로 적으면 멀쩡한 계좌의 신규 주문이 막힌다');
+    });
+
+    // 판정이 "언제나 있다"로 뒤집히지 않았는지 — 정말 없으면 그대로 잡는다.
+    const noStop = await run(new FakeVenue()
+      .on(BN_POS, { json: longPos }).on(BN_OPEN, { json: [] }), { live_orders: [appPos] });
+    test('⑥-2 Binance 손절이 정말 없으면 그대로 PROTECTIVE_ORDER_MISSING이다', () => {
+      eq(noStop.g.exchangePositions?.[0]?.hasProtectiveStop, false);
+      eq(stopMissing(noStop.g), 1, '없는 손절은 critical로 남아야 한다');
+      eq(noStop.g.verdict?.blockNewOrders, true);
+    });
+
+    // 미체결을 못 읽으면 **있다고 가정하지 않는다** — Gate 갈래와 같은 규칙.
+    const unreadable = await run(new FakeVenue()
+      .on(BN_POS, { json: longPos })
+      .on(BN_OPEN, { status: 500, json: { code: -1001, msg: 'down' } }), { live_orders: [appPos] });
+    test('⑥-3 Binance 미체결을 못 읽으면 손절이 있다고 가정하지 않는다', () => {
+      eq(unreadable.g.exchangePositions?.[0]?.hasProtectiveStop, false);
+      eq(stopMissing(unreadable.g), 1);
+    });
+
+    // 익절만 걸려 있는 것은 손절이 아니다.
+    const tpOnly = await run(new FakeVenue()
+      .on(BN_POS, { json: longPos })
+      .on(BN_OPEN, { json: [{ ...stop, orderId: 9002, type: 'TAKE_PROFIT_MARKET', stopPrice: '61000' }] }),
+      { live_orders: [appPos] });
+    test('⑥-4 익절만 걸려 있으면 손절로 세지 않는다', () => {
+      eq(tpOnly.g.exchangePositions?.[0]?.hasProtectiveStop, false);
+      eq(stopMissing(tpOnly.g), 1);
+    });
+  }
+
   await checkReconcileListRoute();
   await checkReconcileRealPath();
 }
