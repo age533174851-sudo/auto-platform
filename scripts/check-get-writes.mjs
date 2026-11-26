@@ -57,12 +57,38 @@ function walk(dir, out = []) {
   return out;
 }
 
-/** GET 함수 본문만 잘라낸다. POST가 쓰는 것은 정상이다 */
+/**
+ * GET 핸들러 본문만 잘라낸다. POST가 쓰는 것은 정상이다.
+ *
+ * **쓰는 법을 바꾸면 비켜 가던 것**
+ * ─────────────────────────────────
+ * 예전에는 \`export async function GET(\` 하나만 찾았다. Next는
+ * \`export const GET = async () => {}\` 꼴도 똑같이 받아 주는데, 그 꼴로
+ * 쓴 라우트는 여기서 \`null\`이 되어 **검사 대상에서 통째로 빠졌다** —
+ * 계수에도 안 들어갔다.
+ *
+ * 실측했다. 그 꼴로 \`.insert(\`를 넣은 라우트를 두고 돌려도
+ * "GET 라우트 132개 · 새로 쓰는 것 0개"가 찍히고 종료코드는 0이었다.
+ * 막으려고 만든 검사가 **표기법만 바꾸면 통과하는 것**이 가장 나쁘다 —
+ * 그 검사는 있는 것보다 나쁘다. 있다고 믿게 하기 때문이다.
+ *
+ * 경계도 넓혔다. 예전 정규식은 다음 \`export\`가 \`const POST = ...\` 꼴이면
+ * 그것을 경계로 보지 못해 POST 본문까지 GET으로 셌다. 지금 그 조합은
+ * 저장소에 없지만(측정함: \`function GET\` 뒤의 다음 export는 전부
+ * \`async function\`), 생기면 엉뚱한 자리를 지적하게 된다.
+ *
+ * 여전히 안 보는 것 — 적어 둔다
+ * ──────────────────────────────
+ * \`export { GET } from '../route'\` 재수출(현재 2곳)은 \`null\`로 건너뛴다.
+ * 쓰기가 있다면 **부모 라우트에 있고 그 파일은 따로 검사된다.** 건너뛰는
+ * 것이 맞다. \`export const GET = someHandler\` 같은 간접 핸들러는 본문이
+ * 이 파일에 없어 못 본다 — 현재 0곳이고, 생기면 이 주석을 고쳐야 한다.
+ */
 function getBody(src) {
-  const m = /export\s+async\s+function\s+GET\s*\(/.exec(src);
-  if (!m) return null;
-  const rest = src.slice(m.index + m[0].length);
-  const next = /\nexport\s+(?:async\s+)?function\s/.exec(rest);
+  const decl = /export\s+(?:async\s+function\s+GET\s*\(|const\s+GET\s*=)/.exec(src);
+  if (decl == null) return null;
+  const rest = src.slice(decl.index + decl[0].length);
+  const next = /\nexport\s+(?:async\s+)?(?:function|const|let|var|class)\s/.exec(rest);
   return next ? rest.slice(0, next.index) : rest;
 }
 
