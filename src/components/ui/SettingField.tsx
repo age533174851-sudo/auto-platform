@@ -191,6 +191,7 @@ export function countChanged<T extends Record<string, any>>(
  */
 export function SliderField({
   label, value, base, unit, min, max, step = 1, onChange, hint, color,
+  preserveRawNumber,
 }: {
   label: string;
   value: number;
@@ -203,6 +204,23 @@ export function SliderField({
   onChange: (v: number) => void;
   hint?: string;
   color?: string;
+  /**
+   * 숫자칸(`<input type="number">`)의 raw 입력을 clamp·round 없이 그대로
+   * `onChange`로 보낸다. slider(`<input type="range">`)는 물리적 범위 안에서
+   * 움직이므로 clamp·round는 유지된다.
+   *
+   * **왜 필요한가 (#778 리뷰)**
+   * 저장 계약이 유한 양수 전체를 받아 오는 자리(배당 보유 수량이 그런 예)에
+   * SliderField를 얹을 때, `min=0.001`로 잡은 slider가 사용자가 친 `0.0005`를
+   * `0.001`로, `max=1_000_000`인 slider가 `5,000,000`을 `1,000,000`으로
+   * **조용히 바꿔** 저장해 버렸다 (Codex 3·4차 재현). 범위 밖 입력은 slider로는
+   * 못 넣지만 숫자칸은 정확히 받아 와 호출자가 저장 전에 명시 거절(혹은
+   * 수용)하도록 넘겨준다. 범위 안 입력은 두 입력 모두 그대로 통과한다.
+   *
+   * 기본값은 `undefined` (기존 동작 유지) — 다른 소비자(DCA·FearDca·Funding
+   * 등)는 clamp가 **오타 10배 방지** 기능이라 바꾸지 않는다.
+   */
+  preserveRawNumber?: boolean;
 }) {
   const clamp = (n: number) => Math.min(max, Math.max(min, n));
   // 소수 step에서 부동소수점 찌꺼기가 남지 않게 자릿수를 맞춘다
@@ -230,7 +248,11 @@ export function SliderField({
             min={min} max={max} step={step}
             onChange={e => {
               const n = parseFloat(e.target.value);
-              if (Number.isFinite(n)) onChange(round(clamp(n)));
+              if (!Number.isFinite(n)) return;
+              // preserveRawNumber: 숫자칸은 사용자가 친 그대로 보낸다 —
+              // 저장 계약이 범위 밖 양수도 받는 경우, 호출자가 저장 전에
+              // 명시 거절할지 결정한다. slider(아래)는 그대로 clamp·round한다.
+              onChange(preserveRawNumber ? n : round(clamp(n)));
             }}
             style={{
               width: `${String(max).length + 4}ch`, minWidth: 62,

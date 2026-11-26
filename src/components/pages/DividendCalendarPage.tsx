@@ -224,37 +224,32 @@ function DividendInner({ currency = 'KRW' }: { currency?: string }) {
                 숫자칸으로 정확히 넣고, 범위 밖 입력은 SliderField가 자동으로
                 clamp해서 들여 보낸다.
 
-                min·max·step 고른 이유 (#778 리뷰 두 차례 반영):
-                - `step=0.00001` — DRIP·분할매수로 생기는 **소수 보유**를 소수
-                  다섯째 자리까지 보존한다. 처음에는 step=1→정수 반올림이었고
-                  (Codex 1차 지적), 두 번째에는 step=0.001도 소수 넷째 자리
-                  이하를 잘랐다 (Codex 2차 지적 "0.0005도 여전히 변합니다").
-                  이 자리까지 내리면 실무상 저장 계약을 전부 보존한다.
-                - `min=0` — `addHolding`이 0 이하를 `notifyError`로 거르는 안전망이
-                  이미 있어 slider에서 추가로 1로 끌어올릴 필요가 없다. 0으로
-                  드래그 후 저장하면 기존 안내 그대로 뜬다.
-                - `max=100_000_000` — 저장 계약 자체에는 상한이 없다. 이 값은
-                  **slider가 필요로 하는 유한 max**일 뿐이다. 1억주는 1주당
-                  $30짜리 ETF 기준 $30억 포지션이라 개인 투자자뿐 아니라
-                  대부분의 기관 비중도 넘는다. **완전한** 계약 보존을 하려면
-                  `SliderField`가 숫자칸까지 clamp·round하지 않도록 API를 나눠야
-                  하는데 (slider 표시 범위 ≠ 숫자 입력 범위), 그건 공용 UI를
-                  고치는 별도 PR 범위다 — follow-up TODO로 적어 둔다.
+                min·max·step·preserveRawNumber 고른 이유 (#778 리뷰 네 차례 반영):
+                - `preserveRawNumber` — 숫자칸은 사용자가 친 그대로 저장한다
+                  (Codex 4차 재현 "0.000001 → 0.00001로 10배 저장" 차단).
+                  slider는 여전히 min·max 안에서만 움직이지만, 숫자칸은 범위
+                  밖 양수도 통과시키고 `addHolding`/`updateHolding`이 저장 전에
+                  명시 거절한다. 저장 계약의 유한 양수 전부를 보존한다.
+                - `step=0.00001` — slider 눈금 자리와 숫자칸 toFixed의 참조.
+                  preserveRawNumber와 함께면 숫자칸은 더 작은 소수도 받는다.
+                - `min=0.00001`·`max=100_000_000` — slider 물리적 범위. 숫자
+                  칸에서 이 밖의 양수를 쳐도 preserveRawNumber가 그대로 통과.
+                  silent-delete 방어를 위해 min은 step과 같게 유지 (slider로
+                  0에 닿지 못하게; 숫자칸 0은 validateHoldingShares가 거절).
 
-                SliderField가 양쪽 (slider·숫자칸)에 적용하는 clamp·round 산식
-                자체가 어떤 입력을 어떤 저장값으로 바꾸는지는 `scripts/test-
-                dividend-sliderfield.mjs`가 **실제 SettingField.tsx 소스의
-                해당 라인을 snapshot으로 묶어** 값으로 못 박는다. 산식이 바뀌면
-                그 테스트가 먼저 깨진다 (ci.yml의 `node --test scripts/test-*.mjs`
-                글롭이 자동으로 집어 가므로 run-tests.mjs 등록 없이 CI에 들어간다). */}
+                SliderField의 산식과 preserveRawNumber 분기가 어떤 입력을
+                어떤 저장값으로 바꾸는지는 `scripts/test-dividend-sliderfield.mjs`
+                가 **실제 SettingField.tsx 소스의 해당 라인을 snapshot으로
+                묶어** 값으로 못 박는다. 산식이 바뀌면 그 테스트가 먼저 깨진다. */}
             <div style={{ marginTop: SP.sm }}>
               <SliderField
                 label="수량"
-                value={Number(addShares) || 0}
+                value={addShares === '' ? NaN : Number(addShares)}
                 unit="주"
                 min={0.00001} max={100_000_000} step={0.00001}
-                onChange={v => setAddShares(v > 0 ? String(v) : '')}
-                hint="소수 다섯째 자리까지 보존 (범위 밖은 min/max로 들여 잡힘)."
+                onChange={v => setAddShares(String(v))}
+                preserveRawNumber
+                hint="숫자칸은 그대로 저장. 범위 밖/0 이하는 저장 시 안내."
               />
             </div>
             <div style={{ ...F.muted, marginTop: 6 }}>지원 종목 탭에서 사용 가능한 심볼 확인</div>
@@ -301,12 +296,13 @@ function DividendInner({ currency = 'KRW' }: { currency?: string }) {
                         validateHoldingShares — 그쪽이 n<=0을 거절한다. */}
                     <SliderField
                       label="수량"
-                      value={Number(draftShares) || est.shares}
+                      value={draftShares === '' ? est.shares : Number(draftShares)}
                       base={est.shares}
                       unit="주"
                       min={0.00001} max={100_000_000} step={0.00001}
                       onChange={v => setDraftShares(String(v))}
-                      hint="소수 다섯째 자리까지 보존. 삭제는 🗑 버튼."
+                      preserveRawNumber
+                      hint="숫자칸은 그대로 저장. 삭제는 🗑 버튼."
                     />
                     <div style={{ display: 'flex', gap: 6, marginTop: SP.sm }}>
                       <button onClick={() => updateHolding(est.symbol)} style={{ ...buttonStyle('primary'), flex: 1 }}>확인</button>

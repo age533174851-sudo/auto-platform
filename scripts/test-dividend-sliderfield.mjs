@@ -50,8 +50,9 @@ const EDIT_PROPS = { min: 0.00001, max: 100_000_000, step: 0.00001 };
 const CLAMP_SNAPSHOT  = '  const clamp = (n: number) => Math.min(max, Math.max(min, n));';
 const ROUND_DECIMALS  = "  const decimals = (String(step).split('.')[1] || '').length;";
 const ROUND_SNAPSHOT  = '  const round = (n: number) => Number(n.toFixed(decimals));';
-const NUMBER_ONCHANGE = 'if (Number.isFinite(n)) onChange(round(clamp(n)));';
+const NUMBER_PRESERVE = 'onChange(preserveRawNumber ? n : round(clamp(n)));';
 const RANGE_ONCHANGE  = 'onChange={e => onChange(round(clamp(parseFloat(e.target.value))))}';
+const PRESERVE_PROP   = 'preserveRawNumber?: boolean;';
 
 function readSettingField() {
   return readFileSync(join(ROOT, 'src/components/ui/SettingField.tsx'), 'utf8');
@@ -61,19 +62,28 @@ function readDividendPage() {
 }
 
 // ── 로컬 복제 — snapshot이 통과했을 때만 이 산식이 소스와 같다고 믿는다 ──
-function sliderOnChange(raw, { min, max, step }) {
+//
+// SliderField는 두 입력(slider·숫자칸)에 서로 다른 처리를 한다:
+//   - slider(range): 항상 round(clamp(n))
+//   - 숫자칸: preserveRawNumber면 raw n 그대로, 아니면 round(clamp(n))
+//
+// DividendCalendarPage의 두 SliderField는 preserveRawNumber=true다. 따라서
+// 숫자칸으로 들어온 사용자 입력은 clamp·round를 거치지 않고 저장 상태에
+// 그대로 들어간다. slider를 드래그한 값은 여전히 clamp·round된다.
+function sliderOnChange(raw, { min, max, step }, kind) {
   const n = parseFloat(raw);
   if (!Number.isFinite(n)) return NaN;
   const clamp = (x) => Math.min(max, Math.max(min, x));
   const decimals = (String(step).split('.')[1] || '').length;
-  return Number(clamp(n).toFixed(decimals));
+  if (kind === 'number-preserveRaw') return n; // DividendCalendarPage의 숫자칸 경로
+  return Number(clamp(n).toFixed(decimals));   // slider 또는 preserveRawNumber 꺼진 숫자칸
 }
 
 // ══ SettingField.tsx 소스가 기대한 모양 그대로인가 ═════════════════════
 
-test('SettingField.tsx: SliderField의 clamp·round 라인이 snapshot 그대로 (아니면 로컬 복제를 같이 바꿔야 함)', () => {
+test('SettingField.tsx: SliderField의 clamp·round·preserveRawNumber 라인이 snapshot 그대로', () => {
   const src = readSettingField();
-  for (const line of [CLAMP_SNAPSHOT, ROUND_DECIMALS, ROUND_SNAPSHOT, NUMBER_ONCHANGE, RANGE_ONCHANGE]) {
+  for (const line of [CLAMP_SNAPSHOT, ROUND_DECIMALS, ROUND_SNAPSHOT, NUMBER_PRESERVE, RANGE_ONCHANGE, PRESERVE_PROP]) {
     assert.ok(
       src.includes(line),
       `SettingField.tsx에 다음 줄이 없음 — 산식이 바뀌었을 수 있다:\n  기대: ${line}\n  → test-dividend-sliderfield.mjs의 sliderOnChange·snapshot을 같이 고칠 것.`
@@ -81,90 +91,86 @@ test('SettingField.tsx: SliderField의 clamp·round 라인이 snapshot 그대로
   }
 });
 
-test('DividendCalendarPage.tsx: 두 SliderField의 min·max·step이 이 테스트 상수와 같다', () => {
+test('DividendCalendarPage.tsx: 두 SliderField의 min·max·step·preserveRawNumber가 이 테스트 상수와 같다', () => {
   const src = readDividendPage();
-  const matches = src.match(/min=\{0\.00001\} max=\{100_000_000\} step=\{0\.00001\}/g);
-  assert.equal(matches?.length, 2,
-    `두 SliderField 모두 min={0.00001} max={100_000_000} step={0.00001} 여야 함. 실제 매칭 수: ${matches?.length ?? 0}`);
+  const propsMatches = src.match(/min=\{0\.00001\} max=\{100_000_000\} step=\{0\.00001\}/g);
+  assert.equal(propsMatches?.length, 2,
+    `두 SliderField 모두 min={0.00001} max={100_000_000} step={0.00001} 여야 함. 실제 매칭 수: ${propsMatches?.length ?? 0}`);
+  // preserveRawNumber가 JSX 속성으로 두 곳 다 있어야 한다 — 숫자칸에서
+  // 사용자 입력이 clamp·round 없이 저장 경로로 가도록 (Codex 4차 "10배
+  // 저장" 차단). JSX 속성은 들여쓰기 뒤에 혼자 쓰이는 shorthand 모양
+  // (`={...}` 없이, 그 자리에서 줄바꿈).
+  const preserveMatches = src.match(/^\s+preserveRawNumber\s*$/gm);
+  assert.equal(preserveMatches?.length, 2,
+    `두 SliderField 모두 JSX shorthand로 preserveRawNumber를 켜야 함. 실제 매칭 수: ${preserveMatches?.length ?? 0}`);
 });
 
 test('DividendCalendarPage.tsx: 삭제는 별도 removeHolding 경로 — updateHolding은 n<=0을 거절', () => {
   const src = readDividendPage();
-  // updateHolding의 분기 `if (n === 0) persist(holdings.filter(...))`가
-  // 남아 있으면 silent-delete 회귀.
   assert.ok(!src.includes('n === 0) persist(holdings.filter'),
     '수정 경로가 n===0을 삭제로 해석하는 분기가 다시 생김 (silent-delete 회귀)');
-  // 삭제는 removeHolding을 통해서만
   assert.ok(src.includes('const removeHolding ='), 'removeHolding 함수가 사라짐');
   assert.ok(src.includes('onClick={() => removeHolding('), '🗑 버튼이 removeHolding을 호출하지 않음');
 });
 
-// ══ 저장 계약 보존 ═════════════════════════════════════════════════════
+// ══ 숫자칸 (preserveRawNumber=true) — 사용자 입력 그대로 저장 ══════════
 
-test('ADD props: 소수 보유 0.5주가 정수로 반올리지 않는다 (Codex 1차 지적)', () => {
-  assert.equal(sliderOnChange('0.5', ADD_PROPS), 0.5);
+test('숫자칸: 소수 보유 0.5주가 정수로 반올리지 않는다 (Codex 1차 지적)', () => {
+  assert.equal(sliderOnChange('0.5', ADD_PROPS, 'number-preserveRaw'), 0.5);
 });
 
-test('ADD props: 0.001 (3자리) 보존', () => {
-  assert.equal(sliderOnChange('0.001', ADD_PROPS), 0.001);
+test('숫자칸: 0.0005 보존 (Codex 2차 지적)', () => {
+  assert.equal(sliderOnChange('0.0005', ADD_PROPS, 'number-preserveRaw'), 0.0005);
 });
 
-test('ADD props: 0.0005 (4자리) 보존 (Codex 2차 지적 — step=0.001이었을 때 0.001로 반올림됐다)', () => {
-  assert.equal(sliderOnChange('0.0005', ADD_PROPS), 0.0005);
+test('숫자칸: 0.000001 보존 (Codex 4차 재현 — 전엔 0.00001로 10배 저장됐다)', () => {
+  // **핵심 회귀 방어**: 사용자가 친 양수를 조용히 다른 양수로 바꾸지 않는다.
+  assert.equal(sliderOnChange('0.000001', ADD_PROPS, 'number-preserveRaw'), 0.000001);
 });
 
-test('ADD props: 0.00001 (step 자리) 보존', () => {
-  assert.equal(sliderOnChange('0.00001', ADD_PROPS), 0.00001);
+test('숫자칸: 보통 정수 100 보존', () => {
+  assert.equal(sliderOnChange('100', ADD_PROPS, 'number-preserveRaw'), 100);
 });
 
-test('ADD props: 0.000001 (step 아래)는 min으로 clamp — 0이 아니다 (Codex 3차 silent-delete 방어)', () => {
-  // step=0.00001보다 작은 양수 입력은 toFixed(5)에서 0으로 반올리지만,
-  // 그 전에 min=0.00001로 clamp된다 (SliderField는 clamp → round 순서).
-  // 따라서 양수가 0으로 변하는 길이 막힌다.
-  assert.equal(sliderOnChange('0.000001', ADD_PROPS), 0.00001);
+test('숫자칸: 5,000,000 보존 (Codex 2차 지적)', () => {
+  assert.equal(sliderOnChange('5000000', ADD_PROPS, 'number-preserveRaw'), 5_000_000);
 });
 
-test('ADD props: 보통 정수 100은 그대로', () => {
-  assert.equal(sliderOnChange('100', ADD_PROPS), 100);
+test('숫자칸: 100,000,001도 보존 — slider 상한을 넘어도 숫자칸은 그대로', () => {
+  // preserveRawNumber=true이므로 slider의 max=100M 상한이 숫자칸 입력을
+  // 자르지 않는다. 호출자(addHolding/updateHolding)가 저장 전에 결정한다.
+  assert.equal(sliderOnChange('100000001', ADD_PROPS, 'number-preserveRaw'), 100_000_001);
 });
 
-test('ADD props: 5,000,000 보존 (Codex 2차 지적 — max=1M이었을 때 잘렸다)', () => {
-  assert.equal(sliderOnChange('5000000', ADD_PROPS), 5000000);
+test('숫자칸: 0 보존 → updateHolding/addHolding이 거절한다', () => {
+  // 전에는 draftShares="0" → "n===0 → 삭제" 분기였다. 지금은 숫자칸이
+  // 0을 그대로 보내고, updateHolding은 validateHoldingShares.non-positive로
+  // 거절 → notifyError. 삭제는 🗑 버튼으로만.
+  assert.equal(sliderOnChange('0', EDIT_PROPS, 'number-preserveRaw'), 0);
 });
 
-test('ADD props: 100,000,001은 max로 clamp — 1억주는 realistic ceiling 넘음을 알리는 자리', () => {
-  // 1억주를 넘는 보유를 편집하면 이 값으로 잘린다 — DividendCalendarPage.tsx
-  // 주석에 적힌 trade-off. 더 올리려면 SliderField가 숫자칸까지 clamp하지
-  // 않도록 API를 나눠야 한다 (별도 PR).
-  assert.equal(sliderOnChange('100000001', ADD_PROPS), 100_000_000);
+test('숫자칸: 음수(-5) 보존 → validateHoldingShares가 거절한다', () => {
+  assert.equal(sliderOnChange('-5', ADD_PROPS, 'number-preserveRaw'), -5);
 });
 
-test('ADD props: 0은 min으로 clamp — 0이 아니다 (silent-nothing 방어)', () => {
-  // 전에는 0 입력 → addShares='' → 저장 눌러도 아무 일 없음 (silent fail).
-  // min=0.00001로 clamp되므로 유효 입력으로 들어간다.
-  assert.equal(sliderOnChange('0', ADD_PROPS), 0.00001);
+test('숫자칸: 기존 소수 보유(25.5) 그대로', () => {
+  assert.equal(sliderOnChange('25.5', EDIT_PROPS, 'number-preserveRaw'), 25.5);
 });
 
-test('EDIT props: 0은 min으로 clamp — 삭제로 해석되지 않는다 (silent-delete 방어)', () => {
-  // 전에는 draftShares="0" → updateHolding의 "n===0 → 삭제" 분기에 걸렸다.
-  // min=0.00001이면 slider에서는 0에 닿지 못하고, updateHolding 자체가
-  // n<=0을 거절한다. 삭제는 🗑 버튼으로만.
-  assert.equal(sliderOnChange('0', EDIT_PROPS), 0.00001);
+test('숫자칸: 소수 7자리(0.0000123)도 그대로 — step=0.00001 아래도 통과', () => {
+  assert.equal(sliderOnChange('0.0000123', EDIT_PROPS, 'number-preserveRaw'), 0.0000123);
 });
 
-test('EDIT props: 0.000001 (Codex 재현 입력)은 silent-delete로 가지 않는다', () => {
-  // Codex 3차 재현 경로의 핵심 입력. min=0.00001·updateHolding 거절
-  // 두 겹으로 막힌다. 여기서는 SliderField onChange의 결과만 검증한다
-  // (0.00001 — min clamp). updateHolding의 거절은 아래 validate 테스트에서.
-  assert.equal(sliderOnChange('0.000001', EDIT_PROPS), 0.00001);
+// ══ slider (range input) — 여전히 clamp·round 적용 ═════════════════════
+
+test('slider: 0.000001은 min=0.00001로 clamp된다 (slider는 물리적 범위 안)', () => {
+  // range input은 min·max를 벗어날 수 없고, step으로 정렬된다. 숫자칸과는
+  // 처리가 다르다.
+  assert.equal(sliderOnChange('0.000001', ADD_PROPS, 'slider'), 0.00001);
 });
 
-test('EDIT props: 기존 소수 보유(25.5) 그대로', () => {
-  assert.equal(sliderOnChange('25.5', EDIT_PROPS), 25.5);
-});
-
-test('EDIT props: 소수 넷째 자리(123.4567)도 그대로', () => {
-  assert.equal(sliderOnChange('123.4567', EDIT_PROPS), 123.4567);
+test('slider: 100,000,001은 max=100_000_000으로 clamp된다', () => {
+  assert.equal(sliderOnChange('100000001', ADD_PROPS, 'slider'), 100_000_000);
 });
 
 // ══ validateHoldingShares — updateHolding의 저장 결정 (silent-delete 방어 핵심) ══
