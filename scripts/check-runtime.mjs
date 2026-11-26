@@ -23,6 +23,7 @@
 
 import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { walkFiles } from './lib/walk-files.mjs';
 
 const SEARCH_DIRS = ['src/components', 'src/app'];
 
@@ -151,17 +152,52 @@ const STALE_CLAIMS = [
   { pattern: /브라우저\s*엔진\s*상태입니다/, why: '실제 실행기 상태와 브라우저 모의 판을 한 문장으로 섞지 마세요' },
 ];
 
+/**
+ * 대상 파일을 찾는다 — **비면 멈춘다.**
+ *
+ * 예전에는 `globSync`가 없거나 던지면 두 집합을 빈 배열로 두고 계속 갔다.
+ * `srcFiles`가 비는 경우는 아래 "워커 생존 판정 기준이 없습니다"가 우연히
+ * 잡아 줬지만, **`uiFiles`가 비는 경우는 아무도 안 잡았다.**
+ *
+ * 실측했다. UI glob만 없는 경로로 바꾸고, 화면에 `Railway`를 적은 파일을
+ * 둔 채 돌리면:
+ *
+ *     ✅ 운영 사실 문구 0건 · 화면 타이머 30개 · 분류 안 된 것 0개
+ *        rc=0
+ *
+ * 한 장도 안 열고 "운영 사실 문구 0건"을 적는다. 이 저장소가 금지한
+ * **UNKNOWN을 0으로 적기**다. 우연히 걸리는 다른 단언에 기대지 않고
+ * 두 집합을 각각 단언한다.
+ */
 let uiFiles = [];
 let srcFiles = [];
+let discovery = 'glob';
+const tsx = (f) => f.endsWith('.tsx');
+const tsNotTest = (f) => f.endsWith('.ts') && !f.endsWith('.test.ts');
 try {
   const fs = await import('node:fs');
-  uiFiles = typeof fs.globSync === 'function'
-    ? [...fs.globSync('src/components/**/*.tsx'), ...fs.globSync('src/app/**/*.tsx')]
-    : [];
-  srcFiles = typeof fs.globSync === 'function'
-    ? [...fs.globSync('src/**/*.ts'), ...fs.globSync('worker/src/**/*.ts')].filter(f => !f.endsWith('.test.ts'))
-    : [];
-} catch { uiFiles = []; srcFiles = []; }
+  if (typeof fs.globSync === 'function') {
+    uiFiles = [...fs.globSync('src/components/**/*.tsx'), ...fs.globSync('src/app/**/*.tsx')];
+    srcFiles = [...fs.globSync('src/**/*.ts'), ...fs.globSync('worker/src/**/*.ts')]
+      .filter(f => !f.endsWith('.test.ts'));
+  } else {
+    discovery = 'walk';
+    uiFiles = [...walkFiles('src/components', tsx), ...walkFiles('src/app', tsx)];
+    srcFiles = [...walkFiles('src', tsNotTest), ...walkFiles('worker/src', tsNotTest)];
+  }
+} catch {
+  discovery = 'walk';
+  uiFiles = [...walkFiles('src/components', tsx), ...walkFiles('src/app', tsx)];
+  srcFiles = [...walkFiles('src', tsNotTest), ...walkFiles('worker/src', tsNotTest)];
+}
+for (const [label, set] of [['화면 파일(.tsx)', uiFiles], ['소스 파일(.ts)', srcFiles]]) {
+  if (set.length === 0) {
+    console.error(`❌ ${label}을 하나도 찾지 못했습니다 (발견 방식: ${discovery})`);
+    console.error('   훑지 않은 것을 "0건"으로 적지 않습니다 — 발견이 돌지 않았다면');
+    console.error('   이 검사는 아무것도 지키지 않습니다.');
+    process.exit(1);
+  }
+}
 
 // ── 사람이 넣어야만 맞는 값으로 운영 사실을 만들지 않는다 ──
 //
