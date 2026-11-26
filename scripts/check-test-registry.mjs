@@ -34,17 +34,42 @@ import { join } from 'path';
 const RUNNER = 'scripts/run-tests.mjs';
 const ROOTS = ['src', 'worker/src'];
 
-function walk(dir, out = []) {
+/**
+ * **훑지 못한 디렉터리를 적어 둔다.**
+ *
+ * 예전에는 `catch { return out; }`이었다. 뿌리가 없거나 읽히지 않으면
+ * 그 뿌리의 시험이 **조용히 검사 밖으로 나갔고**, 집계는 그래도
+ * `미등록 0`이라고 적었다. 실측했다 (2026-11-26, main ed00c1a4):
+ *
+ *   worker/src에 등록 안 된 시험을 심고 돌리면 → ❌ (맞다)
+ *   같은 파일을 둔 채 그 뿌리 경로만 바꾸면   → ✅ 테스트 파일 395개 ·
+ *                                              등록 414개 · 미등록 0 (rc=0)
+ *   readdirSync를 전부 빈 결과로 만들면       → ✅ 테스트 파일 0개 ·
+ *                                              등록 414개 · 미등록 0 (rc=0)
+ *
+ * 이 파일의 머리말이 막으려던 고장이 "테스트 뭉치가 조용히 사라지고
+ * 그때도 CI는 초록"인데, **검사기 자신이 같은 모양으로 비어 있었다.**
+ * 못 본 것은 통과가 아니다.
+ */
+function walk(dir, out = [], failures = []) {
   let names;
-  try { names = readdirSync(dir); } catch { return out; }
+  try { names = readdirSync(dir); }
+  catch (e) { failures.push(`${dir} (${errCode(e)})`); return out; }
   for (const name of names) {
     const p = join(dir, name);
     let st;
-    try { st = statSync(p); } catch { continue; }
-    if (st.isDirectory()) walk(p, out);
+    try { st = statSync(p); }
+    catch (e) { failures.push(`${p} (${errCode(e)})`); continue; }
+    if (st.isDirectory()) walk(p, out, failures);
     else if (name.endsWith('.test.ts')) out.push(p.replace(/\\/g, '/'));
   }
   return out;
+}
+
+/** 예외에서 원인 코드만 꺼낸다 — 경로 외의 내용은 적지 않는다 */
+function errCode(e) {
+  const code = e && typeof e === 'object' && 'code' in e ? String(e.code) : String(e);
+  return code.slice(0, 40);
 }
 
 const runner = readFileSync(RUNNER, 'utf8');
@@ -111,8 +136,33 @@ if (notImported.length > 0) {
 }
 
 // 4. 파일은 있는데 등록이 안 된 것 — **써 놓고 배선을 안 한 테스트다**
-const files = ROOTS.flatMap(r => walk(r));
+// **뿌리마다 따로 센다.** 어느 뿌리가 0으로 떨어졌는지 집계 줄에 남는다.
+//
+// 뿌리마다 "1개 이상"을 요구하지는 **않는다.** 실측하면 worker/src의
+// `.test.ts`는 정상 저장소에서 0개다(파일 5개 중 0개). 그걸 빨강으로
+// 만들면 건강한 저장소가 막히고, 그렇게 막는 검사는 사람이 끈다.
+// 구분해야 하는 것은 **"걸었는데 0개"와 "걷지 못했다"**다.
+const walkFailures = [];
+const perRoot = ROOTS.map(r => ({ root: r, files: walk(r, [], walkFailures) }));
+const files = perRoot.flatMap(p => p.files);
 const fileSet = new Set(files);
+
+if (walkFailures.length > 0) {
+  problems.push({
+    what: '훑지 못한 디렉터리',
+    detail: walkFailures,
+    why: '못 본 것은 통과가 아닙니다 — 그 아래의 시험은 등록 검사를 받지 않고,'
+      + ' 집계에는 "미등록 0"으로 적힙니다',
+  });
+}
+if (files.length === 0) {
+  problems.push({
+    what: '시험 파일을 하나도 찾지 못했습니다',
+    detail: [`뿌리 ${ROOTS.join(' · ')} · 러너 등록은 ${imported.size}개입니다`],
+    why: '발견이 0이면 아래 "미등록"·"러너 미내보냄"·"얹혀 도는 러너" 검사가'
+      + ' 전부 빈 집합을 보고 통과합니다 — 이 검사가 아무것도 지키지 않습니다',
+  });
+}
 /** 같은 파일을 두 번 읽지 않는다 — 아래 '얹혀 도는 러너' 검사도 이걸 쓴다 */
 const srcByFile = new Map();
 const orphans = [];
@@ -244,4 +294,6 @@ if (problems.length > 0) {
   process.exit(1);
 }
 
-console.log(`✅ 테스트 파일 ${files.length}개 · 등록 ${imported.size}개 · 중복 0 · 미등록 0 · 얹혀 도는 러너 0`);
+const tally = perRoot.map(p => `${p.root} ${p.files.length}개`).join(' · ');
+console.log(`✅ 테스트 파일 ${files.length}개(${tally}) · 등록 ${imported.size}개`
+  + ' · 중복 0 · 미등록 0 · 얹혀 도는 러너 0 · 훑지 못한 디렉터리 0');
