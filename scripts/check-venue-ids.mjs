@@ -17,12 +17,30 @@
 // 돌아온다.** 그래서 검사로 막는다 — 이 저장소에서 반복된 고장은
 // 전부 "한쪽만 고쳐졌다"였다.
 
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 
 const DIR = 'src/lib/exchanges';
-/** 파서 자신은 예외다 — 여기가 유일하게 JSON.parse를 부르는 곳이다 */
-const ALLOW = new Set(['losslessJson.ts', 'losslessJson.test.ts']);
+/**
+ * 파서 자신은 예외다 — 여기가 유일하게 JSON.parse를 부르는 곳이다.
+ *
+ * **경로 그대로 비교한다. 파일 이름으로 비교하면 면제가 넓어진다.**
+ *
+ * 처음 재귀로 넓힐 때 `basename(path)`를 이 집합과 비교했다. 평평한
+ * 디렉터리에서는 같은 뜻이었지만, 재귀가 되면 **아무 하위 폴더에서나
+ * 같은 이름을 쓰면 면제**가 된다. 실측했다 (이 브랜치 587e52d0):
+ *
+ *   src/lib/exchanges/zzallow/unsafe.ts        에 `await r.json()` → ❌ (맞다)
+ *   src/lib/exchanges/zzallow/losslessJson.ts  에 같은 본문        → ✅ rc=0
+ *
+ * 정규식과 면제 문자열을 한 글자도 바꾸지 않았는데 **적용 범위가
+ * 달라졌다.** 훑기를 넓히는 변경은 면제의 범위도 같이 넓힌다 — 그것이
+ * 이 수정이 놓쳤던 것이다.
+ */
+const ALLOW = new Set([
+  'src/lib/exchanges/losslessJson.ts',
+  'src/lib/exchanges/losslessJson.test.ts',
+]);
 
 const problems = [];
 
@@ -85,8 +103,8 @@ function scan(dir) {
 
 for (const path of scan(DIR)) {
   // 테스트는 고정 데이터를 직접 만든다 — 거래소 응답이 아니다.
-  const name = basename(path);
-  if (name.endsWith('.test.ts') || ALLOW.has(name)) continue;
+  // (이 면제는 재귀 전에도 파일 이름 기준이었다 — 범위가 바뀐 것은 ALLOW뿐이다.)
+  if (basename(path).endsWith('.test.ts') || ALLOW.has(path)) continue;
   const src = readFileSync(path, 'utf8');
   const lines = src.split('\n');
 
@@ -127,6 +145,17 @@ for (const rel of ['src/lib/engine', 'src/lib/smoke']) {
         problems.push(`${path}:${i + 1}  주문 번호를 숫자로 바꿉니다`);
       }
     });
+  }
+}
+
+// ── 면제가 낡지 않았는가 ──
+//
+// 면제 경로가 사라지면 그 면제는 아무것도 가리키지 않는다. 그대로 두면
+// 다음 사람이 "파서는 면제돼 있다"고 믿는데 실제로는 다른 파일이 그
+// 자리에 있을 수 있다. `check-get-writes`가 같은 이유로 낡은 면제를 막는다.
+for (const a of ALLOW) {
+  if (!existsSync(a)) {
+    problems.push(`${a}  면제 목록에 있는데 파일이 없습니다 — 파서를 옮겼다면 이 검사기도 같이 고치세요`);
   }
 }
 

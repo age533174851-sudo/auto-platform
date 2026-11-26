@@ -55,8 +55,11 @@ function makeTree(extra = {}, skip = []) {
   const files = {
     'src/lib/exchanges/binanceClient.ts': CLEAN_EXCHANGE,
     // 파서 자신은 면제다 — 여기가 유일하게 JSON.parse를 부르는 곳이다.
+    // **면제는 이 두 경로 그대로**이고, 검사기는 둘이 실재하는지도 본다.
     'src/lib/exchanges/losslessJson.ts':
       'export function parseLossless(t: string) { return JSON.parse(t); }\n',
+    'src/lib/exchanges/losslessJson.test.ts':
+      "import { parseLossless } from './losslessJson';\nexport const t = parseLossless('{}');\n",
     'src/lib/engine/orderExecutor.ts':
       'export function idOf(o: { order_id: string }) { return o.order_id; }\n',
     'src/lib/smoke/runSmoke.ts':
@@ -144,4 +147,38 @@ test('★ 훑지 못한 디렉터리는 이름을 적고 빨강이다 (예전에
 test('실제 저장소도 초록이다 — 가짜 트리가 현실과 갈라지지 않았는지 본다', () => {
   const r = runChecker(ROOT);
   assert.equal(r.rc, 0, `실제 저장소가 빨강입니다:\n${r.err}${r.out}`);
+});
+
+test('★ 하위 폴더에서 파일 이름만 losslessJson.ts여도 빨강이다 (면제는 정식 경로 하나)', () => {
+  // 훑기를 재귀로 넓히면서 면제를 `basename`으로 비교하면, 아무 하위
+  // 폴더에서나 같은 이름을 쓰는 것으로 관문을 비켜 갈 수 있다. 실측으로
+  // 확인된 구멍이다 — 정규식과 면제 문자열이 같아도 **적용 범위가**
+  // 달라졌다.
+  withTree({ 'src/lib/exchanges/zzallow/losslessJson.ts': JSON_READER }, (base) => {
+    const r = runChecker(base);
+    assert.equal(r.rc, 1, '이름만 같은 하위 파일을 면제했습니다');
+    assert.match(r.err, /zzallow\/losslessJson\.ts/, '어느 파일인지 말하지 않습니다');
+    assert.doesNotMatch(r.out, /새는 곳 없음/);
+  });
+});
+
+test('정식 파서 자신은 계속 면제된다 — 잘못 막으면 그것도 고장이다', () => {
+  // `src/lib/exchanges/losslessJson.ts`는 저장소에서 유일하게
+  // JSON.parse를 부르는 곳이다. 면제를 좁히다가 이것까지 막으면 안 된다.
+  withTree({}, (base) => {
+    const r = runChecker(base);
+    assert.equal(r.rc, 0, `정식 파서를 막았습니다:\n${r.err}`);
+  });
+});
+
+test('★ 면제 경로가 사라지면 빨강이다 — 낡은 면제는 아무것도 가리키지 않는다', () => {
+  // 파서를 옮기면 면제는 없는 파일을 가리킨다. 그대로 두면 다음 사람은
+  // "파서는 면제돼 있다"고 믿는데, 그 자리에 다른 파일이 올 수 있다.
+  withTree({}, (base) => {
+    rmSync(join(base, 'src/lib/exchanges/losslessJson.test.ts'));
+    const r = runChecker(base);
+    assert.equal(r.rc, 1, `낡은 면제를 통과시켰습니다:\n${r.out}`);
+    assert.match(r.err, /면제 목록에 있는데 파일이 없습니다/);
+    assert.match(r.err, /losslessJson\.test\.ts/);
+  });
 });
