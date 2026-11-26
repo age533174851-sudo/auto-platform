@@ -4,10 +4,13 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { T } from '@/lib/constants';
 import { Store, Zap, Rocket, TrendingUp, Gem, Ban, Check } from 'lucide-react';
 import { assignPortfolio, TIMEFRAMES, type Timeframe } from '@/lib/autotrade/strategyMarket';
-import { notifySuccess } from '@/lib/notify/center';
+import { notifyInfo } from '@/lib/notify/center';
 
 const TF_ICON: Record<string, any> = { Zap, Rocket, TrendingUp, Gem, Ban };
 
+// **지어낸 가격이다.** 실제 시세가 아니라 종목 이름으로 만든 사인파다.
+// 그래서 아래 `assignPortfolio`에 출처 'DEMO'를 명시하고, 화면은 그 값을
+// 보고 데모 배지를 단다 — 실측 배정처럼 그리지 않는다.
 function demoPrices(symbol: string): number[] {
   const seed = symbol.split('').reduce((a, c) => a + c.charCodeAt(0), 0);
   const trend = ((seed % 5) - 2) * 0.6;
@@ -27,7 +30,7 @@ export default function StrategyMarketPanel({ symbols = ['BTC', 'ETH', 'SOL', 'D
     return () => { alive = false; };
   }, []);
 
-  const portfolio = useMemo(() => assignPortfolio(symbols.map(s => ({ symbol: s, prices: demoPrices(s) })), fg, 5), [symbols, fg]);
+  const portfolio = useMemo(() => assignPortfolio(symbols.map(s => ({ symbol: s, prices: demoPrices(s) })), 'DEMO', fg, 5), [symbols, fg]);
 
   // 초기 enabled: 활성 종목만 ON
   useEffect(() => {
@@ -36,9 +39,17 @@ export default function StrategyMarketPanel({ symbols = ['BTC', 'ETH', 'SOL', 'D
     setEnabled(init);
   }, [portfolio]);
 
+  // 이 토글은 **이 화면의 표시만** 바꾼다. 자동매매 전략을 켜거나 끄는
+  // 배선이 없다 — 그러니 "전략 켜짐"이라고 성공을 알리지 않는다.
   const toggle = (symbol: string) => {
-    setEnabled(prev => { const next = { ...prev, [symbol]: !prev[symbol] }; notifySuccess(next[symbol] ? '전략 켜짐' : '전략 꺼짐', symbol); return next; });
+    setEnabled(prev => {
+      const next = { ...prev, [symbol]: !prev[symbol] };
+      notifyInfo(`${symbol} 배분 예시에서 ${next[symbol] ? '포함' : '제외'}`,
+        '이 화면의 예시만 바뀌었습니다 — 실제 자동매매 전략은 켜지거나 꺼지지 않습니다');
+      return next;
+    });
   };
+  const isDemo = portfolio.evidence === 'DEMO';
 
   const activeAlloc = portfolio.allocation.filter(a => enabled[a.symbol]);
 
@@ -49,7 +60,10 @@ export default function StrategyMarketPanel({ symbols = ['BTC', 'ETH', 'SOL', 'D
           <Store size={18} color="#4ADE80" />
         </div>
         <div style={{ flex: 1 }}>
-          <div style={{ color: T.txt, fontWeight: 800, fontSize: 15 }}>AI 전략 마켓</div>
+          <div style={{ color: T.txt, fontWeight: 800, fontSize: 15, display: 'flex', alignItems: 'center', gap: 6 }}>
+            AI 전략 마켓
+            {isDemo && <span style={{ background: '#F59E0B22', color: '#F59E0B', fontSize: 10, fontWeight: 800, padding: '2px 7px', borderRadius: 5 }}>데모</span>}
+          </div>
           <div style={{ color: T.muted, fontSize: 11 }}>종목마다 최적 시간프레임 자동 배정</div>
         </div>
       </div>
@@ -119,7 +133,9 @@ export default function StrategyMarketPanel({ symbols = ['BTC', 'ETH', 'SOL', 'D
       )}
 
       <div style={{ color: T.muted, fontSize: 10, lineHeight: 1.5, marginTop: 12 }}>
-        AI가 종목별 국면·변동성·위원회를 종합해 시간프레임을 배정합니다. 원하는 종목만 켜서 하나의 계좌에서 여러 시간프레임을 동시에 운용할 수 있습니다.
+        {isDemo
+          ? <>이 화면은 실제 시세가 아니라 <b>지어낸 데모 가격</b>으로 배정·확신도·배분을 계산한 예시입니다. 토글은 예시 표시만 바꾸며 자동매매 전략을 켜지 않습니다.</>
+          : <>AI가 종목별 국면·변동성·위원회를 종합해 시간프레임을 배정합니다.</>}
       </div>
     </div>
   );
