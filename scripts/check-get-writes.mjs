@@ -23,8 +23,12 @@
 import { readdirSync, readFileSync, statSync } from 'fs';
 import { join } from 'path';
 
+const APP = 'src/app';
 const ROOT = 'src/app/api';
 const WRITES = ['.insert(', '.upsert(', '.delete(', '.update('];
+
+/** Next가 라우트로 받아 주는 파일 이름. 꼴을 넓게 **찾고**, 읽는 것은 `.ts`뿐이다 */
+const ROUTE_FILE = /^route\.[A-Za-z]+$/;
 
 // ── 이미 GET으로 쓰는 경로 ──
 //
@@ -48,13 +52,47 @@ const ALLOW = {
     '워커가 GET으로 깨운다. **닫는 쪽이라 막지 않는다** — 못 여는 것은 불편이고 못 닫는 것은 사고다',
 };
 
-function walk(dir, out = []) {
-  for (const name of readdirSync(dir)) {
-    const p = join(dir, name);
-    if (statSync(p).isDirectory()) walk(p, out);
-    else if (name === 'route.ts') out.push(p);
+/**
+ * **훑는 것을 넓게, 읽는 것을 좁게.**
+ *
+ * 예전에는 `src/app/api` 아래의 `route.ts`만 모았고, 실패하면 그대로
+ * 던졌다. 그래서 두 가지가 **조용히** 검사 밖으로 나갔다 (실측: #783
+ * HEAD f3818a17):
+ *
+ *   src/app/api/zzprobe-ext/route.tsx 에 GET이 insert
+ *     → ✅ GET 라우트 132개 · 새로 쓰는 것 0개   rc=0
+ *   src/app/(v2)/api/zzprobe-loc/route.ts 에 GET이 insert
+ *     → ✅ GET 라우트 132개 · 새로 쓰는 것 0개   rc=0
+ *
+ * 이 파일이 이미 적어 둔 교훈 그대로다 — "표기법만 바꾸면 통과하는 검사는
+ * 있는 것보다 나쁘다." 거기서 바뀐 표기법은 **선언 꼴**이었고, 여기서는
+ * **파일 꼴과 위치**다. 그래서 `src/app` 전체에서 `route.*`를 찾고,
+ * 이 검사가 읽을 수 없는 꼴이나 걷는 뿌리 밖에 있는 것을 **빨강으로**
+ * 적는다. 모르는 것을 통과로 적지 않는다.
+ *
+ * 지금 저장소 실측(같은 HEAD): `src/app/api` 아래 `route.ts` 179개,
+ * 다른 꼴 0개, `src/app/api` 밖의 `route.*` 0개.
+ */
+const walkFailures = [];
+function walkRoutes(dir, out = []) {
+  let names;
+  try { names = readdirSync(dir); }
+  catch (e) { walkFailures.push(`${dir} (${errCode(e)})`); return out; }
+  for (const name of names) {
+    const p = join(dir, name).replace(/\\/g, '/');
+    let st;
+    try { st = statSync(p); }
+    catch (e) { walkFailures.push(`${p} (${errCode(e)})`); continue; }
+    if (st.isDirectory()) walkRoutes(p, out);
+    else if (ROUTE_FILE.test(name)) out.push(p);
   }
   return out;
+}
+
+/** 예외에서 원인 코드만 꺼낸다 — 경로 외의 내용은 적지 않는다 */
+function errCode(e) {
+  const code = e && typeof e === 'object' && 'code' in e ? String(e.code) : String(e);
+  return code.slice(0, 40);
 }
 
 /**
@@ -92,7 +130,48 @@ function getBody(src) {
   return next ? rest.slice(0, next.index) : rest;
 }
 
-const files = walk(ROOT);
+const allRoutes = walkRoutes(APP);
+const inRoot = allRoutes.filter(p => p.startsWith(`${ROOT}/`));
+const files = inRoot.filter(p => p.endsWith('/route.ts'));
+const unknownForm = inRoot.filter(p => !p.endsWith('/route.ts'));
+const outsideRoot = allRoutes.filter(p => !p.startsWith(`${ROOT}/`));
+
+// ── ⓪ 발견이 성립했는가 ──
+//
+// **이 검사의 결론은 "새로 쓰는 것 0개"다.** 그 문장은 라우트를 실제로
+// 열어 본 뒤에만 참이다. 발견이 비거나 모르는 꼴이 섞여 있으면 그 문장은
+// 참이 아니라 **아직 모른다**는 뜻이고, 모르는 것을 0으로 적지 않는다.
+const discovery = [];
+if (walkFailures.length > 0) {
+  discovery.push({
+    what: '훑지 못한 디렉터리',
+    detail: walkFailures,
+    why: '못 본 것은 통과가 아닙니다 — 그 아래 GET이 쓰는지 아무도 보지 않습니다',
+  });
+}
+if (files.length === 0) {
+  discovery.push({
+    what: `${ROOT} 아래에서 route.ts를 하나도 찾지 못했습니다`,
+    detail: [`${APP} 아래 route.* 전체 ${allRoutes.length}개`],
+    why: '발견이 0이면 아래 쓰기 검사가 빈 집합을 보고 통과합니다 — 이 검사가 아무것도 지키지 않습니다',
+  });
+}
+if (unknownForm.length > 0) {
+  discovery.push({
+    what: '이 검사가 읽지 못하는 라우트 파일 꼴',
+    detail: unknownForm,
+    why: 'route.ts만 읽습니다 — 다른 꼴로 옮기면 GET이 쓰는지 검사 밖입니다.'
+      + ' 꼴을 늘릴 것이면 이 검사기도 같이 고치십시오',
+  });
+}
+if (outsideRoot.length > 0) {
+  discovery.push({
+    what: `걷는 뿌리(${ROOT}) 밖의 라우트`,
+    detail: outsideRoot,
+    why: '뿌리 밖으로 옮긴 라우트는 검사 밖입니다 — 뿌리를 늘릴 것이면 이 검사기도 같이 고치십시오',
+  });
+}
+
 const bad = [];
 let checked = 0;
 
@@ -115,6 +194,17 @@ const stale = Object.keys(ALLOW).filter(k => {
   const body = getBody(src);
   return body == null || !WRITES.some(w => body.includes(w));
 });
+
+if (discovery.length > 0) {
+  console.error('❌ 라우트 발견이 성립하지 않았습니다 — "새로 쓰는 것 0개"를 적지 않습니다\n');
+  for (const d of discovery) {
+    console.error(`  ${d.what}`);
+    for (const x of d.detail) console.error(`    · ${x}`);
+    console.error(`    ${d.why}\n`);
+  }
+  console.error(`고치는 곳: scripts/check-get-writes.mjs (APP=${APP} · ROOT=${ROOT} · route.ts만 읽습니다)`);
+  process.exit(1);
+}
 
 if (bad.length > 0) {
   console.error('❌ GET이 DB에 쓰고 있습니다 — 읽기 요청은 읽기만 해야 합니다\n');
@@ -139,4 +229,10 @@ if (stale.length > 0) {
   process.exit(1);
 }
 
-console.log(`✅ GET 라우트 ${checked}개 · 새로 쓰는 것 0개 (스케줄러 경로 면제 ${Object.keys(ALLOW).length}개)`);
+if (checked === 0) {
+  console.error('❌ GET 핸들러를 가진 라우트가 0개입니다 — 읽은 것이 없으면 "새로 쓰는 것 0개"는 참이 아닙니다');
+  process.exit(1);
+}
+
+console.log(`✅ route.ts ${files.length}개(${ROOT} 밖 0개 · 모르는 꼴 0개) · GET 라우트 ${checked}개`
+  + ` · 새로 쓰는 것 0개 (스케줄러 경로 면제 ${Object.keys(ALLOW).length}개) · 훑지 못한 디렉터리 0`);
