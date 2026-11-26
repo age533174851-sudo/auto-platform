@@ -5,6 +5,7 @@
 import { detectRegime } from './regime';
 import { computeATRPct } from './dynamicSizing';
 import { convene } from './committee';
+import type { EvidenceSource } from './strategyFactory';
 
 export type Timeframe = 'scalping' | 'daytrading' | 'swing' | 'longterm' | 'none';
 
@@ -35,12 +36,15 @@ export interface SymbolAssignment {
   confidence: number;     // 배정 확신도 0~100
   regime: string;
   reason: string;
+  /** 이 배정이 무엇에서 나왔는가. 지어낸 가격이면 'DEMO' */
+  evidence: EvidenceSource;
 }
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
 // 종목 하나에 시간프레임 배정
-export function assignTimeframe(symbol: string, prices: number[], fearGreed = 50, maxLev = 5): SymbolAssignment {
+export function assignTimeframe(symbol: string, prices: number[], fearGreed = 50, maxLev = 5,
+  evidence: EvidenceSource = 'DEMO'): SymbolAssignment {
   const r = detectRegime(prices);
   const atrPct = computeATRPct(prices);
   const committee = convene({ prices, fearGreed });
@@ -92,6 +96,7 @@ export function assignTimeframe(symbol: string, prices: number[], fearGreed = 50
   return {
     symbol, timeframe, tfLabel: tf.label, tfColor: tf.color, tfIcon: tf.icon, horizon: tf.horizon,
     strategy: TF_STRATEGY[timeframe], leverage, confidence, regime: r.regime, reason,
+    evidence: evidence === 'MEASURED' ? 'MEASURED' : 'DEMO',
   };
 }
 
@@ -101,10 +106,18 @@ export interface PortfolioAssignment {
   activeCount: number;
   allocation: { symbol: string; pct: number }[];   // 활성 종목 자금 배분
   summary: string;
+  /** 입력 가격의 출처. 'DEMO'면 화면은 실측 배정처럼 그리지 않는다 */
+  evidence: EvidenceSource;
 }
 
-export function assignPortfolio(symbolPrices: { symbol: string; prices: number[] }[], fearGreed = 50, maxLev = 5): PortfolioAssignment {
-  const assignments = symbolPrices.map(({ symbol, prices }) => assignTimeframe(symbol, prices, fearGreed, maxLev));
+// **출처는 필수 인자다.** 기본값을 두면 부르는 쪽이 잊었을 때 지어낸 가격의
+// 배정이 조용히 실측이 된다(`strategyFactory`와 같은 이유). 'MEASURED'라고
+// 명시하지 않은 것은 전부 DEMO로 취급한다.
+export function assignPortfolio(symbolPrices: { symbol: string; prices: number[] }[],
+  evidence: EvidenceSource, fearGreed = 50, maxLev = 5): PortfolioAssignment {
+  const source: EvidenceSource = evidence === 'MEASURED' ? 'MEASURED' : 'DEMO';
+  const assignments = symbolPrices.map(({ symbol, prices }) =>
+    assignTimeframe(symbol, prices, fearGreed, maxLev, source));
   const active = assignments.filter(a => a.timeframe !== 'none');
 
   // 자금 배분: 확신도 비례
@@ -113,6 +126,7 @@ export function assignPortfolio(symbolPrices: { symbol: string; prices: number[]
   const diff = 100 - allocation.reduce((a, b) => a + b.pct, 0);
   if (allocation.length && diff !== 0) allocation.sort((a, b) => b.pct - a.pct)[0].pct += diff;
 
-  const summary = `${assignments.length}개 종목 중 ${active.length}개 활성 · ${assignments.length - active.length}개 관망`;
-  return { assignments, activeCount: active.length, allocation, summary };
+  const counts = `${assignments.length}개 종목 중 ${active.length}개 활성 · ${assignments.length - active.length}개 관망`;
+  const summary = source === 'DEMO' ? `데모 가격 기준 예시 — ${counts}` : counts;
+  return { assignments, activeCount: active.length, allocation, summary, evidence: source };
 }
