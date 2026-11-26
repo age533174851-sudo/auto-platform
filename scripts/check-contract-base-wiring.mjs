@@ -29,6 +29,7 @@
 // `EXECUTION_CONTRACT_BASE`가 있어야 한다.
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { stripYamlComments } from './lib/strip-comments.mjs';
 
 const DIR = '.github/workflows';
 const VAR = 'EXECUTION_CONTRACT_BASE';
@@ -48,7 +49,16 @@ let scanned = 0;
 let wired = 0;
 
 for (const name of readdirSync(DIR).filter(f => f.endsWith('.yml') || f.endsWith('.yaml'))) {
-  const src = readFileSync(join(DIR, name), 'utf8');
+  // **주석은 배선이 아니다.** `EXECUTION_CONTRACT_BASE: ${{ … }}` 한 줄을
+  // 주석 처리하면 그 값은 넘어가지 않는데, raw 텍스트에는 그대로 남는다.
+  // 실측(ed00c1a4): mutation-100x-pr313.yml:54 와 ci.yml:794 를 각각
+  // 들여쓰기 유지 주석 처리했더니 rc=0 ✅ 였다. 지우면 rc=1 이었지만
+  // 이유가 엉뚱했다 — 44행 **설명 주석**을 배선 줄로 집었기 때문이다.
+  //
+  // 걷는 함수는 이미 `scripts/lib/strip-comments.mjs` 에 있었다. 그 파일이
+  // "새 검사기는 여기서 가져다 쓴다"고 적어 둔 그것을 이 검사기가 쓰지
+  // 않고 있었다.
+  const src = stripYamlComments(readFileSync(join(DIR, name), 'utf8'));
 
   const hits = NEEDS_BASE.filter(s => src.includes(s));
   if (hits.length === 0) continue;
@@ -60,7 +70,12 @@ for (const name of readdirSync(DIR).filter(f => f.endsWith('.yml') || f.endsWith
   if (!onPr && !onPush) continue;
 
   scanned += 1;
-  if (!src.includes(VAR)) {
+  // **값으로 적혀 있는 것과 키로 넘기는 것은 다르다.** 아무 데나 그
+  // 문구가 있으면 "넘긴다"로 셌다 — 실측: 배선 줄을 지우고
+  // `DUMMY: "EXECUTION_CONTRACT_BASE: ${{ … }}"` 한 줄을 넣으면 rc=0
+  // 이었다. 키 자리에 있는 것만 센다.
+  const keyLine = new RegExp(`^\\s*${VAR}\\s*:`, 'm');
+  if (!keyLine.test(src)) {
     err(`${name}: ${hits.join(' · ')}을 ${onPr ? 'pull_request' : 'push'}에서 돌리는데`
       + ` ${VAR}를 넘기지 않습니다 — 계약 검사기가 기준선에서 멈춥니다`);
     continue;
@@ -68,7 +83,7 @@ for (const name of readdirSync(DIR).filter(f => f.endsWith('.yml') || f.endsWith
 
   // **값이 비면 넘기지 않은 것과 같다.** `${{ }}`가 비어 있을 수 있는
   // 표현식인지는 여기서 알 수 없지만, 최소한 이벤트의 base를 참조해야 한다.
-  const line = src.split('\n').find(l => l.includes(VAR) && l.includes(':'));
+  const line = src.split('\n').find(l => new RegExp(`^\\s*${VAR}\\s*:`).test(l));
   if (!line || !/pull_request\.base\.sha|github\.event\.before|\$\{\{/.test(line)) {
     err(`${name}: ${VAR}에 이벤트의 base를 넣지 않습니다 (${String(line || '').trim()})`
       + ' — 고정값이나 빈 값이면 자기 자신과 비교하는 상태로 되돌아갑니다');
