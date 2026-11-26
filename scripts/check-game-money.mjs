@@ -69,17 +69,48 @@ if (!/export const GAME_MONEY_UNIT = '[^']+';/.test(money)) {
 const unit = (money.match(/export const GAME_MONEY_UNIT = '([^']+)';/) || [])[1];
 
 // ── ③ 회계 경로가 표시 함수를 거치지 않는다 ──
+//
+// **훑지 못한 것을 "비침투"로 적지 않는다.**
+//
+// 예전에는 `catch { return out; }`이었다. 뿌리 하나를 읽지 못하면 그
+// 아래가 전부 검사 밖으로 나가고, 집계는 그대로 "주문 본문·엔진 비침투"를
+// 적었다. 이 파일이 바로 아래에서 빈 `bodyBlock`을 잡는 이유와 같다 —
+// **살아 있는 척하는 검사가 제일 나쁘다.** 한쪽에만 그 단언이 있었다.
+//
+// 실측했다 (main ed00c1a4):
+//
+//   worker/src/zzprobe/bad.ts 가 gameMoney를 import
+//     → ❌ 표시 함수를 불러옵니다                       rc=1  (맞다)
+//   같은 파일을 둔 채 그 뿌리 경로만 바꿈 (worker/src → worker/srcX)
+//     → ✅ 게임머니 — … 주문 본문·엔진 비침투           rc=0
+//   readdirSync를 빈 결과로 만듦
+//     → ✅ 같은 문장                                     rc=0
+//
+// 세 뿌리 모두 고정 경로 읽기가 걸쳐 있지 않다(고정 읽기는
+// `src/lib/trading`·`src/components/trading` 쪽이다). 그래서 어느 하나가
+// 사라져도 아무도 눈치채지 못한다.
+const walkFailures = [];
 const walk = (dir) => {
   let out = [];
   let entries = [];
-  try { entries = readdirSync(dir); } catch { return out; }
+  try { entries = readdirSync(dir); }
+  catch (e) { walkFailures.push(`${dir} (${errCode(e)})`); return out; }
   for (const e of entries) {
     const p = join(dir, e);
-    if (statSync(p).isDirectory()) out = out.concat(walk(p));
+    let st;
+    try { st = statSync(p); }
+    catch (e2) { walkFailures.push(`${p} (${errCode(e2)})`); continue; }
+    if (st.isDirectory()) out = out.concat(walk(p));
     else if (/\.tsx?$/.test(p) && !/\.test\.tsx?$/.test(p)) out.push(p);
   }
   return out;
 };
+
+/** 예외에서 원인 코드만 꺼낸다 — 경로 외의 내용은 적지 않는다 */
+function errCode(e) {
+  const c = e && typeof e === 'object' && 'code' in e ? String(e.code) : String(e);
+  return c.slice(0, 40);
+}
 
 // 주문 본문을 만드는 곳에서 표시 함수가 값으로 쓰이면 안 된다
 const sheet = code(read(SHEET));
@@ -98,12 +129,32 @@ if (unit && new RegExp(`['"\`][^'"\`]*\\b${unit}\\b[^'"\`]*['"\`]`).test(bodyBlo
 }
 
 // 서버·엔진 쪽 어디에도 표시 함수가 들어오면 안 된다
+//
+// 뿌리마다 **몇 장 읽었는지 센다.** 오늘 실측: src/app/api 179 ·
+// src/lib/engine 130 · worker/src 5개. 셋 다 비어 있을 수 없는 뿌리이므로
+// "0개"는 경로가 바뀌었다는 뜻이고, 그때 "비침투"는 참이 아니다.
+const scanned = [];
 for (const dir of ['src/app/api', 'src/lib/engine', 'worker/src']) {
-  for (const f of walk(dir)) {
+  const files = walk(dir);
+  scanned.push({ dir, count: files.length });
+  for (const f of files) {
     const body = code(read(f));
     if (/from '[^']*trading\/gameMoney'/.test(body) || /require\([^)]*gameMoney/.test(body)) {
       err(`${f}가 표시 함수를 불러옵니다 — 게임머니는 화면에만 있어야 합니다`);
     }
+  }
+}
+
+if (walkFailures.length > 0) {
+  for (const f of walkFailures) {
+    err(`훑지 못한 디렉터리: ${f} — 못 본 것은 통과가 아닙니다.`
+      + ' 그 아래에서 표시 함수가 회계 경로에 들어왔는지 아무도 보지 않았습니다');
+  }
+}
+for (const s0 of scanned) {
+  if (s0.count === 0) {
+    err(`${s0.dir}에서 읽은 파일이 0개입니다 — 경로가 바뀌었는지 확인해야 합니다.`
+      + ' 읽은 것이 0이면 "엔진 비침투"는 참이 아니라 아직 모른다는 뜻입니다');
   }
 }
 
@@ -113,3 +164,5 @@ if (bad > 0) {
 }
 console.log(`✅ 게임머니 — 표시 전용(${unit}) · 환산 함수 없음 ·`
   + ' LIVE/모름 제외 · 주문 본문·엔진 비침투');
+console.log(`   읽은 파일(하위 폴더 포함): ${scanned.map(s0 => `${s0.dir} ${s0.count}개`).join(' · ')}`
+  + ' · 훑지 못한 디렉터리 0');
