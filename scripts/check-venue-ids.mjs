@@ -17,19 +17,94 @@
 // 돌아온다.** 그래서 검사로 막는다 — 이 저장소에서 반복된 고장은
 // 전부 "한쪽만 고쳐졌다"였다.
 
-import { readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { basename, join } from 'node:path';
 
 const DIR = 'src/lib/exchanges';
-/** 파서 자신은 예외다 — 여기가 유일하게 JSON.parse를 부르는 곳이다 */
-const ALLOW = new Set(['losslessJson.ts', 'losslessJson.test.ts']);
+/**
+ * 파서 자신은 예외다 — 여기가 유일하게 JSON.parse를 부르는 곳이다.
+ *
+ * **경로 그대로 비교한다. 파일 이름으로 비교하면 면제가 넓어진다.**
+ *
+ * 처음 재귀로 넓힐 때 `basename(path)`를 이 집합과 비교했다. 평평한
+ * 디렉터리에서는 같은 뜻이었지만, 재귀가 되면 **아무 하위 폴더에서나
+ * 같은 이름을 쓰면 면제**가 된다. 실측했다 (이 브랜치 587e52d0):
+ *
+ *   src/lib/exchanges/zzallow/unsafe.ts        에 `await r.json()` → ❌ (맞다)
+ *   src/lib/exchanges/zzallow/losslessJson.ts  에 같은 본문        → ✅ rc=0
+ *
+ * 정규식과 면제 문자열을 한 글자도 바꾸지 않았는데 **적용 범위가
+ * 달라졌다.** 훑기를 넓히는 변경은 면제의 범위도 같이 넓힌다 — 그것이
+ * 이 수정이 놓쳤던 것이다.
+ */
+const ALLOW = new Set([
+  'src/lib/exchanges/losslessJson.ts',
+  'src/lib/exchanges/losslessJson.test.ts',
+]);
 
 const problems = [];
 
-for (const name of readdirSync(DIR)) {
+/**
+ * **훑지 않은 것을 "없음"으로 적지 않는다.**
+ *
+ * 예전에는 `readdirSync(DIR)` 하나였다. 그것은 **한 겹만** 본다. 그래서
+ * 하위 폴더가 하나 생기면 그 아래 파일은 전부 검사 밖으로 나가고,
+ * 집계는 그대로 "전부 lossless 파서로 읽습니다"라고 적었다.
+ *
+ * 실측했다 (main ed00c1a4):
+ *
+ *   src/lib/exchanges/zzsub/bad.ts 에 `await r.json()`
+ *     → ✅ 거래소 응답을 전부 lossless 파서로 읽습니다   rc=0
+ *   src/lib/engine/zzsub/bad.ts 에 `Number(o.order_id)`
+ *     → ✅ 같은 문장                                      rc=0
+ *   readdirSync를 빈 결과로 만듦
+ *     → ✅ 같은 문장                                      rc=0
+ *
+ *   src/lib/exchanges/zzbad.ts 에 `await r.json()` (바로 아래)
+ *     → ❌ 응답을 .json()으로 읽습니다                    rc=1  (맞다)
+ *
+ * 이 검사가 막는 고장은 2026-08-16에 **실제로 났다** — 주문 번호가
+ * 뭉개져 취소가 전부 실패하고 포지션 0에 보호주문 2건이 남았다. 그
+ * 관문이 폴더 한 겹에 조용히 비는 것은 둘 수 없다.
+ *
+ * 지금은 세 디렉터리가 평평하다(실측: 하위 폴더 0개 · 바로 아래 .ts
+ * 50 · 231 · 16개). 그래서 훑기를 재귀로 넓혀도 **지금 잡히는 것은
+ * 늘지 않는다** — 늘어나는 것은 앞으로 생길 폴더에 대한 보호다.
+ */
+const walkFailures = [];
+function tsFiles(dir, out = []) {
+  let names;
+  try { names = readdirSync(dir); }
+  catch (e) { walkFailures.push(`${dir} (${errCode(e)})`); return out; }
+  for (const name of names) {
+    const p = join(dir, name).replace(/\\/g, '/');
+    let st;
+    try { st = statSync(p); }
+    catch (e) { walkFailures.push(`${p} (${errCode(e)})`); continue; }
+    if (st.isDirectory()) tsFiles(p, out);
+    else if (name.endsWith('.ts')) out.push(p);
+  }
+  return out;
+}
+
+/** 예외에서 원인 코드만 꺼낸다 — 경로 외의 내용은 적지 않는다 */
+function errCode(e) {
+  const code = e && typeof e === 'object' && 'code' in e ? String(e.code) : String(e);
+  return code.slice(0, 40);
+}
+
+/** 디렉터리별로 센다 — 어디가 0으로 떨어졌는지 집계 줄에 남는다 */
+const scanned = [];
+function scan(dir) {
+  const files = tsFiles(dir);
+  scanned.push({ dir, count: files.length });
+  return files;
+}
+
+for (const path of scan(DIR)) {
   // 테스트는 고정 데이터를 직접 만든다 — 거래소 응답이 아니다.
-  if (!name.endsWith('.ts') || name.endsWith('.test.ts') || ALLOW.has(name)) continue;
-  const path = join(DIR, name);
+  // (이 면제는 재귀 전에도 파일 이름 기준이었다 — 범위가 바뀐 것은 ALLOW뿐이다.)
+  if (basename(path).endsWith('.test.ts') || ALLOW.has(path)) continue;
   const src = readFileSync(path, 'utf8');
   const lines = src.split('\n');
 
@@ -61,9 +136,8 @@ for (const name of readdirSync(DIR)) {
 
 // 실행 경로 쪽에서도 번호를 숫자로 만들지 않는지 본다.
 for (const rel of ['src/lib/engine', 'src/lib/smoke']) {
-  for (const name of readdirSync(rel)) {
-    if (!name.endsWith('.ts') || name.endsWith('.test.ts')) continue;
-    const path = join(rel, name);
+  for (const path of scan(rel)) {
+    if (basename(path).endsWith('.test.ts')) continue;
     const src = readFileSync(path, 'utf8');
     src.split('\n').forEach((line, i) => {
       const code = line.replace(/\/\/.*$/, '');
@@ -74,6 +148,36 @@ for (const rel of ['src/lib/engine', 'src/lib/smoke']) {
   }
 }
 
+// ── 면제가 낡지 않았는가 ──
+//
+// 면제 경로가 사라지면 그 면제는 아무것도 가리키지 않는다. 그대로 두면
+// 다음 사람이 "파서는 면제돼 있다"고 믿는데 실제로는 다른 파일이 그
+// 자리에 있을 수 있다. `check-get-writes`가 같은 이유로 낡은 면제를 막는다.
+for (const a of ALLOW) {
+  if (!existsSync(a)) {
+    problems.push(`${a}  면제 목록에 있는데 파일이 없습니다 — 파서를 옮겼다면 이 검사기도 같이 고치세요`);
+  }
+}
+
+// ── 발견이 성립했는가 ──
+//
+// 이 검사의 결론은 "새는 곳 없음"이다. 그 문장은 파일을 실제로 읽은
+// 뒤에만 참이다. 읽은 것이 0이면 그것은 "없음"이 아니라 **아직 모른다**다.
+if (walkFailures.length > 0) {
+  console.error('❌ 훑지 못한 디렉터리가 있습니다 — 못 본 것은 통과가 아닙니다:\n');
+  for (const f of walkFailures) console.error('  ' + f);
+  console.error('\n그 아래에서 주문 번호가 숫자로 읽히는지 아무도 보지 않았습니다.');
+  process.exit(1);
+}
+const empty = scanned.filter(s0 => s0.count === 0);
+if (empty.length > 0) {
+  console.error('❌ 검사 대상 .ts 파일이 0개인 디렉터리가 있습니다:\n');
+  for (const e of empty) console.error(`  ${e.dir}`);
+  console.error('\n경로가 바뀌었는지 확인해야 합니다. 읽은 것이 0이면');
+  console.error('"새는 곳 없음"은 참이 아니라 아직 모른다는 뜻입니다.');
+  process.exit(1);
+}
+
 if (problems.length) {
   console.error('❌ 거래소 주문 번호가 숫자로 읽히는 곳이 있습니다:\n');
   for (const p of problems) console.error('  ' + p);
@@ -81,4 +185,6 @@ if (problems.length) {
   process.exit(1);
 }
 
+const tally = scanned.map(s0 => `${s0.dir} ${s0.count}개`).join(' · ');
 console.log('✅ 거래소 응답을 전부 lossless 파서로 읽습니다 — 주문 번호가 숫자로 새는 곳 없음');
+console.log(`   읽은 파일(하위 폴더 포함): ${tally} · 훑지 못한 디렉터리 0`);
