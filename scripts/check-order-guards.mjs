@@ -99,13 +99,56 @@ for (const rel of ORDER_ROUTES) {
 // `node:fs`의 globSync를 정적 import하지 않는다 — 없는 런타임에서는
 // 모듈 로드 자체가 깨져서, 안전장치 검사가 통째로 안 돌게 된다.
 // **검사가 조용히 사라지는 것이 검사가 못 찾는 것보다 나쁘다.**
+/**
+ * 파일을 직접 걷는다 — **발견이 조용히 비는 길을 막는다.**
+ *
+ * 예전에는 `globSync`가 없거나 던지면 후보를 빈 배열로 두고 계속 갔다.
+ * 그러면 목록에 없는 새 주문 경로가 있어도 "빠진 것 0개"가 찍히고
+ * 종료코드는 0이다. 실측했다 — `globSync` 분기를 끄고 돌리면 목록에
+ * 없는 주문 라우트를 그 자리에 두고도 이렇게 끝났다:
+ *
+ *     ✅ 실주문 경로 10개 · 안전장치 빠진 것 0개 · 조회 실패를 0으로
+ *        만드는 길 0개 …                                  rc=0
+ *
+ * 이 파일의 머리말이 적은 "검사가 조용히 사라지는 것이 검사가 못 찾는
+ * 것보다 나쁘다"를 검사기 자신이 하고 있었다. 한 줄도 안 훑고 "0개"를
+ * 적는 것은 이 저장소가 금지한 **UNKNOWN을 0으로 적기**다.
+ *
+ * 그래서 두 가지를 한다: ① `globSync`가 없으면 직접 걷는다(없는 런타임
+ * 에서도 검사가 계속 돈다) ② 그래도 비면 **빨강으로 멈춘다.**
+ */
+function walkFiles(dir, keep, out = []) {
+  let names;
+  try { names = readdirSync(dir); } catch { return out; }
+  for (const name of names) {
+    const p = join(dir, name);
+    let st;
+    try { st = statSync(p); } catch { continue; }
+    if (st.isDirectory()) walkFiles(p, keep, out);
+    else if (keep(p.replaceAll('\\', '/'))) out.push(p.replaceAll('\\', '/'));
+  }
+  return out;
+}
+
 let candidates = [];
+let discovery = 'glob';
 try {
   const fs = await import('node:fs');
   candidates = typeof fs.globSync === 'function'
     ? fs.globSync('src/app/api/**/order/route.ts')
-    : [];
-} catch { candidates = []; }
+    : (discovery = 'walk', walkFiles('src/app/api', (f) => f.endsWith('/order/route.ts')));
+} catch {
+  discovery = 'walk';
+  candidates = walkFiles('src/app/api', (f) => f.endsWith('/order/route.ts'));
+}
+// **0건을 통과로 적지 않는다.** 아래 `ORDER_ROUTES`에 적힌 실주문 경로가
+// 디스크에 있는데 발견이 0건이면 그것은 "새 경로가 없다"가 아니라
+// "발견이 돌지 않았다"다.
+if (candidates.length === 0) {
+  errors.push('주문 경로를 하나도 찾지 못했습니다'
+    + ` (발견 방식: ${discovery}) — 0건을 통과로 적지 않습니다.`
+    + ' 발견이 돌지 않았다면 이 검사는 아무것도 지키지 않습니다');
+}
 
 const known = new Set(ORDER_ROUTES);
 // 모의 전용 경로는 실주문이 아니다.
@@ -149,13 +192,25 @@ if (errors.length > 0) {
 // 사용자는 본전이라고 읽는다. 한 줄만 새로 써도 그대로 돌아오므로
 // 배선 검사에 넣는다.
 let zeroFiles = [];
+let zeroDiscovery = 'glob';
+const tsOnly = (f) => f.endsWith('.ts');
 try {
   const fs = await import('node:fs');
   zeroFiles = typeof fs.globSync === 'function'
     ? [...fs.globSync('src/lib/markets/**/*.ts'), ...fs.globSync('src/lib/engine/**/*.ts')]
-    : [];
-} catch { zeroFiles = []; }
+    : (zeroDiscovery = 'walk',
+      [...walkFiles('src/lib/markets', tsOnly), ...walkFiles('src/lib/engine', tsOnly)]);
+} catch {
+  zeroDiscovery = 'walk';
+  zeroFiles = [...walkFiles('src/lib/markets', tsOnly), ...walkFiles('src/lib/engine', tsOnly)];
+}
 const zeroErrors = [];
+// 같은 이유로 여기도 0건을 통과로 적지 않는다 — 한 줄도 안 훑고
+// "조회 실패를 0으로 만드는 길 0개"를 적으면 그 문장이 거짓이 된다.
+if (zeroFiles.length === 0) {
+  zeroErrors.push('`src/lib/markets`·`src/lib/engine`에서 파일을 하나도 찾지 못했습니다'
+    + ` (발견 방식: ${zeroDiscovery}) — 훑지 않은 것을 "0개"로 적지 않습니다`);
+}
 {
   for (const f of zeroFiles) {
     if (!f.endsWith('.ts') || f.endsWith('.test.ts')) continue;
