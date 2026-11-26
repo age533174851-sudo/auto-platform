@@ -13,6 +13,7 @@ import { Card, Dot, Spark, Pill, Bdg, Toggle, AreaChart, WorldClock, Heatmap,
          DonutChart, MiniBar, GlobalSearch, getLeverageRec,
          LiquidationCalc, PositionSizer, RiskDashboard,
          InlineTVChart } from './SharedUI';
+import { SliderField } from '@/components/ui/SettingField';
 
 
 const DRAWING_TOOLS: DrawingTool[] = [
@@ -160,6 +161,16 @@ function saveLayouts(layouts: LayoutData[]): void {
   try { localStorage.setItem(STORAGE_KEY_LAYOUTS, JSON.stringify(layouts)); } catch {}
 }
 
+/* ── Risk tool defaults ──
+   투자금(riskSize)의 기본값을 상수로 뺀다. 이유는 SettingField.tsx 주석과 같다:
+   "지금 값이 원래 값인지 내가 바꾼 값인지 알 수 없다"를 피하려면 **원래 값이
+   어디 적혀 있어야** 한다. 100만원과 1,000만원을 한 자리 차이로 치는 사고는
+   SliderField의 clamp가 들여 잡지만, 그 전에 "기본이 100만원"이라는 문장이
+   화면에 보여야 "0을 하나 더 쳤구나"를 알 수 있다.
+   진입가/손절가/목표가는 자산마다 가격 단위가 다르므로 상수화하지 않는다 —
+   상수의 값이 BTC에 맞으면 NVDA에선 틀린다. */
+const RISK_SIZE_DEFAULT = 1_000_000;
+
 /* ── Default fib levels ── */
 const DEFAULT_FIB_LEVELS = [
   { level: 0,     label: '0',     color: 'var(--t-sub)' },
@@ -212,7 +223,7 @@ function AnalysisHubPage() {
   const [riskEntry,setRiskEntry]     = useState(94230000);
   const [riskSL,setRiskSL]           = useState(91200000);
   const [riskTP,setRiskTP]           = useState(99000000);
-  const [riskSize,setRiskSize]       = useState(1000000);
+  const [riskSize,setRiskSize]       = useState(RISK_SIZE_DEFAULT);
   const [riskLeverage,setRiskLeverage] = useState(3);
 
   /* ── Fib state ── */
@@ -1006,14 +1017,34 @@ function AnalysisHubPage() {
 
       {showSheet&&sheetContent==='risk'&&(
         <BottomSheet title={`위험 도구 — ${activeTool==='long_pos'?'롱':'숏'} 포지션`}>
-          <div className="mobile-1col" style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:12}}>
-            {[{l:'진입가',key:'entry',val:riskEntry,set:setRiskEntry},{l:'손절가',key:'sl',val:riskSL,set:setRiskSL},{l:'목표가',key:'tp',val:riskTP,set:setRiskTP},{l:'투자금',key:'size',val:riskSize,set:setRiskSize}].map(f=>(
+          {/* 가격 셋 — 자산마다 가격 단위가 다르므로 슬라이더 범위를 못 정한다.
+              94M원짜리 BTC와 수백원짜리 알트를 같은 min/max로 못 묶는다.
+              그래서 **가격은 그대로 숫자칸**으로 둔다.
+              반면 투자금은 이 교육용 도구 안에서 "얼마를 거는 시늉"을 하는
+              KRW 값이라 10만~1억 범위가 설정 의미에 맞는다 — 아래 SliderField로. */}
+          <div className="mobile-1col" style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8,marginBottom:12}}>
+            {[{l:'진입가',key:'entry',val:riskEntry,set:setRiskEntry},{l:'손절가',key:'sl',val:riskSL,set:setRiskSL},{l:'목표가',key:'tp',val:riskTP,set:setRiskTP}].map(f=>(
               <div key={f.key}>
                 <div style={{color:T.muted,fontSize:10,marginBottom:3}}>{f.l}</div>
                 <input type="number" value={f.val} onChange={e=>f.set(+e.target.value)} style={{width:'100%',background:T.bg,border:`1px solid ${T.border}`,borderRadius:8,padding:'8px 10px',color:T.txt,fontSize:11,fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums',outline:'none'}}/>
               </div>
             ))}
           </div>
+          {/* 투자금 — 돈 액수는 슬라이더·숫자칸·기본값·되돌리기를 같이 본다.
+              범위는 1만~1억(KRW). SliderField가 범위 밖 입력을 자동으로 clamp하므로
+              "0을 하나 더 쳤다"가 바로 값에 들어가지 않는다 — 1,000,000이 되려다
+              10,000,000이 되는 사고를 UI에서 들여 잡는 지점이다. */}
+          <SliderField
+            label="투자금"
+            value={riskSize}
+            base={RISK_SIZE_DEFAULT}
+            unit="원"
+            min={10_000}
+            max={100_000_000}
+            step={10_000}
+            onChange={setRiskSize}
+            hint="1만원 ~ 1억원. 교육용 계산이므로 실제 자금과 무관한 값이다."
+          />
           <div style={{marginBottom:12}}>
             <div style={{color:T.muted,fontSize:10,fontWeight:700,marginBottom:4}}>레버리지: {riskLeverage}x</div>
             <input type="range" min={1} max={20} step={1} value={riskLeverage} onChange={e=>setRiskLeverage(+e.target.value)} style={{width:'100%',accentColor:T.acl}}/>
