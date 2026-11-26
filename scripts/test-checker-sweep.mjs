@@ -234,6 +234,63 @@ test('환경변수 접두와 명령 이어붙이기는 부르는 것이다 — �
   assert.equal(ciInvokes('        run: |\n          node scripts/check-a.mjs\n', 'scripts/check-a.mjs'), true);
 });
 
+test('★ 인용 안의 호출은 부르는 것이 아니다 (독립 검수 반례 ③)', () => {
+  // 세 번째 반례. 같은 문장을 **따옴표로 감싸고 세미콜론 하나**를 넣으면
+  // 다시 "부름"으로 셌다 — raw 문자열을 `;` 로 나누니 둘째 토막이
+  // `node …` 로 시작했기 때문이다. 셸은 그 문장을 출력만 한다.
+  // 실제 `ci.yml` 로 재현하고 `/bin/bash -c` 로 검사기가 돌지 않는 것을
+  // 확인했다 (HEAD c02d4f05).
+  assert.equal(ciInvokes(
+    '        run: echo "literal; node scripts/check-a.mjs --synthetic"', 'scripts/check-a.mjs'), false);
+  assert.equal(ciInvokes(
+    "        run: printf '%s\\n' 'literal; node scripts/check-a.mjs --synthetic'", 'scripts/check-a.mjs'), false);
+  // 뒤에 플래그가 없어도, 닫는 따옴표 앞에 공백이 있어도 같다.
+  // (전 판은 이 둘 중 하나만 우연히 걸렀다 — `(\s|$)` 가 `"` 에 막혀서다.
+  //  우연히 맞는 것은 성질이 아니다.)
+  assert.equal(ciInvokes('        run: echo "x; node scripts/check-a.mjs"', 'scripts/check-a.mjs'), false);
+  assert.equal(ciInvokes('        run: echo "x; node scripts/check-a.mjs "', 'scripts/check-a.mjs'), false);
+});
+
+test('★ heredoc 본문은 명령이 아니다', () => {
+  // `cat <<'SH'` 와 닫는 줄 사이는 셸이 실행하지 않는다 — 자료다.
+  const yaml = [
+    '        run: |',
+    "          cat <<'SH' > /dev/null",
+    '          node scripts/check-a.mjs',
+    '          SH',
+  ].join('\n');
+  assert.equal(ciInvokes(yaml, 'scripts/check-a.mjs'), false);
+  // 여는 줄 자체는 명령이므로, 같은 줄에 진짜 호출이 있으면 센다.
+  assert.equal(ciInvokes(
+    "        run: |\n          node scripts/check-a.mjs <<'SH'\n          자료\n          SH",
+    'scripts/check-a.mjs'), true);
+});
+
+test('★ run 이 아닌 블록은 명령이 아니다 — env 본문에 적어도 부름이 아니다', () => {
+  // `|` 블록은 `run:` 말고도 쓰인다. 그 본문을 명령으로 읽으면
+  // `env:` 한 칸으로 관문을 통과시킬 수 있다. 본문에 `run:` 이라고
+  // 적어도 명령이 되지 않는다.
+  assert.equal(ciInvokes(
+    '        env:\n          HINT: |\n            node scripts/check-a.mjs\n        run: true',
+    'scripts/check-a.mjs'), false);
+  assert.equal(ciInvokes(
+    '        env:\n          HINT: |\n            run: node scripts/check-a.mjs\n        run: true',
+    'scripts/check-a.mjs'), false);
+  // 같은 단계의 진짜 `run:` 은 그대로 센다.
+  assert.equal(ciInvokes(
+    '        env:\n          HINT: |\n            아무 말\n        run: node scripts/check-a.mjs',
+    'scripts/check-a.mjs'), true);
+});
+
+test('인용·heredoc을 보면서도 진짜 호출을 놓치지 않는다', () => {
+  // 좁히는 쪽으로 고칠 때 같이 걸리기 쉬운 네 가지.
+  assert.equal(ciInvokes('        run: node scripts/check-a.mjs   # 이유', 'scripts/check-a.mjs'), true);
+  assert.equal(ciInvokes('        run: echo x | grep x && node scripts/check-a.mjs', 'scripts/check-a.mjs'), true);
+  assert.equal(ciInvokes('        run: cd . && NODE_OPTIONS=--no-warnings node scripts/check-a.mjs',
+    'scripts/check-a.mjs'), true);
+  assert.equal(ciInvokes('      - run: node scripts/check-a.mjs', 'scripts/check-a.mjs'), true);
+});
+
 test('이름이 겹치지 않게 본다 — check-a 선언이 check-ab 를 덮지 않는다', () => {
   assert.equal(ciInvokes('        run: node scripts/check-ab.mjs', 'scripts/check-a.mjs'), false);
 });
