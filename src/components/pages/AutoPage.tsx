@@ -1338,7 +1338,8 @@ import { watchAuthToken } from '@/lib/auth/authToken';
 import { calcPerformance, calcStrategyPerformance } from '@/lib/autotrade/performance';
 import { attributionOf, rowsWithResidual, topMoversOf } from '@/lib/portfolio/attribution';
 import { timeWeightedReturn, moneyWeightedReturn, naiveCheck, pnlBreakdown } from '@/lib/portfolio/returns';
-import { getTodayPnL, checkRiskGuard, clearCooldown, resetTodayPnL } from '@/lib/risk/guard';
+import { checkRiskGuard, clearCooldown, resetTodayPnL } from '@/lib/risk/guard';
+import { todayPnlRow, DAILY_LIMIT_PROGRESS_TEXT } from '@/lib/ui/todayPnlView';
 import type { ExecutionLog } from '@/lib/autotrade/types';
 // **숫자와 '확인 불가'를 이 화면이 다시 정하지 않는다.** 같은 장부를 보는
 // 지갑 화면과 자릿수·부호·문구가 갈리면 사용자는 둘 다 못 믿는다.
@@ -1378,15 +1379,14 @@ function AutoTradeLogPanel({ onOpenAsset, currency = 'KRW' }: { onOpenAsset?: (a
     return () => { alive = false; };
   }, [paperAuth]);
   const paper = paperViewOf({ loaded: paperLoaded, payload: paperPayload });
+  const todayRow = todayPnlRow(paper);
   const [filter, setFilter] = useState<'all'|'triggered'|'skipped'|'error'>('all');
-  const [todayPnL, setTodayPnL] = useState(() => getTodayPnL());
   const [guard, setGuard] = useState(() => checkRiskGuard());
   const [riskMode, setRiskMode] = useState(() => loadRiskSettings().mode);
   const [userStrategies, setUserStrategies] = useState<any[]>([]);
 
   const refresh = useCallback(() => {
     setLogs(loadLogs());
-    setTodayPnL(getTodayPnL());
     setGuard(checkRiskGuard());
     setRiskMode(loadRiskSettings().mode);
     import('@/lib/strategies/store').then(m => setUserStrategies(m.listStrategies())).catch(() => {});
@@ -1435,41 +1435,32 @@ function AutoTradeLogPanel({ onOpenAsset, currency = 'KRW' }: { onOpenAsset?: (a
           </span>
         </div>
 
-        {/* 오늘 PnL + 한도 */}
+        {/* 오늘 손익 + 한도
+            **서버 모의 장부의 오늘 손익을 쓴다.** 예전에는 가드의 localStorage
+            칸(getTodayPnL)을 그렸는데, 그 칸을 채우는 recordTradePnL은 부르는
+            곳이 없어 언제나 「+0 (0건)」이었다 (todayPnlView.ts 머리말). */}
         <div style={{marginBottom: guard.todayLimit ? 8 : 0}}>
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',marginBottom:4}}>
             <span style={{color:T.muted,fontSize:10,fontWeight:700,display:'inline-flex',alignItems:'center',gap:4}}>
-              {todayPnL.pnl >= 0
-                ? <TrendingUpIc size={11} strokeWidth={2.4} color={T.grn}/>
-                : <TrendingDownIc size={11} strokeWidth={2.4} color={T.red}/>}
-              오늘 PnL ({todayPnL.trades}건)
+              {todayRow.tone === 'bad'
+                ? <TrendingDownIc size={11} strokeWidth={2.4} color={T.red}/>
+                : <TrendingUpIc size={11} strokeWidth={2.4} color={todayRow.known ? T.grn : T.muted}/>}
+              {todayRow.label}
             </span>
-            <span style={{color: todayPnL.pnl >= 0 ? T.grn : T.red, fontWeight:900, fontSize:14, fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>
-              {todayPnL.pnl >= 0 ? '+' : ''}{cvt(Math.abs(Math.floor(todayPnL.pnl)), currency)}
+            <span style={{color: !todayRow.known ? T.muted : todayRow.tone === 'bad' ? T.red : todayRow.tone === 'good' ? T.grn : T.txt, fontWeight:900, fontSize:14, fontFamily:'Inter,monospace',fontVariantNumeric:'tabular-nums'}}>
+              {todayRow.text}
             </span>
           </div>
+          {!todayRow.known && todayRow.reason && (
+            <div style={{color:T.muted,fontSize:9,marginBottom:4}}>{todayRow.reason}</div>
+          )}
 
-          {/* 일일 한도 진행 바 */}
+          {/* 일일 한도 — 진행은 적지 않는다(가드의 오늘 손익 칸이 비어 있다) */}
           {guard.todayLimit != null && (
-            <>
-              <div style={{height:6, background: T.alt, borderRadius:3, overflow:'hidden', position:'relative'}}>
-                {todayPnL.pnl < 0 && (() => {
-                  const usedPct = Math.min(100, (-todayPnL.pnl / guard.todayLimit) * 100);
-                  const barColor = usedPct >= 90 ? T.red : usedPct >= 70 ? T.ylw : T.grn;
-                  return (
-                    <div style={{
-                      width: `${usedPct}%`, height:'100%',
-                      background: barColor,
-                      transition: 'width 300ms',
-                    }}/>
-                  );
-                })()}
-              </div>
-              <div style={{display:'flex',justifyContent:'space-between',marginTop:3,fontSize:9,color:T.muted}}>
-                <span>한도까지 남음: {cvt(Math.floor(Math.max(0, guard.todayLimit + Math.min(0, todayPnL.pnl))), currency)}</span>
-                <span>한도: -{cvt(guard.todayLimit, currency)}</span>
-              </div>
-            </>
+            <div style={{display:'flex',justifyContent:'space-between',gap:8,marginTop:3,fontSize:9,color:T.muted}}>
+              <span>{DAILY_LIMIT_PROGRESS_TEXT}</span>
+              <span style={{whiteSpace:'nowrap'}}>한도: -{cvt(guard.todayLimit, currency)}</span>
+            </div>
           )}
         </div>
 
@@ -1518,12 +1509,12 @@ function AutoTradeLogPanel({ onOpenAsset, currency = 'KRW' }: { onOpenAsset?: (a
         {/* 빠른 액션 */}
         <div style={{display:'flex',gap:5,marginTop:8}}>
           <button onClick={async () => {
-              if ((await confirmDialog('오늘의 PnL과 연속 손실 카운터를 초기화하시겠습니까?', { danger: true }))) {
+              if ((await confirmDialog('브라우저 가드의 오늘 손익·연속 손실 카운터를 초기화하시겠습니까? (모의 장부는 바뀌지 않습니다)', { danger: true }))) {
                 resetTodayPnL(); refresh();
               }
             }}
             style={{flex:1,minHeight:MIN_CONTROL_TARGET,background:T.alt,color:T.muted,border:`1px solid ${T.border}`,borderRadius:6,padding:'5px 10px',fontSize:10,fontWeight:700,cursor:'pointer'}}>
-            오늘 PnL 리셋
+            가드 카운터 리셋
           </button>
         </div>
       </Card>
