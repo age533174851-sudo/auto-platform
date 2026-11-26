@@ -104,6 +104,30 @@ export interface DividendHolding {
   shares: number;
 }
 
+/**
+ * 수량 입력 한 건의 유효성.
+ *
+ * **왜 분리했는가 (#778 리뷰)**
+ * 전에는 수정 경로가 "n이 유한 양수이면 update, 0이면 delete"로 **같은
+ * 숫자칸이 두 동작의 입구**였다. 그런데 SliderField는 소수 step 아래
+ * 입력(예: step=0.00001일 때 0.000001)을 `toFixed(5)`로 **0에 반올림**한다.
+ * 결과: 사용자가 양의 수량 0.000001을 치려다가 저장소에서 해당 종목이
+ * 조용히 삭제된다 (Codex 3차 재현).
+ *
+ * 그래서 삭제는 **별도 버튼**으로 떼어 내고, 수정 경로는 이 함수로
+ * **양의 유한 수량만** 받는다. 0이나 음수는 거절한다 — 삭제 의도라면
+ * 삭제 버튼을 누르는 게 맞다.
+ */
+export type HoldingSharesValidation =
+  | { ok: true; shares: number }
+  | { ok: false; reason: 'not-finite' | 'non-positive' };
+
+export function validateHoldingShares(n: number): HoldingSharesValidation {
+  if (!Number.isFinite(n)) return { ok: false, reason: 'not-finite' };
+  if (n <= 0) return { ok: false, reason: 'non-positive' };
+  return { ok: true, shares: n };
+}
+
 export interface AnnualDividendEstimate {
   symbol: string;
   name: string;
