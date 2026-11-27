@@ -32,6 +32,7 @@
 //   src/lib/supabase/client.ts   같은 것
 //   worker/                      Next 런타임 밖이라 이 캐시가 없다
 import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { stripJsComments } from './lib/strip-comments.mjs';
 import { join, relative } from 'node:path';
 
 const ROOT = process.cwd();
@@ -79,14 +80,27 @@ for (const file of walk(join(ROOT, 'src'))) {
 // **검사가 대상을 잃으면 조용히 통과한다.** 고친 코드가 사라지지
 // 않았는지 여기서 같이 본다.
 try {
-  const gate = readFileSync(join(ROOT, 'src/lib/supabase/server.ts'), 'utf8');
+  // ★ **주석에 적힌 낱말은 고친 코드가 아니다.**
+  //
+  //   이 두 단정이 원문에 걸려 있었다. 실측(무인 회차 02:32):
+  //   `serverFetch.ts` 의 `no-store` 는 3곳인데 실제 코드는 `cache: 'no-store'`
+  //   한 줄뿐이고 나머지 둘은 머리말 주석(`:13`)과 함수 설명(`:60`)이다.
+  //   그래서 **실제 한 줄을 지워도** `/no-store/` 가 맞아 통과했다 — 즉
+  //   "수정이 사라졌습니다" 를 잡겠다는 단정이 정확히 그 경우에 침묵했다.
+  //   `adminClientOptions()` 도 호출 줄을 주석 처리하면 통과했다.
+  //
+  //   §① 은 그대로 원문을 본다. 저쪽은 **금지** 방향이고(직접 createClient),
+  //   줄 번호를 보고하므로 주석을 걷으면 번호가 어긋난다. 걷은 텍스트는
+  //   **필수** 앵커에만 쓴다 — 방향에 따라 넓이를 달리한다.
+  const gate = stripJsComments(readFileSync(join(ROOT, 'src/lib/supabase/server.ts'), 'utf8'));
   if (!/adminClientOptions\s*\(/.test(gate)) {
     err('src/lib/supabase/server.ts가 adminClientOptions()를 쓰지 않습니다'
       + '\n     서버 읽기가 다시 캐시에 굳을 수 있습니다');
   }
-  const impl = readFileSync(join(ROOT, 'src/lib/supabase/serverFetch.ts'), 'utf8');
-  if (!/no-store/.test(impl)) {
-    err('src/lib/supabase/serverFetch.ts에 no-store가 없습니다 — 수정이 사라졌습니다');
+  const impl = stripJsComments(readFileSync(join(ROOT, 'src/lib/supabase/serverFetch.ts'), 'utf8'));
+  // 낱말이 아니라 **fetch 옵션 모양**을 본다. 이 문의 보증이 그것이다.
+  if (!/cache:\s*['"`]no-store['"`]/.test(impl)) {
+    err("src/lib/supabase/serverFetch.ts에 cache: 'no-store'가 없습니다 — 수정이 사라졌습니다");
   }
 } catch (e) {
   err(`서버 client 파일을 읽지 못했습니다: ${String(e?.message || e).slice(0, 120)}`);
