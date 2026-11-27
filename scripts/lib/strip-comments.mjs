@@ -88,9 +88,22 @@ export function stripJsComments(t) {
     }
     if (c === '/' && d === '/') { while (i < s.length && s[i] !== '\n') i += 1; continue; }
     if (c === '/' && d === '*') {
+      // **줄바꿈은 남긴다.** 여러 줄 주석을 통째로 접으면 그 뒤의 줄 번호가
+      // 밀려서, 줄 단위로 보는 규칙과 **보고되는 줄 번호**가 어긋난다.
+      //
+      // 실측으로 잡았다 — `check-display-layer` 의 지역 사본을 이 함수로
+      // 바꾸니 `WalletPage.tsx` 의 줄이 5칸 밀려 **원문에서 거짓 실패**가 났다
+      // (`toFixed` 개수는 두 판 모두 2로 같았다 — 새 위반을 찾은 것이 아니다).
+      // 그 사본의 주석이 이유를 미리 적어 두었다: "줄 번호가 어긋나면 오류
+      // 위치가 틀린다 — 개행은 남긴다". 아래 `stripSqlComments` 도 같은 이유로
+      // 개행을 남긴다. **사본이 생긴 이유 하나가 이것이었다** — 공용 함수가
+      // 소비처가 필요로 하는 성질을 갖고 있지 않으면 각자 복사한다.
       i += 2;
-      while (i < s.length && !(s[i] === '*' && s[i + 1] === '/')) i += 1;
-      i += 2; continue;
+      let nl = '';
+      while (i < s.length && !(s[i] === '*' && s[i + 1] === '/')) { if (s[i] === '\n') nl += '\n'; i += 1; }
+      i += 2;
+      out += nl;
+      continue;
     }
     if (c === '"' || c === "'" || c === '`') { q = c; prev = c; out += c; i += 1; continue; }
     if (c === '/' && regexAllowed()) {

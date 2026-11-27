@@ -29,7 +29,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { stripJsComments, stripSqlComments, stripYamlComments } from './lib/strip-comments.mjs';
 
@@ -196,4 +196,49 @@ test('★ 실제 087 — 소유자 조건 3곳이 꼬리 주석으로 셀 수 �
   // 줄머리만 떼던 예전 방식으로는 3곳으로 세어졌다 — 그게 구멍이었다
   const lineHead = (t) => t.split('\n').filter((l) => !/^\s*(--|\/\*|\*)/.test(l)).join('\n');
   assert.equal([...lineHead(holed).matchAll(/c\.user_id = p_user/g)].length, 3);
+});
+
+// ── 줄 정렬 ───────────────────────────────────────────────────────
+//
+// 사본이 생긴 이유 하나가 이것이었다. `check-display-layer` 의 지역 판은
+// 블록 주석의 **개행을 남기고** 그 주석이 이유를 적어 두었다 — "줄 번호가
+// 어긋나면 오류 위치가 틀린다". 공용 판이 접고 있었으므로, 그 검사기를
+// 공용 함수로 바꾸면 `WalletPage.tsx` 의 줄이 5칸 밀려 **원문에서 거짓
+// 실패**가 났다(`toFixed` 개수는 두 판 모두 2로 같았다 — 새 위반이 아니다).
+//
+// 공용 함수가 소비처가 필요로 하는 성질을 갖고 있지 않으면 각자 복사한다.
+// 그래서 여기서 그 성질을 못 박는다.
+
+test('★ 여러 줄 블록 주석을 걷어도 줄 수가 그대로다', () => {
+  const src = 'const a = 1;\n/*\n 주석\n 두 줄\n*/\nconst b = 2;';
+  const out = stripJsComments(src);
+  assert.equal(out.split('\n').length, src.split('\n').length);
+  assert.doesNotMatch(out, /주석/);           // 내용은 사라진다
+  assert.match(out.split('\n')[5], /const b = 2;/);   // 자리도 그대로다
+});
+
+test('★ 실제 src 전체 — 걷은 뒤 줄 수가 달라지는 파일이 없다', () => {
+  const walk = (d) => {
+    let out = [];
+    for (const e of readdirSync(d)) {
+      const p = join(d, e);
+      if (statSync(p).isDirectory()) out = out.concat(walk(p));
+      else if (/\.tsx?$/.test(p)) out.push(p);
+    }
+    return out;
+  };
+  const files = walk('src');
+  assert.ok(files.length > 500, `src 를 못 훑었습니다 (${files.length}개)`);
+  const shifted = files.filter((f) => {
+    const s = readFileSync(f, 'utf8');
+    return s.split('\n').length !== stripJsComments(s).split('\n').length;
+  });
+  assert.deepEqual(shifted, [], `줄 정렬이 밀리는 파일이 있습니다: ${shifted.slice(0, 3).join(', ')}`);
+  console.log(`    src ${files.length}개 · 줄 정렬 밀림 0개`);
+});
+
+test('대조 — JSX 한 줄 블록 주석은 개행을 늘리지 않는다', () => {
+  // 개행을 "남긴다"가 "더한다"가 되면 반대로 밀린다.
+  assert.equal(stripJsComments('<div>{/* MARK */}</div>'), '<div>{}</div>');
+  assert.equal(stripJsComments('a(/* x */); b();').split('\n').length, 1);
 });
