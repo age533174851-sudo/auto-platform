@@ -34,6 +34,8 @@
 // "아직 안 붙인 것" 목록이 된다.
 
 import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs';
+import { shellText } from './lib/workflow-shell.mjs';
+import { stripYamlComments } from './lib/strip-comments.mjs';
 import { join, basename, dirname } from 'node:path';
 
 /**
@@ -824,23 +826,33 @@ const HOURLY = [
 const CAUSE_GUESS = /에서 멈췄다면/;
 const causeGaps = [];
 for (const wf of HOURLY) {
-  const text = readFileSync(wf, 'utf8');
+  const raw = readFileSync(wf, 'utf8');
+  // **주석은 호출이 아니다** — 이 파일이 :1030 에 그렇게 적어 뒀는데 이
+  // 블록만 원문을 그대로 봤다. 실측(무인 회차 01:32): `claude-hourly-dev.yml`
+  // 의 `node scripts/claude-exec-category.mjs` 세 줄을 들여쓰기를 지키며
+  // 전부 `#` 로 막아도 이 검사기는 rc=0 으로 통과했다. "진단기가 **항상**
+  // 돌아야 한다"는 문장이 주석 한 줄에 열려 있었다.
+  //
+  // 걷은 쪽은 **필수** 단정에만 쓴다. 아래 CAUSE_GUESS 는 금지 패턴이라
+  // 주석에라도 있으면 걸리는 편이 안전하므로 원문을 본다 — 방향에 따라
+  // 넓이를 달리한다.
+  const text = stripYamlComments(raw);
   // 진단기가 **항상** 돌아야 한다. 실패한 회차에만 돌면 `cancelled`·
   // `timed_out`으로 끝난 회차에는 범주가 없다.
   if (!/node scripts\/claude-exec-category\.mjs/.test(text)) {
     causeGaps.push(`${wf} — 진단기(claude-exec-category)를 부르지 않습니다`);
   }
-  const at = text.indexOf('- name: 실패 원인 기록');
+  const at = raw.indexOf('- name: 실패 원인 기록');
   if (at === -1) {
     // 단계 이름이 바뀌면 아래 검사가 **조용히 통과한다.** 못 찾은 것을
     // 통과로 적지 않는다.
     causeGaps.push(`${wf} — '실패 원인 기록' 단계를 찾지 못했습니다 (이 규칙이 헛돌고 있습니다)`);
     continue;
   }
-  const rest = text.slice(at + 1);
+  const rest = raw.slice(at + 1);
   const end = rest.search(/\n {6}- name:/);
   const step = end === -1 ? rest : rest.slice(0, end);
-  const firstLine = text.slice(0, at).split('\n').length;
+  const firstLine = raw.slice(0, at).split('\n').length;
   for (const [i, l] of step.split('\n').entries()) {
     if (CAUSE_GUESS.test(l)) causeGaps.push(`${wf}:${firstLine + i} — ${l.trim()}`);
   }
@@ -1053,8 +1065,21 @@ if (checkerFiles.length === 0) {
 const checkerCallers = [];
 for (const wf of readdirSync('.github/workflows').filter(f => /\.ya?ml$/.test(f))) {
   const text = readFileSync(join('.github/workflows', wf), 'utf8');
-  // YAML 주석 줄을 뺀다.
-  checkerCallers.push(text.split('\n').filter(l => !l.trim().startsWith('#')).join('\n'));
+  // **셸이 실제로 실행하는 줄만 '부른다'로 센다.**
+  //
+  // 줄머리 `#` 만 걷는 것으로는 모자랐다. 실측(무인 회차 01:32): `ci.yml`
+  // 에서 `check-audit-readonly.mjs` 호출 줄을 지우고 그 자리에
+  //
+  //     echo "would run: node scripts/check-audit-readonly.mjs"
+  //
+  // 만 남겨도 이 검사기는 "배선됨"으로 셌다. 인용 안의 문장 · heredoc 본문 ·
+  // `run:` 이 아닌 블록 · `- name:` 단계 제목에 이름이 있으면 전부 통과했다.
+  // 그 판정은 #792 에서 한 곳(`scripts/lib/workflow-shell.mjs`)으로 모았고,
+  // 여기가 그 판정의 **두 번째 사본**이었다 — 상습 고장 ② 다.
+  //
+  // 실제 저장소에서 좁힘의 대가를 먼저 쟀다: 검사기 95개 중 셸 위치로
+  // 좁혀서 새로 "미배선"이 되는 것은 **0개**다.
+  checkerCallers.push(shellText(text));
 }
 checkerCallers.push(stripComments(readFileSync(CHECK_RUNNER, 'utf8')));
 
