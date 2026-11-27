@@ -20,7 +20,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, cpSync, readdirSync, symlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, cpSync, readdirSync, symlinkSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -40,16 +40,31 @@ const SRC = 'src/lib/engine/paperPriceSource.ts';
  * 저장소 경로로 부르므로 `./lib/` 를 제대로 집는다. `node --test` 는 파일을
  * 병렬로 돌리니 실제 저장소 파일은 건드리지 않는다.
  */
+const PREFIX = 'pps-';
+
+/** 이 시험이 만든 임시 폴더 목록 (다른 접두사·다른 시험은 세지 않는다) */
+function ownTempDirs() {
+  return readdirSync(tmpdir()).filter((n) => n.startsWith(PREFIX));
+}
+
 function runChecker(mutate) {
-  const dir = mkdtempSync(join(tmpdir(), 'pps-'));
-  for (const e of readdirSync(REPO)) {
-    if (e === 'src' || e === '.git') continue;
-    symlinkSync(join(REPO, e), join(dir, e));
+  const dir = mkdtempSync(join(tmpdir(), PREFIX));
+  try {
+    for (const e of readdirSync(REPO)) {
+      if (e === 'src' || e === '.git') continue;
+      symlinkSync(join(REPO, e), join(dir, e));
+    }
+    cpSync(join(REPO, 'src'), join(dir, 'src'), { recursive: true });
+    if (mutate) mutate((rel) => join(dir, rel));
+    const r = spawnSync('node', [CHECKER], { cwd: dir, encoding: 'utf8' });
+    return { rc: r.status, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
+  } finally {
+    // **치우지 않으면 한 번 돌 때마다 `src` 사본이 남는다.** 실측: 이 파일
+    // 하나가 임시 폴더 53개 · 1060MB 를 남겼고, 같은 모양의 시험 넷을 합치면
+    // 약 1.57GB 였다(검수 지적: #799 코멘트 7212565149). 이 컨테이너의
+    // 쓰기 가능 공간은 고정 할당이라 그대로 두면 다음 작업이 디스크로 막힌다.
+    rmSync(dir, { recursive: true, force: true });
   }
-  cpSync(join(REPO, 'src'), join(dir, 'src'), { recursive: true });
-  if (mutate) mutate((rel) => join(dir, rel));
-  const r = spawnSync('node', [CHECKER], { cwd: dir, encoding: 'utf8' });
-  return { rc: r.status, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
 }
 
 /** 한 줄을 다른 글로 바꾼다. 못 찾으면 실패한다 — 못 찾은 것을 통과로 적지 않는다. */
@@ -138,4 +153,11 @@ test('대조 — 줄머리 주석에 적힌 금지 호출은 호출이 아니다
     writeFileSync(f, s.replace(CALL_POS, '  // getPremiumIndex 는 쓰지 않는다\n' + CALL_POS));
   });
   assert.equal(r.rc, 0, r.out);
+});
+
+test('★ 임시 폴더를 남기지 않는다 — 한 번 돌 때마다 src 사본이 쌓였다', () => {
+  const before = new Set(ownTempDirs());
+  runChecker(null);
+  const leaked = ownTempDirs().filter((n) => !before.has(n));
+  assert.deepEqual(leaked, [], `남은 임시 폴더:\n  ${leaked.join('\n  ')}`);
 });
