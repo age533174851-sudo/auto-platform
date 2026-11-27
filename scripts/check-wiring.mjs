@@ -34,6 +34,8 @@
 // "아직 안 붙인 것" 목록이 된다.
 
 import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs';
+import { invokesScript } from './lib/workflow-shell.mjs';
+import { stripYamlComments } from './lib/strip-comments.mjs';
 import { join, basename, dirname } from 'node:path';
 
 /**
@@ -824,23 +826,37 @@ const HOURLY = [
 const CAUSE_GUESS = /에서 멈췄다면/;
 const causeGaps = [];
 for (const wf of HOURLY) {
-  const text = readFileSync(wf, 'utf8');
+  const raw = readFileSync(wf, 'utf8');
+  // **주석은 호출이 아니다** — 이 파일이 :1030 에 그렇게 적어 뒀는데 이
+  // 블록만 원문을 그대로 봤다. 실측(무인 회차 01:32): `claude-hourly-dev.yml`
+  // 의 `node scripts/claude-exec-category.mjs` 세 줄을 들여쓰기를 지키며
+  // 전부 `#` 로 막아도 이 검사기는 rc=0 으로 통과했다. "진단기가 **항상**
+  // 돌아야 한다"는 문장이 주석 한 줄에 열려 있었다.
+  //
+  // 걷은 쪽은 **필수** 단정에만 쓴다. 아래 CAUSE_GUESS 는 금지 패턴이라
+  // 주석에라도 있으면 걸리는 편이 안전하므로 원문을 본다 — 방향에 따라
+  // 넓이를 달리한다.
+  const text = stripYamlComments(raw);
   // 진단기가 **항상** 돌아야 한다. 실패한 회차에만 돌면 `cancelled`·
   // `timed_out`으로 끝난 회차에는 범주가 없다.
-  if (!/node scripts\/claude-exec-category\.mjs/.test(text)) {
+  // 주석을 걷는 것으로도 모자랐다 — 유효한 YAML 안의 인용 문자열이 남는다.
+  // 실측 반례(#792 코멘트 7208374816):
+  //     echo 'node scripts/claude-exec-category.mjs | tee -a "$GITHUB_STEP_SUMMARY"'
+  // 셸은 이것을 **출력만** 한다. 그래서 명령 위치에서 본다.
+  if (!invokesScript(raw, 'scripts/claude-exec-category.mjs')) {
     causeGaps.push(`${wf} — 진단기(claude-exec-category)를 부르지 않습니다`);
   }
-  const at = text.indexOf('- name: 실패 원인 기록');
+  const at = raw.indexOf('- name: 실패 원인 기록');
   if (at === -1) {
     // 단계 이름이 바뀌면 아래 검사가 **조용히 통과한다.** 못 찾은 것을
     // 통과로 적지 않는다.
     causeGaps.push(`${wf} — '실패 원인 기록' 단계를 찾지 못했습니다 (이 규칙이 헛돌고 있습니다)`);
     continue;
   }
-  const rest = text.slice(at + 1);
+  const rest = raw.slice(at + 1);
   const end = rest.search(/\n {6}- name:/);
   const step = end === -1 ? rest : rest.slice(0, end);
-  const firstLine = text.slice(0, at).split('\n').length;
+  const firstLine = raw.slice(0, at).split('\n').length;
   for (const [i, l] of step.split('\n').entries()) {
     if (CAUSE_GUESS.test(l)) causeGaps.push(`${wf}:${firstLine + i} — ${l.trim()}`);
   }
@@ -1050,19 +1066,34 @@ if (checkerFiles.length === 0) {
   bad = true;
 }
 
-const checkerCallers = [];
+// **무엇을 '부른다'로 셀 것인가 — 적혀 있는 것이 아니라 명령 위치다.**
+//
+// 세 단계로 좁혔고 앞의 둘은 반례가 났다:
+//
+//   ① 원문 `.includes(name)`           — 주석 한 줄로 열렸다
+//   ② `shellText` + `.includes(name)`  — 셸 **본문**이지 명령 위치가 아니라,
+//      유효한 `run: echo 'node scripts/check-x.mjs'` 가 그대로 통과했다
+//      (#792 코멘트 7208374816. YAML 파싱·`bash -n` 둘 다 통과하는 반례다)
+//   ③ 명령 위치 — 토막으로 나눠 첫 낱말이 `node` 이고 인자에 그 스크립트가
+//      있는 것만 센다. 인용 안의 문장은 들어오지 않는다.
+//
+// 좁힘의 대가를 **먼저** 쟀다: 검사기 95개 중 ③ 으로 새로 "미배선" 이 되는
+// 것은 0개다. 더 좁은 `ciInvokes`(`^node\s+scripts/…`)로 재면 1개가 거짓으로
+// 미배선이 된다 — 이 저장소는 시험 파일을 `node --test …` 로 부르기 때문이다.
+// 모으는 모양은 전과 같다 — 바뀐 것은 **판정**뿐이다.
+const workflowTexts = [];
 for (const wf of readdirSync('.github/workflows').filter(f => /\.ya?ml$/.test(f))) {
-  const text = readFileSync(join('.github/workflows', wf), 'utf8');
-  // YAML 주석 줄을 뺀다.
-  checkerCallers.push(text.split('\n').filter(l => !l.trim().startsWith('#')).join('\n'));
+  workflowTexts.push(readFileSync(join('.github/workflows', wf), 'utf8'));
 }
-checkerCallers.push(stripComments(readFileSync(CHECK_RUNNER, 'utf8')));
+// `run-tests.mjs` 는 셸 토막이 아니라 JS 진입점이다 — 주석만 걷고 이름으로 본다.
+const runnerSources = [];
+runnerSources.push(stripComments(readFileSync(CHECK_RUNNER, 'utf8')));
 
 const unwiredCheckers = [];
 const staleCheckerAllow = [];
 for (const c of checkerFiles) {
-  const name = basename(c);
-  const called = checkerCallers.some(t => t.includes(name));
+  const called = workflowTexts.some(w => invokesScript(w, c))
+    || runnerSources.some(t => t.includes(basename(c)));
   const allowed = CHECKER_ALLOW.has(c);
   if (!called && !allowed) unwiredCheckers.push(c);
   if (called && allowed) staleCheckerAllow.push(c);

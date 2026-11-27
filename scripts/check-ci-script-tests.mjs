@@ -39,7 +39,7 @@
 // 글롭(`scripts/test-*.mjs`) 하나면 다음에 생기는 시험도 자동으로 돈다.
 
 import { readdirSync, readFileSync } from 'fs';
-import { stripYamlComments } from './lib/strip-comments.mjs';
+import { nodeFileArgs } from './lib/workflow-shell.mjs';
 
 const CI = '.github/workflows/ci.yml';
 
@@ -53,13 +53,24 @@ export function testFileNames(dir = 'scripts') {
 /**
  * `node --test ...`로 **실제로 돌려지는** 경로 토큰.
  *
- * 같은 줄에 `node --test`가 있어야 한다. 주석 처리된 줄은 세지 않는다.
+ * **같은 줄에 적혀 있는 것으로는 모자랐다.** 전에는 주석만 걸러 낸 뒤
+ * 줄에서 `node --test`를 찾았는데, 그러면 셸이 출력만 하는 문장도
+ * 돌리는 것으로 셌다. 실측으로 뚫린 꼴 둘(유효 YAML · 단계는 성공 ·
+ * 시험은 한 번도 안 돈다):
+ *
+ *     run: echo 'node --test scripts/test-*.mjs'
+ *     run: printf '%s' "node --test scripts/test-*.mjs"
+ *
+ * 그래서 `nodeFileArgs`로 **명령 위치**의 `node` 호출만 받는다 —
+ * `invokesScript`와 같은 목록이다. 주석·`--eval` 꼴은 그쪽에서 걸러진다.
  */
 export function runTokens(yamlText) {
   const tokens = [];
-  for (const line of stripYamlComments(yamlText).split('\n')) {
-    if (!/node\s+--test/.test(line)) continue;
-    for (const m of line.matchAll(/scripts\/test-[^\s'"`;|&)]*\.mjs/g)) tokens.push(m[0]);
+  for (const args of nodeFileArgs(yamlText)) {
+    if (!args.includes('--test')) continue;
+    for (const a of args) {
+      for (const m of a.matchAll(/scripts\/test-[^\s'"`;|&)]*\.mjs/g)) tokens.push(m[0]);
+    }
   }
   return tokens;
 }
@@ -108,6 +119,16 @@ const CASES = [
   { n: 'ci.yml 을 못 읽으면 통과가 아니다', names: ['test-a.mjs'], yaml: null, want: ['NO_CI'] },
   { n: '값 안의 # 을 주석으로 읽지 않는다', names: ['test-a.mjs'],
     yaml: '        run: node --test scripts/test-a.mjs  # 이유', want: [] },
+  { n: '★ echo 안에 적힌 실행 줄은 돌리는 것이 아니다', names: ['test-a.mjs'],
+    yaml: "        run: echo 'node --test scripts/test-*.mjs'", want: ['NO_RUN_STEP', 'NOT_RUN'] },
+  { n: '★ printf 안에 적힌 실행 줄도 아니다', names: ['test-a.mjs'],
+    yaml: '        run: printf \'%s\' "node --test scripts/test-*.mjs"', want: ['NO_RUN_STEP', 'NOT_RUN'] },
+  { n: '대조: --eval 뒤의 경로는 인자다 — 전에도 막혔고 새 경로에서도 막힌다', names: ['test-a.mjs'],
+    yaml: '        run: node --eval \'console.log(1)\' --test scripts/test-a.mjs', want: ['NO_RUN_STEP', 'NOT_RUN'] },
+  { n: '대조: 환경변수 접두는 명령 위치를 바꾸지 않는다', names: ['test-a.mjs'],
+    yaml: '        run: CI=1 node --test scripts/test-*.mjs', want: [] },
+  { n: '대조: 여러 줄 블록의 둘째 줄도 본다', names: ['test-a.mjs', 'test-b.mjs'],
+    yaml: '        run: |\n          npm run lint\n          node --test scripts/test-*.mjs', want: [] },
 ];
 
 export function selfTest() {

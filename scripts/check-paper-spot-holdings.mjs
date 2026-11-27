@@ -13,6 +13,8 @@
 // `if (false)`로 바꿔도 문자열은 그대로였다.
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import ts from 'typescript';
+import { shellText, heredocText, stripWorkflowComments } from './lib/workflow-shell.mjs';
+import { stripYamlComments } from './lib/strip-comments.mjs';
 
 /**
  * `<InstrumentDetail onOrder={…}>` 핸들러가 **그 자리에서** 문맥을 읽고,
@@ -133,13 +135,29 @@ const marks = stripTs(read(MARKS));
 const sellr = stripTs(read(SELLR));
 const holdr = stripTs(read(HOLDR));
 const scope = stripTs(read(SCOPE));
-const audit = read(AUDIT);      // YAML은 주석을 지우지 않는다 — 트리거가 주석일 수 있다
-// SQL 본문만 볼 때 쓴다. **규칙이 주석에 반응하면 안 된다** — 실제로
-// "이 표를 보지 말라"고 적어 둔 설명 주석이 그 규칙을 깨뜨렸다.
-const auditCode = audit.split('\n')
-  .filter(l => !/^\s*(--|#)/.test(l))
-  .join('\n');
-const replay = read(REPLAY);
+const audit = read(AUDIT);
+
+// ★ **워크플로에 적혀 있는 것과 그 자리에서 실행되는 것은 다르다.**
+//
+//   전에는 단정을 전부 `audit` 원문에 걸었다. 그래서 같은 글자가 머리말
+//   주석이나 `- name:` 단계 제목에 있으면 그것으로 만족했다. 실측:
+//   `BEGIN TRANSACTION READ ONLY` 가 5개인데 실제 SQL 은 2개뿐이고
+//   (주석 1 + 단계 제목 2), 하한이 `>= 2` 라 **실제 SQL 두 줄을 다 지워도
+//   통과**했다. 운영 DB 감사가 읽기 전용 0개로 돌아도 ✅ 가 되는 모양이다.
+//
+//   `#`/`--` 를 줄 앞에서 걸러내는 것으로는 모자랐다. 자리마다 주석 글자가
+//   다르고(YAML·셸은 `#`, SQL 은 `--`), `sed -E 's#postgres…'` 처럼
+//   **인용 안의 `#`** 는 주석이 아니다. 그래서 자리를 계산해서 본다.
+const auditYaml  = stripYamlComments(audit);               // 트리거·식·`uses:` 같은 YAML 구조
+const auditShell = shellText(audit);                       // `run:` 이 실제로 실행하는 것
+const auditSql   = stripSql(heredocText(audit));           // `psql <<'SQL'` 본문 = 실제로 도는 SQL
+// 금지 구문(쓰기 SQL·돈 움직이는 RPC)은 **어느 자리에 있어도** 잡아야 하므로
+// 좁히지 않는다 — 주석만 걷은 전체를 본다. 좁히면 그게 구멍이 된다.
+const auditCode  = stripWorkflowComments(audit);
+
+const replay      = read(REPLAY);
+const replayYaml  = stripYamlComments(replay);             // `paths:` 목록
+const replayShell = shellText(replay);                     // 실제로 부르는 자리
 
 // 함수 본문 한 덩어리를 뽑는다.
 //
@@ -586,7 +604,7 @@ function body(name) {
   if (!audit) fail(`${AUDIT}가 없습니다 — 활성화 뒤 검증 장치가 없습니다`);
 
   // 트리거가 workflow_run이고, push가 아니어야 한다.
-  const on = audit.match(/\non:\n([\s\S]*?)\nconcurrency:/)?.[1] ?? '';
+  const on = auditYaml.match(/\non:\n([\s\S]*?)\nconcurrency:/)?.[1] ?? '';
   if (!/workflow_run:/.test(on) || !/workflows:\s*\[migrate\]/.test(on)) {
     fail(`${AUDIT}: migrate 완료에 걸리지 않았습니다 — 적용 전 스키마를 읽게 됩니다`);
   }
@@ -594,26 +612,27 @@ function body(name) {
     fail(`${AUDIT}: push 트리거가 있습니다 — migrate와 경합합니다`);
   }
   // 성공·main 두 조건을 모두 본다.
-  if (!/workflow_run\.conclusion\s*==\s*'success'/.test(audit)) {
+  if (!/workflow_run\.conclusion\s*==\s*'success'/.test(auditYaml)) {
     fail(`${AUDIT}: 깨운 실행의 성공 여부를 보지 않습니다`);
   }
-  if (!/workflow_run\.head_branch\s*==\s*'main'/.test(audit)) {
+  if (!/workflow_run\.head_branch\s*==\s*'main'/.test(auditYaml)) {
     fail(`${AUDIT}: 깨운 실행이 main인지 보지 않습니다`);
   }
   // 특권 경로는 기본 브랜치 코드만 돈다.
-  if (!/uses:\s*actions\/checkout@v4[\s\S]{0,120}ref:\s*main/.test(audit)) {
+  if (!/uses:\s*actions\/checkout@v4[\s\S]{0,120}ref:\s*main/.test(auditYaml)) {
     fail(`${AUDIT}: 체크아웃이 main으로 고정돼 있지 않습니다 — 깨운 커밋의 코드가 secret을 쥡니다`);
   }
   // 감사 대상 커밋 == 활성화 커밋.
-  if (!/ACTIVATION_SHA/.test(audit) || !/here.*!=.*ACTIVATION_SHA|ACTIVATION_SHA.*!=.*here/.test(audit)) {
+  if (!/^\s*ACTIVATION_SHA\s*:/m.test(auditYaml)
+      || !/here.*!=.*ACTIVATION_SHA|ACTIVATION_SHA.*!=.*here/.test(auditShell)) {
     fail(`${AUDIT}: 활성화 커밋과 감사 커밋이 같은지 확인하지 않습니다`);
   }
 
   // 읽기 전용 — 선언만이 아니라 **값으로** 확인해야 한다.
-  if ((audit.match(/BEGIN TRANSACTION READ ONLY/g) || []).length < 2) {
+  if ((auditSql.match(/BEGIN TRANSACTION READ ONLY/g) || []).length < 2) {
     fail(`${AUDIT}: 읽기 전용 트랜잭션으로 열지 않는 질의가 있습니다`);
   }
-  if ((audit.match(/READ_ONLY=on/g) || []).length < 2) {
+  if ((auditShell.match(/READ_ONLY=on/g) || []).length < 2) {
     fail(`${AUDIT}: 읽기 전용이었다는 증거를 값으로 확인하지 않습니다`);
   }
   // **돈을 움직이는 RPC를 부르지 않는다.** 카탈로그에서 이름을 문자열로
@@ -630,33 +649,33 @@ function body(name) {
   }
 
   // ★ 대조는 **챌린지 전용 계좌만**. 일반 계좌에는 챌린지 원장이 없다.
-  if (!/FROM public\.paper_challenges c\s*\n\s*JOIN public\.paper_accounts a ON a\.id = c\.paper_account_id/.test(audit)) {
+  if (!/FROM public\.paper_challenges c\s*\n\s*JOIN public\.paper_accounts a ON a\.id = c\.paper_account_id/.test(auditSql)) {
     fail(`${AUDIT}: 잔고-원장 대조가 챌린지 전용 계좌로 한정돼 있지 않습니다 — `
        + '일반 PAPER 계좌가 전부 FALSE로 잡힙니다');
   }
-  if (!/acct_shared_by_challenges/.test(audit)) {
+  if (!/acct_shared_by_challenges/.test(auditSql)) {
     fail(`${AUDIT}: 챌린지 ↔ 전용 계좌 1:1을 확인하지 않습니다`);
   }
 
   // ★ backfill 등식은 **아직 처분되지 않은 열린 줄에만** 건다.
   //   거래가 일어나면 정상적으로 달라진다 — 불변식으로 만들면 다음 감사가
   //   멀쩡한 운영을 FALSE로 적는다.
-  if (!/NOT EXISTS \(SELECT 1 FROM public\.paper_sell_event_lots l[\s\S]{0,120}WHERE l\.position_id = pp\.id\)/.test(audit)) {
+  if (!/NOT EXISTS \(SELECT 1 FROM public\.paper_sell_event_lots l[\s\S]{0,120}WHERE l\.position_id = pp\.id\)/.test(auditSql)) {
     fail(`${AUDIT}: backfill 등식이 처분 이력이 없는 줄로 한정돼 있지 않습니다`);
   }
-  if (!/pp\.status = 'open'/.test(audit)) {
+  if (!/pp\.status = 'open'/.test(auditSql)) {
     fail(`${AUDIT}: backfill 등식이 열린 줄로 한정돼 있지 않습니다`);
   }
 
   // UNKNOWN을 통과로 바꾸지 않는다.
-  if (!/if \[ "\$\{u\}" -gt 0 \]; then\s*\n\s*verdict='UNKNOWN'/.test(audit)) {
+  if (!/if \[ "\$\{u\}" -gt 0 \]; then\s*\n\s*verdict='UNKNOWN'/.test(auditShell)) {
     fail(`${AUDIT}: UNKNOWN이 있어도 판정을 내립니다`);
   }
-  if (!/verdict.*!=.*'MATCH'[\s\S]{0,200}exit 1/.test(audit)) {
+  if (!/verdict.*!=.*'MATCH'[\s\S]{0,200}exit 1/.test(auditShell)) {
     fail(`${AUDIT}: MATCH가 아닌데 성공으로 끝납니다`);
   }
   // 접속 정보를 로그에 흘리지 않는다.
-  if (!/sed -E 's#postgres/.test(audit)) {
+  if (!/sed -E 's#postgres/.test(auditShell)) {
     fail(`${AUDIT}: psql 출력에서 접속 정보를 가리지 않습니다`);
   }
 
@@ -671,12 +690,12 @@ function body(name) {
   //        → `[A-Z_]+`로 찾으면 그 줄만 빠지고 "줄없음 → UNKNOWN"이 된다
   //
   //   **두 추출 지점 모두** 본다. 한 곳만 고치면 그 한 곳만 돈다.
-  const trims = audit.match(/sed -E 's\/\^\[\[:space:\]\]\+\/\/; s\/\[\[:space:\]\]\+\$\/\/'/g) || [];
+  const trims = auditShell.match(/sed -E 's\/\^\[\[:space:\]\]\+\/\/; s\/\[\[:space:\]\]\+\$\/\/'/g) || [];
   if (trims.length < 2) {
     fail(`${AUDIT}: 판정 줄을 다듬지 않고 찾습니다 (${trims.length}/2) — `
        + 'psql 정렬 출력의 앞 공백 때문에 한 줄도 안 잡힙니다');
   }
-  const greps = audit.match(/grep -E '\^\[[^\]]*\]\+=\(TRUE\|FALSE\|UNKNOWN\)\$'/g) || [];
+  const greps = auditShell.match(/grep -E '\^\[[^\]]*\]\+=\(TRUE\|FALSE\|UNKNOWN\)\$'/g) || [];
   if (greps.length < 2) {
     fail(`${AUDIT}: 판정 줄 추출이 두 곳에 있지 않습니다 (${greps.length}/2)`);
   }
@@ -696,11 +715,11 @@ function body(name) {
   if (/supabase_migrations\.schema_migrations/.test(auditCode)) {
     fail(`${AUDIT}: Supabase CLI의 장부 표를 봅니다 — 이 저장소의 기록은 거기 없습니다`);
   }
-  if (!/FROM public\.schema_migrations[\s\S]{0,160}filename = '088_paper_spot_holdings\.sql'/.test(auditCode)) {
+  if (!/FROM public\.schema_migrations[\s\S]{0,160}filename = '088_paper_spot_holdings\.sql'/.test(auditSql)) {
     fail(`${AUDIT}: 장부를 public.schema_migrations의 filename으로 조회하지 않습니다`);
   }
   // 적혀 있다는 것과 실행됐다는 것은 다른 사실이다.
-  if (!/m\.status = 'APPLIED'/.test(auditCode)) {
+  if (!/m\.status = 'APPLIED'/.test(auditSql)) {
     fail(`${AUDIT}: 장부 행의 status가 APPLIED인지 보지 않습니다 — `
        + 'FAILED·BASELINE도 행은 남습니다');
   }
@@ -714,20 +733,20 @@ function body(name) {
   for (const need of ['scripts/sql/088_paper_spot_holdings_proof.sql',
                       'scripts/paper-spot-holdings-concurrency.sh',
                       'scripts/paper-spot-holdings-mutations.mjs']) {
-    if (!replay.includes(need)) {
+    if (!replayShell.includes(need)) {
       fail(`${REPLAY}: ${need}이 걸려 있지 않습니다 — 재생이 088을 검사하지 않습니다`);
     }
   }
   // 경로 목록에도 있어야 파일이 바뀔 때 재생이 깨어난다.
-  if ((replay.match(/scripts\/paper-spot-holdings-concurrency\.sh/g) || []).length < 3) {
+  if ((replayYaml.match(/scripts\/paper-spot-holdings-concurrency\.sh/g) || []).length < 3) {
     fail(`${REPLAY}: 088 스크립트가 pull_request·push 경로 목록에 없습니다 — `
        + '그 파일만 고치면 재생이 안 돕니다');
   }
   // 0건을 통과로 적지 않는다.
-  if (!/n_ok.*-lt 90/.test(replay)) {
+  if (!/n_ok.*-lt 90/.test(replayShell)) {
     fail(`${REPLAY}: 088 증명의 확인 건수 하한이 없습니다`);
   }
-  if (!/n_red.*-lt 30/.test(replay)) {
+  if (!/n_red.*-lt 30/.test(replayShell)) {
     fail(`${REPLAY}: 088 뮤테이션의 RED 하한이 없습니다`);
   }
 }
