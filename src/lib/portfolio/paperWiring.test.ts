@@ -20,6 +20,7 @@ import { paperPositionViews, readPaperEquity, missingColumnOf } from './paperRea
 import { totalEquityOf } from './wallet';
 import { paperPanelOf, seedOptionsOf } from './paperPanel';
 import { amountOf } from './wallet';
+import { readFileSync } from 'fs';
 
 /** `paper_accounts` 한 줄과 `paper_positions` 몇 줄을 가진 가짜 Supabase */
 function fakeSb(opts: {
@@ -466,4 +467,33 @@ export function runPaperWiringTests() {
     const opts = seedOptionsOf([50_000], fx);
     assert(opts[0].usdText.includes('50,000'), '원화가 USDT를 대체하지 않는다');
   });
+
+  // ── ⑥ 데모 러너의 가용 잔고 ──
+  //
+  // `/api/paper/account` · `/api/paper/positions` · `/api/paper/order`는
+  // 사용 증거금을 `paperAvailable` 한 곳에서 센다. `/api/paper/run`만
+  // `Number(p.margin) || 0`을 그대로 들고 있었다 — 못 읽은 증거금을 0으로
+  // 세고 음수 증거금은 **더해서**, 가용 잔고가 부푼 채로 진입 수량을
+  // 계획했다 (증거금 null → 10,000 그대로, -500 → 10,500).
+  // 경로가 넷인데 셋만 고쳐진 상태였다.
+  //
+  // **왜 핸들러를 직접 부르지 않는가.** 이 함수의 시험들은 동시에 돈다.
+  // 라우트를 부르려면 `binanceFutures`·`paperStore` 같은 공용 모듈을
+  // `require.cache`로 갈아끼워야 하는데, 그 사이 다른 시험이 가짜를
+  // 물어 가 엉뚱한 곳이 깨졌다(실측). 판정은 `paperAvailable.test.ts`가
+  // 덮고, 여기서는 **라우트가 그 판정을 쓰는지**만 본다.
+  test('/api/paper/run: 사용 증거금을 paperAvailable 한 곳에서 센다', () => {
+    const code = stripComments(readFileSync('src/app/api/paper/run/route.ts', 'utf8'));
+    assert(!/Number\(\s*\w+\.margin\s*\)\s*\|\|\s*0/.test(code),
+      '못 읽은 증거금을 0으로 세는 `Number(p.margin) || 0`이 남아 있다');
+    assert(/import\(\s*['"]@\/lib\/engine\/paperAvailable['"]\s*\)/.test(code),
+      'paperAvailable을 불러오지 않는다');
+    assert(/\bavailableView\s*\(/.test(code), 'availableView를 부르지 않는다');
+    assert(/availableUsd\s*:\s*available\b/.test(code), '계획에 넘기는 가용 잔고가 그 값이 아니다');
+  });
+}
+
+/** 블록 주석과 줄 끝 `//` 주석을 뗀다 — 주석 속 글자를 배선으로 세지 않는다 */
+function stripComments(src: string): string {
+  return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"])\/\/.*$/gm, '$1');
 }
