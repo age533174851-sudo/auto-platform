@@ -16,7 +16,7 @@ import { readFileSync, writeFileSync, mkdtempSync, cpSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { shellText, shellCommands, shellScriptLines, heredocText, heredocBodies, stripWorkflowComments } from './lib/workflow-shell.mjs';
+import { shellText, shellCommands, shellScriptLines, heredocText, heredocBodies, stripWorkflowComments, nodeFileArgs, invokesScript } from './lib/workflow-shell.mjs';
 
 const AUDIT = '.github/workflows/audit-production-exact100x-testnet-readiness.yml';
 
@@ -231,4 +231,51 @@ test('닫히지 않은 heredoc 의 본문은 끝까지 센다 — 금지 구문�
   const yaml = '      - run: |\n          cat > /tmp/a.sql <<\'SQL\'\n          INSERT INTO public.x VALUES (1);\n';
   assert.match(heredocText(yaml), /INSERT INTO public\.x/);
   assert.match(stripWorkflowComments(yaml), /INSERT INTO public\.x/);
+});
+
+/* ── nodeFileArgs — 이름으로 찾는 쪽과 글롭으로 찾는 쪽이 같은 목록을 본다
+   ────────────────────────────────────────────────────────────────────
+   전에는 명령 위치 판정이 `invokesScript` 안에만 있었고,
+   `check-ci-script-tests.mjs` 의 `runTokens` 는 줄 단위로 `node --test` 를
+   찾았다. 그래서 같은 반례가 한쪽만 막혔다 — 실측으로 확인했다. */
+
+test('nodeFileArgs — 명령 위치의 node 호출만 인자째로 내보낸다', () => {
+  const y = [
+    '        run: |',
+    '          npm run lint',
+    '          node --test scripts/test-a.mjs',
+    '          node scripts/check-b.mjs --strict',
+  ].join('\n');
+  assert.deepEqual(nodeFileArgs(y), [
+    ['--test', 'scripts/test-a.mjs'],
+    ['scripts/check-b.mjs', '--strict'],
+  ]);
+});
+
+test('★ echo·printf 안에 적힌 node 는 호출이 아니다', () => {
+  assert.deepEqual(nodeFileArgs("        run: echo 'node --test scripts/test-a.mjs'"), []);
+  assert.deepEqual(nodeFileArgs('        run: printf \'%s\' "node --test scripts/test-a.mjs"'), []);
+});
+
+test('★ --eval 꼴은 파일을 돌리지 않으므로 목록에 없다', () => {
+  for (const flag of ['--eval', '-e', '-p', '--print', '-pe', '--eval=1+1']) {
+    assert.deepEqual(
+      nodeFileArgs(`        run: node ${flag} 'console.log(1)' scripts/test-a.mjs`),
+      [], `${flag} 가 파일 호출로 셌다`,
+    );
+  }
+});
+
+test('대조 — --test 와 환경변수 접두는 좁히지 않는다', () => {
+  assert.deepEqual(nodeFileArgs('        run: CI=1 node --test scripts/test-a.mjs'),
+    [['--test', 'scripts/test-a.mjs']]);
+});
+
+test('★ invokesScript 가 이 목록 위에 서 있다 — 판단이 두 곳에 없다', () => {
+  const y = '        run: node scripts/check-b.mjs';
+  assert.equal(invokesScript(y, 'scripts/check-b.mjs'), true);
+  assert.equal(invokesScript("        run: echo 'node scripts/check-b.mjs'", 'scripts/check-b.mjs'), false);
+  // 실제 ci.yml 에서도 그대로여야 한다 (좁히는 대가 0)
+  const ci = readFileSync('.github/workflows/ci.yml', 'utf8');
+  assert.equal(invokesScript(ci, 'scripts/check-design-tokens.mjs'), true);
 });

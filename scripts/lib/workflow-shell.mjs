@@ -209,6 +209,41 @@ export function shellCommands(yamlText) {
 }
 
 /**
+ * 명령 위치에서 `node` 가 **파일을 돌리는** 호출의 인자 목록 전부.
+ *
+ * **`node` 뒤에 경로가 있다고 그 파일이 도는 것은 아니다.**
+ *
+ * 실측 반례(#792 코멘트 7209193550, 유효 YAML · `bash -n` 통과 ·
+ * 실제로 돌려 보면 `noop` 만 찍힌다):
+ *
+ *     run: node --eval 'console.log("noop")' scripts/check-audit-readonly.mjs
+ *
+ * Node 는 `--eval` 의 표현식을 실행하고 뒤의 경로는 **인자**로 넘긴다 —
+ * 그 파일은 돌지 않는다. `-e`·`-p`·`--print` 도 같다(`-pe` 처럼 붙여 쓸 수
+ * 있다). 그래서 이 꼴은 목록에 넣지 않는다.
+ *
+ * `--test` 는 반대다 — 뒤의 경로들을 **실제로 돌린다.** 이 저장소가
+ * 시험 파일을 그렇게 부르므로 양성으로 남겨야 한다(검사기 95개로 쟀다).
+ *
+ * **이름으로 찾는 쪽과 글롭으로 찾는 쪽이 같은 목록을 본다.** 전에는
+ * `invokesScript` 만 명령 위치를 봤고, `check-ci-script-tests.mjs` 의
+ * `runTokens` 는 줄 단위로 `node --test` 를 찾고 있었다 — 그래서
+ * `run: echo 'node --test scripts/test-*.mjs'` 가 통과했다(실측).
+ * 같은 판단을 두 곳에 두지 않는다.
+ */
+export function nodeFileArgs(yamlText) {
+  const out = [];
+  for (const cmd of shellCommands(yamlText)) {
+    const parts = cmd.split(/\s+/);
+    if (parts[0] !== 'node') continue;
+    const args = parts.slice(1);
+    if (args.some((a) => EVAL_OPTION.test(a))) continue;
+    out.push(args);
+  }
+  return out;
+}
+
+/**
  * 이 워크플로가 **명령 위치에서** 이 스크립트를 node 로 실행하는가.
  *
  * `shellText` 로는 모자랐다. 그것은 셸 **본문**이지 명령 위치가 아니라서,
@@ -229,28 +264,9 @@ export function shellCommands(yamlText) {
 export function invokesScript(yamlText, scriptPath) {
   const path = String(scriptPath ?? '').replace(/^\.\//, '');
   if (!path) return false;
-  for (const cmd of shellCommands(yamlText)) {
-    const parts = cmd.split(/\s+/);
-    if (parts[0] !== 'node') continue;
-    const args = parts.slice(1);
-    // **`node` 뒤에 경로가 있다고 그 파일이 도는 것은 아니다.**
-    //
-    // 실측 반례(#792 코멘트 7209193550, 유효 YAML · `bash -n` 통과 ·
-    // 실제로 돌려 보면 `noop` 만 찍힌다):
-    //
-    //     run: node --eval 'console.log("noop")' scripts/check-audit-readonly.mjs
-    //
-    // Node 는 `--eval` 의 표현식을 실행하고 뒤의 경로는 **인자**로 넘긴다 —
-    // 그 파일은 돌지 않는다. `-e`·`-p`·`--print` 도 같다(`-pe` 처럼 붙여 쓸 수
-    // 있다). 그래서 이 꼴이면 파일 호출로 세지 않는다.
-    //
-    // `--test` 는 반대다 — 뒤의 경로들을 **실제로 돌린다.** 이 저장소가
-    // 시험 파일을 그렇게 부르므로 양성으로 남겨야 한다(검사기 95개로 쟀다).
-    if (args.some(a => EVAL_OPTION.test(a))) continue;
-    // 인용부호가 붙은 인자는 명령이 아니라 자료다 — 벗기지 않고 그대로 본다.
-    if (args.some(a => a === path || a === `./${path}`)) return true;
-  }
-  return false;
+  // 인용부호가 붙은 인자는 명령이 아니라 자료다 — 벗기지 않고 그대로 본다.
+  return nodeFileArgs(yamlText)
+    .some((args) => args.some((a) => a === path || a === `./${path}`));
 }
 
 /**

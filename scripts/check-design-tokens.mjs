@@ -23,6 +23,7 @@
 
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { invokesScript } from './lib/workflow-shell.mjs';
 import { stripJsComments } from './lib/strip-comments.mjs';
 
 let bad = false;
@@ -216,9 +217,21 @@ for (const [name, vals] of Object.entries(must)) {
 
 /* ── ⑧ 기존 계약을 약화시키지 않았다 ──────────────────────────
    디자인 정리를 핑계로 UI-1·UI-3A 검사를 우회하거나 지우면 안 된다. */
+/* **적혀 있는 것과 부르는 것은 다르다.** 전에는 `ci.includes(s)` 였다 —
+   원문에 이름이 있으면 통과였다. 셋 다 실측으로 뚫렸다(유효 YAML ·
+   단계는 성공 · 검사기는 한 번도 안 돈다):
+
+       run: echo 'node scripts/check-ui-shell-contract.mjs'
+       run: true  # node scripts/check-ui-shell-contract.mjs
+
+   그래서 `invokesScript` 로 **명령 위치**를 본다. 좁히는 대가는 쟀다 —
+   세 이름 모두 그대로 양성이다(0건 새로 막힘). */
 const ci = readFileSync('.github/workflows/ci.yml', 'utf8');
 for (const s of ['check-ui-shell-contract.mjs', 'check-ui-truth-claims.mjs', 'check-design-tokens.mjs']) {
-  if (!ci.includes(s)) err(`.github/workflows/ci.yml: ${s}가 CI에 없습니다`);
+  if (!invokesScript(ci, `scripts/${s}`)) {
+    err(`.github/workflows/ci.yml: ${s}를 CI가 명령 위치에서 부르지 않습니다`
+      + ' — 이름이 적혀 있는 것은 도는 것이 아닙니다');
+  }
 }
 
 if (bad) {
