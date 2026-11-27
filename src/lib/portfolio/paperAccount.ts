@@ -21,6 +21,8 @@
 // 사고 기록이 있다(`walletMoney.ts`): 공용 `cvt()`가 입력을 KRW로
 // 가정해서 1,000배 확대됐다. **환율이 없으면 원화로 바꾸지 않는다.**
 
+import { usedMarginOf } from '../engine/paperAvailable';
+
 export interface PaperPositionLike {
   symbol?: string | null;
   side?: string | null;
@@ -362,12 +364,16 @@ export function paperEquityOf(i: {
   const initial = num(a!.initial_balance);
 
   const list = Array.isArray(i?.positions) ? i.positions : [];
-  let usedMargin = 0;
+  // **사용 증거금은 주문·가용 판정과 같은 함수로 센다.** 예전에는 여기서
+  // 따로 더하면서 못 읽은 줄을 건너뛰어 `0`을 적었다 — 같은
+  // `/api/paper/account` 응답 안에서 `account.usedMargin`은 null인데
+  // `equity.usedMargin`은 0이 되었고, 화면은 그 0으로 "가용 = 현금 전부"를
+  // 그렸다. 한 줄이라도 못 읽었으면 null(모름)이다.
+  const used = usedMarginOf(list);
+  const usedMargin = used.unreadable > 0 ? null : used.used;
   let unreal = 0;
   let unknownCount = 0;
   for (const p of list) {
-    const m = num(p?.margin);
-    if (m != null) usedMargin += m;
     const u = p?.unrealizedPnl;
     if (u == null || !Number.isFinite(Number(u))) unknownCount += 1;
     else unreal += Number(u);
