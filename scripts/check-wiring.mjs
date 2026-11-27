@@ -1080,17 +1080,20 @@ if (checkerFiles.length === 0) {
 // 좁힘의 대가를 **먼저** 쟀다: 검사기 95개 중 ③ 으로 새로 "미배선" 이 되는
 // 것은 0개다. 더 좁은 `ciInvokes`(`^node\s+scripts/…`)로 재면 1개가 거짓으로
 // 미배선이 된다 — 이 저장소는 시험 파일을 `node --test …` 로 부르기 때문이다.
-const workflowTexts = readdirSync('.github/workflows')
-  .filter(f => /\.ya?ml$/.test(f))
-  .map(wf => readFileSync(join('.github/workflows', wf), 'utf8'));
-// `run-tests.mjs` 는 JS 진입점이라 셸 토막이 아니다 — 주석만 걷고 본다.
-const runnerSrc = stripComments(readFileSync(CHECK_RUNNER, 'utf8'));
+// 모으는 모양은 전과 같다 — 바뀐 것은 **판정**뿐이다.
+const workflowTexts = [];
+for (const wf of readdirSync('.github/workflows').filter(f => /\.ya?ml$/.test(f))) {
+  workflowTexts.push(readFileSync(join('.github/workflows', wf), 'utf8'));
+}
+// `run-tests.mjs` 는 셸 토막이 아니라 JS 진입점이다 — 주석만 걷고 이름으로 본다.
+const runnerSources = [];
+runnerSources.push(stripComments(readFileSync(CHECK_RUNNER, 'utf8')));
 
 const unwiredCheckers = [];
 const staleCheckerAllow = [];
 for (const c of checkerFiles) {
   const called = workflowTexts.some(w => invokesScript(w, c))
-    || runnerSrc.includes(basename(c));
+    || runnerSources.some(t => t.includes(basename(c)));
   const allowed = CHECKER_ALLOW.has(c);
   if (!called && !allowed) unwiredCheckers.push(c);
   if (called && allowed) staleCheckerAllow.push(c);
