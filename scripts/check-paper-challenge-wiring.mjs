@@ -19,6 +19,7 @@
 //   ⑦ 상태 관문이 **허용 목록**이다 (금지 목록이면 상태가 늘 때 조용히 열린다)
 //   ⑧ 모의 청산 경로가 **하나뿐**이다
 import { readFileSync, readdirSync } from 'node:fs';
+import { stripJsComments } from './lib/strip-comments.mjs';
 
 const ORDER     = 'src/app/api/paper/order/route.ts';
 const POSITIONS = 'src/app/api/paper/positions/route.ts';
@@ -33,16 +34,53 @@ const read = (p) => {
   try { return readFileSync(p, 'utf8'); }
   catch { err(`${p}를 읽지 못했습니다 — 확인하지 못한 것을 통과로 적지 않습니다`); return ''; }
 };
-/** 주석을 뺀 본문. 규칙을 주석으로 만족시키지 못하게 한다. */
-const code = (s) => s.split('\n').filter(l => !/^\s*(\/\/|\*|\/\*|--)/.test(l)).join('\n');
+/**
+ * 주석을 뺀 TS 본문. 규칙을 주석으로 만족시키지 못하게 한다.
+ *
+ * 예전에는 **줄머리만** 뗐다. 그래서 꼬리 주석 한 줄로 관문이 열렸다 —
+ * 기계 탐침으로 실제로 돌려 네 자리를 확인했다(전부 TS 구문 유효):
+ *
+ *     accountId = zs.accountId;        // accountId = cs.accountId;
+ *     rpc('zaper_challenge_cancel'     // rpc('paper_challenge_cancel'
+ *     status === 'ZUNNING'             // status === 'RUNNING'
+ *     zaperEventTimeNow()              /* paperEventTimeNow() *\/
+ *
+ * 넷 다 "이름만 바꾸면 rc=1, 주석을 남기면 rc=0" 이었다. 앵커는 필요한
+ * 것이 맞았고 보는 눈이 주석을 못 걸러낸 것이다. 공용 `stripJsComments`는
+ * 인용부호·템플릿·정규식을 알고 걷으므로 문자열 안의 `//`를 건드리지 않는다.
+ */
+const codeTs = (s) => stripJsComments(s);
+
+/**
+ * 주석을 뺀 SQL 본문. **여기는 아직 줄머리만 뗀다.**
+ *
+ * 같은 탐침을 마이그레이션에 걸어 **구멍 세 개를 실측했다**:
+ *
+ *     AND TRUE -- AND c.close_intent IS NULL              (사유 CAS)
+ *     TRUE     -- paper_event_time_guard(p_event_…)        (사건 시각 신선도)
+ *     TRUE     -- c.user_id = p_user                       (소유자, 3곳 필요)
+ *
+ * 셋 다 지우면 rc=1 인데 꼬리 주석으로 옮기면 rc=0 이다. 마지막이 가장
+ * 나쁘다 — 그 규칙은 **개수를 세므로** 세 자리 중 하나를 끄고 주석만
+ * 남기면 "셋 다 있다"가 된다. 그 조건이 빠지는 날 남의 챌린지가 닫힌다.
+ *
+ * **여기서 고치지 않는 이유**: SQL `--` 를 인용부호·달러 인용을 알고 걷는
+ * 일은 새 판단 로직이고, 그것은 `scripts/lib/strip-comments.mjs` 한 곳에
+ * 있어야 한다. 이 검사기 안에 따로 쓰면 다음 SQL 검사기가 복사해 가고
+ * 언젠가 한쪽만 고쳐진다 — 이 저장소가 반복해서 겪은 "경로가 둘인데
+ * 한쪽만 고침"이다. 그래서 `stripSqlComments` 를 공용 파일에 먼저 넣었고
+ * (PR #795, `c4e64867`), 그것이 main 에 올라가면 이 함수를 그 호출로
+ * 바꾼다. **구멍 3개를 0으로 적지 않는다 — 측정했고 아직 열려 있다.**
+ */
+const codeSql = (s) => s.split('\n').filter(l => !/^\s*(--|\/\*|\*)/.test(l)).join('\n');
 
 const order = read(ORDER), positions = read(POSITIONS);
 const cancel = read(CANCEL), create = read(CREATE);
 const scope = read(SCOPE), mig = read(MIG);
 
-const orderC = code(order), positionsC = code(positions);
-const cancelC = code(cancel), createC = code(create), scopeC = code(scope);
-const migC = code(mig);
+const orderC = codeTs(order), positionsC = codeTs(positions);
+const cancelC = codeTs(cancel), createC = codeTs(create), scopeC = codeTs(scope);
+const migC = codeSql(mig);
 
 // ── ① 계좌 id는 밖에서 오지 않는다 ──
 //
@@ -236,7 +274,7 @@ if (!/IF p_event_effective_at IS NULL THEN[\s\S]{0,200}?'22004'/.test(migC)) {
 
   let sawCloser = false;
   for (const p of routes) {
-    const src = code(readFileSync(p, 'utf8'));
+    const src = codeTs(readFileSync(p, 'utf8'));
     if (/closePaperPosition\(/.test(src)) sawCloser = true;
     // 요청에서 온 값이 청산가·손익으로 흘러드는가
     if (/(body|searchParams)[^\n]{0,80}(exitPrice|exit_price|realizedPnl|realized_pnl|pnl)/i.test(src)) {
