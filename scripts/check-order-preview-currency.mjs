@@ -30,36 +30,23 @@
 // 사용: node scripts/check-order-preview-currency.mjs
 
 import { readFileSync, existsSync } from 'node:fs';
+import { stripJsComments } from './lib/strip-comments.mjs';
 
 const fails = [];
 const notes = [];
 const fail = (m) => fails.push(m);
 
-// 이 파일도 설명에 `1375`·`sel.quotePrice`를 그대로 적는다. 검사기가
-// 자기 산문을 읽고 통과/실패하는 고장이 반복됐다.
-function stripJs(src) {
-  let out = '', i = 0, quote = null;
-  const n = src.length;
-  while (i < n) {
-    const c = src[i], d = src[i + 1];
-    if (quote) {
-      if (c === '\\') { out += '  '; i += 2; continue; }
-      if (c === quote) quote = null;
-      out += c === '\n' ? '\n' : c;
-      i++; continue;
-    }
-    if (c === '/' && d === '/') { while (i < n && src[i] !== '\n') i++; continue; }
-    if (c === '/' && d === '*') {
-      i += 2;
-      while (i < n && !(src[i] === '*' && src[i + 1] === '/')) { if (src[i] === '\n') out += '\n'; i++; }
-      i += 2; continue;
-    }
-    if (c === '"' || c === "'" || c === '`') { quote = c; out += c; i++; continue; }
-    out += c; i++;
-  }
-  return out;
-}
-
+// 주석을 걷는 일은 공용 `scripts/lib/strip-comments.mjs` 한 곳에 있다.
+//
+// **여기에 사본이 있었다.** 그 파일의 머리글이 이유를 미리 적어 두었다:
+//
+//   그래서 이 함수를 **한 곳에만** 둔다. 검사기마다 각자 복사해 두면 언젠가
+//   한쪽만 고쳐지고, 그때부터 그 검사기는 조용히 아무것도 막지 않는다.
+//
+// 그 일이 일어났다 — 사본 13개가 전부 **정규식 리터럴을 모른다**.
+// `/["\']+/g`를 만나면 안의 `"`를 문자열 시작으로 읽고 가짜 문자열 상태에
+// 빠지고, 그 상태에서는 `//`를 주석으로 보지 않아 **주석 본문이 코드로
+// 남는다.** 그러면 "있어야 한다"를 보는 규칙이 주석에 적힌 문구로 통과한다.
 /** `from` 이후 짝이 맞는 중괄호까지. 길이로 자르면 옆 구문을 읽는다. */
 function braceBodyAt(src, from) {
   const open = src.indexOf('{', from);
@@ -114,7 +101,7 @@ const TESTS = [
 // ── 1. 뜻은 한 곳에 있고, 거래소 계산에 환율이 없다 ──
 if (!existsSync(LIB)) fail(`${LIB}이 없습니다`);
 else {
-  const lib = stripJs(readFileSync(LIB, 'utf8'));
+  const lib = stripJsComments(readFileSync(LIB, 'utf8'));
   for (const fn of ['orderPreviewOf', 'exchangePreviewOf', 'practicePreviewOf']) {
     if (!new RegExp(`export function ${fn}\\b`).test(lib)) fail(`${LIB}에 ${fn}이 없습니다`);
   }
@@ -141,7 +128,7 @@ else {
 
 if (!existsSync(QUOTE)) fail(`${QUOTE}이 없습니다`);
 else {
-  const q = stripJs(readFileSync(QUOTE, 'utf8'));
+  const q = stripJsComments(readFileSync(QUOTE, 'utf8'));
   if (!/export async function fetchVenueQuote\b/.test(q)) fail(`${QUOTE}에 fetchVenueQuote가 없습니다`);
   if (!/export function toVenueSymbol\b/.test(q)) fail(`${QUOTE}에 toVenueSymbol이 없습니다`);
 }
@@ -149,7 +136,7 @@ else {
 // ── 2. 화면 ──
 if (!existsSync(PAGE)) fail(`${PAGE}이 없습니다`);
 else {
-  const page = stripJs(readFileSync(PAGE, 'utf8'));
+  const page = stripJsComments(readFileSync(PAGE, 'utf8'));
 
   // 현물 참고가로 되돌아가는 길 자체가 없어야 한다.
   if (/sel\.quotePrice/.test(page)) {

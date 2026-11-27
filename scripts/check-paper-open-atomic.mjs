@@ -35,6 +35,7 @@
 // 사용: node scripts/check-paper-open-atomic.mjs
 
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
+import { stripJsComments } from './lib/strip-comments.mjs';
 import { feeDeductionContract, migrationCorpus } from './lib/paper-money-path.mjs';
 import { functionBodyOrFail } from './lib/function-body.mjs';
 
@@ -42,30 +43,17 @@ const fails = [];
 const notes = [];
 const fail = (m) => fails.push(m);
 
-// 이 파일도 설명에 `paper_apply_entry_fee`와 `feeApplied`를 그대로 적는다.
-function stripJs(src) {
-  let out = '', i = 0, quote = null;
-  const n = src.length;
-  while (i < n) {
-    const c = src[i], d = src[i + 1];
-    if (quote) {
-      if (c === '\\') { out += '  '; i += 2; continue; }
-      if (c === quote) quote = null;
-      out += c === '\n' ? '\n' : c;
-      i++; continue;
-    }
-    if (c === '/' && d === '/') { while (i < n && src[i] !== '\n') i++; continue; }
-    if (c === '/' && d === '*') {
-      i += 2;
-      while (i < n && !(src[i] === '*' && src[i + 1] === '/')) { if (src[i] === '\n') out += '\n'; i++; }
-      i += 2; continue;
-    }
-    if (c === '"' || c === "'" || c === '`') { quote = c; out += c; i++; continue; }
-    out += c; i++;
-  }
-  return out;
-}
-
+// 주석을 걷는 일은 공용 `scripts/lib/strip-comments.mjs` 한 곳에 있다.
+//
+// **여기에 사본이 있었다.** 그 파일의 머리글이 이유를 미리 적어 두었다:
+//
+//   그래서 이 함수를 **한 곳에만** 둔다. 검사기마다 각자 복사해 두면 언젠가
+//   한쪽만 고쳐지고, 그때부터 그 검사기는 조용히 아무것도 막지 않는다.
+//
+// 그 일이 일어났다 — 사본 13개가 전부 **정규식 리터럴을 모른다**.
+// `/["\']+/g`를 만나면 안의 `"`를 문자열 시작으로 읽고 가짜 문자열 상태에
+// 빠지고, 그 상태에서는 `//`를 주석으로 보지 않아 **주석 본문이 코드로
+// 남는다.** 그러면 "있어야 한다"를 보는 규칙이 주석에 적힌 문구로 통과한다.
 /**
  * SQL의 `--` 주석을 뗀다. 작은따옴표 문자열 안의 `--`는 건드리지 않는다.
  *
@@ -210,8 +198,8 @@ else {
   // **원문을 그대로 파서에 넣는다.** 주석·문자열을 먼저 지우면 위치가
   // 어긋난다. 본문을 정확히 뽑은 뒤에 지운다.
   const storeRaw = readFileSync(STORE, 'utf8');
-  const store = stripJs(storeRaw);
-  const open = stripJs(functionBodyOrFail(storeRaw, 'openPaperPosition', fail, STORE));
+  const store = stripJsComments(storeRaw);
+  const open = stripJsComments(functionBodyOrFail(storeRaw, 'openPaperPosition', fail, STORE));
   if (!open) { /* 위에서 이미 사유를 적었다 */ }
   else {
     if (!/rpc\s*\(\s*'paper_open_position'/.test(open)) {
@@ -250,7 +238,7 @@ for (const dir of ['src/app/api', 'src/lib']) {
       if (!p.endsWith('.ts') && !p.endsWith('.tsx')) continue;
       if (p.endsWith('.test.ts')) continue;
       if (p === STORE) continue;
-      const src = stripJs(readFileSync(p, 'utf8'));
+      const src = stripJsComments(readFileSync(p, 'utf8'));
       if (/paper_apply_entry_fee/.test(src)) {
         fail(`${p}이 진입 수수료를 따로 부릅니다 — 정본은 paper_open_position 하나입니다`);
       }

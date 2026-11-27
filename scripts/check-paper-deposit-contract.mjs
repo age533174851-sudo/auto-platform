@@ -32,6 +32,7 @@
 // 않는다 (`gen-migration-manifest.mjs`의 `loadPlan()`과 같은 방식).
 
 import { readFileSync, existsSync, readdirSync, mkdtempSync, cpSync } from 'node:fs';
+import { stripJsComments } from './lib/strip-comments.mjs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -46,44 +47,17 @@ let bad = 0;
 const err = (m) => { console.error(`::error::${m}`); bad += 1; };
 const notes = [];
 
-/**
- * 주석을 걷어낸 **실행되는 TypeScript**.
- *
- * 문자열·템플릿 안의 `//`는 주석이 아니다(URL이 그렇다). 따옴표를 세면서
- * 지운다. 완전한 파서는 아니지만, 이 검사가 보는 것은 "이 판정이 코드에
- * 남아 있는가"뿐이라 이 정도면 충분하고 **틀리는 방향이 안전하다** —
- * 주석을 코드로 잘못 읽는 쪽만 막으면 된다.
- */
-function stripTsComments(src) {
-  let out = '';
-  let i = 0;
-  let quote = null;      // ' " ` 중 하나
-  let block = false;     // /* ... */ 안인가
-  while (i < src.length) {
-    const c = src[i];
-    const d = src[i + 1];
-    if (block) {
-      if (c === '*' && d === '/') { block = false; i += 2; continue; }
-      if (c === '\n') out += c;   // 줄 수를 유지한다
-      i += 1; continue;
-    }
-    if (quote) {
-      out += c;
-      if (c === '\\') { out += d ?? ''; i += 2; continue; }
-      if (c === quote) quote = null;
-      i += 1; continue;
-    }
-    if (c === '/' && d === '/') {
-      while (i < src.length && src[i] !== '\n') i += 1;
-      continue;
-    }
-    if (c === '/' && d === '*') { block = true; i += 2; continue; }
-    if (c === '\'' || c === '"' || c === '`') { quote = c; out += c; i += 1; continue; }
-    out += c; i += 1;
-  }
-  return out;
-}
-
+// 주석을 걷는 일은 공용 `scripts/lib/strip-comments.mjs` 한 곳에 있다.
+//
+// **여기에 사본이 있었다.** 그 파일의 머리글이 이유를 미리 적어 두었다:
+//
+//   그래서 이 함수를 **한 곳에만** 둔다. 검사기마다 각자 복사해 두면 언젠가
+//   한쪽만 고쳐지고, 그때부터 그 검사기는 조용히 아무것도 막지 않는다.
+//
+// 그 일이 일어났다 — 사본 13개가 전부 **정규식 리터럴을 모른다**.
+// `/["\']+/g`를 만나면 안의 `"`를 문자열 시작으로 읽고 가짜 문자열 상태에
+// 빠지고, 그 상태에서는 `//`를 주석으로 보지 않아 **주석 본문이 코드로
+// 남는다.** 그러면 "있어야 한다"를 보는 규칙이 주석에 적힌 문구로 통과한다.
 // ── ① 지금 정본인 paper_deposit은 무엇을 돌려주는가 ──
 //
 // 번호가 큰 파일이 나중에 실행된다. **마지막으로 정의한 파일이 정본이다.**
@@ -213,7 +187,7 @@ if (bad === 0) {
   // 이 라우트의 주석은 "예전에는 `row.applied !== true`를 봤다"처럼 **없앤
   // 코드**를 설명한다. 주석까지 훑으면 검사기가 그 설명을 현재 코드로 읽고
   // 엉뚱한 곳에서 멈춘다 — 실제로 그렇게 한 번 멈췄다.
-  const src = stripTsComments(raw);
+  const src = stripJsComments(raw);
   if (!raw) {
     err(`${ROUTE}을 읽지 못했습니다`);
   } else {
