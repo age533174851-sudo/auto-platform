@@ -30,6 +30,7 @@
 // 계좌를 따라간다) 오염 위험이 없다. **안전망은 넓어야 한다.**
 
 import { readFileSync, existsSync } from 'node:fs';
+import { stripJsComments } from './lib/strip-comments.mjs';
 import { execSync } from 'node:child_process';
 
 let bad = 0;
@@ -90,7 +91,21 @@ for (const file of FILES) {
     if (!lines[i].includes("from('paper_positions')")) continue;
 
     // 질의 한 덩어리. 체이닝이 여러 줄에 걸친다.
-    const chunk = lines.slice(i, i + 10).join(' ');
+    //
+    // **주석을 계약으로 읽지 않는다.** 이 창은 원문이었다. 기계 탐침으로
+    // 실제로 돌려 확인했다(TS 구문 유효):
+    //
+    //     .eq('user_id',uid) // .eq('paper_account_id',account.data.id)
+    //     .eq('user_id',uid) /* .eq('paper_account_id', x) */
+    //
+    // 좁히기를 지우면 rc=1 인데, 같은 창 안 주석에 그 글자를 남기면 둘 다
+    // rc=0 이었다 — 계좌로 좁히지 않은 조회가 통과한다. 그러면 전용 계좌가
+    // 생기는 날 이 검사가 막으려던 혼선이 그대로 일어난다.
+    //
+    // **줄 정렬은 건드리지 않는다.** 걷는 것은 이 창뿐이고, 찾기와 줄 번호는
+    // 원래 `lines` 에서 그대로 쓴다. 이어 붙일 때 `' '` 가 아니라 `'\n'` 을
+    // 쓰는 이유도 그것이다 — 공백으로 이으면 `//` 하나가 창 전체를 먹는다.
+    const chunk = stripJsComments(lines.slice(i, i + 10).join('\n'));
 
     // ② 포지션 id 한 줄을 집는 질의 — 그 줄이 자기 계좌를 들고 있다.
     //    `.eq('id', …)`가 있으면 계좌가 모호하지 않다.
