@@ -13,6 +13,7 @@
 //
 // 배선이라 순수 테스트로는 안 잡힌다.
 import { readFileSync } from 'node:fs';
+import { stripJsComments } from './lib/strip-comments.mjs';
 import { join } from 'node:path';
 
 const ROOT = process.cwd();
@@ -24,19 +25,17 @@ function read(rel) {
   catch { err(`${rel}을 읽지 못했습니다 — 검사가 대상을 잃었습니다`); return null; }
 }
 
-/** 주석을 걷어 낸다 — 설명 주석에 적힌 옛 코드에 속지 않기 위해서다 */
-function stripComments(src) {
-  return String(src)
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')
-    .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
-}
-
+// 주석을 걷는 일은 공용 `scripts/lib/strip-comments.mjs` 한 곳에 있다.
+// 여기에 사본이 있었다 — 그 파일의 머리글이 미리 적어 둔 위험이다:
+//
+//   그래서 이 함수를 **한 곳에만** 둔다. 검사기마다 각자 복사해 두면 언젠가
+//   한쪽만 고쳐지고, 그때부터 그 검사기는 조용히 아무것도 막지 않는다.
 // ── ① 브라우저와 무관하게 워커가 주기 실행한다 ──
 {
   const rel = 'worker/src/index.ts';
   const src = read(rel);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
     // **정의가 아니라 호출을 본다.** 정의만 보면 아무도 안 부르는
     // 함수를 "돌고 있다"고 읽는다.
     if (!/await\s+pollLedgerSync\s*\(/.test(code)) {
@@ -55,7 +54,7 @@ function stripComments(src) {
   const rel = 'src/app/api/wallets/overview/route.ts';
   const src = read(rel);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
     if (!/ledgerWindowOf\s*\(/.test(code)) {
       err(`${rel} — 덮인 창(ledgerWindowOf)으로 묻지 않습니다`
         + '\n     `covered_to >= now`를 요구하면, 15분 주기 수집기로는'
@@ -80,7 +79,7 @@ function stripComments(src) {
   const rel = 'src/app/api/ledger/sync/route.ts';
   const src = read(rel);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
     if (!/ingestTargetsOf\s*\(/.test(code)) {
       err(`${rel} — 수집 대상을 ingestTargetsOf로 고르지 않습니다`
         + '\n     별도 등록 목록을 두면 새 연결을 만들 때 한 줄을 빼먹고,'
@@ -119,7 +118,7 @@ function stripComments(src) {
   const rel = 'src/app/api/system/runtime-health/route.ts';
   const src = read(rel);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
     if (!/ingestHealthOf\s*\(/.test(code)) {
       err(`${rel} — 원장 수집 상태를 내려주지 않습니다`
         + '\n     그러면 "확인 불가"의 원인을 고르는 방법이 Fly 로그를 여는 것뿐입니다');
@@ -132,7 +131,7 @@ function stripComments(src) {
   const rel = 'src/lib/ledger/ingestHealth.ts';
   const src = read(rel);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
     if (!/sanitizeReason\s*\(/.test(code)) {
       err(`${rel} — 실패 사유를 거르지 않고 내보냅니다`);
     }
@@ -144,7 +143,7 @@ function stripComments(src) {
   const rel = 'src/lib/ledger/ingestState.ts';
   const src = read(rel);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
     if (!/if\s*\(\s*!i\.readOk\s*\)/.test(code)) {
       err(`${rel} — 읽기 실패를 따로 다루지 않습니다`
         + '\n     실패 회차가 covered_to를 옮기면, 읽지 않은 구간을 읽었다고 말하게 됩니다');
@@ -168,7 +167,7 @@ function stripComments(src) {
   const rel = 'src/lib/ledger/ingestState.ts';
   const src = read(rel);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
     if (!/i\.complete\s*===\s*false/.test(code)) {
       err(`${rel} — 끝까지 읽었는지를 보지 않습니다`
         + '\n     응답이 API 상한에 닿아도 covered_to가 지금까지 갑니다');
@@ -183,7 +182,7 @@ function stripComments(src) {
   const rel = 'src/app/api/ledger/sync/route.ts';
   const src = read(rel);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
     if (!/pageVerdictOf\s*\(/.test(code)) {
       err(`${rel} — 페이지 포화를 판정하지 않습니다`
         + '\n     rows.length >= limit는 "그 구간을 다 읽었다"가 아닙니다');
@@ -210,7 +209,7 @@ function stripComments(src) {
   const rel = 'src/lib/ledger/incomePaging.ts';
   const src = read(rel);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
     if (!/STUCK/.test(code)) {
       err(`${rel} — 전진 불가 상태를 가르지 않습니다`
         + '\n     같은 첫 페이지를 무한히 다시 읽는 구조가 됩니다');

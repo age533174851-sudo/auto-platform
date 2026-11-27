@@ -28,6 +28,7 @@
 // 파일**을 컴파일해서 쓴다 — 복제하면 언젠가 한쪽만 고쳐진다.
 
 import { readFileSync, existsSync, mkdtempSync, readdirSync } from 'node:fs';
+import { stripJsComments } from './lib/strip-comments.mjs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -43,11 +44,11 @@ const KILL_ROUTES = [
 /** `enqueueJob`의 정의가 있는 파일. 이 안의 insert는 **호출자 수로** 센다 */
 const ENQUEUE_HELPER = 'src/lib/jobs.ts';
 
-/** 주석을 지운다 — 주석에 적힌 이름을 호출로 세면 숫자가 거짓이 된다 */
-function stripComments(src) {
-  return String(src).replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
-}
-
+// 주석을 걷는 일은 공용 `scripts/lib/strip-comments.mjs` 한 곳에 있다.
+// 여기에 사본이 있었다 — 그 파일의 머리글이 미리 적어 둔 위험이다:
+//
+//   그래서 이 함수를 **한 곳에만** 둔다. 검사기마다 각자 복사해 두면 언젠가
+//   한쪽만 고쳐지고, 그때부터 그 검사기는 조용히 아무것도 막지 않는다.
 function productTsFiles(root) {
   const out = [];
   if (!existsSync(root)) return out;
@@ -80,7 +81,7 @@ function killSwitchFacts() {
 
     let calls = 0, ext = 0;
     for (const f of files) {
-      const body = stripComments(readFileSync(f, 'utf8'));
+      const body = stripJsComments(readFileSync(f, 'utf8'));
       // 호출만 센다 — 정의(`export async function enqueueJob(`)는 뺀다.
       for (const m of body.matchAll(/enqueueJob\s*\(/g)) {
         const before = body.slice(Math.max(0, m.index - 40), m.index);
@@ -101,7 +102,7 @@ function killSwitchFacts() {
     let inline = true;
     for (const r of KILL_ROUTES) {
       if (!existsSync(r)) { inline = null; break; }
-      const body = stripComments(readFileSync(r, 'utf8'));
+      const body = stripJsComments(readFileSync(r, 'utf8'));
       if (!/executeKillActions/.test(body)) inline = false;
       if (/from\(\s*['"]jobs['"]\s*\)\s*\.\s*insert/.test(body)) inline = false;
     }

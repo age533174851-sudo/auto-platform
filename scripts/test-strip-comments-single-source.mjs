@@ -16,9 +16,9 @@
 // 그리고 `let q = false` 로 걷는 것까지 있다.
 //
 // 기준 SHA `ed00c1a4` 에서 최종 탐지기로 세니 **파일 39개**다. 이 브랜치가
-// JS 사본 7개를 공용 함수로 모은 뒤 남은 것이 **34개**다 (`check-paper-capacity`
-// 와 `check-paper-open-atomic` 은 JS 사본만 지웠고 SQL 사본이 남아 있어서
-// 양쪽에 다 센다).
+// **24개**를 공용 함수로 모은 뒤 남은 것이 **18개**다 (`check-paper-capacity` ·
+// `check-paper-open-atomic` · `check-mock-single-source` 는 JS 쪽만 지웠고 SQL
+// 사본이 남아 있어서 양쪽에 다 센다).
 //
 // 숫자를 두 번 고쳤다. 13 → 38 → 39. 두 번째 정정은 **아래 대조 시험이
 // 잡았다** — 탐지기가 `export function strip…` 을 못 봐서 공용 파일 자신이
@@ -93,6 +93,7 @@ const STILL_COPIED = new Map([
   // ── 열린 PR 점유 ──
   ['check-claude-hourly.mjs', '점유 6'],
   ['check-credential-exposure.mjs', '점유 1'],
+  ['check-db-columns.mjs', '점유 1 — #781 (이름이 strip* 가 아닌 스캐너)'],
   ['check-min-order-source.mjs', '점유 4 — #503 #583 #586 #588'],
   ['check-order-quantity-source.mjs', '점유 4 — #503 #583 #586 #588'],
   ['check-order-type-fidelity.mjs', '점유 0 — PR #807 이 지우는 중'],
@@ -101,36 +102,37 @@ const STILL_COPIED = new Map([
   ['check-scheduler-evidence.mjs', '점유 1 — #503'],
   ['check-venue-precision.mjs', '점유 4 — #503 #583 #586 #588'],
   ['check-wiring.mjs', '점유 10'],
-  ['check-db-columns.mjs', '점유 1 — #781 (이름이 strip* 가 아닌 사본)'],
-  ['check-ci-downloads.mjs', '점유 0 — `export function stripShellComments` (넓힌 탐지기가 찾아냈다)'],
-  // ── SQL 사본: 공용 stripSqlComments 가 main 에 올라간 뒤 (#795) ──
-  ['check-paper-capacity.mjs', 'SQL 사본 — 이 브랜치가 JS 사본만 지웠다 (#795 뒤)'],
-  ['check-paper-open-atomic.mjs', 'SQL 사본 — 이 브랜치가 JS 사본만 지웠다 (#795 뒤)'],
+
+  // ── SQL 사본: 공용 `stripSqlComments` 가 main 에 올라간 뒤 (#795) ──
+  //
+  // `check-paper-capacity` · `check-paper-open-atomic` 은 이 브랜치가 **JS
+  // 사본만** 지웠고 `stripSql` 이 남아 있다. `check-paper-challenge-core` 의
+  // 지역 판은 줄 단위로 `--` 만 떼므로 **블록 주석을 모른다** — 복합 외래키를
+  // 단일 칸으로 바꾸고 원문을 `/* … */` 에 남기면 통과했다(실측 rc=0).
+  ['check-migration-catalog-types.mjs', 'SQL 사본 — #795 뒤'],
+  ['check-mock-single-source.mjs', 'SQL 사본 — JS 쪽은 이번에 모았다 (#795 뒤)'],
+  ['check-paper-capacity.mjs', 'SQL 사본 — JS 쪽만 지웠다 (#795 뒤)'],
   ['check-paper-challenge-core.mjs', 'SQL 사본 — 블록 주석 구멍 실측 (#795 뒤)'],
-  ['check-migration-catalog-types.mjs', 'SQL 사본 (#795 뒤)'],
-  ['check-mock-single-source.mjs', 'JS·SQL 사본 둘 (#795 뒤)'],
-  // ── 점유 0 · 다음 회차 ──
-  ['check-admin-auth-contract.mjs', '점유 0 — 다음 회차'],
-  ['check-display-layer.mjs', '점유 0 — 다음 회차'],
-  ['check-exit-venue.mjs', '점유 0 — 다음 회차'],
-  ['check-first-eval.mjs', '점유 0 — 다음 회차'],
-  ['check-gate-spot-precision.mjs', '점유 0 — 다음 회차'],
-  ['check-kill-switch-contract.mjs', '점유 0 — 다음 회차'],
-  ['check-ledger-ingest.mjs', '점유 0 — 다음 회차'],
-  ['check-paper-autotrade.mjs', '점유 0 — 다음 회차'],
-  ['check-paper-wiring.mjs', '점유 0 — 다음 회차'],
-  ['check-practice-boundary.mjs', '점유 0 — 다음 회차'],
-  ['check-practice-ledger-env.mjs', '점유 0 — 다음 회차'],
-  ['check-product-registry.mjs', '점유 0 — 다음 회차'],
-  ['check-reconcile-truth.mjs', '점유 0 — 다음 회차'],
-  ['check-scheduled-exit-runner.mjs', '점유 0 — 다음 회차'],
-  ['check-spot-precision.mjs', '점유 0 — 다음 회차'],
-  ['check-wake-paths.mjs', 'YAML 사본 — 점유 0, 다음 회차'],
-  ['check-worker-coverage.mjs', '점유 0 — 다음 회차'],
+  ['check-paper-open-atomic.mjs', 'SQL 사본 — JS 쪽만 지웠다 (#795 뒤)'],
+
+  // ── 셸 주석: 공용 파일에 셸 제거기가 없다 ──
+  ['check-ci-downloads.mjs', '셸(`#`) 사본 — 공용 파일에 해당 함수가 없다'],
+
+  // ── 바꾸면 깨진다: 공용 판이 **줄 정렬을 잃는다** ──
+  //
+  // 실측으로 잡았다. 이 검사기의 지역 판은 블록 주석의 **개행을 남긴다**
+  // (그 주석이 이유를 적어 두었다 — "줄 번호가 어긋나면 오류 위치가 틀린다").
+  // 공용 `stripJsComments` 는 블록 주석을 접으므로 `WalletPage.tsx` 의 줄이
+  // 5칸 밀리고, 그 검사기의 면제가 어긋나 **원문에서 거짓 실패**가 났다
+  // (`toFixed` 개수는 두 판 모두 2로 같았다 — 새 위반을 찾은 것이 아니다).
+  // 공용 판이 개행을 남기도록 고친 뒤에 바꾼다 — `stripSqlComments` 는 #795
+  // 에서 이미 그렇게 한다.
+  ['check-display-layer.mjs', '공용 판이 줄 정렬을 잃는다 — 실측 거짓 실패'],
 ]);
 
 /** 이번에 **JS** 사본을 공용 함수로 모은 파일 */
 const CONVERTED = [
+  // 첫 묶음 — JS 사본
   'check-execution-currency.mjs',
   'check-order-preview-currency.mjs',
   'check-paper-capacity.mjs',
@@ -138,7 +140,30 @@ const CONVERTED = [
   'check-position-sizing-display.mjs',
   'check-quantity-intent.mjs',
   'check-paper-deposit-contract.mjs',
+  // 둘째 묶음 — 점유 0 인 나머지 (rc·표준출력 전문 대조 전부 동일)
+  'check-exit-venue.mjs',
+  'check-first-eval.mjs',
+  'check-gate-spot-precision.mjs',
+  'check-kill-switch-contract.mjs',
+  'check-ledger-ingest.mjs',
+  'check-paper-autotrade.mjs',
+  'check-paper-wiring.mjs',
+  'check-practice-boundary.mjs',
+  'check-practice-ledger-env.mjs',
+  'check-product-registry.mjs',
+  'check-reconcile-truth.mjs',
+  'check-scheduled-exit-runner.mjs',
+  'check-spot-precision.mjs',
+  'check-worker-coverage.mjs',
+  'check-mock-single-source.mjs',
+  // `#` 주석이라 JS 가 아니다 — 공용 YAML 제거기로 간다
+  'check-admin-auth-contract.mjs',
+  // 생성 러너가 아니라 워크플로를 읽는다 — 공용 YAML 제거기
+  'check-wake-paths.mjs',
 ];
+
+/** `stripJsComments` 가 아니라 `stripYamlComments` 로 간 것 */
+const YAML_CONVERTED = new Set(['check-admin-auth-contract.mjs', 'check-wake-paths.mjs']);
 
 test('★ 주석 걷기 사본이 새로 생기지 않는다 (래칫)', () => {
   const found = readdirSync(DIR)
@@ -150,18 +175,21 @@ test('★ 주석 걷기 사본이 새로 생기지 않는다 (래칫)', () => {
   console.log(`    사본 남은 파일 ${found.length}개 — 전부 목록에 사유가 적혀 있다`);
 });
 
-test('★ 이번에 모은 7개에 JS 사본이 없고 공용 함수를 부른다', () => {
+test('★ 모은 파일에는 해당 사본이 없고 공용 함수를 부른다', () => {
   for (const n of CONVERTED) {
     const src = readFileSync(join(DIR, n), 'utf8');
-    const names = localStripperNames(src);
-    const js = names.filter((x) => !/^strip(Sql|Yaml)/i.test(x));
-    assert.deepEqual(js, [], `${n} 에 JS 주석 걷기 사본이 남아 있습니다: ${js.join(', ')}`);
+    const want = YAML_CONVERTED.has(n) ? 'stripYamlComments' : 'stripJsComments';
+    // 남아 있어도 되는 것은 **다른 언어의 사본**뿐이다 (SQL 은 #795 뒤).
+    const keep = YAML_CONVERTED.has(n) ? /^strip(Js|Sql|Shell)/i : /^strip(Sql|Yaml|Shell)/i;
+    const same = localStripperNames(src).filter((x) => !keep.test(x));
+    assert.deepEqual(same, [], `${n} 에 같은 언어의 사본이 남아 있습니다: ${same.join(', ')}`);
     assert.equal(hasUnnamedScanner(src), false, `${n} 에 이름 없는 스캐너가 남아 있습니다`);
-    assert.match(src, /import \{ stripJsComments \} from '\.\/lib\/strip-comments\.mjs'/,
-      `${n} 이 공용 함수를 가져오지 않습니다`);
-    assert.ok(/stripJsComments\(/.test(src.replace(/import \{[^}]*\}[^\n]*\n/, '')),
+    assert.ok(src.includes(`import { ${want} } from './lib/strip-comments.mjs'`),
+      `${n} 이 공용 ${want} 를 가져오지 않습니다`);
+    assert.ok(new RegExp(`${want}\\(`).test(src.replace(/import \{[^}]*\}[^\n]*\n/, '')),
       `${n} 이 공용 함수를 부르지 않습니다 — 가져다 놓고 안 쓰면 아무것도 걷지 않습니다`);
   }
+  console.log(`    공용 함수로 모은 파일 ${CONVERTED.length}개`);
 });
 
 test('★ 남은 목록이 낡지 않았다 — 적힌 파일은 실제로 사본을 들고 있다', () => {

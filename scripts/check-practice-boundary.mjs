@@ -26,6 +26,7 @@
 //
 // **값도 비밀도 읽지 않는다.** 이 검사가 보는 것은 파일의 모양뿐이다.
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
+import { stripJsComments } from './lib/strip-comments.mjs';
 import { join, relative } from 'node:path';
 
 const ROOT = process.cwd();
@@ -37,31 +38,11 @@ const read = (rel) => {
   return readFileSync(p, 'utf8');
 };
 
-/**
- * 주석을 걷어낸다.
- *
- * **안 걷어내면 검사가 제 설명을 코드로 읽는다.** 이 저장소는 그 고장을
- * 여러 번 겪었다. 이 PR이 손대는 파일들은 하나같이 "예전에는 이랬다"는
- * 역사를 주석으로 남긴다 — 그 역사가 위반으로 읽히면 안 되고, 반대로
- * 위반을 주석 뒤에 숨길 수도 없어야 한다.
- */
-function stripComments(src) {
-  let out = ''; let i = 0;
-  const s = String(src);
-  while (i < s.length) {
-    const c = s[i], n = s[i + 1];
-    if (c === '/' && n === '/') { while (i < s.length && s[i] !== '\n') i += 1; continue; }
-    if (c === '/' && n === '*') { i += 2; while (i < s.length && !(s[i] === '*' && s[i + 1] === '/')) i += 1; i += 2; continue; }
-    if (c === "'" || c === '"' || c === '`') {
-      const q = c; out += c; i += 1;
-      while (i < s.length && s[i] !== q) { if (s[i] === '\\') { out += s[i]; i += 1; } out += s[i] ?? ''; i += 1; }
-      out += q; i += 1; continue;
-    }
-    out += c; i += 1;
-  }
-  return out;
-}
-
+// 주석을 걷는 일은 공용 `scripts/lib/strip-comments.mjs` 한 곳에 있다.
+// 여기에 사본이 있었다 — 그 파일의 머리글이 미리 적어 둔 위험이다:
+//
+//   그래서 이 함수를 **한 곳에만** 둔다. 검사기마다 각자 복사해 두면 언젠가
+//   한쪽만 고쳐지고, 그때부터 그 검사기는 조용히 아무것도 막지 않는다.
 /**
  * 함수·인터페이스 본문을 떼어 낸다.
  *
@@ -129,7 +110,7 @@ function srcFiles() {
 // "지웠는데 다시 들어옴"을 둘 다 겪었다. 정의도 호출도 없어야 한다.
 {
   for (const rel of srcFiles()) {
-    const code = stripComments(readFileSync(join(ROOT, rel), 'utf8'));
+    const code = stripJsComments(readFileSync(join(ROOT, rel), 'utf8'));
     if (/(?:export\s+)?(?:async\s+)?function\s+checkPaperExits\b/.test(code)
       || /\bcheckPaperExits\s*[:=]\s*(?:async\s*)?\(/.test(code)) {
       fail(`${rel}: 브라우저 청산 감시기(checkPaperExits)가 다시 정의됐습니다`
@@ -146,7 +127,7 @@ function srcFiles() {
 {
   const src = read(STORE);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
 
     const pos = bodyAt(code, 'interface PaperPosition');
     if (!pos) fail(`${STORE}: PaperPosition 본문을 찾지 못했습니다 — 이름이 바뀌었다면 이 검사도 같이 고치세요`);
@@ -186,7 +167,7 @@ function srcFiles() {
 {
   const src = read(STORE);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
     if (!new RegExp(`const\\s+PAPER_BAL_KEY\\s*=\\s*['"\`]${LEDGER_KEY}['"\`]`).test(code)) {
       fail(`${STORE}: 연습 장부 키가 '${LEDGER_KEY}'가 아닙니다`
         + '\n     키를 바꾸면 기존 사용자의 장부가 통째로 안 읽힙니다');
@@ -207,7 +188,7 @@ function srcFiles() {
 
   // 어느 파일도 이 키를 지우거나 다른 판으로 옮기지 않는다.
   for (const rel of srcFiles()) {
-    const code = stripComments(readFileSync(join(ROOT, rel), 'utf8'));
+    const code = stripJsComments(readFileSync(join(ROOT, rel), 'utf8'));
     if (new RegExp(`removeItem\\s*\\(\\s*['"\`]${LEDGER_KEY}`).test(code)
       || /removeItem\s*\(\s*PAPER_BAL_KEY/.test(code)) {
       fail(`${rel}: 연습 장부 키를 지웁니다 — 사용자의 기존 잔고가 사라집니다`);
@@ -223,7 +204,7 @@ function srcFiles() {
 {
   const src = read(PAGE);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
 
     // 서버 PAPER와 같은 이름으로 부르지 않는다.
     if (/모의 포지션\s*\(/.test(code)) {
@@ -309,7 +290,7 @@ function srcFiles() {
 {
   const src = read(SETTING);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
     if (/k\s*:\s*'tpsl'/.test(code)) {
       fail(`${SETTING}: 연습 포지션 'TP/SL 편집' 토글이 남아 있습니다`
         + '\n     끌 수 있는 토글로 두면 "켜면 되는 기능"으로 읽힙니다 —'

@@ -28,6 +28,7 @@
 //
 // 이 검사가 없으면 `runFirstCheck` 같은 함수가 조용히 다시 생긴다.
 import { readFileSync, globSync } from 'node:fs';
+import { stripJsComments } from './lib/strip-comments.mjs';
 
 let bad = 0;
 const err = (m) => { console.error(`❌ ${m}`); bad += 1; };
@@ -58,15 +59,11 @@ function checkFlagNames() {
   return [...m[1].matchAll(/'([^']+)'/g)].map((x) => x[1]);
 }
 
-/** 줄 주석·블록 주석을 지운다. 왜 없앴는지 설명하려면 경로를 적어야 한다 */
-function stripComments(src) {
-  return src
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .split('\n')
-    .map((l) => (/^\s*(\/\/|\*)/.test(l) ? '' : l.replace(/\/\/.*$/, '')))
-    .join('\n');
-}
-
+// 주석을 걷는 일은 공용 `scripts/lib/strip-comments.mjs` 한 곳에 있다.
+// 여기에 사본이 있었다 — 그 파일의 머리글이 미리 적어 둔 위험이다:
+//
+//   그래서 이 함수를 **한 곳에만** 둔다. 검사기마다 각자 복사해 두면 언젠가
+//   한쪽만 고쳐지고, 그때부터 그 검사기는 조용히 아무것도 막지 않는다.
 /** `fn(` 뒤의 괄호가 닫히는 곳까지 */
 function argsOf(src, start) {
   let depth = 0;
@@ -102,7 +99,7 @@ let checked = 0;
 for (const f of BROWSER_FILES) {
   let raw = '';
   try { raw = readFileSync(f, 'utf8'); } catch { continue; }
-  const src = stripComments(raw);
+  const src = stripJsComments(raw);
 
   // ① 전략 요청을 조립하는 곳은 반드시 `checkOnly: true`를 넣는다.
   //    (`strategyRunRequest`가 주소를 숨기므로 주소만 찾아서는 못 잡는다)

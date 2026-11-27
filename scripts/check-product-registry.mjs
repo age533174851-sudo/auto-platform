@@ -13,6 +13,7 @@
 // 낱말이 아니라 **모양**을 본다. 이 저장소에서 규칙이 뮤테이션을 통과시킨
 // 적이 여러 번 있는데 전부 "글자가 남아 있어서"였다.
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
+import { stripJsComments } from './lib/strip-comments.mjs';
 
 const REG = 'src/lib/products/registry.ts';
 const CAP = 'src/lib/trading/capability.ts';
@@ -23,12 +24,13 @@ const read = (p) => {
   if (!existsSync(p)) { fail(`${p}가 없습니다`); return ''; }
   return readFileSync(p, 'utf8');
 };
-const stripTs = (s) => String(s)
-  .replace(/\/\/[^\n]*/g, ' ')
-  .replace(/\/\*[\s\S]*?\*\//g, ' ');
-
+// 주석을 걷는 일은 공용 `scripts/lib/strip-comments.mjs` 한 곳에 있다.
+// 여기에 사본이 있었다 — 그 파일의 머리글이 미리 적어 둔 위험이다:
+//
+//   그래서 이 함수를 **한 곳에만** 둔다. 검사기마다 각자 복사해 두면 언젠가
+//   한쪽만 고쳐지고, 그때부터 그 검사기는 조용히 아무것도 막지 않는다.
 const src = read(REG);
-const code = stripTs(src);
+const code = stripJsComments(src);
 
 // ══════════════ ① 근거가 실재하는가 ══════════════
 //
@@ -166,7 +168,7 @@ const code = stripTs(src);
   const NAMES = /'(OPTIONS|PERP_STOCK|PERP_COMMODITY|CONVERT|ONCHAIN|SPOT_CRYPTO|PERP_CRYPTO|SPOT_STOCK)'/;
   for (const f of walk('src')) {
     if (f === REG || f.startsWith('src/lib/products/')) continue;
-    const c = stripTs(readFileSync(f, 'utf8'));
+    const c = stripJsComments(readFileSync(f, 'utf8'));
     if (!NAMES.test(c)) continue;
     if (!/from '.*products\/registry'|products\/registry'/.test(c)) {
       fail(`${f}: 제품 이름을 쓰면서 정본(${REG})을 거치지 않습니다`);
@@ -180,7 +182,7 @@ const code = stripTs(src);
 // 제품이 거래되는지는 여기서 답한다. 한쪽이 다른 쪽 어휘를 들고 오면
 // 경계가 무너진다.
 {
-  const capCode = stripTs(read(CAP));
+  const capCode = stripJsComments(read(CAP));
   if (/'OPTIONS'|'CONVERT'|'ONCHAIN'|'PERP_STOCK'|'PERP_COMMODITY'/.test(capCode)) {
     fail(`${CAP}: 주문 기능 능력표가 제품 이름을 들고 있습니다 — 경계가 무너집니다`);
   }

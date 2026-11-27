@@ -20,18 +20,19 @@
 // `reconcileLedgerStatus` 하나로 모았고, 이 검사기는 그 정본이 계속
 // 쓰이는지와 그 결과를 받는 쪽들이 배선된 채로 있는지를 본다.
 import { readFileSync, existsSync } from 'node:fs';
+import { stripJsComments } from './lib/strip-comments.mjs';
 
 const errors = [];
 const err = (m) => errors.push(m);
 
-/** 주석은 코드가 아니다. 검사기가 자기 설명문을 규칙으로 읽으면 오탐이 난다 */
-const stripComments = (src) => src
-  .replace(/\/\*[\s\S]*?\*\//g, '')
-  .split('\n').map((l) => l.replace(/\/\/.*$/, '')).join('\n');
-
+// 주석을 걷는 일은 공용 `scripts/lib/strip-comments.mjs` 한 곳에 있다.
+// 여기에 사본이 있었다 — 그 파일의 머리글이 미리 적어 둔 위험이다:
+//
+//   그래서 이 함수를 **한 곳에만** 둔다. 검사기마다 각자 복사해 두면 언젠가
+//   한쪽만 고쳐지고, 그때부터 그 검사기는 조용히 아무것도 막지 않는다.
 const read = (p) => {
   if (!existsSync(p)) { err(`${p}를 찾을 수 없습니다 — 경로가 바뀌었는지 확인해야 합니다`); return null; }
-  return stripComments(readFileSync(p, 'utf8'));
+  return stripJsComments(readFileSync(p, 'utf8'));
 };
 
 const CANON = 'src/lib/engine/reconcileLedgerStatus.ts';

@@ -12,6 +12,7 @@
 //
 // 이 검사는 "돌아오지 않게" 한다. 배선이라 순수 테스트로는 안 잡힌다.
 import { readFileSync } from 'node:fs';
+import { stripJsComments } from './lib/strip-comments.mjs';
 import { join } from 'node:path';
 
 const ROOT = process.cwd();
@@ -21,12 +22,11 @@ function read(rel) {
   try { return readFileSync(join(ROOT, rel), 'utf8'); }
   catch { err(`${rel}을 읽지 못했습니다 — 검사가 대상을 잃었습니다`); return null; }
 }
-function stripComments(src) {
-  return String(src)
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')
-    .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
-}
-
+// 주석을 걷는 일은 공용 `scripts/lib/strip-comments.mjs` 한 곳에 있다.
+// 여기에 사본이 있었다 — 그 파일의 머리글이 미리 적어 둔 위험이다:
+//
+//   그래서 이 함수를 **한 곳에만** 둔다. 검사기마다 각자 복사해 두면 언젠가
+//   한쪽만 고쳐지고, 그때부터 그 검사기는 조용히 아무것도 막지 않는다.
 /**
  * SQL 주석(`--`)을 지운다.
  *
@@ -55,7 +55,7 @@ const LOCAL_LEDGER = ['loadPaperBalance', 'paperBuy', 'paperSell', 'checkPaperEx
 for (const rel of MOCK_SCREENS) {
   const src = read(rel);
   if (!src) continue;
-  const code = stripComments(src);
+  const code = stripJsComments(src);
   for (const fn of LOCAL_LEDGER) {
     if (new RegExp(`\\b${fn}\\s*\\(`).test(code)) {
       err(`${rel} — 로컬 장부(${fn})를 씁니다`
@@ -70,7 +70,7 @@ for (const rel of MOCK_SCREENS) {
   const rel = 'src/components/AutoTradeEngine.tsx';
   const src = read(rel);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
     for (const fn of ['paperBuy', 'paperSell', 'checkPaperExits']) {
       if (new RegExp(`\\b${fn}\\s*\\(`).test(code)) {
         err(`${rel} — 브라우저가 모의를 체결/청산합니다 (${fn})`
@@ -84,7 +84,7 @@ for (const rel of MOCK_SCREENS) {
 // ── ③ 두 화면이 같은 정규화기를 쓴다 ──
 for (const rel of ['src/components/MockAutoTrade.tsx', 'src/lib/portfolio/paperPanel.ts']) {
   const src = read(rel);
-  if (src && !/paperViewOf\s*\(/.test(stripComments(src))) {
+  if (src && !/paperViewOf\s*\(/.test(stripJsComments(src))) {
     err(`${rel} — 공용 정규화기(paperViewOf)를 쓰지 않습니다`
       + '\n     각자 서버 응답을 꺼내 쓰면 언젠가 한쪽에만 칸이 늘고 숫자가 갈립니다');
   }
@@ -95,7 +95,7 @@ for (const rel of ['src/components/MockAutoTrade.tsx', 'src/lib/portfolio/paperP
   const rel = 'src/lib/portfolio/legacyPaper.ts';
   const src = read(rel);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
     for (const bad2 of ['import', 'migrate', 'merge']) {
       if (new RegExp(`export function \\w*${bad2}`, 'i').test(code)) {
         err(`${rel} — 예전 로컬 기록을 옮기는 함수가 있습니다`
@@ -111,7 +111,7 @@ for (const rel of ['src/components/MockAutoTrade.tsx', 'src/lib/portfolio/paperP
   const rel = 'src/lib/portfolio/paperView.ts';
   const src = read(rel);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
     if (/localStorage|sessionStorage/.test(code)) {
       err(`${rel} — 정규화기가 브라우저 저장소를 읽습니다`
         + '\n     읽지 않는 것이 "로컬이 서버를 덮을 수 없다"의 구현입니다');
@@ -128,7 +128,7 @@ for (const rel of ['src/components/MockAutoTrade.tsx', 'src/lib/portfolio/paperP
   const rel = 'src/app/api/paper/exit-monitor/route.ts';
   const src = read(rel);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
     if (!/paperExitPlan\s*\(/.test(code)) {
       err(`${rel} — 청산 판정을 부르지 않습니다`);
     }
@@ -149,7 +149,7 @@ for (const rel of ['src/components/MockAutoTrade.tsx', 'src/lib/portfolio/paperP
   const rel = 'worker/src/index.ts';
   const src = read(rel);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
     // **정의가 아니라 호출을 본다.**
     if (!/await\s+pollPaperExit\s*\(/.test(code)) {
       err(`${rel} — 워커가 모의 청산 감시를 깨우지 않습니다`
@@ -169,7 +169,7 @@ for (const rel of ['src/components/MockAutoTrade.tsx', 'src/lib/portfolio/paperP
   const rel = 'src/lib/engine/paperStore.ts';
   const src = read(rel);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
 
     // 청산은 정산 함수로만 나간다.
     if (!/\.rpc\(\s*'paper_settle_close'/.test(code)) {

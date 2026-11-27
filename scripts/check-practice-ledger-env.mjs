@@ -23,35 +23,17 @@
 //
 // **비밀도 값도 읽지 않는다.** 이 검사가 보는 것은 호출 모양뿐이다.
 import { readFileSync, existsSync } from 'node:fs';
+import { stripJsComments } from './lib/strip-comments.mjs';
 
 let bad = 0;
 const err = (m) => { console.error(`❌ ${m}`); console.error(`::error::${m}`); bad += 1; };
 const read = (p) => (existsSync(p) ? readFileSync(p, 'utf8') : null);
 
-/**
- * 주석을 걷어낸다.
- *
- * **안 걷어내면 검사가 제 설명을 코드로 읽는다.** 이 저장소는 그 고장을
- * 이미 두 번 겪었다(#211의 표시 계층 검사, #215의 인증 계약 검사).
- * 이 PR도 "예전에는 paperBuy(...)를 불렀다"는 역사를 주석에 남긴다.
- */
-function stripComments(src) {
-  let out = ''; let i = 0;
-  const s = String(src);
-  while (i < s.length) {
-    const c = s[i], n = s[i + 1];
-    if (c === '/' && n === '/') { while (i < s.length && s[i] !== '\n') i += 1; continue; }
-    if (c === '/' && n === '*') { i += 2; while (i < s.length && !(s[i] === '*' && s[i + 1] === '/')) i += 1; i += 2; continue; }
-    if (c === "'" || c === '"' || c === '`') {
-      const q = c; out += c; i += 1;
-      while (i < s.length && s[i] !== q) { if (s[i] === '\\') { out += s[i]; i += 1; } out += s[i] ?? ''; i += 1; }
-      out += q; i += 1; continue;
-    }
-    out += c; i += 1;
-  }
-  return out;
-}
-
+// 주석을 걷는 일은 공용 `scripts/lib/strip-comments.mjs` 한 곳에 있다.
+// 여기에 사본이 있었다 — 그 파일의 머리글이 미리 적어 둔 위험이다:
+//
+//   그래서 이 함수를 **한 곳에만** 둔다. 검사기마다 각자 복사해 두면 언젠가
+//   한쪽만 고쳐지고, 그때부터 그 검사기는 조용히 아무것도 막지 않는다.
 /** 브라우저 로컬 연습 장부를 바꾸는 함수들 */
 const MUTATORS = [
   'paperBuy', 'paperSell', 'closePaperPosition', 'reversePaperPosition',
@@ -88,7 +70,7 @@ const JUDGE = 'src/lib/autotrade/practiceEnv.ts';
   const src = read(JUDGE);
   if (!src) err(`${JUDGE}가 없습니다 — 환경 판정이 사라지면 막을 것이 없습니다`);
   else {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
     if (!/export function mayMutatePracticeLedger/.test(code)) {
       err(`${JUDGE}: mayMutatePracticeLedger가 없습니다`);
     }
@@ -108,7 +90,7 @@ const JUDGE = 'src/lib/autotrade/practiceEnv.ts';
   const src = read(STORE);
   if (!src) err(`${STORE}가 없습니다`);
   else {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
     for (const fn of MUTATORS) {
       const m = code.match(new RegExp(`export function ${fn}\\s*\\(([^)]*)\\)`, 's'));
       if (!m) { err(`${STORE}: ${fn}을 찾지 못했습니다 — 이름이 바뀌었다면 이 검사도 같이 고치세요`); continue; }
@@ -132,7 +114,7 @@ const JUDGE = 'src/lib/autotrade/practiceEnv.ts';
 for (const rel of PRACTICE_SCREENS) {
   const src = read(rel);
   if (!src) { err(`${rel}이 없습니다`); continue; }
-  const code = stripComments(src);
+  const code = stripJsComments(src);
   for (const key of LEDGER_KEYS) {
     if (new RegExp(`(setItem|removeItem)\\s*\\(\\s*['"\`]${key}`).test(code)) {
       err(`${rel}: 저장소 키 '${key}'를 직접 씁니다 — 장부 함수를 거치세요`
@@ -204,7 +186,7 @@ for (const rel of PRACTICE_SCREENS) {
   };
 
   for (const rel of PRACTICE_SCREENS) {
-    const code = stripComments(read(rel) ?? '');
+    const code = stripJsComments(read(rel) ?? '');
 
     // ① 연습 청산 핸들러
     const ci = code.search(/\bconst\s+closePosition\s*=/);
@@ -238,7 +220,7 @@ for (const rel of PRACTICE_SCREENS) {
 // 서버 PAPER(USDT)와 브라우저 연습 장부(KRW)는 다른 장부다. 한 화면이
 // 둘을 같이 읽으면 어느 쪽 숫자를 보여 주는지 화면에서 알 수 없게 된다.
 for (const rel of PRACTICE_SCREENS) {
-  const code = stripComments(read(rel) ?? '');
+  const code = stripJsComments(read(rel) ?? '');
   const usesLocal = MUTATORS.some(fn => new RegExp(`\\b${fn}\\s*\\(`).test(code))
     || /loadPaperBalance\s*\(/.test(code);
   const usesServerPaper = /['"`]\/api\/paper\//.test(code);
@@ -253,7 +235,7 @@ for (const rel of PRACTICE_SCREENS) {
 // 줄마다 환경이 적혀 있지 않아 사후에 가려낼 수 없다. 지우는 것도
 // 재분류하는 것도 추측이다.
 {
-  const code = stripComments(read(JUDGE) ?? '');
+  const code = stripJsComments(read(JUDGE) ?? '');
   if (!/LEGACY_LEDGER_STATUS/.test(code)) {
     err(`${JUDGE}: 이미 섞인 과거 장부를 어떻게 볼 것인지가 적혀 있지 않습니다`);
   }

@@ -17,6 +17,7 @@
 //
 // 배선과 문구라 순수 테스트로는 안 잡힌다.
 import { readFileSync } from 'node:fs';
+import { stripJsComments } from './lib/strip-comments.mjs';
 import { join } from 'node:path';
 
 const ROOT = process.cwd();
@@ -27,18 +28,17 @@ function read(rel) {
   try { return readFileSync(join(ROOT, rel), 'utf8'); }
   catch { err(`${rel}을 읽지 못했습니다 — 검사가 대상을 잃었습니다`); return null; }
 }
-function stripComments(src) {
-  return String(src)
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')
-    .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
-}
-
+// 주석을 걷는 일은 공용 `scripts/lib/strip-comments.mjs` 한 곳에 있다.
+// 여기에 사본이 있었다 — 그 파일의 머리글이 미리 적어 둔 위험이다:
+//
+//   그래서 이 함수를 **한 곳에만** 둔다. 검사기마다 각자 복사해 두면 언젠가
+//   한쪽만 고쳐지고, 그때부터 그 검사기는 조용히 아무것도 막지 않는다.
 // ── ① 워커가 예약청산을 깨운다 ──
 {
   const rel = 'worker/src/index.ts';
   const src = read(rel);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
     // **정의가 아니라 호출을 본다.**
     if (!/await\s+pollScheduledExit\s*\(/.test(code)) {
       err(`${rel} — 워커가 예약청산을 깨우지 않습니다`
@@ -61,7 +61,7 @@ function stripComments(src) {
   const rel = 'src/components/terminal/ScheduledExitPanel.tsx';
   const src = read(rel);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
     // 하드코딩된 실행기 주장이 돌아오는 것을 막는다.
     if (/accuracyNote\s*\(\s*\{[^}]*true/.test(code)) {
       err(`${rel} — 실행기 상태를 손으로 true로 적습니다`
@@ -84,7 +84,7 @@ function stripComments(src) {
   const rel = 'src/app/api/autotrade/scheduled-exit/route.ts';
   const src = read(rel);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
     if (!/overdueExitsOf\s*\(/.test(code)) {
       err(`${rel} — 놓친 예약을 세지 않습니다`
         + '\n     그게 "실행기가 제때 안 왔다"의 유일한 직접 증거입니다');
@@ -102,7 +102,7 @@ function stripComments(src) {
 {
   const rel = 'src/app/api/system/runtime-health/route.ts';
   const src = read(rel);
-  if (src && !/scheduledExitRunnerOf\s*\(/.test(stripComments(src))) {
+  if (src && !/scheduledExitRunnerOf\s*\(/.test(stripJsComments(src))) {
     err(`${rel} — 예약청산이 제때 나가는지 운영 화면에 없습니다`);
   }
 }
