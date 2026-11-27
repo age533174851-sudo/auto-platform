@@ -25,6 +25,7 @@
 //   ⑦ 씨앗 난수로 그리는 `AreaChart`가 거래 화면에 들어오지 않는다
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { stripJsComments } from './lib/strip-comments.mjs';
 
 const CHART   = 'src/components/trading/PriceChart.tsx';
 const SERIES  = 'src/lib/trading/candleSeries.ts';
@@ -39,8 +40,30 @@ const read = (p) => {
   try { return readFileSync(p, 'utf8'); }
   catch { err(`${p}를 읽지 못했습니다 — 확인하지 못한 것을 통과로 적지 않습니다`); return ''; }
 };
-/** 주석을 뺀 본문. 규칙을 주석으로 만족시키지 못하게 한다. */
-const code = (s) => s.split('\n').filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+/**
+ * 주석을 뺀 본문. 규칙을 주석으로 만족시키지 못하게 한다.
+ *
+ * 예전에는 **줄머리만** 뗐다(`/^\s*(\/\/|\*|\/\*)/`). 두 가지가 샜다.
+ *
+ *   꼬리 주석이 코드로 셌다
+ *     `if (!disposed) zetChartEpoch(n => n + 1); // setChartEpoch(`
+ *     → 실제 호출은 사라졌는데 `setChartEpoch\s*\(`가 주석에 맞아 통과했다.
+ *     실측으로 setChartEpoch · isFreshResponse(두 곳) · 정본 봉 fetch 주소
+ *     세 자리가 이 모양으로 뚫렸다.
+ *
+ *   줄머리 `*`가 **실행되는 코드**를 버렸다
+ *     `+ 1\n        * Math.random());`
+ *     연산자로 시작하는 줄이라 통째로 버려져서, 차트가 진짜 난수를 쓰는데도
+ *     ①("값을 만들지 않는다")이 통과했다. 금지 앵커가 주석이 아니라
+ *     **코드**를 못 본 것이라 이쪽이 더 나쁘다.
+ *
+ * 공용 `stripJsComments`는 인용부호·템플릿·정규식을 알고 걷으므로
+ * 문자열 안의 URL을 건드리지 않는다. 이 검사기는 URL 자체를 앵커로
+ * 요구하기까지 한다(`api.binance.com/api/v3/klines` — `venueBars.ts:180`의
+ * 템플릿 안에 있다). 읽는 파일 전체에서 코드 안 URL은 2개이고 잘리는 것은
+ * 0개다.
+ */
+const code = (s) => stripJsComments(s);
 
 const chart = code(read(CHART));
 const series = code(read(SERIES));
