@@ -16,7 +16,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, readdirSync, symlinkSync, cpSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, readdirSync, symlinkSync, cpSync , rmSync} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -30,16 +30,32 @@ const IMPL = 'src/lib/supabase/serverFetch.ts';
  * 검사기를 격리 폴더에서 돌린다. `src` 만 실제 복사하고(변형 대상) 나머지는
  * 심링크한다 — 저장소를 통째로 복사하지 않는다.
  */
+const PREFIX = 'adm-anchor-';
+
+/** 이 시험이 만든 임시 폴더 (다른 접두사·다른 시험은 세지 않는다) */
+function ownTempDirs() {
+  return readdirSync(tmpdir()).filter((n) => n.startsWith(PREFIX));
+}
+
 function runChecker(mutate) {
-  const dir = mkdtempSync(join(tmpdir(), 'adm-anchor-'));
-  for (const e of readdirSync(REPO)) {
-    if (e === 'src' || e === '.git') continue;
-    symlinkSync(join(REPO, e), join(dir, e));
+  const dir = mkdtempSync(join(tmpdir(), PREFIX));
+  try {
+    for (const e of readdirSync(REPO)) {
+      if (e === 'src' || e === '.git') continue;
+      symlinkSync(join(REPO, e), join(dir, e));
+    }
+    cpSync(join(REPO, 'src'), join(dir, 'src'), { recursive: true });
+    if (mutate) mutate((rel) => join(dir, rel));
+    const r = spawnSync('node', [CHECKER], { cwd: dir, encoding: 'utf8' });
+    return { rc: r.status, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
+  } finally {
+    // **치우지 않으면 한 번 돌 때마다 `src` 사본이 남는다.** 검수 지적으로
+    // 재현했다(#799 코멘트 7212565149): 이 접두사만 이 컨테이너에 20개 ·
+    // 400MB 였고, 같은 모양의 제 시험 넷을 합치면 약 1.57GB 였다. 쓰기
+    // 가능 공간이 고정 할당이라 그대로 두면 다음 작업이 디스크로 막힌다.
+    // 검사기가 실패해 예외가 나도 치운다.
+    rmSync(dir, { recursive: true, force: true });
   }
-  cpSync(join(REPO, 'src'), join(dir, 'src'), { recursive: true });
-  if (mutate) mutate((rel) => join(dir, rel));
-  const r = spawnSync('node', [CHECKER], { cwd: dir, encoding: 'utf8' });
-  return { rc: r.status, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
 }
 
 /** 주석도 설명도 아닌 **실제 코드** 줄만 고른다. */
@@ -117,4 +133,11 @@ test('§① 은 좁히지 않았다 — 실제 createClient 는 잡고, 주석�
     writeFileSync(f, L.join('\n'));
   });
   assert.equal(commented.rc, 0, `주석을 호출로 셌다\n${commented.out}`);
+});
+
+test('★ 임시 폴더를 남기지 않는다 — 한 번 돌 때마다 src 사본이 쌓였다', () => {
+  const before = new Set(ownTempDirs());
+  runChecker(null);
+  const leaked = ownTempDirs().filter((n) => !before.has(n));
+  assert.deepEqual(leaked, [], `남은 임시 폴더:\n  ${leaked.join('\n  ')}`);
 });
