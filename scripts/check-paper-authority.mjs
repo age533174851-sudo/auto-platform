@@ -31,6 +31,7 @@
 //   ⑦ 두 legacy 목록이 겹치지 않는다
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { stripJsComments } from './lib/strip-comments.mjs';
 
 let bad = 0;
 const err = (m) => { console.error(`❌ ${m}`); bad += 1; };
@@ -38,7 +39,26 @@ const read = (p) => {
   try { return readFileSync(p, 'utf8'); }
   catch { err(`${p}를 읽지 못했습니다 — 확인하지 못한 것을 통과로 적지 않습니다`); return ''; }
 };
-const code = (s) => s.split('\n').filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+/**
+ * 주석을 뺀 본문. 규칙을 주석으로 만족시키지 못하게 한다.
+ *
+ * **줄머리만 보면 모자랐다.** 전에는 `//`·`*`·`/*`로 **시작하는 줄**만
+ * 버렸다. 그래서 꼬리 주석에 적힌 글자가 코드로 셌다. 기계 탐침으로
+ * 실제로 돌려 확인한 구멍 — TS 구문이 유효하고 관문은 꺼졌는데 통과했다:
+ *
+ *     if (false) { // if (!isTradableLedger(LEDGER)) {
+ *
+ * §① 의 두 단정(파일에 관문이 있는가 · 쓰기 하나하나가 자기 관문을 갖는가)이
+ * 둘 다 이 `code()` 를 통과한 본문을 본다. 즉 **옛 로컬 장부 쓰기의 거래
+ * 가능 관문을 통째로 꺼도** 검사기가 ✅ 를 적었다. 먼저 앵커가 필요한지
+ * 확인했다 — 관문 세 블록을 지우면 rc=1 이다.
+ *
+ * 그래서 공용 `stripJsComments`로 바꾼다(검사기 17개가 이미 쓴다).
+ * 좁히는 쪽으로 틀리지 않는지 먼저 쟀다 — 문자열·템플릿 안의 URL을 그대로
+ * 두고, 정규식 리터럴과 나눗셈을 주석으로 오인하지 않는다. 금지 구문 쪽도
+ * 같은 기준이 맞다: 주석에 적힌 호출은 호출이 아니다.
+ */
+const code = (s) => stripJsComments(s);
 
 /** src 아래 .ts/.tsx 전부 */
 function walk(dir, out = []) {
