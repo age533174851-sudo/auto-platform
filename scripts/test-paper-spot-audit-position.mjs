@@ -18,7 +18,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, cpSync, readdirSync, symlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, cpSync, readdirSync, symlinkSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -36,17 +36,31 @@ const REPLAY = 'supabase-replay.yml';
  * 검사기 파일 자체는 저장소 경로로 부르므로 `./lib/` 를 제대로 집는다.
  * `node --test` 는 파일을 병렬로 돌리니, 실제 저장소 파일은 건드리지 않는다.
  */
+/** 이 시험이 만든 임시 폴더 (다른 접두사·다른 시험은 세지 않는다) */
+function ownTempDirs() {
+  return readdirSync(tmpdir()).filter((n) => n.startsWith('spot-pos-'));
+}
+
 function runChecker(mutate) {
   const dir = mkdtempSync(join(tmpdir(), 'spot-pos-'));
-  for (const e of readdirSync(REPO)) {
-    if (e === '.github' || e === '.git') continue;
-    symlinkSync(join(REPO, e), join(dir, e));
+  try {
+    for (const e of readdirSync(REPO)) {
+      if (e === '.github' || e === '.git') continue;
+      symlinkSync(join(REPO, e), join(dir, e));
+    }
+    mkdirSync(join(dir, '.github/workflows'), { recursive: true });
+    cpSync(join(REPO, '.github/workflows'), join(dir, '.github/workflows'), { recursive: true });
+    if (mutate) mutate((name) => join(dir, '.github/workflows', name));
+    const r = spawnSync('node', [CHECKER], { cwd: dir, encoding: 'utf8' });
+    return { rc: r.status, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
+  } finally {
+    // **치우지 않으면 한 번 돌 때마다 사본이 남는다.** 검수 지적으로
+    // 재현했다(#799 코멘트 7212565149): 같은 모양의 제 시험 넷이 이
+    // 컨테이너에 임시 폴더 181개 · 약 1.57GB 를 남겼고 이 접두사는
+    // 87개 · 87MB 였다. 쓰기 가능 공간이 고정 할당이라 그대로 두면 다음 작업이
+    // 디스크로 막힌다. 검사기가 실패해 예외가 나도 치운다.
+    rmSync(dir, { recursive: true, force: true });
   }
-  mkdirSync(join(dir, '.github/workflows'), { recursive: true });
-  cpSync(join(REPO, '.github/workflows'), join(dir, '.github/workflows'), { recursive: true });
-  if (mutate) mutate((name) => join(dir, '.github/workflows', name));
-  const r = spawnSync('node', [CHECKER], { cwd: dir, encoding: 'utf8' });
-  return { rc: r.status, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
 }
 
 /** 줄 번호(1부터)를 **들여쓰기를 지키며** 주석 처리한다. */
@@ -158,4 +172,11 @@ test('설명 주석에 적힌 금지 구문으로는 불평하지 않는다 — 
   const { rc, out } = runChecker(null);
   assert.equal(rc, 0, out);
   assert.doesNotMatch(out, /Supabase CLI의 장부 표/);
+});
+
+test('★ 임시 폴더를 남기지 않는다 — 한 번 돌 때마다 사본이 쌓였다', () => {
+  const before = new Set(ownTempDirs());
+  runChecker(null);
+  const leaked = ownTempDirs().filter((n) => !before.has(n));
+  assert.deepEqual(leaked, [], `남은 임시 폴더:\n  ${leaked.join('\n  ')}`);
 });
