@@ -209,6 +209,36 @@ export function shellCommands(yamlText) {
 }
 
 /**
+ * 이 워크플로가 **명령 위치에서** 이 스크립트를 node 로 실행하는가.
+ *
+ * `shellText` 로는 모자랐다. 그것은 셸 **본문**이지 명령 위치가 아니라서,
+ * 유효한 YAML 안의 인용 문자열이 그대로 남는다. 실측된 반례 둘
+ * (#792 코멘트 7208374816, 둘 다 YAML 파싱·`bash -n` 통과):
+ *
+ *     run: echo 'node scripts/check-audit-readonly.mjs'
+ *     echo 'node scripts/claude-exec-category.mjs | tee -a "$GITHUB_STEP_SUMMARY"'
+ *
+ * 셸은 둘 다 **출력만** 한다. 그래서 토막으로 나눠 명령 위치를 본다.
+ *
+ * **플래그를 견딘다.** `ciInvokes` 는 `^node\s+scripts/<name>` 만 보는데,
+ * 이 저장소는 시험 파일을 `node --test scripts/check-x.test.mjs` 로 부른다.
+ * 그 꼴을 못 보면 실제로 돌고 있는 것을 "미배선" 으로 적는다 — 측정으로
+ * 걸렀다(`scripts/` 에 `check-*.test.mjs` 가 2개 있고 둘 다 그 꼴이다).
+ * 그래서 첫 낱말이 `node` 인 토막의 **인자**에서 스크립트를 찾는다.
+ */
+export function invokesScript(yamlText, scriptPath) {
+  const path = String(scriptPath ?? '').replace(/^\.\//, '');
+  if (!path) return false;
+  for (const cmd of shellCommands(yamlText)) {
+    const parts = cmd.split(/\s+/);
+    if (parts[0] !== 'node') continue;
+    // 인용부호가 붙은 인자는 명령이 아니라 자료다 — 벗기지 않고 그대로 본다.
+    if (parts.slice(1).some(a => a === path || a === `./${path}`)) return true;
+  }
+  return false;
+}
+
+/**
  * 앞에 붙는 환경변수 지정을 떼어낸다 — **명령 위치를 바꾸지 않는다.**
  *
  * `FOO=1 sed -E …` 는 `sed` 를 부르는 것이다. 이 처리를 빼먹으면

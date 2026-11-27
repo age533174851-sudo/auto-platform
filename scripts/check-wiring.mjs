@@ -34,7 +34,7 @@
 // "아직 안 붙인 것" 목록이 된다.
 
 import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs';
-import { shellText } from './lib/workflow-shell.mjs';
+import { invokesScript } from './lib/workflow-shell.mjs';
 import { stripYamlComments } from './lib/strip-comments.mjs';
 import { join, basename, dirname } from 'node:path';
 
@@ -839,7 +839,11 @@ for (const wf of HOURLY) {
   const text = stripYamlComments(raw);
   // 진단기가 **항상** 돌아야 한다. 실패한 회차에만 돌면 `cancelled`·
   // `timed_out`으로 끝난 회차에는 범주가 없다.
-  if (!/node scripts\/claude-exec-category\.mjs/.test(text)) {
+  // 주석을 걷는 것으로도 모자랐다 — 유효한 YAML 안의 인용 문자열이 남는다.
+  // 실측 반례(#792 코멘트 7208374816):
+  //     echo 'node scripts/claude-exec-category.mjs | tee -a "$GITHUB_STEP_SUMMARY"'
+  // 셸은 이것을 **출력만** 한다. 그래서 명령 위치에서 본다.
+  if (!invokesScript(raw, 'scripts/claude-exec-category.mjs')) {
     causeGaps.push(`${wf} — 진단기(claude-exec-category)를 부르지 않습니다`);
   }
   const at = raw.indexOf('- name: 실패 원인 기록');
@@ -1062,32 +1066,31 @@ if (checkerFiles.length === 0) {
   bad = true;
 }
 
-const checkerCallers = [];
-for (const wf of readdirSync('.github/workflows').filter(f => /\.ya?ml$/.test(f))) {
-  const text = readFileSync(join('.github/workflows', wf), 'utf8');
-  // **셸이 실제로 실행하는 줄만 '부른다'로 센다.**
-  //
-  // 줄머리 `#` 만 걷는 것으로는 모자랐다. 실측(무인 회차 01:32): `ci.yml`
-  // 에서 `check-audit-readonly.mjs` 호출 줄을 지우고 그 자리에
-  //
-  //     echo "would run: node scripts/check-audit-readonly.mjs"
-  //
-  // 만 남겨도 이 검사기는 "배선됨"으로 셌다. 인용 안의 문장 · heredoc 본문 ·
-  // `run:` 이 아닌 블록 · `- name:` 단계 제목에 이름이 있으면 전부 통과했다.
-  // 그 판정은 #792 에서 한 곳(`scripts/lib/workflow-shell.mjs`)으로 모았고,
-  // 여기가 그 판정의 **두 번째 사본**이었다 — 상습 고장 ② 다.
-  //
-  // 실제 저장소에서 좁힘의 대가를 먼저 쟀다: 검사기 95개 중 셸 위치로
-  // 좁혀서 새로 "미배선"이 되는 것은 **0개**다.
-  checkerCallers.push(shellText(text));
-}
-checkerCallers.push(stripComments(readFileSync(CHECK_RUNNER, 'utf8')));
+// **무엇을 '부른다'로 셀 것인가 — 적혀 있는 것이 아니라 명령 위치다.**
+//
+// 세 단계로 좁혔고 앞의 둘은 반례가 났다:
+//
+//   ① 원문 `.includes(name)`           — 주석 한 줄로 열렸다
+//   ② `shellText` + `.includes(name)`  — 셸 **본문**이지 명령 위치가 아니라,
+//      유효한 `run: echo 'node scripts/check-x.mjs'` 가 그대로 통과했다
+//      (#792 코멘트 7208374816. YAML 파싱·`bash -n` 둘 다 통과하는 반례다)
+//   ③ 명령 위치 — 토막으로 나눠 첫 낱말이 `node` 이고 인자에 그 스크립트가
+//      있는 것만 센다. 인용 안의 문장은 들어오지 않는다.
+//
+// 좁힘의 대가를 **먼저** 쟀다: 검사기 95개 중 ③ 으로 새로 "미배선" 이 되는
+// 것은 0개다. 더 좁은 `ciInvokes`(`^node\s+scripts/…`)로 재면 1개가 거짓으로
+// 미배선이 된다 — 이 저장소는 시험 파일을 `node --test …` 로 부르기 때문이다.
+const workflowTexts = readdirSync('.github/workflows')
+  .filter(f => /\.ya?ml$/.test(f))
+  .map(wf => readFileSync(join('.github/workflows', wf), 'utf8'));
+// `run-tests.mjs` 는 JS 진입점이라 셸 토막이 아니다 — 주석만 걷고 본다.
+const runnerSrc = stripComments(readFileSync(CHECK_RUNNER, 'utf8'));
 
 const unwiredCheckers = [];
 const staleCheckerAllow = [];
 for (const c of checkerFiles) {
-  const name = basename(c);
-  const called = checkerCallers.some(t => t.includes(name));
+  const called = workflowTexts.some(w => invokesScript(w, c))
+    || runnerSrc.includes(basename(c));
   const allowed = CHECKER_ALLOW.has(c);
   if (!called && !allowed) unwiredCheckers.push(c);
   if (called && allowed) staleCheckerAllow.push(c);
