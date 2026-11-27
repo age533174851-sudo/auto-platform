@@ -32,35 +32,40 @@
 // 사용: node scripts/check-order-type-fidelity.mjs
 
 import { readFileSync, existsSync } from 'node:fs';
+import { stripJsComments } from './lib/strip-comments.mjs';
 
 const fails = [];
 const notes = [];
 const fail = (m) => fails.push(m);
 
-// 이 파일도 설명에 `type: 'MARKET'`과 `CONDITIONAL`을 그대로 적는다.
-function stripJs(src) {
-  let out = '', i = 0, quote = null;
-  const n = src.length;
-  while (i < n) {
-    const c = src[i], d = src[i + 1];
-    if (quote) {
-      if (c === '\\') { out += '  '; i += 2; continue; }
-      if (c === quote) quote = null;
-      out += c === '\n' ? '\n' : c;
-      i++; continue;
-    }
-    if (c === '/' && d === '/') { while (i < n && src[i] !== '\n') i++; continue; }
-    if (c === '/' && d === '*') {
-      i += 2;
-      while (i < n && !(src[i] === '*' && src[i + 1] === '/')) { if (src[i] === '\n') out += '\n'; i++; }
-      i += 2; continue;
-    }
-    if (c === '"' || c === "'" || c === '`') { quote = c; out += c; i++; continue; }
-    out += c; i++;
-  }
-  return out;
-}
-
+// 이 파일도 설명에 `type: 'MARKET'`과 `CONDITIONAL`을 그대로 적는다. 그래서
+// 읽은 본문에서 주석을 걷어야 한다.
+//
+// **여기에 `stripJs` 사본이 있었다.** 공용 `scripts/lib/strip-comments.mjs`의
+// 머리글이 그 위험을 미리 적어 두었다:
+//
+//   그래서 이 함수를 **한 곳에만** 둔다. 검사기마다 각자 복사해 두면 언젠가
+//   한쪽만 고쳐지고, 그때부터 그 검사기는 조용히 아무것도 막지 않는다.
+//
+// 그 일이 일어났다. 사본은 **정규식 리터럴을 모른다** — `/["\']+/g`를 만나면
+// 안의 `"`를 문자열 시작으로 읽고 가짜 문자열 상태에 빠지고, 그 상태에서는
+// `//`를 주석으로 보지 않아 **주석 본문이 코드로 남는다.** 기계 탐침으로
+// 실제로 돌려 확인했다(TS 구문 유효):
+//
+//     const QUOTES = /["\']+/g;
+//     // export function sizingPriceOf
+//     export function zizingPriceOf(t) { … }
+//
+//   이름만 바꾸면                                   rc=1
+//   정규식 없이 같은 주석만 남기면                   rc=1   ← 탈선이 원인이라는 대조
+//   위처럼 정규식 뒤에 주석을 남기면                 rc=0   ← 구멍
+//
+// 그래서 사본을 지우고 공용 함수를 쓴다. 지금 main의 공용 함수도 같은 탈선을
+// 갖고 있어서 이 교체만으로 위 구멍이 닫히지는 않는다. **대신 고칠 자리가
+// 하나가 된다** — PR #795가 공용 함수의 그 탈선을 고치고, 같은 변이를 #795
+// 판으로 재면 주석 문구가 코드로 남지 않는다(실측: 사본 true · main true ·
+// #795 false). 사본을 남겨 두면 #795가 병합돼도 이 검사기만 조용히 뚫린 채
+// 남는다.
 /** `from` 이후 짝이 맞는 중괄호까지 */
 function braceBodyAt(src, from) {
   const open = src.indexOf('{', from);
@@ -96,7 +101,7 @@ const TEST = 'src/lib/markets/orderTypes.test.ts';
 // ── 1. 목록은 한 곳에 있다 ──
 if (!existsSync(TYPES)) fail(`${TYPES}이 없습니다`);
 else {
-  const t = stripJs(readFileSync(TYPES, 'utf8'));
+  const t = stripJsComments(readFileSync(TYPES, 'utf8'));
   if (!/export const SERVER_ORDER_TYPES\s*=/.test(t)) fail(`${TYPES}에 SERVER_ORDER_TYPES가 없습니다`);
   if (!/export function sizingPriceOf\b/.test(t)) fail(`${TYPES}에 sizingPriceOf가 없습니다`);
   // 기준가 함수가 못 정했을 때 값을 지어내면 안 된다.
@@ -132,7 +137,7 @@ else {
 // ── 2. 서버 검증기가 같은 목록을 본다 ──
 if (!existsSync(VALID)) fail(`${VALID}이 없습니다`);
 else {
-  const v = stripJs(readFileSync(VALID, 'utf8'));
+  const v = stripJsComments(readFileSync(VALID, 'utf8'));
   if (!/import\s*\{[^}]*(SERVER_ORDER_TYPES|isServerOrderType)[^}]*\}\s*from\s*['"][^'"]*orderTypes['"]/.test(v)) {
     fail(`${VALID}이 orderTypes에서 목록을 가져오지 않습니다 — 목록이 두 벌이면 갈립니다`);
   }
@@ -147,7 +152,7 @@ else {
 // ── 3. 모드별 선택지 ──
 if (!existsSync(CURR)) fail(`${CURR}이 없습니다`);
 else {
-  const c = stripJs(readFileSync(CURR, 'utf8'));
+  const c = stripJsComments(readFileSync(CURR, 'utf8'));
   if (!/export function supportedOrderTypes\b/.test(c)) fail(`${CURR}에 supportedOrderTypes가 없습니다`);
   const sup = fnBodyAt(c, 'export function supportedOrderTypes');
   if (sup && !/SERVER_ORDER_TYPES/.test(sup)) {
@@ -177,7 +182,7 @@ else {
 // ── 4. 화면 ──
 if (!existsSync(PAGE)) fail(`${PAGE}이 없습니다`);
 else {
-  const page = stripJs(readFileSync(PAGE, 'utf8'));
+  const page = stripJsComments(readFileSync(PAGE, 'utf8'));
 
   // ── 요청 본문의 유형이 리터럴이면 실패 ──
   //
@@ -255,11 +260,38 @@ else {
 }
 
 // ── 5. 시험 ──
-const reg = existsSync('scripts/run-tests.mjs') ? readFileSync('scripts/run-tests.mjs', 'utf8') : '';
+//
+// **원문이 아니라 걷은 본문을 본다.** 탐침으로 확인한 구멍 둘이다:
+//
+//   zunOrderTypesTests() // runOrderTypesTests()     → rc=0 (시험이 등록 안 됐는데 통과)
+//   시험 이름을 바꾸고 원래 이름을 주석에 남기면      → rc=0 (회귀 시험을 지워도 통과)
+//
+// 둘째가 특히 나쁘다. 그 회귀 시험이 지키는 것이 "지정가 수량은 지정가로
+// 나눈다"이고, 그게 빠지면 사용자가 적은 명목가와 실제 체결 명목가가 갈린다
+// (이 파일 머리말의 100 → 80 USDT 사고가 그것이다).
+//
+// 등록 여부는 **생성되는 러너 본문**에서 본다. `run-tests.mjs`는 러너를
+// `const RUN_SRC = \`…\`` 템플릿 하나로 들고 있다가 `run.ts`로 써 내려간다
+// (47행 ~ 586행). 즉 호출이 적힌 자리는 호스트 코드가 아니라 **그 템플릿
+// 안**이고, 호스트의 주석을 걷어도 템플릿은 문자열이라 손대지 않는다 —
+// 그래서 템플릿 안에 `// runOrderTypesTests();`를 남기면 생성된 `run.ts`
+// 에서는 주석인데 검사기는 통과했다(실측 rc=0).
+//
+// 템플릿 본문도 **소스**다. 소스로 읽는다. 모양이 바뀌어 본문을 못 떼면
+// 빈 문자열이 되어 앵커가 없다고 **크게 실패한다** — 조용히 통과하지 않는다.
+function generatedRunnerSource(src) {
+  const at = src.indexOf('const RUN_SRC = `');
+  if (at < 0) return '';
+  const from = src.indexOf('`', at) + 1;
+  const end = src.indexOf('\n`;', from);
+  return end < 0 ? '' : src.slice(from, end);
+}
+const reg = existsSync('scripts/run-tests.mjs')
+  ? stripJsComments(generatedRunnerSource(readFileSync('scripts/run-tests.mjs', 'utf8'))) : '';
 if (!existsSync(TEST)) fail(`${TEST}이 없습니다`);
 else {
   if (!reg.includes('runOrderTypesTests()')) fail('run-tests.mjs에 runOrderTypesTests()가 없습니다');
-  const t = readFileSync(TEST, 'utf8');
+  const t = stripJsComments(readFileSync(TEST, 'utf8'));
   if (!/화면 선택지는 서버 목록의 부분집합이다/.test(t)) {
     fail(`${TEST}에 선택지 부분집합 시험이 없습니다`);
   }
