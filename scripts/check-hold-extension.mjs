@@ -19,6 +19,7 @@
 // 실주문·DB 변경·거래소 조회를 하지 않는다. 소스 읽기와 순수 함수 호출뿐이다.
 
 import { readFileSync, existsSync, mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { stripJsComments } from './lib/strip-comments.mjs';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
@@ -36,9 +37,24 @@ const err = (m) => errors.push(m);
 const read = (f) => { try { return readFileSync(f, 'utf8'); } catch { return null; } };
 
 /** 주석을 벗긴 소스. **검사기가 자기 설명 주석을 근거로 통과하면 안 된다** */
-const code = (s) => s
-  .replace(/\/\*[\s\S]*?\*\//g, '')
-  .split('\n').map(l => l.replace(/\/\/.*$/, '')).join('\n');
+// 주석을 뺀 본문. 규칙을 주석으로 만족시키지 못하게 한다.
+//
+// 예전에는 줄마다 `l.replace(/\/\/.*$/, '')` 였다. 그것은 **인용부호를
+// 모르므로 문자열 안의 `//` 에서도 자른다** — URL 한 개가 그 줄의 나머지를
+// 먹는다. 기계 탐침으로 실제로 돌려 확인했다(TS 구문 유효):
+//
+//     const _u = 'https://x/y'; const _x = () => resolveHoldExtensionPolicy({});
+//
+//   금지 호출을 평범하게 넣으면                    rc=1
+//   `//` 없는 문자열(`'plain'`)을 앞에 두면         rc=1   ← 원인이 `//` 라는 대조
+//   위처럼 URL 을 앞에 두면                        rc=0   ← 구멍
+//
+// 즉 ④가 막는 `resolveHoldExtensionPolicy` 직접 호출("승인·소급 금지 관문을
+// 지나지 않는다")이 **URL 한 개로 눈을 감는다.** 금지 앵커가 코드를 못 보는
+// 쪽이라 조용히 열린다.
+//
+// 공용 `stripJsComments` 는 인용부호·템플릿·정규식을 알고 걷는다.
+const code = (s) => stripJsComments(s);
 
 /**
  * `fn(` 호출의 **인자 전체**를 괄호를 세어 떼어 온다. 없으면 null.
