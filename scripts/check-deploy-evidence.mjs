@@ -12,6 +12,7 @@
 //
 // 한 번 고쳐도 같은 모양이 다시 들어올 수 있다. 그래서 여기서 막는다.
 import { readFileSync } from 'node:fs';
+import { stripJsComments, stripYamlComments } from './lib/strip-comments.mjs';
 
 const RUNNER = 'scripts/ops-runner.mjs';
 const LIB = 'src/lib/ops/selfHeal.ts';
@@ -19,8 +20,12 @@ const WF = '.github/workflows/ops-runner.yml';
 let bad = 0;
 const err = (m) => { console.error(`❌ ${m}`); bad += 1; };
 
+// **주석 걷기는 공용 함수를 쓴다.** 여기 있던 줄머리 필터는 `//` 로 시작
+// 하는 줄만 지워서 줄 끝 주석과 여러 줄 `/* … */` 를 못 걷는다.
+// (이 채택이 막혀 있던 이유가 공용 함수의 정규식 리터럴 탈선이었고,
+//  같은 커밋에서 그것을 고쳤다.)
 const runner = readFileSync(RUNNER, 'utf8');
-const code = runner.split('\n').filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+const code = stripJsComments(runner);
 
 // ── 1. main을 Vercel로 둔갑시키지 않는가 ──
 if (/vercelSha\s*:\s*mainSha/.test(code)) {
@@ -50,7 +55,11 @@ if (/readVercelSha\(\)\s*(\|\||\?\?)/.test(code)) {
 }
 
 // ── 4. 판정 모듈이 빈 값을 "같다"로 읽지 않는가 ──
-const lib = readFileSync(LIB, 'utf8');
+// 여기는 주석을 **아예** 걷지 않았다. 기계 탐침 실측 (ed00c1a4, `//` 주석):
+//   selfHeal.ts:245 `if (!/^[0-9a-f]{7,40}$/.test(sha)) return null;` → rc=0 ✅
+//   selfHeal.ts:265 `ok: vercel ? same(main, vercel) : null`         → rc=0 ✅
+// 둘 다 주석 처리하면 모양 검사와 "비어 있으면 모름"이 사라지는데 통과했다.
+const lib = stripJsComments(readFileSync(LIB, 'utf8'));
 if (!/ok:\s*vercel\s*\?\s*same\(main,\s*vercel\)\s*:\s*null/.test(lib)) {
   err(`${LIB}의 Vercel 검사가 "비어 있으면 모름"을 유지하지 않습니다`);
 }
@@ -59,8 +68,10 @@ if (!/\^\[0-9a-f\]\{7,40\}\$/.test(lib)) {
 }
 
 // ── 5. 주소가 배선돼 있는가 (있어야 관측이 가능하다) ──
-const wf = readFileSync(WF, 'utf8');
-if (!/DEPLOY_STATUS_URL:\s*\$\{\{\s*secrets\./.test(wf)) {
+// 배선도 같다. 그 한 줄을 주석 처리하면 관측 주소가 안 넘어가 **관측
+// 경로가 영원히 모름**이 되는데 통과했다 (실측 rc=0). 키 자리만 센다.
+const wf = stripYamlComments(readFileSync(WF, 'utf8'));
+if (!/^\s*DEPLOY_STATUS_URL:\s*\$\{\{\s*secrets\./m.test(wf)) {
   err(`${WF}에 배포 상태 주소가 배선되지 않았습니다 — 관측 경로가 영원히 모름이 됩니다`);
 }
 
