@@ -38,6 +38,7 @@
 // 바꾸면 세 곳이 함께 움직인다 — 이 저장소는 "검사기가 낱말만 보다가
 // 뮤테이션을 놓치는" 실수를 여러 번 했다.
 import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
+import { stripJsComments } from './lib/strip-comments.mjs';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
@@ -96,11 +97,22 @@ const read = (p) => {
  * `onPickPrice={() => { /* 지정가를 받지 않는다 *\/ }}`가 "지정가 UI가 있다"로
  * 잡힌 적이 있다. 코드는 계약을 지키고 있었고 주석만 걸린 것이다.
  *
- * `//`는 줄 안에서 떼지 않는다 — `https://`가 같이 잘린다.
+ * **줄 안의 `//`도 뗀다 — 전에는 떼지 않았다.** 이유는 `https://`가 같이
+ * 잘린다는 것이었고, 그 우려는 맞다. 그래서 공용 `stripJsComments`로 바꿨다
+ * — 인용부호·템플릿·정규식을 알고 걷으므로 문자열 안의 URL을 건드리지 않고
+ * 주석만 뗀다(7가지로 쟀다: `'https://…/ticker/price'` · 템플릿 안의 URL ·
+ * `/a\/\/b/` · `a / b; // …` 전부 그대로다).
+ *
+ * 떼지 않던 대가를 실측했다 — 꼬리 주석 한 줄로 계약이 뚫렸다:
+ *
+ *     const detailTarget = useMemo(() => xTargetOf( // detailTargetOf(
+ *       detailAsset), [detailAsset]);
+ *
+ * 실제 호출은 `xTargetOf`로 바뀌었는데 §가 요구하는 `detailTargetOf(`가
+ * 주석에 남아 있어 통과했다(TS 구문 유효). 이름을 그냥 바꾸면 rc=1 이므로
+ * 앵커는 필요한 것이 맞았고, 보는 눈이 주석을 못 걸러낸 것이다.
  */
-const code = (s) => s
-  .split('\n').filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n')
-  .replace(/\/\*[\s\S]*?\*\//g, ' ');
+const code = (s) => stripJsComments(s);
 
 /**
  * 함수 본문을 자른다.
