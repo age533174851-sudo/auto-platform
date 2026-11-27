@@ -30,6 +30,7 @@
 //        선물 마크가(만료 캐시 포함)로 방향을 보면, 현물 포지션에서
 //        "걸자마자 발동하는" 손절이 검사를 통과한다.
 import { readFileSync } from 'node:fs';
+import { stripJsComments } from './lib/strip-comments.mjs';
 
 const ORDER  = 'src/app/api/paper/order/route.ts';
 const CLOSE  = 'src/app/api/paper/close/route.ts';
@@ -42,8 +43,26 @@ const read = (p) => {
   try { return readFileSync(p, 'utf8'); }
   catch { err(`${p}를 읽지 못했습니다 — 확인하지 못한 것을 통과로 적지 않습니다`); return ''; }
 };
-/** 주석을 뺀 본문. 규칙을 주석으로 만족시키지 못하게 한다. */
-const code = (s) => s.split('\n').filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+/**
+ * 주석을 뺀 본문. 규칙을 주석으로 만족시키지 못하게 한다.
+ *
+ * **줄머리만 보면 모자랐다.** 전에는 `//`·`*`·`/*`로 **시작하는 줄**만
+ * 버렸다. 그래서 꼬리 주석에 적힌 글자가 코드로 셌고, 실제로 부르는 줄을
+ * 지워도 관문이 통과했다. 기계 탐침으로 돌려 확인한 구멍 7개(전부 TS 구문
+ * 유효, 지우기 대조 4/4 rc=1 로 앵커가 필요함을 먼저 확인했다):
+ *
+ *   const px = { ok: true, price: 0 } as any; // await readPaperMarkPrice(market, symbol);
+ *   .select('id, user_id, symbol, status').…;  // .select('status, market')
+ *   if (false) { // market !== 'SPOT' && market !== 'USDM'
+ *   if (market === 'USDM') return 'BINANCE_USDM_MARK'; // if (market === 'SPOT') return 'BINANCE_SPOT_TICKER';
+ *
+ * 그래서 공용 `stripJsComments`로 바꾼다. **좁히는 쪽으로 틀리지 않는지
+ * 먼저 쟀다** — 문자열·템플릿 안의 URL을 그대로 둔다(금지 토큰
+ * `ticker/price`가 URL 조각이라 이것이 깨지면 §①이 실제 호출을 놓친다),
+ * 정규식 리터럴과 나눗셈을 주석으로 오인하지 않는다. 금지 구문 쪽도 같은
+ * 기준이 맞다 — 주석에 적힌 호출은 호출이 아니다.
+ */
+const code = (s) => stripJsComments(s);
 
 const order = code(read(ORDER));
 const close = code(read(CLOSE));
