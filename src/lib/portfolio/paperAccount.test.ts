@@ -10,6 +10,7 @@ import {
   paperEquityOf, paperTodayPnl, validateSeed, PAPER_SEED_CHOICES,
   paperReturnVerdict,
 } from './paperAccount';
+import { usedMarginOf } from '../engine/paperAvailable';
 
 // **시작한 계좌다.** `started_at`(071)이 없으면 흔적이 없는 이 줄은
 // '읽기 경로가 자동으로 만든 빈 계좌'와 구별되지 않는다 — 그때는
@@ -77,10 +78,34 @@ export function runPaperAccountTests() {
     eq(v.returnPct, null, '수익률도 계산하지 않는다');
   });
 
-  test('증거금을 못 읽은 줄은 합계에서 빠지되 총자산을 막지는 않는다', () => {
+  // **못 읽은 증거금은 0이 아니다.** 예전에는 이 줄을 합계에서 빼고
+  // `usedMargin: 0`을 적었다 — 같은 `/api/paper/account` 응답 안에서
+  // `account.usedMargin`(paperAvailable)은 null인데 `equity.usedMargin`은 0이
+  // 되어 갈렸고, `paperView`·지갑 MOCK 칸은 그 0으로 "가용 = 현금 전부"를 그렸다.
+  test('증거금을 못 읽은 줄이 있으면 사용 증거금은 0이 아니라 모름이다 — 총자산은 막지 않는다', () => {
     const v = paperEquityOf({ account: ACCT, positions: [{ margin: null, unrealizedPnl: 50 }] });
-    eq(v.usedMargin, 0, '못 읽은 증거금은 안 더한다');
+    eq(v.usedMargin, null, '**못 읽은 증거금을 0으로 적지 않는다**');
     eq(v.totalEquity, 10_050, '미실현은 알고 있으므로 총자산은 낼 수 있다');
+  });
+
+  test('읽은 줄과 못 읽은 줄이 섞여 있어도 부분합계를 사용 증거금이라 적지 않는다', () => {
+    const v = paperEquityOf({
+      account: ACCT,
+      positions: [{ margin: 500, unrealizedPnl: 10 }, { margin: '', unrealizedPnl: 0 }],
+    });
+    eq(v.usedMargin, null, '500만 적으면 가용이 실제보다 커진다');
+  });
+
+  test('사용 증거금은 주문·가용 판정(usedMarginOf)과 같은 답을 한다', () => {
+    const cases: any[] = [
+      [], [{ margin: 200 }], [{ margin: 200 }, { margin: null }],
+      [{ margin: 'x' }], [{ margin: -5 }], [{ margin: 0 }],
+    ];
+    for (const ps of cases) {
+      const v = paperEquityOf({ account: ACCT, positions: ps.map((p: any) => ({ ...p, unrealizedPnl: 0 })) });
+      const u = usedMarginOf(ps);
+      eq(v.usedMargin, u.unreadable > 0 ? null : u.used, `positions=${JSON.stringify(ps)}`);
+    }
   });
 
   // ══ 오늘 손익 ══
