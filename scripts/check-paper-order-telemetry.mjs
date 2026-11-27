@@ -14,6 +14,7 @@
 //   3. 실패 경로는 기다리고(await) 성공 경로는 기다리지 않는다
 //   4. taxonomy의 코드는 전부 판정 모듈에 실재한다 (오타가 조용히 통과하지 않게)
 import { readFileSync } from 'node:fs';
+import { stripJsComments } from './lib/strip-comments.mjs';
 
 const ROUTE = 'src/app/api/paper/order/route.ts';
 const MODULE = 'src/lib/engine/paperOrderTelemetry.ts';
@@ -26,10 +27,27 @@ const mod = readFileSync(MODULE, 'utf8');
 // ── 1. 모든 종료 지점이 세어지는가 ──
 //
 // 주석과 헬퍼 정의(`counted` 안의 것)는 빼고 본다.
-const body = route
-  .split('\n')
-  .filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l))
-  .join('\n');
+//
+// **줄머리만 떼면 안 된다.** 예전에는 `/^\s*(\/\/|\*|\/\*)/`로 줄머리만
+// 뗐다. 기계 탐침으로 실제로 돌려 보니 세지 않는 종료 지점이 이 한 줄로
+// 보이지 않게 됐다(TS 구문 유효):
+//
+//     return /* counted( */ NextResponse.json({ ok: false, … }, { status: 400 });
+//
+// 아래는 `return` 문 안에 `counted(`가 있는지를 보는데, 같은 문장 안의
+// **블록 주석**이 그 자리를 채워 줬다. 계수를 아예 벗기면 rc=1 이므로
+// 규칙은 맞았고 보는 눈이 문제였다. 공용 `stripJsComments`는 인용부호·
+// 템플릿·정규식을 알고 걷으므로 응답 본문의 문자열은 건드리지 않는다.
+//
+// (같은 탐침에서 **구멍이 아니었던 것**: 앞 줄 꼬리 주석에 `counted(`를
+// 남기는 변이는 고치기 전에도 rc=1 이었다. `return ` 이후만 잘라 보기
+// 때문이다. 패턴이 비슷하다고 구멍으로 적지 않는다.)
+const body = stripJsComments(route);
+// 판정 모듈의 선언도 같이 걷는다 — 아래 4번이 **주석에 적힌 코드**를
+// 실재한다고 읽으면, "오타가 조용히 통과하지 않게" 한다는 그 규칙의
+// 목적이 그대로 사라진다. 탐침으로 확인했다: 라우트가 쓰는 코드를
+// 모듈의 주석에만 `// | 'NOT_DECLARED_CODE'`로 적어 두면 통과했다.
+const modBody = stripJsComments(mod);
 // 응답을 만드는 자리를 전부 찾고, **그 return 문 안에** counted(가 있는지 본다.
 // counted(sb, 'CODE', NextResponse.json(...)) 이므로 둘 사이에 인자가 있다.
 const returns = [];
@@ -59,10 +77,14 @@ for (const m of body.matchAll(/counted\(([\s\S]{0,120}?)NextResponse\.json/g)) {
 }
 
 // ── 3. 실패는 기다리고 성공은 안 기다리는가 ──
-if (!/if \(code === 'OPENED'\) recordAudit\(/.test(route)) {
+// **`route`(원문)가 아니라 걷은 본문을 본다.** 탐침으로 확인한 구멍이다:
+// 두 줄을 주석으로 바꾸고 실제 호출을 다른 이름으로 돌려도 통과했다
+// (TS 구문 유효). 그러면 "실패 경로를 끝까지 남긴다"는 계약이 주석
+// 두 줄로 사라지고, 서버리스에서 기록이 응답과 함께 잘린다.
+if (!/if \(code === 'OPENED'\) recordAudit\(/.test(body)) {
   err('성공 경로가 기록을 기다리지 않는다는 계약이 보이지 않습니다');
 }
-if (!/else await recordAuditAsync\(/.test(route)) {
+if (!/else await recordAuditAsync\(/.test(body)) {
   err('실패 경로가 기록을 끝까지 남긴다는 계약이 보이지 않습니다');
   console.error('   → 서버리스에서 fire-and-forget은 응답과 함께 잘릴 수 있습니다.');
 }
@@ -71,7 +93,7 @@ if (!/else await recordAuditAsync\(/.test(route)) {
 //
 // 오타는 조용히 통과한다 — 타입이 넓어지는 자리가 아니라도, 문자열로 적는
 // 순간 검사는 사라진다. 그래서 여기서 대조한다.
-const declared = new Set([...mod.matchAll(/\|\s*'([A-Z_]+)'/g)].map(m => m[1]));
+const declared = new Set([...modBody.matchAll(/\|\s*'([A-Z_]+)'/g)].map(m => m[1]));
 const used = [...body.matchAll(/counted\(\s*[^,]+,\s*'([A-Z_]+)'/g)].map(m => m[1]);
 for (const c of used) {
   if (!declared.has(c)) err(`라우트가 쓰는 코드가 판정 모듈에 없습니다: ${c}`);
