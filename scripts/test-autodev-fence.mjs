@@ -194,3 +194,76 @@ test('실제 워크플로: 설정 키는 한 줄도 표면에 없다 (대가를 
   assert.deepEqual(leaked, [], `설정 키가 표면에 들어왔습니다:\n  ${leaked.join('\n  ')}`);
   console.log(`    워크플로 ${files.length}장 · 표면 ${checked}줄 · 설정 키 누출 0`);
 });
+
+/* ── 키를 YAML 이 읽는 모양으로 보지 않으면, 같은 입력이 다르게 읽힌다
+   ──────────────────────────────────────────────────────────────────────
+   `^\s*키:` 로만 보면 두 모양이 빠져나갔다. 둘 다 **실측**이다:
+
+     ① 인용된 키 — `js-yaml` 로 읽으면 같은 키인데 정규식이 못 본다
+          "permission-contents": read → write   미검출
+        (Codex 가 #798 코멘트 7211691020 에서 재현한 반례. 제 쪽에서도
+         `js-yaml.load` 로 양쪽 값이 read/write 임을 확인한 뒤 고쳤다.)
+
+     ② 목록 항목으로 쓴 키 — 단계의 첫 키는 거의 항상 이 모양이다
+          - uses: actions/checkout@v4
+        실제 워크플로 35장에서 `- uses:` 39줄이 **표면에 0줄** 들어 있었다.
+        액션 버전이나 액션 자체를 바꿔도 울타리가 못 봤다.
+
+   아래가 그 모양들이다. 하나라도 다시 통과하면 구멍이 다시 열린 것이다. */
+
+test('★ 인용된 키도 같은 키다 — 일곱 모양이 전부 거부된다', () => {
+  const shapes = [
+    ['쌍따옴표 contents', 'permissions:\n  "contents": read\n', 'permissions:\n  "contents": write\n'],
+    ['홑따옴표 contents', "permissions:\n  'contents': read\n", "permissions:\n  'contents': write\n"],
+    ['인용된 cron', 'on:\n  schedule:\n    - "cron": "17 * * * *"\n', 'on:\n  schedule:\n    - "cron": "*/5 * * * *"\n'],
+    ['인용된 uses', 'steps:\n  - "uses": a/b@v1\n', 'steps:\n  - "uses": a/b@v2\n'],
+    ['인용된 대문자 env 키', 'env:\n  "LIVE_MODE": off\n', 'env:\n  "LIVE_MODE": on\n'],
+    ['인용된 timeout-minutes', 'jobs:\n  a:\n    "timeout-minutes": 5\n', 'jobs:\n  a:\n    "timeout-minutes": 360\n'],
+    ['인용된 앱 토큰 권한', 'with:\n  "permission-contents": read\n', 'with:\n  "permission-contents": write\n'],
+  ];
+  for (const [label, before, after] of shapes) {
+    const f = authorityFindings({ path: `${WF}/w.yml`, before, after });
+    assert.ok(f.length > 0, `통과했습니다 — 인용된 키가 빠져나갑니다: ${label}`);
+  }
+  console.log(`    거부 확인 · 인용된 키 ${shapes.length}모양`);
+});
+
+test('★ 목록 항목으로 쓴 `- uses:` 도 권한 표면이다', () => {
+  const before = 'jobs:\n  a:\n    steps:\n      - uses: actions/checkout@v4\n';
+  const after = 'jobs:\n  a:\n    steps:\n      - uses: evil/checkout@v4\n';
+  assert.ok(authorityFindings({ path: `${WF}/w.yml`, before, after }).length > 0,
+    '액션을 바꿨는데 통과했습니다');
+  // 실제 워크플로에서도 한 줄도 빠지지 않는다.
+  //
+  // **원문과 표면을 글자로 비교하지 않는다.** 표면은 주석을 뗀 모양을
+  // 담으므로(`- uses: …@sha   # v4.2.2` 두 줄이 그렇다) 원문과 같지 않다.
+  // 그래서 **개수**로 본다 — 내가 처음 쓴 글자 비교는 그 두 줄 때문에
+  // 수정이 옳은데도 실패했다.
+  const DASH_USES = /^\s*-\s+(['"]?)uses\1\s*:/;
+  const files = readdirSync(WF).filter((n) => /\.ya?ml$/.test(n));
+  assert.ok(files.length > 0, '워크플로를 한 장도 못 읽었습니다 — 못 읽은 것을 통과로 적지 않습니다');
+  const missing = [];
+  let seen = 0;
+  for (const f of files) {
+    const src = readFileSync(join(WF, f), 'utf8');
+    const inSrc = src.split('\n').filter((l) => DASH_USES.test(l)).length;
+    const inSurf = authoritySurface(src).filter((l) => DASH_USES.test(l)).length;
+    seen += inSrc;
+    if (inSrc !== inSurf) missing.push(`${f}: ${inSrc}줄 중 ${inSurf}줄만 표면에`);
+  }
+  assert.ok(seen > 0, '`- uses:` 를 한 줄도 못 찾았습니다 — 0건을 통과로 적지 않습니다');
+  assert.deepEqual(missing, [], `표면에 빠진 \`- uses:\`:\n  ${missing.join('\n  ')}`);
+  console.log(`    실제 워크플로 ${files.length}장 · \`- uses:\` ${seen}줄 전부 표면에`);
+});
+
+test('대조 — 목록 항목의 다른 키는 끌어오지 않는다 (좁히는 쪽으로 틀리지 않는다)', () => {
+  for (const [label, before, after] of [
+    ['셸 본문', 'steps:\n  - run: node a.mjs\n', 'steps:\n  - run: node a.mjs --x\n'],
+    ['단계 제목', 'steps:\n  - name: 가\n', 'steps:\n  - name: 나\n'],
+    ['입력 설명', 'on:\n  workflow_dispatch:\n    inputs:\n      a:\n        description: 가\n',
+      'on:\n  workflow_dispatch:\n    inputs:\n      a:\n        description: 나\n'],
+  ]) {
+    assert.equal(authorityFindings({ path: `${WF}/w.yml`, before, after }).length, 0,
+      `무해한 변경이 막혔습니다: ${label}`);
+  }
+});

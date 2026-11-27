@@ -88,7 +88,7 @@ const AUTHORITY_LINE = [
   /^\s*group\s*:/,
   /^\s*timeout-minutes\s*:/,
   /^\s*(schedule|workflow_dispatch|workflow_run|workflow_call|push|pull_request|pull_request_target|check_suite|check_run|status|repository_dispatch|issue_comment|release)\s*:/,
-  /^\s*-\s*cron\s*:/,
+  /^\s*cron\s*:/,                   // 목록 항목(`- cron:`)은 keyShape 가 벗긴다
   /^\s*(branches|tags|paths|paths-ignore|types)\s*:/,
   /^\s*[A-Z][A-Z0-9_]*\s*:/,         // env 키 (대문자 관례)
   // `with:`/`env:` 아래에 와도 **권한을 주는** 키. 블록을 추적하지 않고
@@ -120,6 +120,33 @@ function stripComment(line) {
 }
 
 /**
+ * 키를 **YAML 이 읽는 모양으로** 맞춘다. 판정에만 쓰고 표면에는 원문을 남긴다.
+ *
+ * `^\s*키:` 로만 보면 **같은 입력이 다르게 읽혔다.** 실측된 두 모양:
+ *
+ *   ① 인용된 키 — `js-yaml` 로 읽으면 같은 키인데 정규식이 못 본다
+ *        "permission-contents": read → write   미검출 (Codex #798 코멘트 7211691020)
+ *        'contents': read → write              미검출
+ *        "cron" · "uses" · "timeout-minutes" · 대문자 env 키도 같다 (7모양 실측)
+ *
+ *   ② 목록 항목으로 쓴 키 — 단계의 첫 키는 거의 항상 이 모양이다
+ *        - uses: actions/checkout@v4
+ *      실제 워크플로 35장에서 `- uses:` 가 **39줄이고 표면에 든 것은 0줄**이다
+ *      (평범한 `uses:` 18줄은 18/18 들어온다). 액션 버전이나 액션 자체를
+ *      바꿔도 울타리가 못 봤다.
+ *
+ * **표면에는 원문을 남긴다.** 정규화한 줄을 저장하면 `- uses:` 를 `uses:` 로
+ * 옮기는 재배치가 안 보인다 — 그 변경은 `with:` 가 어느 단계에 붙는지를
+ * 바꿀 수 있다. 원문을 남기면 인용만 바꾸는 변경도 거부되는데, 그것은
+ * 시끄러운 쪽이라 안전하다.
+ */
+function keyShape(line) {
+  return line
+    .replace(/^(\s*)-\s+(?=\S)/, '$1')
+    .replace(/^(\s*)(['"])([^'"\n]+)\2(\s*:)/, '$1$3$4');
+}
+
+/**
  * 워크플로 원문에서 **권한 표면만** 뽑는다. 들여쓰기까지 남긴다 —
  * 같은 키가 다른 깊이로 옮겨 가면 효력이 달라질 수 있다.
  */
@@ -128,7 +155,9 @@ export function authoritySurface(src) {
   for (const raw of String(src ?? '').split('\n')) {
     const line = stripComment(raw);
     if (line.trim() === '') continue;
-    const hit = AUTHORITY_LINE.some((re) => re.test(line))
+    // 판정은 YAML 이 읽는 모양으로, 저장은 원문으로
+    const shape = keyShape(line);
+    const hit = AUTHORITY_LINE.some((re) => re.test(shape))
       || AUTHORITY_ANYWHERE.some((re) => re.test(line));
     if (hit) out.push(line.replace(/\s+$/, ''));
   }
