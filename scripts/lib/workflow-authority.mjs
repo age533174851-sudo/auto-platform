@@ -36,6 +36,31 @@
 //   concurrency / timeout 겹침과 상한
 //   with: 의 키           액션에 넘기는 설정(토큰·ref 포함)
 //
+// ## `with:` 는 **그 줄만으로는 모자랐다**
+//
+// 위 문단은 처음부터 "`with:` 의 키" 를 표면에 넣는다고 적어 놓았는데,
+// 구현은 `with:` **그 한 줄만** 뽑고 있었다. 이미 `with:` 블록이 있는
+// 단계에 자식 키를 더하면 표면이 그대로라서, 실제로 권한을 넓히는 네
+// 모양이 **통과했다**(실측, `authorityFindings` 직접 호출):
+//
+//     with: 아래 permission-contents: write   앱 토큰에 쓰기 권한
+//     with: 아래 repositories: 를 넓힘         앱 토큰이 받을 저장소
+//     with: 아래 persist-credentials: true     토큰이 .git/config 에 남는다
+//     with: 아래 ref: 를 바꿈                  다른 코드를 같은 권한으로 돌린다
+//
+// **그렇다고 블록을 통째로 넣지는 않는다.** 실제 워크플로 35장으로 쟀을
+// 때 `with:`/`env:` 자식 전부를 넣으면 229줄이 새로 얼어붙고, 그중
+// 153줄이 `claude_args`·`prompt` 의 블록 스칼라 **본문**이다 — 프롬프트
+// 한 글자만 고쳐도 승인 대기가 된다. 그것이 이 모듈이 생긴 이유인
+// #679 의 고장 그대로다.
+//
+// 그래서 `AUTHORITY_LINE` 에 **권한을 주는 키 이름만** 더한다. 블록을
+// 추적하지 않으니 본문은 그대로 자유롭고, 같은 35장에서 새로 얼어붙는
+// 줄은 **19줄**이다(ref 8 · persist-credentials 3 · base_branch 2 ·
+// branch_prefix 2 · claude_args 2 · prompt 2). `node-version` · `cache` ·
+// `fetch-depth` · `path` · `retention-days` 같은 설정은 **한 줄도**
+// 들어오지 않는다.
+//
 // **값까지 본다.** `permissions: contents: read` 를 `write` 로 바꾸는 것은
 // 키가 같고 값만 다르다 — 그게 정확히 막아야 할 모양이다.
 //
@@ -66,6 +91,10 @@ const AUTHORITY_LINE = [
   /^\s*-\s*cron\s*:/,
   /^\s*(branches|tags|paths|paths-ignore|types)\s*:/,
   /^\s*[A-Z][A-Z0-9_]*\s*:/,         // env 키 (대문자 관례)
+  // `with:`/`env:` 아래에 와도 **권한을 주는** 키. 블록을 추적하지 않고
+  // 이름으로 본다 — 머리말의 측정(229줄 vs 19줄)이 그 이유다.
+  /^\s*(ref|token|github[-_]token|persist-credentials|app-id|private-key|owner|repositories|permission-[a-z-]+)\s*:/,
+  /^\s*(allowed[-_]tools|disallowed[-_]tools|claude_args|prompt|base_branch|branch_prefix)\s*:/,
 ];
 
 /** 줄 안 어디에 있어도 권한을 바꾸는 모양 */
