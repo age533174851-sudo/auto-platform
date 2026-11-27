@@ -25,9 +25,20 @@
 // 검증된 경로를 깨뜨리지 않는다.
 
 import fs from 'node:fs';
+import { stripJsComments } from './lib/strip-comments.mjs';
 
 const REGISTRY = 'src/lib/strategies/registry.ts';
-const src = fs.readFileSync(REGISTRY, 'utf8');
+// **선언도 주석으로 바꿔치기된다.** 아래 블록 추출은 `checkFlag` 의
+// **첫 일치**를 집으므로, 코드보다 앞에 놓인 주석이 이긴다. 실제로 돌려
+// 확인했다 — daily-ladder(위임하지 않고 이름을 직접 읽는 갈래)에서:
+//
+//   진짜 읽기(`body.checkOnly`)만 지우면                 rc=1  ← 앵커는 동작한다
+//   지우고 블록에 `// … checkFlag: 'dryRun'` 를 적으면   rc=0  ← 구멍
+//     (판정줄이 `'dryRun'를 직접 읽음` 으로 바뀐다 —
+//      검사기가 **엉뚱한 이름**을 검증하고 통과한 것이다)
+//
+// 그래서 레지스트리도 주석을 걷고 읽는다.
+const src = stripJsComments(fs.readFileSync(REGISTRY, 'utf8'));
 
 // 레지스트리에서 (id, route, checkFlag, executionReady)를 뽑는다.
 // 파서를 만들지 않는다 — 이 파일의 모양은 안정적이고, 모양이 바뀌면
@@ -60,7 +71,19 @@ for (const s of specs) {
     bad = true;
     continue;
   }
-  const body = fs.readFileSync(file, 'utf8');
+  // **적혀 있는 것과 부르는 것은 다르다.** 아래 두 판정은 원문을 보면
+  // 주석으로도 만족된다 — 기계 탐침으로 실제로 돌려 확인했다(변이는
+  // 저장소의 TypeScript 파서로 구문 유효성 확인):
+  //
+  //   scalp 의 위임 호출을 지우면                         rc=1  ← 앵커는 동작한다
+  //   지우고 그 이름 없는 주석을 적으면                   rc=1  ← 대조
+  //   지우고 **주석에만** `checkOnlyOf(` 를 적으면        rc=0  ← 구멍
+  //   daily-ladder 가 읽는 자리를 지우면                  rc=1  ← 앵커는 동작한다
+  //   지우고 **주석에만** `body.checkOnly` 를 적으면      rc=0  ← 구멍
+  //
+  // 즉 주석 한 줄로 **점검 호출이 주문을 낼 수 있는 상태**가 통과했다.
+  // 이 파일 머리에 적힌 고장이 바로 그것이다. 그래서 주석을 걷고 본다.
+  const body = stripJsComments(fs.readFileSync(file, 'utf8'));
 
   const delegates = /checkOnlyOf\s*\(/.test(body);
   if (delegates) {
