@@ -19,11 +19,35 @@
 // 그리고 변동률의 기준(주식 = 어제 종가 / 코인 = 24시간 롤링)을 같은
 // 말로 적지 않는지도 본다.
 import { readFileSync, existsSync } from 'node:fs';
+import { stripJsComments } from './lib/strip-comments.mjs';
 
 let bad = 0;
 const err = (m) => { console.error(`❌ ${m}`); console.error(`::error::${m}`); bad += 1; };
 const read = (p) => existsSync(p) ? readFileSync(p, 'utf8') : '';
-const code = (s) => s.split('\n').filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+/**
+ * 주석을 뺀 본문. 규칙을 주석으로 만족시키지 못하게 한다.
+ *
+ * **줄머리만 보면 모자랐다.** 전에는 `//`·`*`·`/*`로 **시작하는 줄**만
+ * 버렸다. 이 검사기의 앵커는 대부분 오류 코드·상수 문자열이라, 꼬리
+ * 주석에 그 글자만 남겨도 만족됐다. 기계 탐침으로 실제로 돌려 확인한
+ * 구멍 둘 — 전부 TS 구문이 유효하고, **이 검사기가 막으려고 쓰인 바로
+ * 그 고장**이 되살아나는데 통과했다:
+ *
+ *   if (false) { // if (items.length === 0 && !allowMock) {
+ *     → 공급자 미설정 거부가 꺼지고 지어낸 기사가 ok 로 나간다
+ *
+ *   if (items.length === 0) source = 'TRAIGO'; // source = 'MOCK_NOT_REAL_NEWS'
+ *     → 지어낸 기사가 우리 출처로 적혀 실제 기사와 구별되지 않는다
+ *       (머리말 ①이 적어 둔 그 사고다)
+ *
+ * 먼저 앵커가 필요한지 확인했다 — 두 줄을 지우면 각각 rc=1 이다.
+ *
+ * 그래서 공용 `stripJsComments`로 바꾼다(검사기 17개가 이미 쓴다).
+ * 좁히는 쪽으로 틀리지 않는지 먼저 쟀다 — 문자열·템플릿 안의 URL을 그대로
+ * 두고 정규식 리터럴·나눗셈을 주석으로 오인하지 않는다. 금지 구문 쪽도
+ * 같은 기준이 맞다: 주석에 적힌 호출은 호출이 아니다.
+ */
+const code = (s) => stripJsComments(s);
 
 // ── ① 지어낸 기사를 진짜처럼 내보내지 않는다 ──
 {
