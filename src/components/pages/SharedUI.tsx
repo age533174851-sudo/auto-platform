@@ -7,6 +7,24 @@ import { cvt, fmt, fmtPct, clamp, tr, gS, sS, uid } from '@/lib/utils';
 import { ASSETS, TYPE_LABEL, TYPE_COLOR } from '@/data/assets';
 import type { Asset } from '@/types';
 import { R, FS, FW, SP, BORDER_W } from '@/lib/ui/tokens';
+import { SliderField } from '@/components/ui/SettingField';
+
+/**
+ * 포지션 사이저 기본값.
+ *
+ * 상수로 꺼내는 이유: 화면이 "이 값이 기본과 다릅니다"라고 말하려면
+ * 기본이 무엇인지 알아야 한다. useState 안에만 있으면 화면이 자기 사본을
+ * 들게 되고, 언젠가 둘이 어긋나 **틀린 기본값을 알려준다.** DCA_DEFAULTS와
+ * 같은 이유로 여기 바깥에 둔다.
+ */
+export const POSITION_SIZER_DEFAULTS = {
+  // 한 트레이드에서 자본의 몇 %를 잃어도 되는가. 2는 흔히 쓰는 기본값
+  // ("2% 룰") — 보수/균형/공격 배수가 추가로 곱해진다.
+  riskPct: 2,
+  // 진입가에서 손절가까지 거리(%). 좁을수록 **최대 포지션이 커진다** —
+  // posSize = riskAmt / (slPct/100). 숫자를 반으로 줄이면 포지션이 2배다.
+  slPct: 5,
+} as const;
 
 // LOGO_DB 항목의 형태. initials/bg는 Logo 컴포넌트가 이미지 로드 실패 시
 // 쓰는 폴백이며 대부분의 항목이 채워 넣는다. url/fallback은 구형 항목용.
@@ -1780,8 +1798,8 @@ export function LiquidationCalc({ entryPrice, leverage, side, currency }: {
 }
 
 export function PositionSizer({ balance, currency }: { balance: number; currency: string }) {
-  const [riskPct, setRiskPct]   = useState(2);
-  const [slPct, setSlPct]       = useState(5);
+  const [riskPct, setRiskPct]   = useState<number>(POSITION_SIZER_DEFAULTS.riskPct);
+  const [slPct, setSlPct]       = useState<number>(POSITION_SIZER_DEFAULTS.slPct);
   const [mode, setMode]         = useState<'conservative' | 'balanced' | 'aggressive'>('balanced');
   const modeMulti = mode === 'conservative' ? 0.5 : mode === 'balanced' ? 1 : 2;
   const riskAmt   = balance * (riskPct / 100) * modeMulti;
@@ -1804,18 +1822,32 @@ export function PositionSizer({ balance, currency }: { balance: number; currency
           </button>
         ))}
       </div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-        <span style={{ color: T.muted, fontSize: 11 }}>리스크 %</span>
-        <input type="number" value={riskPct} min={0.1} max={10} step={0.1}
-          onChange={e => setRiskPct(Number(e.target.value))}
-          style={{ width: 60, background: T.surf, border: '1px solid ' + T.border, borderRadius: 6, color: T.txt, fontSize: 11, padding: '2px 6px', textAlign: 'right' }} />
-      </div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 10 }}>
-        <span style={{ color: T.muted, fontSize: 11 }}>손절 %</span>
-        <input type="number" value={slPct} min={0.1} max={50} step={0.5}
-          onChange={e => setSlPct(Number(e.target.value))}
-          style={{ width: 60, background: T.surf, border: '1px solid ' + T.border, borderRadius: 6, color: T.txt, fontSize: 11, padding: '2px 6px', textAlign: 'right' }} />
-      </div>
+      {/* ── 숫자칸만 있던 두 칸을 슬라이더 + 숫자칸으로 ──
+          이 둘은 아래 '최대 포지션'을 직접 움직인다. 리스크 2를 3으로
+          올리는 건 포지션 50% 증가고, 손절 5를 2.5로 좁히는 건 포지션
+          2배다. 60px 숫자칸으로는 감이 안 오고, 폰에서는 소수점 한
+          자리를 정확히 치기도 어렵다. 슬라이더로 대략 맞추고 숫자칸으로
+          다듬는다. 기본값(2/5)이 꼬리표로 늘 보이므로, 내가 바꾼 값인지
+          원래 그랬던 것인지 헷갈리지 않는다. */}
+      <SliderField
+        label="리스크 %"
+        value={riskPct}
+        base={POSITION_SIZER_DEFAULTS.riskPct}
+        unit="%"
+        min={0.1} max={10} step={0.1}
+        onChange={v => setRiskPct(v)}
+        hint="1회 손실로 감수할 자본 비율. 보수/균형/공격 모드 배수가 더 곱해진다."
+      />
+      <SliderField
+        label="손절 %"
+        value={slPct}
+        base={POSITION_SIZER_DEFAULTS.slPct}
+        unit="%"
+        min={0.1} max={50} step={0.5}
+        onChange={v => setSlPct(v)}
+        color={T.red}
+        hint="진입가에서 손절가까지 거리. 좁힐수록 최대 포지션이 커진다."
+      />
       <div style={{ display: 'flex', justifyContent: 'space-between' }}>
         <span style={{ color: T.muted, fontSize: 11 }}>최대 포지션</span>
         <span style={{ color: T.acl, fontWeight: 800, fontSize: 13 }}>
