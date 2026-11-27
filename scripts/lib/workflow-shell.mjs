@@ -232,11 +232,36 @@ export function invokesScript(yamlText, scriptPath) {
   for (const cmd of shellCommands(yamlText)) {
     const parts = cmd.split(/\s+/);
     if (parts[0] !== 'node') continue;
+    const args = parts.slice(1);
+    // **`node` 뒤에 경로가 있다고 그 파일이 도는 것은 아니다.**
+    //
+    // 실측 반례(#792 코멘트 7209193550, 유효 YAML · `bash -n` 통과 ·
+    // 실제로 돌려 보면 `noop` 만 찍힌다):
+    //
+    //     run: node --eval 'console.log("noop")' scripts/check-audit-readonly.mjs
+    //
+    // Node 는 `--eval` 의 표현식을 실행하고 뒤의 경로는 **인자**로 넘긴다 —
+    // 그 파일은 돌지 않는다. `-e`·`-p`·`--print` 도 같다(`-pe` 처럼 붙여 쓸 수
+    // 있다). 그래서 이 꼴이면 파일 호출로 세지 않는다.
+    //
+    // `--test` 는 반대다 — 뒤의 경로들을 **실제로 돌린다.** 이 저장소가
+    // 시험 파일을 그렇게 부르므로 양성으로 남겨야 한다(검사기 95개로 쟀다).
+    if (args.some(a => EVAL_OPTION.test(a))) continue;
     // 인용부호가 붙은 인자는 명령이 아니라 자료다 — 벗기지 않고 그대로 본다.
-    if (parts.slice(1).some(a => a === path || a === `./${path}`)) return true;
+    if (args.some(a => a === path || a === `./${path}`)) return true;
   }
   return false;
 }
+
+/**
+ * Node 가 **파일 대신 식을 실행하게** 만드는 옵션.
+ *
+ * `--eval` · `--print` 와 짧은 꼴 `-e` · `-p`(`-pe`·`-ep` 처럼 붙여 쓸 수 있다),
+ * 그리고 `--eval=CODE` 처럼 등호로 붙인 꼴까지 본다.
+ *
+ * Node CLI 를 전부 해석한다고 주장하지 않는다 — 실측된 이 한 종류를 막는다.
+ */
+const EVAL_OPTION = /^(?:--(?:eval|print)(?:=|$)|-[ep]+$)/;
 
 /**
  * 앞에 붙는 환경변수 지정을 떼어낸다 — **명령 위치를 바꾸지 않는다.**

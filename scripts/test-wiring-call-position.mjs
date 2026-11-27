@@ -133,3 +133,26 @@ test('좁히는 쪽으로 틀리지 않았다 — 환경변수 접두와 `node -
   assert.equal(asIs.rc, 0, asIs.out);
   assert.match(asIs.out, /아무도 안 부르는 것 0개/);
 });
+
+test('★ `node --eval` 뒤의 경로는 도는 파일이 아니다 — 음성 대조', () => {
+  // 실측 반례(#792 코멘트 7209193550). 유효 YAML 이고 `bash -n` 도 통과하며,
+  // 실제로 돌려 보면 `noop` 만 찍히고 검사기는 돌지 않는다:
+  //
+  //     run: node --eval 'console.log("noop")' scripts/check-audit-readonly.mjs
+  //
+  // Node 는 식을 실행하고 뒤의 경로를 **인자**로 넘긴다. 짧은 꼴(`-e`·`-p`·
+  // `-pe`)과 등호 꼴(`--eval=CODE`)도 같다.
+  for (const opt of ["--eval 'console.log(\"noop\")'", "-pe '1'", '--eval=1']) {
+    const { rc, out } = runWiring((p) => {
+      const ci = p(WF('ci.yml'));
+      const L = readFileSync(ci, 'utf8').split('\n');
+      const i = L.findIndex((l) => l.includes('check-audit-readonly.mjs'));
+      assert.ok(i >= 0);
+      const indent = L[i].length - L[i].replace(/^\s*/, '').length;
+      L[i] = `${' '.repeat(indent)}run: node ${opt} scripts/check-audit-readonly.mjs`;
+      writeFileSync(ci, L.join('\n'));
+    });
+    assert.equal(rc, 1, `node ${opt} 뒤의 경로를 호출로 셌다\n${out}`);
+    assert.match(out, /아무도 부르지 않는 검사기[\s\S]*check-audit-readonly\.mjs/);
+  }
+});
