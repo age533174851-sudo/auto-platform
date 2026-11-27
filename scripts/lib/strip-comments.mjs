@@ -119,6 +119,70 @@ export function stripJsComments(t) {
 }
 
 /**
+ * SQL(마이그레이션) 주석 제거.
+ *
+ * **왜 필요한가** — 마이그레이션을 읽는 검사기들이 주석을 걷을 때
+ * `/^\s*(--|\/\*)/`처럼 **줄머리만** 뗀다. 그래서 꼬리 주석 한 줄로
+ * 관문이 열린다. `check-paper-challenge-wiring`에서 실측했다:
+ *
+ *     AND TRUE -- AND c.close_intent IS NULL
+ *     TRUE     -- paper_event_time_guard(p_event_effective_at)
+ *     TRUE     -- c.user_id = p_user
+ *
+ * 세 변이 모두 지우면 rc=1 인데 꼬리 주석으로 옮기면 **rc=0** 이었다.
+ * 소유자 조건(`c.user_id = p_user`)은 개수를 세는 규칙이라 주석이 그대로
+ * 한 곳으로 셌다 — 그 조건이 빠지면 남의 챌린지가 닫힌다.
+ *
+ * **무엇을 불투명하게 두는가**
+ *   · `'...'` 문자열과 `"..."` 식별자 안의 `--`는 값이다. 표준 SQL
+ *     (`standard_conforming_strings=on`)에서 역슬래시는 글자이므로 escape를
+ *     따라가지 않는다. `'it''s'`는 닫고 다시 여는 것으로 같은 상태가 된다.
+ *   · 블록 주석은 **겹친다**(Postgres). 깊이를 센다.
+ *
+ * **달러 인용 본문은 투명하게 둔다** — `$$ … $$` 안은 plpgsql **코드**이고
+ * `--`는 거기서도 주석이다. 이 저장소의 마이그레이션 15개가 전부
+ * `AS $$ … $$` 꼴이고, 위에서 뚫린 앵커들도 그 본문 안에 있다. 안쪽을
+ * 불투명하게 두면 아무것도 걷지 못한다. 본문 안의 `'...'`는 그 안에서
+ * 다시 불투명하게 다룬다.
+ */
+export function stripSqlComments(t) {
+  const s = String(t);
+  let out = '', i = 0;
+  while (i < s.length) {
+    const c = s[i], d = s[i + 1];
+    // 달러 인용 여닫이 — 태그는 식별자이거나 비어 있다
+    if (c === '$') {
+      const m = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/.exec(s.slice(i));
+      if (m) { out += m[0]; i += m[0].length; continue; }
+    }
+    if (c === "'" || c === '"') {
+      out += c; i += 1;
+      while (i < s.length && s[i] !== c) { out += s[i]; i += 1; }
+      if (i < s.length) { out += s[i]; i += 1; }
+      continue;
+    }
+    if (c === '-' && d === '-') { while (i < s.length && s[i] !== '\n') i += 1; continue; }
+    if (c === '/' && d === '*') {
+      // 블록 주석은 **겹친다**(Postgres). 그리고 **줄바꿈은 남긴다** —
+      // 여러 줄 주석을 한 칸으로 접으면 그 뒤의 줄 번호가 밀려서, 줄 단위로
+      // 보는 규칙과 보고된 줄 번호가 어긋난다. 처음에 접어 놓고 쟀다가
+      // `094`의 리터럴 12개가 "사라졌다"고 나왔고, 실제로는 밀린 것이었다.
+      let depth = 0, nl = '';
+      while (i < s.length) {
+        if (s[i] === '/' && s[i + 1] === '*') { depth += 1; i += 2; continue; }
+        if (s[i] === '*' && s[i + 1] === '/') { depth -= 1; i += 2; if (depth === 0) break; continue; }
+        if (s[i] === '\n') nl += '\n';
+        i += 1;
+      }
+      out += ' ' + nl;
+      continue;
+    }
+    out += c; i += 1;
+  }
+  return out;
+}
+
+/**
  * YAML(과 그 안의 `run:` 셸) 주석 제거.
  *
  * `#`은 줄 맨 앞이거나 **공백 뒤**일 때만 주석이다 — `a#b`는 값이고,

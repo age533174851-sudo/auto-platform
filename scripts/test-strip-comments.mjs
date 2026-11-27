@@ -29,8 +29,9 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { stripJsComments, stripYamlComments } from './lib/strip-comments.mjs';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { stripJsComments, stripSqlComments, stripYamlComments } from './lib/strip-comments.mjs';
 
 test('★ 정규식 리터럴 안의 인용부호에 속지 않는다', () => {
   const src = 'const re = /["\']+/g;\n// MARK\nconst keep = 1;\n';
@@ -107,4 +108,92 @@ test('stripYamlComments 는 인용 안의 # 를 자르지 않는다 (기존 계�
   assert.equal(stripYamlComments('run: echo "a # b"').trim(), 'run: echo "a # b"');
   assert.equal(stripYamlComments('key: v  # 이유').trim(), 'key: v');
   assert.equal(stripYamlComments('color: "#fff"').trim(), 'color: "#fff"');
+});
+
+// ── SQL(마이그레이션) ─────────────────────────────────────────────
+//
+// 마이그레이션을 읽는 검사기들도 **줄머리만** 뗀다. `check-paper-challenge-wiring`
+// 에서 실측한 구멍 세 개를 여기서 못 박는다 — 지우면 rc=1 인데 꼬리 주석으로
+// 옮기면 rc=0 이었다. 그중 `c.user_id = p_user` 는 **개수를 세는** 규칙이라
+// 주석이 그대로 한 곳으로 셌고, 그 조건이 빠지면 남의 챌린지가 닫힌다.
+
+test('★ SQL 꼬리 주석을 걷는다 — 줄머리만 떼던 자리', () => {
+  assert.equal(stripSqlComments('AND TRUE -- AND c.close_intent IS NULL'), 'AND TRUE ');
+  assert.equal(stripSqlComments('  TRUE -- paper_event_time_guard(p_event_effective_at)'), '  TRUE ');
+  assert.equal(stripSqlComments('   AND TRUE -- c.user_id = p_user'), '   AND TRUE ');
+});
+
+test('문자열·식별자 안의 -- 는 값이므로 남는다 — 좁히는 쪽 대조', () => {
+  // 실제로 `054_worker_version.sql` 의 COMMENT 문구가 이 모양이다.
+  for (const src of [
+    "SELECT 'a--b';",
+    "SELECT 'it''s--x';",
+    'SELECT "col--x" FROM t;',
+    "COMMENT ON COLUMN t.c IS 'SHA (ARG GIT_SHA <- fly-deploy --build-arg)';",
+  ]) {
+    assert.equal(stripSqlComments(src), src, `값이 잘렸습니다: ${src}`);
+  }
+});
+
+test('★ 달러 인용 본문 안의 주석도 걷는다 (plpgsql 코드다)', () => {
+  // 이 저장소의 마이그레이션 15개가 `AS $$ … $$` 꼴이고, 위에서 뚫린 앵커가
+  // 전부 그 본문 안에 있다. 안쪽을 불투명하게 두면 아무것도 걷지 못한다.
+  const src = 'AS $$\n  v := 1; -- c.user_id = p_user\n$$';
+  assert.equal(stripSqlComments(src), 'AS $$\n  v := 1; \n$$');
+  // 태그가 붙은 꼴도 같다
+  assert.equal(stripSqlComments('$body$ x -- y\n$body$'), '$body$ x \n$body$');
+  // 본문 안의 문자열은 그 안에서 다시 불투명하다
+  assert.equal(stripSqlComments("$$ v := 'a--b'; -- c\n$$"), "$$ v := 'a--b'; \n$$");
+});
+
+test('위치 인자 $1 을 달러 인용 여닫이로 읽지 않는다', () => {
+  assert.equal(stripSqlComments('SELECT $1, $2 -- x'), 'SELECT $1, $2 ');
+});
+
+test('블록 주석은 겹치고, 줄바꿈은 남는다', () => {
+  assert.equal(stripSqlComments('a /* x /* y */ z */ b'), 'a   b');
+  // 여러 줄 주석을 한 칸으로 접으면 뒤의 줄 번호가 밀린다. 처음에 접어 놓고
+  // 쟀다가 `094` 의 리터럴 12개가 "사라졌다"고 나왔고, 실제로는 밀린 것이었다.
+  const src = 'a\n/*\n 주석\n*/\nb';
+  assert.equal(stripSqlComments(src).split('\n').length, src.split('\n').length);
+});
+
+test('★ 실제 마이그레이션 111개 — 코드 줄의 문자열 리터럴을 하나도 먹지 않는다', () => {
+  // 반대 방향이 더 위험하다: 코드를 먹으면 금지 문구를 보는 검사가 조용히
+  // 아무것도 못 보게 된다. 줄 정렬이 유지되는지도 같이 본다.
+  const dir = 'supabase/migrations';
+  const files = readdirSync(dir).filter((f) => f.endsWith('.sql'));
+  assert.ok(files.length > 50, `마이그레이션을 못 찾았습니다 (${files.length}개)`);
+  let counted = 0, lost = 0, shifted = 0;
+  for (const f of files) {
+    const src = readFileSync(join(dir, f), 'utf8');
+    const L = src.split('\n');
+    const A = stripSqlComments(src).split('\n');
+    if (L.length !== A.length) shifted += 1;
+    for (let i = 0; i < L.length; i += 1) {
+      if (/^\s*(--|\/\*|\*)/.test(L[i])) continue;          // 원래도 버려진 줄
+      const dash = L[i].indexOf('--');
+      for (const m of L[i].matchAll(/'(?:[^']|'')*'/g)) {
+        if (dash >= 0 && m.index > dash) continue;           // 꼬리 주석 안의 값
+        counted += 1;
+        if (!(A[i] ?? '').includes(m[0])) lost += 1;
+      }
+    }
+  }
+  assert.equal(shifted, 0, '줄 정렬이 밀린 파일이 있습니다');
+  assert.equal(lost, 0, `코드 줄의 리터럴 ${lost}개가 잘렸습니다 (센 것 ${counted}개)`);
+  console.log(`    마이그레이션 ${files.length}개 · 코드 줄 리터럴 ${counted}개 · 잘린 것 0개 · 줄 정렬 유지`);
+});
+
+test('★ 실제 087 — 소유자 조건 3곳이 꼬리 주석으로 셀 수 없다', () => {
+  // `check-paper-challenge-wiring` 이 세는 바로 그 조건이다.
+  const src = readFileSync('supabase/migrations/087_paper_challenge_cancel.sql', 'utf8');
+  const real = [...stripSqlComments(src).matchAll(/c\.user_id = p_user/g)].length;
+  assert.equal(real, 3, `걷은 뒤 ${real}곳입니다 — 원문은 3곳이어야 합니다`);
+  // 한 곳을 꼬리 주석으로 옮기면 2곳으로 줄어야 한다 (예전엔 3곳으로 셌다)
+  const holed = src.replace('c.user_id = p_user', 'TRUE -- c.user_id = p_user');
+  assert.equal([...stripSqlComments(holed).matchAll(/c\.user_id = p_user/g)].length, 2);
+  // 줄머리만 떼던 예전 방식으로는 3곳으로 세어졌다 — 그게 구멍이었다
+  const lineHead = (t) => t.split('\n').filter((l) => !/^\s*(--|\/\*|\*)/.test(l)).join('\n');
+  assert.equal([...lineHead(holed).matchAll(/c\.user_id = p_user/g)].length, 3);
 });
