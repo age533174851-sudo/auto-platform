@@ -26,6 +26,7 @@ import { readFileSync, existsSync, mkdtempSync, writeFileSync, mkdirSync, rmSync
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
+import { stripJsComments } from './lib/strip-comments.mjs';
 
 const V = 'src/lib/engine/testnetDiagnoseVerdict.ts';
 const ROUTE = 'src/app/api/binance/futures/diagnose/route.ts';
@@ -47,10 +48,31 @@ const recvWindowMs = (() => {
   return m ? Number(m[1]) : null;
 })();
 
-/** 주석을 벗긴 소스. **자기 설명 주석을 근거로 통과하면 안 된다** */
-const code = (s) => s
-  .replace(/\/\*[\s\S]*?\*\//g, '')
-  .split('\n').map(l => l.replace(/\/\/.*$/, '')).join('\n');
+/**
+ * 주석을 벗긴 소스. **자기 설명 주석을 근거로 통과하면 안 된다**
+ *
+ * 공용 제거기를 쓴다. 전에는 여기서 직접 걷었는데 **인용부호를 몰라서**
+ * 문자열 안의 `//`에서도 잘랐다. URL 한 개가 그 줄의 나머지를 먹었고,
+ * 그러면 금지 앵커가 눈을 감는다. 기계 탐침으로 실제로 돌려 확인했다
+ * (변이는 저장소의 TypeScript 파서로 구문 유효성을 확인):
+ *
+ *     const _u = 'https://binance-docs.github.io/apidocs/';
+ *     const _x = () => setFuturesLeverage(1);
+ *
+ *   레버리지 변경 호출을 평범하게 넣으면      rc=1  ← 금지 앵커는 동작한다
+ *   `//` 없는 문자열을 앞에 두면              rc=1  ← 원인이 `//` 라는 대조
+ *   위처럼 URL 을 앞에 두면                   rc=0  ← 구멍
+ *
+ * 금지 경로 문자열(`/fapi/v1/marginType`)도 같은 모양으로 숨었다.
+ * 즉 **읽기만 해야 하는 진단이 배율·마진 모드를 고치는 코드**가 URL 한
+ * 개 뒤에 숨을 수 있었다. 이 검사기의 ①이 막으려던 바로 그것이다.
+ *
+ * 남은 한계: 공용 제거기는 아직 정규식 리터럴에서 탈선할 수 있고,
+ * 블록 주석의 줄바꿈을 남기지 않는다. 둘 다 #795가 고친다. 그래서
+ * `/^import /m`을 블록 주석으로 숨기는 자리는 **지금도 열려 있다** —
+ * 0으로 적지 않는다.
+ */
+const code = (s) => stripJsComments(s);
 
 /** `fn(` 호출의 인자 전체를 괄호를 세어 떼어 온다. 없으면 null */
 const callArgsOf = (src, fn) => {
