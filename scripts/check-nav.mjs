@@ -25,6 +25,7 @@
 // 하나도 안 잡히면 그건 '문제 없음'이 아니라 이 검사가 고장 난 것이다.
 
 import { readFileSync, existsSync } from 'node:fs';
+import { stripJsComments } from './lib/strip-comments.mjs';
 
 const MENU_FILE = 'src/lib/menuItems.tsx';
 const PAGE_FILE = 'src/app/page.tsx';
@@ -38,8 +39,22 @@ for (const f of [MENU_FILE, PAGE_FILE]) {
   if (!existsSync(f)) fail(`${f}를 찾지 못했습니다 — 이 검사가 무엇을 보고 있는지 다시 확인하세요`);
 }
 
-const menuSrc = readFileSync(MENU_FILE, 'utf8');
-const pageSrc = readFileSync(PAGE_FILE, 'utf8');
+// **적혀 있는 것과 부르는 것은 다르다.** 아래는 전부 원문을 훑어
+// 찾는다. 주석에 같은 토큰이 있으면 그것으로 만족된다 — 기계 탐침으로
+// 실제로 돌려 확인했다(변이는 저장소의 TypeScript 파서로 구문 유효성
+// 확인, 끝나면 바이트 동일 복원):
+//
+//   trading 의 화면 분기를 없애면                        rc=1  ← 앵커는 동작한다
+//   없애고 그 토큰 없는 주석을 적으면                    rc=1  ← 대조
+//   없애고 주석에만 `case 'trading':` 를 적으면          rc=0  ← 구멍
+//   없애고 메뉴 블록에 `/* disabled: true */` 를 적으면  rc=0  ← 구멍
+//   없애고 메뉴 블록에 `/* href: … */` 를 적으면         rc=0  ← 구멍
+//
+// 셋 다 결과가 같다 — **눌러도 아무 일도 안 일어나는 메뉴**가 통과한다.
+// 이 파일이 막으려는 고장이 바로 그것이다. 면제 조건(href·disabled)까지
+// 주석으로 만들어지므로, 두 파일 다 주석을 걷고 읽는다.
+const menuSrc = stripJsComments(readFileSync(MENU_FILE, 'utf8'));
+const pageSrc = stripJsComments(readFileSync(PAGE_FILE, 'utf8'));
 
 // MENU의 id들. `{ id:'trading', ... }` 모양을 그대로 읽는다.
 // **문자셋을 좁게 잡으면 안 읽히는 항목이 생긴다.** 처음에 [a-zA-Z_0-9]로
