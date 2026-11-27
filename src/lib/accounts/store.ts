@@ -7,77 +7,41 @@ import type { HubState, HubAccount, ProfitTransferRule } from './types';
 
 export const HUB_STORE_KEY = 'tg_hub_accounts_v1';
 
-// ── Mock seed: 마스터 프롬프트 예시 그대로 ─────────────────
+// ── 빈 시작 상태 ─────────────────────────────────────────
+//
+// **저장된 것이 없으면 빈 계좌다.** 예전에는 여기서 "마스터 프롬프트
+// 예시"를 돌려줬다 — 총 1,000만 원 · 오늘 +16.2만 원 · 실현손익 +109.5만
+// 원 · 단타 봇 실행 중 · BTC 5배 롱을 비롯한 포지션 6건. 화면
+// (`HubAccountsPage`, 로그인이 필요한 '통합 운용' 탭)은 그것을 예시라는
+// 표시 없이 **사용자의 계좌로** 그렸고, 버튼 하나만 눌러도 그 숫자가
+// localStorage에 저장돼 남았다. 넣은 적 없는 돈과 한 적 없는 거래다.
+//
+// 계좌 **칸**(단타·장투·현금·자동매매)은 남긴다 — 화면이 그릴 자리이고
+// 지어낸 사실이 아니다. 금액·손익·포지션·봇 상태는 전부 비운다.
+// (`dca.ts`의 `loadDCARules`가 같은 이유로 예시 이력을 걷어 냈다.)
+function emptyAccount(
+  id: string, kind: HubAccount['kind'], name: string, icon: string, color: string,
+  riskLevel: HubAccount['riskLevel'],
+): HubAccount {
+  return {
+    id, kind, name, icon, color,
+    balance: 0,
+    cash: 0,
+    realizedPnl: 0,
+    todayPnl: 0,
+    cumulativeReturn: 0,
+    riskLevel,
+    botActive: false,
+    positions: [],
+  };
+}
+
 function seed(): HubState {
-  const now = Date.now();
   const accounts: HubAccount[] = [
-    {
-      id: 'acc_short',
-      kind: 'shortterm',
-      name: '단타 계좌',
-      icon: '⚡',
-      color: '#F59E0B',
-      balance: 3000000,
-      cash: 800000,
-      realizedPnl: 245000,
-      todayPnl: 120000,
-      cumulativeReturn: 8.93,
-      riskLevel: 'high',
-      botActive: true,
-      positions: [
-        { id: 'p1', accountId: 'acc_short', symbol: 'BTC',    name: 'Bitcoin',   assetClass: 'crypto_perp', side: 'long',  qty: 0.012, avgPrice: 95800000, currentPrice: 97200000, leverage: 5, liqPrice: 87100000, openedAt: now-3600_000, isBot: true },
-        { id: 'p2', accountId: 'acc_short', symbol: 'NATGAS', name: 'Nat. Gas',  assetClass: 'commodity',   side: 'short', qty: 50,    avgPrice: 3.42,     currentPrice: 3.28,     leverage: 3, liqPrice: 4.11,     openedAt: now-7200_000, isBot: true },
-      ],
-    },
-    {
-      id: 'acc_long',
-      kind: 'longterm',
-      name: '장투 계좌',
-      icon: '📈',
-      color: '#3B82F6',
-      balance: 6000000,
-      cash: 300000,
-      realizedPnl: 850000,
-      todayPnl: 42000,
-      cumulativeReturn: 14.12,
-      riskLevel: 'low',
-      botActive: false,
-      positions: [
-        { id: 'p3', accountId: 'acc_long', symbol: 'QQQ',  name: 'Invesco QQQ',  assetClass: 'etf',         side: 'spot', qty: 4,    avgPrice: 528_000, currentPrice: 562_000, openedAt: now-86400_000*30 },
-        { id: 'p4', accountId: 'acc_long', symbol: 'NVDA', name: 'NVIDIA',       assetClass: 'stock',       side: 'spot', qty: 3,    avgPrice: 178_000, currentPrice: 201_000, openedAt: now-86400_000*45 },
-        { id: 'p5', accountId: 'acc_long', symbol: 'MSFT', name: 'Microsoft',    assetClass: 'stock',       side: 'spot', qty: 2,    avgPrice: 520_000, currentPrice: 548_000, openedAt: now-86400_000*60 },
-        { id: 'p6', accountId: 'acc_long', symbol: 'BTC',  name: 'Bitcoin (현물)',assetClass: 'crypto_spot', side: 'spot', qty: 0.02, avgPrice: 88_000_000, currentPrice: 97_200_000, openedAt: now-86400_000*90 },
-      ],
-    },
-    {
-      id: 'acc_cash',
-      kind: 'cash',
-      name: '현금 대기금',
-      icon: '💵',
-      color: 'var(--t-sub)',
-      balance: 1000000,
-      cash: 1000000,
-      realizedPnl: 0,
-      todayPnl: 0,
-      cumulativeReturn: 0,
-      riskLevel: 'low',
-      positions: [],
-    },
-    {
-      id: 'acc_bot',
-      kind: 'autobot',
-      name: '자동매매 계좌',
-      icon: '🤖',
-      color: '#7C3AED',
-      balance: 0,
-      cash: 0,
-      realizedPnl: 0,
-      todayPnl: 0,
-      cumulativeReturn: 0,
-      riskLevel: 'mid',
-      botActive: false,
-      positions: [],
-    },
+    emptyAccount('acc_short', 'shortterm', '단타 계좌',     '⚡', '#F59E0B',     'high'),
+    emptyAccount('acc_long',  'longterm',  '장투 계좌',     '📈', '#3B82F6',     'low'),
+    emptyAccount('acc_cash',  'cash',      '현금 대기금',   '💵', 'var(--t-sub)', 'low'),
+    emptyAccount('acc_bot',   'autobot',   '자동매매 계좌', '🤖', '#7C3AED',     'mid'),
   ];
 
   return {

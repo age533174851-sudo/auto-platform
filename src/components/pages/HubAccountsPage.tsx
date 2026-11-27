@@ -198,7 +198,7 @@ function HubAccountsPageInner() {
           </div>
         </div>
         <button
-          onClick={async () => { if ((await confirmDialog('계좌 데이터를 초기 mock 상태로 되돌립니다. 진행할까요?', { danger: true }))) persist(resetHubState()); }}
+          onClick={async () => { if ((await confirmDialog('계좌 데이터를 빈 상태로 되돌립니다. 진행할까요?', { danger: true }))) persist(resetHubState()); }}
           style={{ ...buttonStyle('ghost', 'sm'), gap: 6 }}
         >
           <RefreshCw size={14} strokeWidth={IC_STROKE} /> 초기화
