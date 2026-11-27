@@ -18,6 +18,7 @@
 // 부르는가, 그 결과가 POST 본문에 들어가는가, 섞이면 안 되는 것이
 // 섞이지 않았는가.
 import { readFileSync, existsSync } from 'node:fs';
+import { stripJsComments } from './lib/strip-comments.mjs';
 
 const PREC = 'src/lib/exchanges/gateSpotPrecision.ts';
 const PLAN = 'src/lib/exchanges/gateSpotPlan.ts';
@@ -31,17 +32,11 @@ const read = (p) => {
   if (!existsSync(p)) { fail(`${p}가 없습니다`); return ''; }
   return readFileSync(p, 'utf8');
 };
-/**
- * 주석은 규율이 아니다.
- *
- * `://`를 주석으로 읽지 않는다 — 블록 주석을 먼저 지우고, 줄 주석은
- * 앞 글자가 `:`가 아닐 때만 자른다. (같은 함정을 현물 검사기에서 한 번
- * 겪었다: URL이 있는 줄이 통째로 사라져 하드코딩 호스트를 못 잡았다.)
- */
-const stripTs = (s) => String(s)
-  .replace(/\/\*[\s\S]*?\*\//g, ' ')
-  .replace(/(^|[^:\\])\/\/[^\n]*/gm, '$1 ');
-
+// 주석을 걷는 일은 공용 `scripts/lib/strip-comments.mjs` 한 곳에 있다.
+// 여기에 사본이 있었다 — 그 파일의 머리글이 미리 적어 둔 위험이다:
+//
+//   그래서 이 함수를 **한 곳에만** 둔다. 검사기마다 각자 복사해 두면 언젠가
+//   한쪽만 고쳐지고, 그때부터 그 검사기는 조용히 아무것도 막지 않는다.
 /** `marker`(필요하면 `after`) 뒤의 첫 블록을 짝이 맞는 `}`까지 */
 function blockAfter(src, marker, after) {
   const at = src.indexOf(marker);
@@ -65,11 +60,11 @@ function blockAfter(src, marker, after) {
   return null;
 }
 
-const prec = stripTs(read(PREC));
-const plan = stripTs(read(PLAN));
-const api  = stripTs(read(API));
-const exec = stripTs(read(EXEC));
-const reg  = stripTs(read(REG));
+const prec = stripJsComments(read(PREC));
+const plan = stripJsComments(read(PLAN));
+const api  = stripJsComments(read(API));
+const exec = stripJsComments(read(EXEC));
+const reg  = stripJsComments(read(REG));
 
 // ══════════════ ① 가격 자릿수를 거래소에서 읽는다 ══════════════
 {
@@ -220,7 +215,7 @@ const reg  = stripTs(read(REG));
     if (verdict === 'SUPPORTED') {
       // metadata를 읽는 것만으로는 부족하다 — 본문까지 들어가야 한다
       const f = evidence.split(':')[0];
-      const c = existsSync(f) ? stripTs(readFileSync(f, 'utf8')) : '';
+      const c = existsSync(f) ? stripJsComments(readFileSync(f, 'utf8')) : '';
       if (!/body\.price = String\(sentPrice\)/.test(c)) {
         fail(`${REG}: GATE_SPOT을 SUPPORTED로 적었는데 근거 파일이 맞춘 가격을 `
            + `본문에 넣는 것을 보이지 않습니다 (${f})`);

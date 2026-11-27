@@ -16,6 +16,7 @@
 //
 // 배선이라 순수 테스트로는 안 잡힌다.
 import { readFileSync } from 'node:fs';
+import { stripJsComments } from './lib/strip-comments.mjs';
 import { join } from 'node:path';
 
 const ROOT = process.cwd();
@@ -26,12 +27,11 @@ function read(rel) {
   try { return readFileSync(join(ROOT, rel), 'utf8'); }
   catch { err(`${rel}을 읽지 못했습니다 — 검사가 대상을 잃었습니다`); return null; }
 }
-function stripComments(src) {
-  return String(src)
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')
-    .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
-}
-
+// 주석을 걷는 일은 공용 `scripts/lib/strip-comments.mjs` 한 곳에 있다.
+// 여기에 사본이 있었다 — 그 파일의 머리글이 미리 적어 둔 위험이다:
+//
+//   그래서 이 함수를 **한 곳에만** 둔다. 검사기마다 각자 복사해 두면 언젠가
+//   한쪽만 고쳐지고, 그때부터 그 검사기는 조용히 아무것도 막지 않는다.
 /** 전략 실행 라우트 전부. **하나라도 빠지면 그 전략만 조용히 다르게 돈다** */
 const ROUTES = [
   'src/app/api/autotrade/daily-ladder/route.ts',
@@ -43,7 +43,7 @@ const ROUTES = [
 for (const rel of ROUTES) {
   const src = read(rel);
   if (!src) continue;
-  const code = stripComments(src);
+  const code = stripJsComments(src);
   if (!/gateOrder\s*\(/.test(code)) {
     err(`${rel} — 모드 관문(gateOrder)이 없습니다`
       + '\n     관문이 없으면 PAPER로 켠 예약이 그대로 내려와'
@@ -58,7 +58,7 @@ for (const rel of ROUTES) {
 for (const rel of ROUTES) {
   const src = read(rel);
   if (!src) continue;
-  const code = stripComments(src);
+  const code = stripJsComments(src);
   // **정의가 아니라 호출을 본다.**
   if (!/await\s+dispatchPaperEntry\s*\(/.test(code)) {
     err(`${rel} — 모의 모드에서 모의 계좌에 체결하지 않습니다`
@@ -71,7 +71,7 @@ for (const rel of ROUTES) {
 for (const rel of ROUTES) {
   const src = read(rel);
   if (!src) continue;
-  const code = stripComments(src);
+  const code = stripJsComments(src);
   // 라우트가 직접 openPaperPosition을 부르면 규칙이 네 벌이 된다.
   if (/openPaperPosition\s*\(/.test(code)) {
     err(`${rel} — 모의 체결을 라우트에서 직접 만듭니다`
@@ -85,7 +85,7 @@ for (const rel of ROUTES) {
   const rel = 'src/lib/engine/paperDispatch.ts';
   const src = read(rel);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
     if (!/cap\.sendsOrders/.test(code)) {
       err(`${rel} — 거래소로 보내는 모드를 걸러내지 않습니다`
         + '\n     같은 거래가 거래소와 모의 장부 양쪽에 생깁니다');

@@ -18,6 +18,7 @@
 //
 // 둘 다 판정기가 아니라 **배선**이라 순수 테스트로는 안 잡힌다.
 import { readFileSync } from 'node:fs';
+import { stripJsComments } from './lib/strip-comments.mjs';
 import { join } from 'node:path';
 
 const ROOT = process.cwd();
@@ -29,13 +30,11 @@ function read(rel) {
   catch { err(`${rel}을 읽지 못했습니다 — 검사가 대상을 잃었습니다`); return null; }
 }
 
-/** 주석을 걷어 낸다 — 설명 주석에 적힌 옛 코드에 속지 않기 위해서다 */
-function stripComments(src) {
-  return String(src)
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')
-    .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
-}
-
+// 주석을 걷는 일은 공용 `scripts/lib/strip-comments.mjs` 한 곳에 있다.
+// 여기에 사본이 있었다 — 그 파일의 머리글이 미리 적어 둔 위험이다:
+//
+//   그래서 이 함수를 **한 곳에만** 둔다. 검사기마다 각자 복사해 두면 언젠가
+//   한쪽만 고쳐지고, 그때부터 그 검사기는 조용히 아무것도 막지 않는다.
 /** 모의 계좌를 읽는 경로 전부. 셋이 같은 답을 내야 한다 */
 const READERS = [
   'src/app/api/wallets/overview/route.ts',
@@ -47,7 +46,7 @@ const READERS = [
 for (const rel of READERS) {
   const src = read(rel);
   if (!src) continue;
-  const code = stripComments(src);
+  const code = stripJsComments(src);
   if (/getPaperAccount\s*\(/.test(code)) {
     err(`${rel} — getPaperAccount()를 부릅니다`
       + '\n     그 함수는 줄이 없으면 10,000 USDT짜리 계좌를 **만듭니다**'
@@ -63,7 +62,7 @@ for (const rel of READERS) {
 for (const rel of READERS) {
   const src = read(rel);
   if (!src) continue;
-  const code = stripComments(src);
+  const code = stripJsComments(src);
   if (!/await\s+readPaperEquity\s*\(/.test(code)) {
     err(`${rel} — readPaperEquity()를 부르지 않습니다`
       + '\n     같은 판단(잔고·포지션·평가손익·총자산)이 경로마다 한 벌씩 생기면'
@@ -76,7 +75,7 @@ for (const rel of READERS) {
   const rel = 'src/lib/portfolio/paperRead.ts';
   const src = read(rel);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
     for (const op of ['insert', 'upsert', 'update', 'delete']) {
       if (new RegExp(`\\.${op}\\s*\\(`).test(code)) {
         err(`${rel} — .${op}()가 있습니다. **읽기는 쓰지 않습니다**`);
@@ -90,7 +89,7 @@ for (const rel of READERS) {
   const rel = 'src/app/api/wallets/overview/route.ts';
   const src = read(rel);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
     if (!/paperEnvWalletOf\s*\(/.test(code)) {
       err(`${rel} — MOCK 환경 칸을 만들지 않습니다`
         + '\n     화면에는 MOCK 탭이 있습니다. 서버가 칸을 안 만들면'
@@ -109,7 +108,7 @@ for (const rel of READERS) {
   const rel = 'src/app/api/paper/account/route.ts';
   const src = read(rel);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
     // **되읽는가**를 본다 — 특정 쓰기 모양을 요구하지 않는다.
     //
     // 예전에는 `.upsert(...).select(...)`만 통과시켰다. 그때는 그것이
@@ -140,7 +139,7 @@ for (const rel of READERS) {
   const rel = 'src/components/pages/WalletPage.tsx';
   const src = read(rel);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
     if (!/paperPanelOf\s*\(/.test(code)) {
       err(`${rel} — paperPanelOf를 쓰지 않습니다`
         + '\n     화면 안에서 "시작 안 함"을 판정하면 테스트할 수 없고,'
@@ -165,7 +164,7 @@ for (const rel of READERS) {
   const rel = 'src/lib/portfolio/paperRead.ts';
   const src = read(rel);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
     const acct = code.match(/from\('paper_accounts'\)[\s\S]{0,200}?\.select\(([^)]*)\)/);
     if (acct && /started_at/.test(acct[1])) {
       err(`${rel} — paper_accounts를 칸 이름으로 select합니다`
@@ -184,7 +183,7 @@ for (const rel of READERS) {
   const rel = 'src/app/api/paper/account/route.ts';
   const src = read(rel);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
     if (!/missingColumnOf\s*\(/.test(code)) {
       err(`${rel} — 칸이 없을 때의 되돌림이 없습니다`
         + '\n     071이 아직 안 돈 DB에서는 사용자가 **모의투자를 시작할 수 없습니다**'
@@ -202,7 +201,7 @@ for (const rel of READERS) {
   const rel = 'src/lib/portfolio/paperPanel.ts';
   const src = read(rel);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
     if (!/detail\s*:/.test(code)) {
       err(`${rel} — 진단 칸(detail)이 없습니다`
         + '\n     원문을 담을 자리가 없으면 결국 note에 들어갑니다');
@@ -218,7 +217,7 @@ for (const rel of READERS) {
   const rel = 'src/components/pages/WalletPage.tsx';
   const src = read(rel);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
     if (!/paperPanel\.detail/.test(code)) {
       err(`${rel} — 진단(자세히)을 그리지 않습니다`
         + '\n     그러면 원인을 볼 곳이 없어지고, 다음에 누군가 원문을'
@@ -232,7 +231,7 @@ for (const rel of READERS) {
   const rel = 'src/lib/portfolio/wallet.ts';
   const src = read(rel);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
     if (!/usable\.length\s*>\s*0/.test(code)) {
       err(`${rel} — totalEquityOf가 빈 합계를 완전하다고 봅니다`
         + '\n     NOT_APPLICABLE은 missing에서 빠지므로, 모든 칸이 해당 없음이면'

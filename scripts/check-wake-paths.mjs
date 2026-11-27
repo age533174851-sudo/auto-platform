@@ -26,6 +26,7 @@
 //   `src/app/api/cron/reconcile/route.ts`가 실제로 겪은 그 실패를 기록하고
 //   있는데, 기록은 관문이 아니다. 여기서 센다.
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
+import { stripYamlComments } from './lib/strip-comments.mjs';
 
 const PAPER_ROUTE = 'src/app/api/paper/exit-monitor/route.ts';
 const PAPER_PATH = '/api/paper/exit-monitor';
@@ -52,30 +53,11 @@ const read = (p) => {
   return readFileSync(p, 'utf8');
 };
 
-/**
- * YAML 주석을 지운다. **주석으로 만족되는 검사기는 검사기가 아니다.**
- *
- * 이 파일이 보는 워크플로의 주석에는 경로·크론·비밀 이름이 설명으로
- * 적혀 있다. 주석을 남겨 두면 `run:`에서 curl을 지워도 규칙이 계속
- * 만족된다 — check-paper-multi-bot이 같은 함정에 한 번 빠졌다.
- *
- * 따옴표 안의 `#`은 주석이 아니므로, 앞쪽 따옴표 개수가 짝수일 때만 자른다.
- */
-function stripYamlComments(src) {
-  return src.split('\n').map((line) => {
-    if (/^\s*#/.test(line)) return '';
-    let q1 = 0, q2 = 0;
-    for (let i = 0; i < line.length; i++) {
-      const c = line[i];
-      if (c === "'") q1++;
-      else if (c === '"') q2++;
-      else if (c === '#' && q1 % 2 === 0 && q2 % 2 === 0
-        && (i === 0 || /\s/.test(line[i - 1]))) return line.slice(0, i);
-    }
-    return line;
-  }).join('\n');
-}
-
+// 주석을 걷는 일은 공용 `scripts/lib/strip-comments.mjs` 한 곳에 있다.
+// 여기에 사본이 있었다 — 그 파일의 머리글이 미리 적어 둔 위험이다:
+//
+//   그래서 이 함수를 **한 곳에만** 둔다. 검사기마다 각자 복사해 두면 언젠가
+//   한쪽만 고쳐지고, 그때부터 그 검사기는 조용히 아무것도 막지 않는다.
 /**
  * 이 크론이 **하루 한 번 이하**인가.
  *

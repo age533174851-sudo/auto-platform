@@ -19,6 +19,7 @@
 //
 // 둘 다 판정기가 아니라 **배선**의 문제라 순수 테스트로 안 잡힌다.
 import { readFileSync } from 'node:fs';
+import { stripJsComments } from './lib/strip-comments.mjs';
 import { join } from 'node:path';
 
 const ROOT = process.cwd();
@@ -30,19 +31,17 @@ function read(rel) {
   catch { err(`${rel}을 읽지 못했습니다 — 검사가 대상을 잃었습니다`); return null; }
 }
 
-/** 주석을 걷어 낸다 — 설명 주석에 적힌 옛 코드에 속지 않기 위해서다 */
-function stripComments(src) {
-  return String(src)
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')
-    .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
-}
-
+// 주석을 걷는 일은 공용 `scripts/lib/strip-comments.mjs` 한 곳에 있다.
+// 여기에 사본이 있었다 — 그 파일의 머리글이 미리 적어 둔 위험이다:
+//
+//   그래서 이 함수를 **한 곳에만** 둔다. 검사기마다 각자 복사해 두면 언젠가
+//   한쪽만 고쳐지고, 그때부터 그 검사기는 조용히 아무것도 막지 않는다.
 // ── ① 봉은 거래소를 보고 가져온다 ──
 {
   const rel = 'src/lib/engine/exitMonitor.ts';
   const src = read(rel);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
     if (!/exchange\s*:\s*'binance'\s*\|\s*'gate'/.test(code)) {
       err(`${rel} — highWaterSince가 거래소를 인자로 받지 않습니다`
         + '\n     받지 않으면 Gate 포지션도 바이낸스 봉으로 계산합니다'
@@ -87,7 +86,7 @@ function stripComments(src) {
   const rel = 'src/app/api/autotrade/exit-monitor/route.ts';
   const src = read(rel);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
     // **이름이 있는 것과 부르는 것은 다르다.** 처음 판을 이 차이로
     // 놓쳤다 — `const tradeVenueOf: any = null`도 통과했다.
     if (!/tradeVenueOf\s*\(/.test(code)) {
@@ -106,7 +105,7 @@ function stripComments(src) {
   const rel = 'src/lib/strategies/ladderGate.ts';
   const src = read(rel);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
     if (!/connection_id/.test(code)) {
       err(`${rel} — 진입 장부에 connection_id를 남기지 않습니다`
         + '\n     남기지 않으면 청산 감시가 어느 계좌인지 영영 알 수 없습니다');
@@ -122,7 +121,7 @@ function stripComments(src) {
   const rel = 'src/app/api/autotrade/exit-monitor/route.ts';
   const src = read(rel);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
     for (const [re, why] of [
       // **정의가 있는 것과 부르는 것은 다르다.** 이 검사의 첫 판이
       // `async function runLifecycleSweep(`을 호출로 세어 속았다.
@@ -154,7 +153,7 @@ function stripComments(src) {
   const rel = 'src/lib/engine/exitCoverage.ts';
   const src = read(rel);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
     if (!/lifecyclePolicyOf\s*\(/.test(code)) {
       err(`${rel} — 커버리지를 정책에서 읽지 않습니다`
         + '\n     손으로 적은 true는 구현이 없어도 초록이 됩니다');

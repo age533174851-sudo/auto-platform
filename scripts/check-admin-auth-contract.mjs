@@ -27,6 +27,7 @@
 //
 // **비밀 값은 읽지도 출력하지도 않는다.** 이 검사가 보는 것은 이름뿐이다.
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
+import { stripYamlComments } from './lib/strip-comments.mjs';
 import { join } from 'node:path';
 import { stripJsComments } from './lib/strip-comments.mjs';
 import { functionBody } from './lib/function-body.mjs';
@@ -35,20 +36,11 @@ let bad = 0;
 const err = (m) => { console.error(`❌ ${m}`); console.error(`::error::${m}`); bad += 1; };
 const read = (p) => (existsSync(p) ? readFileSync(p, 'utf8') : null);
 
-/**
- * **주석을 걷어낸다. 안 걷어내면 검사기가 제 설명을 사용처로 읽는다.**
- *
- * 이 파일을 처음 돌렸을 때 실패한 이유가 그거였다 — autotrade-tick의
- * "예전에는 `EXIT_MONITOR_SECRET`을 썼다"는 **역사를 적은 주석**을
- * 보고 지금도 쓰고 있다고 판정했다. 이 저장소는 같은 고장을 이미 겪었다
- * (#211에서 검사기가 주석을 코드로 읽고 59줄을 통째로 삼켰다).
- *
- * 줄 맨 앞의 `#`만 지운다. YAML 주석도 `run:` 블록 안의 셸 주석도 그 형태다.
- * 값 뒤에 붙는 `# ...`까지 지우려 들면 따옴표 안의 `#`을 잘라 먹는다.
- */
-const stripComments = (src) =>
-  src.split('\n').map(l => (/^\s*#/.test(l) ? '' : l)).join('\n');
-
+// 주석을 걷는 일은 공용 `scripts/lib/strip-comments.mjs` 한 곳에 있다.
+// 여기에 사본이 있었다 — 그 파일의 머리글이 미리 적어 둔 위험이다:
+//
+//   그래서 이 함수를 **한 곳에만** 둔다. 검사기마다 각자 복사해 두면 언젠가
+//   한쪽만 고쳐지고, 그때부터 그 검사기는 조용히 아무것도 막지 않는다.
 /** 정본 이름. 이것 말고 다른 별칭을 x-admin-secret에 쓰지 않는다 */
 const CANON = 'ADMIN_SECRET';
 
@@ -115,7 +107,7 @@ if (!files.length) err(`${WF_DIR}에서 워크플로를 하나도 못 읽었습�
 
 const adminCallers = [];
 for (const f of files) {
-  const src = stripComments(read(f) ?? '');
+  const src = stripYamlComments(read(f) ?? '');
   if (!/x-admin-secret\s*:/i.test(src)) continue;
   adminCallers.push(f);
 
@@ -160,7 +152,7 @@ for (const c of REQUIRED_CALLERS) {
 
 // ── ④ 동기화가 그 이름을 기준값으로 받는가 ──
 {
-  const wf = stripComments(read('.github/workflows/sync-secrets.yml') ?? '') || null;
+  const wf = stripYamlComments(read('.github/workflows/sync-secrets.yml') ?? '') || null;
   if (!wf) err('.github/workflows/sync-secrets.yml이 없습니다');
   else if (!new RegExp(`${CANON}:\\s*\\$\\{\\{\\s*secrets\\.${CANON}\\s*\\}\\}`).test(wf)) {
     err(`sync-secrets.yml: 기준값이 \`secrets.${CANON}\`이 아닙니다 — `
@@ -191,7 +183,7 @@ for (const c of REQUIRED_CALLERS) {
 for (const s of SEPARATE_CONTRACTS) {
   const raw = read(s.file);
   if (!raw) { err(`${s.file}이 없습니다`); continue; }
-  const src = stripComments(raw);
+  const src = stripYamlComments(raw);
   if (!src.includes(`secrets.${s.secret}`)) {
     err(`${s.file}: \`secrets.${s.secret}\`이 사라졌습니다 — `
       + `이것은 ${s.header} 별도 계약이라 ${CANON}으로 바꾸면 안 됩니다`);
@@ -210,7 +202,7 @@ const HUMAN_TODO = [
 ];
 for (const f of files) {
   // 주석에 남긴 역사는 사람 할 일 목록이 아니다. 실행되는 줄만 본다.
-  const src = stripComments(read(f) ?? '');
+  const src = stripYamlComments(read(f) ?? '');
   for (const h of HUMAN_TODO) {
     if (h.re.test(src)) {
       err(`${f}: ${h.what}가 남아 있습니다 — 사람이 맞춰야 하는 구조 자체를 없앴습니다`);
@@ -222,7 +214,7 @@ for (const f of files) {
 //
 // 지문(sha256 앞 몇 자)은 허용한다. 값 자체를 echo하는 것만 막는다.
 for (const f of files) {
-  const src = stripComments(read(f) ?? '');
+  const src = stripYamlComments(read(f) ?? '');
   for (const line of src.split('\n')) {
     if (!/^\s*echo\b/.test(line)) continue;
     if (/sha256sum|cut -c/.test(line)) continue;          // 지문은 허용

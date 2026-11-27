@@ -29,6 +29,7 @@
 // 사용: node scripts/check-paper-capacity.mjs
 
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
+import { stripJsComments } from './lib/strip-comments.mjs';
 import { feeDeductionContract, migrationCorpus } from './lib/paper-money-path.mjs';
 import { functionBodyOrFail } from './lib/function-body.mjs';
 
@@ -36,30 +37,17 @@ const fails = [];
 const notes = [];
 const fail = (m) => fails.push(m);
 
-// 이 파일도 설명에 `FALLBACK_EQUITY`와 `getFuturesBalance`를 그대로 적는다.
-function stripJs(src) {
-  let out = '', i = 0, quote = null;
-  const n = src.length;
-  while (i < n) {
-    const c = src[i], d = src[i + 1];
-    if (quote) {
-      if (c === '\\') { out += '  '; i += 2; continue; }
-      if (c === quote) quote = null;
-      out += c === '\n' ? '\n' : c;
-      i++; continue;
-    }
-    if (c === '/' && d === '/') { while (i < n && src[i] !== '\n') i++; continue; }
-    if (c === '/' && d === '*') {
-      i += 2;
-      while (i < n && !(src[i] === '*' && src[i + 1] === '/')) { if (src[i] === '\n') out += '\n'; i++; }
-      i += 2; continue;
-    }
-    if (c === '"' || c === "'" || c === '`') { quote = c; out += c; i++; continue; }
-    out += c; i++;
-  }
-  return out;
-}
-
+// 주석을 걷는 일은 공용 `scripts/lib/strip-comments.mjs` 한 곳에 있다.
+//
+// **여기에 사본이 있었다.** 그 파일의 머리글이 이유를 미리 적어 두었다:
+//
+//   그래서 이 함수를 **한 곳에만** 둔다. 검사기마다 각자 복사해 두면 언젠가
+//   한쪽만 고쳐지고, 그때부터 그 검사기는 조용히 아무것도 막지 않는다.
+//
+// 그 일이 일어났다 — 사본 13개가 전부 **정규식 리터럴을 모른다**.
+// `/["\']+/g`를 만나면 안의 `"`를 문자열 시작으로 읽고 가짜 문자열 상태에
+// 빠지고, 그 상태에서는 `//`를 주석으로 보지 않아 **주석 본문이 코드로
+// 남는다.** 그러면 "있어야 한다"를 보는 규칙이 주석에 적힌 문구로 통과한다.
 /** SQL의 `--` 주석을 뗀다. `$$ … $$` 안도 똑같이 뗀다 — 함수 본문이 그 안이다. */
 function stripSql(src) {
   let out = '', i = 0, inStr = false;
@@ -104,7 +92,7 @@ if (!existsSync(CAP)) fail(`${CAP}이 없습니다`);
 else {
   // 원문은 파서에게, 지운 것은 문자열 검사에게. 순서를 바꾸면 위치가 어긋난다.
   const capRaw = readFileSync(CAP, 'utf8');
-  const cap = stripJs(capRaw);
+  const cap = stripJsComments(capRaw);
   for (const fn of ['paperCapacityOf', 'capacityVerdict', 'readPaperCapacity']) {
     if (!new RegExp(`export (async )?function ${fn}\\b`).test(cap)) fail(`${CAP}에 ${fn}이 없습니다`);
   }
@@ -125,7 +113,7 @@ else {
   // ── 가용 예산은 **사용 중 증거금을 뺀 값**이다 ──
   //
   // 빼지 않으면 이미 물고 있는 만큼을 한 번 더 쓸 수 있게 된다.
-  const capOf = stripJs(functionBodyOrFail(capRaw, 'paperCapacityOf', fail, CAP));
+  const capOf = stripJsComments(functionBodyOrFail(capRaw, 'paperCapacityOf', fail, CAP));
   if (!capOf) { /* 위에서 이미 사유를 적었다 */ }
   else if (!/available:\s*Math\.max\(\s*0\s*,\s*balance\s*-\s*used/.test(capOf)) {
     fail(`${CAP}이 가용 예산에서 사용 중 증거금을 빼지 않습니다`);
@@ -135,7 +123,7 @@ else {
   // `Number(balance) || 10000` 같은 한 줄이면 '모름'이 사라진다. 0도
   // 같이 지워진다 — 잔고 0은 확인된 사실이다.
   for (const fn of ['paperCapacityOf', 'readPaperCapacity']) {
-    const body = stripJs(functionBodyOrFail(capRaw, fn, fail, CAP));
+    const body = stripJsComments(functionBodyOrFail(capRaw, fn, fail, CAP));
     for (const m of body.matchAll(/(?:\|\||\?\?)\s*(\d+(?:\.\d+)?)/g)) {
       fail(`${CAP}의 ${fn}가 숫자 기본값 ${m[1]}을 채웁니다`
         + ' — 모름과 0이 같이 사라집니다');
@@ -146,7 +134,7 @@ else {
     fail(`${CAP}이 빈 값을 0으로 접습니다 — Number(null)도 Number('')도 0입니다`);
   }
   // 용량 식에 수수료가 들어간다.
-  const verdict = stripJs(functionBodyOrFail(capRaw, 'capacityVerdict', fail, CAP));
+  const verdict = stripJsComments(functionBodyOrFail(capRaw, 'capacityVerdict', fail, CAP));
   if (!verdict) { /* 위에서 이미 사유를 적었다 */ }
   else if (!/usedMargin\s*\+\s*margin\s*\+\s*fee/.test(verdict.replace(/\bcap\./g, ''))) {
     fail(`${CAP}의 용량 식에 진입 수수료가 없습니다`
@@ -158,7 +146,7 @@ else {
 // ── 2. 위험 컨텍스트 ──
 if (!existsSync(CTX)) fail(`${CTX}이 없습니다`);
 else {
-  const ctx = stripJs(readFileSync(CTX, 'utf8'));
+  const ctx = stripJsComments(readFileSync(CTX, 'utf8'));
   if (!/readPaperCapacity/.test(ctx)) {
     fail(`${CTX}이 모의 자산을 읽지 않습니다 — 크기가 거래소 잔고·폴백에서 나옵니다`);
   }
@@ -338,7 +326,7 @@ else {
 
 // ── 4. 용량 미달을 오류로 뭉개지 않는가 ──
 if (existsSync(STORE)) {
-  const store = stripJs(readFileSync(STORE, 'utf8'));
+  const store = stripJsComments(readFileSync(STORE, 'utf8'));
   if (!/INSUFFICIENT_MARGIN/.test(store)) {
     fail(`${STORE}이 가용 증거금 부족을 구분하지 않습니다 — 사용자가 이유를 알 수 없습니다`);
   }

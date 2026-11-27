@@ -33,35 +33,23 @@
 // 사용: node scripts/check-execution-currency.mjs
 
 import { readFileSync, existsSync } from 'node:fs';
+import { stripJsComments } from './lib/strip-comments.mjs';
 
 const fails = [];
 const notes = [];
 const fail = (m) => fails.push(m);
 
-// 이 파일도 설명에 `1375`와 `loadPaperBalance`를 그대로 적는다.
-function stripJs(src) {
-  let out = '', i = 0, quote = null;
-  const n = src.length;
-  while (i < n) {
-    const c = src[i], d = src[i + 1];
-    if (quote) {
-      if (c === '\\') { out += '  '; i += 2; continue; }
-      if (c === quote) quote = null;
-      out += c === '\n' ? '\n' : c;
-      i++; continue;
-    }
-    if (c === '/' && d === '/') { while (i < n && src[i] !== '\n') i++; continue; }
-    if (c === '/' && d === '*') {
-      i += 2;
-      while (i < n && !(src[i] === '*' && src[i + 1] === '/')) { if (src[i] === '\n') out += '\n'; i++; }
-      i += 2; continue;
-    }
-    if (c === '"' || c === "'" || c === '`') { quote = c; out += c; i++; continue; }
-    out += c; i++;
-  }
-  return out;
-}
-
+// 주석을 걷는 일은 공용 `scripts/lib/strip-comments.mjs` 한 곳에 있다.
+//
+// **여기에 사본이 있었다.** 그 파일의 머리글이 이유를 미리 적어 두었다:
+//
+//   그래서 이 함수를 **한 곳에만** 둔다. 검사기마다 각자 복사해 두면 언젠가
+//   한쪽만 고쳐지고, 그때부터 그 검사기는 조용히 아무것도 막지 않는다.
+//
+// 그 일이 일어났다 — 사본 13개가 전부 **정규식 리터럴을 모른다**.
+// `/["\']+/g`를 만나면 안의 `"`를 문자열 시작으로 읽고 가짜 문자열 상태에
+// 빠지고, 그 상태에서는 `//`를 주석으로 보지 않아 **주석 본문이 코드로
+// 남는다.** 그러면 "있어야 한다"를 보는 규칙이 주석에 적힌 문구로 통과한다.
 /**
  * 함수 **본문**을 뗀다.
  *
@@ -103,7 +91,7 @@ const PRICES = 'src/app/api/prices/route.ts';
 // ── 1. 판정은 한 곳에 있고 환율을 받지 않는다 ──
 if (!existsSync(LIB)) fail(`${LIB}이 없습니다`);
 else {
-  const lib = stripJs(readFileSync(LIB, 'utf8'));
+  const lib = stripJsComments(readFileSync(LIB, 'utf8'));
   for (const fn of ['orderCurrencyOf', 'amountMustClear', 'planExchangeOrder', 'percentBaseFor',
     'balanceStateOf', 'scopedValueFor']) {
     if (!new RegExp(`export function ${fn}\\b`).test(lib)) fail(`${LIB}에 ${fn}이 없습니다`);
@@ -128,7 +116,7 @@ else {
 // ── 1b. 시세 읽기 경로는 하나다 ──
 if (!existsSync(QUOTE_LIB)) fail(`${QUOTE_LIB}이 없습니다`);
 else {
-  const q = stripJs(readFileSync(QUOTE_LIB, 'utf8'));
+  const q = stripJsComments(readFileSync(QUOTE_LIB, 'utf8'));
   if (!/futures\/quote/.test(q)) fail(`${QUOTE_LIB}이 venue 선물 시세 경로를 읽지 않습니다`);
   if (!/connectionId=/.test(q)) fail(`${QUOTE_LIB}이 시세를 연결에 묶어 읽지 않습니다`);
   // 못 읽었을 때 값을 지어내면 안 된다.
@@ -141,7 +129,7 @@ else {
 // ── 2. 거래소 원본 가격이 손실 없이 내려오는가 ──
 if (!existsSync(PRICES)) fail(`${PRICES}이 없습니다`);
 else {
-  const pr = stripJs(readFileSync(PRICES, 'utf8'));
+  const pr = stripJsComments(readFileSync(PRICES, 'utf8'));
   // 파일 어딘가에 이름이 있는 것과 **값을 싣는 것**은 다르다. 실제로
   // 한 생성 지점에서 지워도 타입 선언 때문에 통과했다.
   const assigned = (pr.match(/quotePrice\s*[:=]\s*parseFloat/g) || []).length;
@@ -156,7 +144,7 @@ else {
 // ── 3. 거래소 주문 분기 ──
 if (!existsSync(PAGE)) fail(`${PAGE}이 없습니다`);
 else {
-  const page = stripJs(readFileSync(PAGE, 'utf8'));
+  const page = stripJsComments(readFileSync(PAGE, 'utf8'));
 
   const branchAt = page.indexOf("tradeMode === 'testnet' || tradeMode === 'live'");
   if (branchAt < 0) fail(`${PAGE}에서 거래소 주문 분기를 찾지 못했습니다`);
@@ -248,7 +236,7 @@ else {
   }
   {
     // `Number(null)`은 0이다. 먼저 거르지 않으면 **못 읽은 것이 '잔고 0'**이 된다.
-    const lib2 = existsSync(LIB) ? stripJs(readFileSync(LIB, 'utf8')) : '';
+    const lib2 = existsSync(LIB) ? stripJsComments(readFileSync(LIB, 'utf8')) : '';
     const body2 = functionBodyAt(lib2, 'balanceStateOf');
     if (body2 && !/raw\s*==\s*null/.test(body2)) {
       fail(`${LIB}의 balanceStateOf가 빈 값을 먼저 거르지 않습니다`
@@ -268,7 +256,7 @@ else {
 const QUOTE = 'src/app/api/binance/futures/quote/route.ts';
 if (!existsSync(QUOTE)) fail(`${QUOTE}이 없습니다 — venue 선물 시세 경로가 필요합니다`);
 else {
-  const q = stripJs(readFileSync(QUOTE, 'utf8'));
+  const q = stripJsComments(readFileSync(QUOTE, 'utf8'));
   if (!/loadFuturesCreds\s*\(/.test(q)) {
     fail(`${QUOTE}이 연결에서 거래소·환경을 읽지 않습니다`);
   }

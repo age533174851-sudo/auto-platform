@@ -28,41 +28,28 @@
 // 사용: node scripts/check-position-sizing-display.mjs
 
 import { readFileSync, existsSync } from 'node:fs';
+import { stripJsComments } from './lib/strip-comments.mjs';
 
 const fails = [];
 const notes = [];
 const fail = (m) => fails.push(m);
 
-// 이 파일도 설명에 `amount × leverage`를 그대로 적는다. 문자를 하나씩
-// 걸으며 문자열 안의 `//`는 주석으로 세지 않는다.
-function stripJs(src) {
-  let out = '', i = 0, quote = null;
-  const n = src.length;
-  while (i < n) {
-    const c = src[i], d = src[i + 1];
-    if (quote) {
-      if (c === '\\') { out += '  '; i += 2; continue; }
-      if (c === quote) quote = null;
-      out += c === '\n' ? '\n' : c;
-      i++; continue;
-    }
-    if (c === '/' && d === '/') { while (i < n && src[i] !== '\n') i++; continue; }
-    if (c === '/' && d === '*') {
-      i += 2;
-      while (i < n && !(src[i] === '*' && src[i + 1] === '/')) { if (src[i] === '\n') out += '\n'; i++; }
-      i += 2; continue;
-    }
-    if (c === '"' || c === "'" || c === '`') { quote = c; out += c; i++; continue; }
-    out += c; i++;
-  }
-  return out;
-}
-
+// 주석을 걷는 일은 공용 `scripts/lib/strip-comments.mjs` 한 곳에 있다.
+//
+// **여기에 사본이 있었다.** 그 파일의 머리글이 이유를 미리 적어 두었다:
+//
+//   그래서 이 함수를 **한 곳에만** 둔다. 검사기마다 각자 복사해 두면 언젠가
+//   한쪽만 고쳐지고, 그때부터 그 검사기는 조용히 아무것도 막지 않는다.
+//
+// 그 일이 일어났다 — 사본 13개가 전부 **정규식 리터럴을 모른다**.
+// `/["\']+/g`를 만나면 안의 `"`를 문자열 시작으로 읽고 가짜 문자열 상태에
+// 빠지고, 그 상태에서는 `//`를 주석으로 보지 않아 **주석 본문이 코드로
+// 남는다.** 그러면 "있어야 한다"를 보는 규칙이 주석에 적힌 문구로 통과한다.
 // ── 1. 뜻은 한 곳에서 정의된다 ──
 const LIB = 'src/lib/markets/quantityInput.ts';
 if (!existsSync(LIB)) fail(`${LIB}이 없습니다`);
 else {
-  const lib = stripJs(readFileSync(LIB, 'utf8'));
+  const lib = stripJsComments(readFileSync(LIB, 'utf8'));
   // 명목가는 배율과 무관하고, 증거금은 나눗셈이다.
   if (!/export function notionalAndMargin/.test(lib)) {
     fail(`${LIB}에 통화 중립 helper(notionalAndMargin)가 없습니다`);
@@ -102,7 +89,7 @@ else {
 const SOURCE = 'src/lib/markets/orderPreview.ts';
 if (!existsSync(SOURCE)) fail(`${SOURCE}이 없습니다`);
 else {
-  const src = stripJs(readFileSync(SOURCE, 'utf8'));
+  const src = stripJsComments(readFileSync(SOURCE, 'utf8'));
   if (!/convertQuantity\s*\(/.test(src)) {
     fail(`${SOURCE}이 convertQuantity를 쓰지 않습니다 — 명목가·증거금 공식을 다시 만들고 있습니다`);
   }
@@ -118,7 +105,7 @@ else {
 const SCREENS = ['src/components/pages/TradingPage.tsx'];
 for (const file of SCREENS) {
   if (!existsSync(file)) { fail(`${file}이 없습니다`); continue; }
-  const body = stripJs(readFileSync(file, 'utf8'));
+  const body = stripJsComments(readFileSync(file, 'utf8'));
 
   if (!/orderPreviewOf\s*\(/.test(body)) {
     fail(`${file}이 orderPreviewOf를 쓰지 않습니다 — 명목가·증거금 공식을 화면이 다시 만들고 있습니다`);

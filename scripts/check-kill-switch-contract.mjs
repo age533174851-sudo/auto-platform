@@ -27,6 +27,7 @@
 //     근거는 `closePct`뿐이다
 //   · 대상 수량은 `amount`로 읽는다
 import { readFileSync } from 'node:fs';
+import { stripJsComments } from './lib/strip-comments.mjs';
 import { join } from 'node:path';
 
 const ROOT = process.cwd();
@@ -38,19 +39,11 @@ function read(rel) {
   catch { err(`${rel}을 읽지 못했습니다 — 검사가 대상을 잃었습니다`); return null; }
 }
 
-/**
- * 주석을 걷어 낸다.
- *
- * **이걸 안 해서 이 검사가 한 번 속았다.** 설명 주석에 적어 둔
- * `effectiveActionMode = null`이 할당으로 잡혀서, 실제 할당을 지웠는데도
- * 통과했다. 검사가 주석을 코드로 읽으면 그 검사는 없느니만 못하다.
- */
-function stripComments(src) {
-  return String(src)
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')   // 블록 주석
-    .replace(/(^|[^:])\/\/[^\n]*/g, '$1'); // 줄 주석 (URL의 // 는 앞이 ':')
-}
-
+// 주석을 걷는 일은 공용 `scripts/lib/strip-comments.mjs` 한 곳에 있다.
+// 여기에 사본이 있었다 — 그 파일의 머리글이 미리 적어 둔 위험이다:
+//
+//   그래서 이 함수를 **한 곳에만** 둔다. 검사기마다 각자 복사해 두면 언젠가
+//   한쪽만 고쳐지고, 그때부터 그 검사기는 조용히 아무것도 막지 않는다.
 // ── ① 발동하는 곳은 targetedPending을 남긴다 ──
 const ACTIVATORS = [
   'src/app/api/risk/kill-switch/trigger/route.ts',
@@ -65,7 +58,7 @@ for (const rel of ACTIVATORS) {
   //
   // 두 번째를 빠뜨리면 자동 손실한도 발동이 NULL로 남는다 — 실제로
   // 이 검사의 첫 판이 그걸 놓쳤다.
-  const code = stripComments(src);
+  const code = stripJsComments(src);
   const activates = /\.active\s*=\s*true/.test(code)
     || (/\bevaluate\s*\(/.test(code) && /saveKillSwitch\s*\(/.test(code));
   if (!activates) continue;
@@ -153,7 +146,7 @@ for (const rel of ACTIVATORS) {
   const rel = 'src/app/api/risk/kill-switch/status/route.ts';
   const src = read(rel);
   if (src) {
-    const code = stripComments(src);
+    const code = stripJsComments(src);
     const FORBIDDEN = [
       [/Worker가/, '알림·주석이 Worker를 실행자로 말합니다 — 이 요청이 직접 실행합니다'],
       [/실행 예정/, '이미 실행한 뒤에 나가는 알림에 "실행 예정"이라 적었습니다'],

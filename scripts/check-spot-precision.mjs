@@ -19,6 +19,7 @@
 // 거기에 수량 정규화를 끼우면 `Number(null) === 0`이 되어 지금 정상
 // 동작하는 매수가 전부 막힌다. 이 경계가 4B-2A의 핵심이다.
 import { readFileSync, existsSync } from 'node:fs';
+import { stripJsComments } from './lib/strip-comments.mjs';
 
 const EXEC  = 'src/lib/exchanges/spotOrderExecutor.ts';
 const ROUTE = 'src/app/api/binance/spot/order/route.ts';
@@ -58,31 +59,18 @@ const read = (p) => {
   if (!existsSync(p)) { fail(`${p}가 없습니다`); return ''; }
   return readFileSync(p, 'utf8');
 };
-/**
- * 주석은 규율이 아니다. 주석에 적힌 낱말로 검사가 통과하면 안 된다.
- *
- * ★ **`://`를 주석으로 읽지 않는다.**
- *
- *   원래는 `//`를 무조건 잘랐다. 그런데 `https://api.binance.com/...`의
- *   `//`가 걸려서 **URL이 있는 줄이 통째로 사라졌다.** 그래서 "실전 호스트를
- *   하드코딩했다"를 잡는 규칙 앞에서, 하드코딩한 그 줄만 안 보였다 —
- *   검사기가 자기가 잡아야 할 것을 스스로 지우고 있었다(MUT-S22가 이것을
- *   짚었다).
- *
- *   블록 주석을 **먼저** 지운다. 그래야 문서 주석 안의 URL이 코드로
- *   남지 않는다.
- */
-const stripTs = (s) => String(s)
-  .replace(/\/\*[\s\S]*?\*\//g, ' ')
-  .replace(/(^|[^:\\])\/\/[^\n]*/gm, '$1 ');
-
-const exec  = stripTs(read(EXEC));
-const route = stripTs(read(ROUTE));
-const bn    = stripTs(read(BN));
-const plan  = stripTs(read(PLAN));
-const form  = stripTs(read(FORM));
-const reg   = stripTs(read(REG));
-const state = stripTs(read(STATE));
+// 주석을 걷는 일은 공용 `scripts/lib/strip-comments.mjs` 한 곳에 있다.
+// 여기에 사본이 있었다 — 그 파일의 머리글이 미리 적어 둔 위험이다:
+//
+//   그래서 이 함수를 **한 곳에만** 둔다. 검사기마다 각자 복사해 두면 언젠가
+//   한쪽만 고쳐지고, 그때부터 그 검사기는 조용히 아무것도 막지 않는다.
+const exec  = stripJsComments(read(EXEC));
+const route = stripJsComments(read(ROUTE));
+const bn    = stripJsComments(read(BN));
+const plan  = stripJsComments(read(PLAN));
+const form  = stripJsComments(read(FORM));
+const reg   = stripJsComments(read(REG));
+const state = stripJsComments(read(STATE));
 
 /**
  * `marker` 뒤의 첫 블록을 짝이 맞는 `}`까지 잘라 준다.
@@ -423,7 +411,7 @@ function blockAfter(src, marker, after) {
     if (verdict !== 'SUPPORTED') continue;
     const f = evidence.split(':')[0];
     if (!existsSync(f)) { fail(`${REG}: ${venue}의 근거 파일이 없습니다 (${f})`); continue; }
-    const c = stripTs(readFileSync(f, 'utf8'));
+    const c = stripJsComments(readFileSync(f, 'utf8'));
     if (!/quantizeOrder|normalizeForVenue/.test(c)) {
       fail(`${REG}: ${venue}를 SUPPORTED로 적었는데 근거 파일이 격자를 적용하지 않습니다 (${f})`);
     }
