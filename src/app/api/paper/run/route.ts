@@ -172,15 +172,20 @@ async function cycle(req: NextRequest, uid: string, sb: any, body: any, dryRun: 
 
   // ── 3. 진입 ───────────────────────────────────────────────────
   // 가용 잔고 = 잔고 − 열린 포지션이 물고 있는 증거금.
+  //
+  // 계산은 `paperAvailable` 한 곳에 있다 — `/api/paper/account` ·
+  // `/api/paper/positions` · `/api/paper/order`와 같은 함수다. 예전 이 자리는
+  // `Number(p.margin) || 0`이었다. 못 읽은 증거금을 0으로, 음수 증거금은
+  // 더해서 세어 **가용 잔고가 부푼 채로 진입 수량을 계획했다.**
+  // 못 읽었으면 `null`이고, `planEntry`가 진입하지 않는다.
   let available: number | null = null;
   try {
     const { getPaperAccount } = await import('@/lib/engine/paperStore');
+    const { availableView } = await import('@/lib/engine/paperAvailable');
     const acct = await getPaperAccount(sb, uid);
-    const used = (Array.isArray(rows) ? rows : [])
-      .filter((r: any) => stillOpen.some(p => p.id === String(r.id)))
-      .reduce((a: number, p: any) => a + (Number(p.margin) || 0), 0);
-    const bal = Number(acct?.balance);
-    available = Number.isFinite(bal) ? bal - used : null;
+    const openRows = (Array.isArray(rows) ? rows : [])
+      .filter((r: any) => stillOpen.some(p => p.id === String(r.id)));
+    available = availableView(acct?.balance, openRows).available;
   } catch { available = null; }
 
   const { collectRegime } = await import('@/lib/risk/regimeCheck');
