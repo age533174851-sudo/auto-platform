@@ -61,6 +61,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { argv } from 'node:process';
 import { pathToFileURL } from 'node:url';
+import { stripJsComments } from './lib/strip-comments.mjs';
 
 export const TYPE_CTX = [
   /useState<\s*NAME/, /useRef<\s*NAME/, /useMemo<\s*NAME/,
@@ -84,9 +85,38 @@ const USAGE_BANNER = /^(?:Version \d|tsc: The TypeScript Compiler|COMMON COMMAND
  */
 export const SYNTAX_ALLOW = new Set(['TS1117']);
 
+/**
+ * **주석은 타입 문맥이 아니다.**
+ *
+ * 이 판정이 `true`면 그 줄은 보고되지 않는다. 그래서 원문을 보면
+ * **주석이 면제를 위조할 수 있다** — 실제로 재서 확인했다. `src`에
+ * 미정의 식별자를 값 위치로 심고 같은 줄에 주석 하나를 붙였더니:
+ *
+ *     주석 없이          → 🔴 런타임 크래시 위험 1건            (rc=1)
+ *     `// : NAME 로 …`   → ✅ 런타임 미정의 식별자 없음          (rc=0)
+ *                          (진단 53건을 "실제로 읽었습니다"라고 적고서)
+ *
+ * 즉 TS2304를 **읽고 나서 버렸다.** 같은 구멍이 `// NAME[]` ·
+ * `// interface NAME` · `/* <NAME> *\/`로도 열렸다(측정 4/4).
+ *
+ * **줄 하나만** 지운다 — 파일 전체를 지우면 공용 제거기가 블록 주석의
+ * 개행을 보존하지 않아 줄 번호가 밀리고, 그러면 **다른 줄**을 보고
+ * 판정한다. 그게 더 나쁘다.
+ *
+ * 그래서 여러 줄에 걸친 주석·템플릿의 경계는 모른다. 어긋나는 방향은 둘이고
+ * 대칭이 아니다:
+ *   · 주석 안을 코드로 읽으면 **보고한다** — 막는 쪽이다
+ *   · 블록 주석의 **마지막 줄**에 타입 문맥이 있고 그 뒤에 코드가 오는
+ *     모양(`… : NAME *\/ NAME();`)은 아직 가장된다(측정: 그대로 0건)
+ * 뒤쪽은 개행을 보존하는 제거기로 파일 전체를 지워야 닫힌다(#795). 닫을
+ * 수 없는 것을 닫았다고 적지 않는다.
+ *
+ * 표시는 원문 그대로 남긴다 — 운영자는 주석까지 봐야 왜 이 줄인지 안다.
+ */
 export function isTypeOnly(name, src) {
+  const code = stripJsComments(String(src ?? ''));
   const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return TYPE_CTX.some(re => new RegExp(re.source.replace(/NAME/g, esc)).test(src));
+  return TYPE_CTX.some(re => new RegExp(re.source.replace(/NAME/g, esc)).test(code));
 }
 
 /**
