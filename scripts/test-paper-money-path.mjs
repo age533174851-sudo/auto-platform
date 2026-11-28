@@ -200,3 +200,89 @@ test('plpgsqlBody — 없는 함수는 못 읽었다고 한다', () => {
   assert.equal(r.ok, false);
   assert.match(r.reason, /찾지 못했습니다/);
 });
+
+// ── inline 갈래도 같은 수식어 판정을 쓴다 (Codex 지적) ──────────────
+//
+// `movesByDelta`만 고치고 `inlineDelta`에 있던 **같은 정규식의 사본**을
+// 그대로 뒀다. 그래서 위임 갈래(085 이후)에서는 막히는 것이 **inline
+// 갈래(074–084)에서는 계속 통과했다.** 돌려서 얻은 값 — 네 가지 모두
+// `ok:true, where:'inline'`:
+//
+//   balance - p_entry_fee            허용  옳다
+//   a.balance - p_entry_fee          허용  옳다 (대상 별칭)
+//   v_row.balance - p_entry_fee      허용  ← 구멍
+//   v_prev.balance - p_entry_fee     허용  ← 구멍
+//
+// 이 저장소가 이름 붙여 둔 고장 그대로다 — **"경로가 둘인데 한쪽만 고침".**
+// 그래서 수식어 판정을 `qualifierIsTarget` 한 곳에 두고 양쪽이 같은 함수를
+// 쓴다.
+//
+// 074–084 의 진입 함수는 수수료를 **함수 안에서 직접** 뺐다. 그 갈래는
+// 지금 전수에는 없지만(085 가 위임 구조로 바꿨다) 판정에 남아 있고,
+// 남아 있는 한 같은 계약을 지켜야 한다.
+const inlineBody = (rhs, { alias = false, noRows = true } = {}) => `
+DECLARE v_row record; v_prev record; p_entry_fee numeric := 1; p_account_id uuid;
+BEGIN
+  SELECT * INTO v_row FROM public.paper_accounts WHERE id = p_account_id;
+  UPDATE public.paper_accounts${alias ? ' AS a' : ''}
+     SET balance = ${rhs} WHERE id = p_account_id;
+  ${noRows ? "IF NOT FOUND THEN RAISE EXCEPTION 'missing'; END IF;" : 'NULL;'}
+END;`;
+
+for (const [how, rhs] of [
+  ['v_row.balance', 'v_row.balance - p_entry_fee'],
+  ['v_prev.balance', 'v_prev.balance - p_entry_fee'],
+]) {
+  test(`★ inline 갈래 — ${how} 로 덮어쓰면 막는다`, () => {
+    const r = feeDeductionContract({ sql: '', fnBody: inlineBody(rhs) });
+    assert.equal(r.ok, false, `${how} 는 앞서 읽어 둔 record 값이다`);
+  });
+}
+
+test('대조 — inline 갈래의 정당한 세 형태는 통과한다', () => {
+  for (const [rhs, opt] of [
+    ['balance - p_entry_fee', {}],
+    ['a.balance - p_entry_fee', { alias: true }],
+    ['paper_accounts.balance - p_entry_fee', {}],
+  ]) {
+    const r = feeDeductionContract({ sql: '', fnBody: inlineBody(rhs, opt) });
+    assert.equal(r.ok, true, `서식만 다른 것이 막히면 거짓 실패다: ${rhs} — ${r.ok ? '' : r.reason}`);
+    assert.equal(r.where, 'inline');
+  }
+});
+
+test('대조 — inline 갈래도 0행 분기를 요구한다', () => {
+  const r = feeDeductionContract({
+    sql: '', fnBody: inlineBody('balance - p_entry_fee', { noRows: false }) });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /되돌리지 않습니다/);
+});
+
+test('★ inline 갈래도 0행 분기 밖의 RAISE 로는 통과하지 않는다', () => {
+  // 입력 검증용 `RAISE EXCEPTION` 이 접속을 채우지 못해야 한다.
+  const body = `
+DECLARE p_entry_fee numeric := 1; p_account_id uuid;
+BEGIN
+  IF p_entry_fee IS NULL THEN RAISE EXCEPTION 'fee required'; END IF;
+  UPDATE public.paper_accounts
+     SET balance = balance - p_entry_fee WHERE id = p_account_id;
+  IF NOT FOUND THEN RETURN; END IF;
+END;`;
+  const r = feeDeductionContract({ sql: '', fnBody: body });
+  assert.equal(r.ok, false, '0행 분기가 되돌리지 않으면 통과시키면 안 된다');
+  assert.match(r.reason, /되돌리지 않습니다/);
+});
+
+test('대조 — 두 갈래가 같은 수식어 판정을 쓴다', () => {
+  // 같은 잘못된 수식어가 inline 과 delegated 양쪽에서 막혀야 한다.
+  // 한쪽만 막히면 판정이 두 벌이라는 뜻이다.
+  const inlineBad = feeDeductionContract({
+    sql: '', fnBody: inlineBody('v_row.balance - p_entry_fee') });
+  const delegatedBad = feeDeductionContract({
+    sql: corpusWith(s => s.replace('SET balance    = balance + p_amount,',
+      'SET balance    = v_row.balance + p_amount,')),
+    fnBody: openBody(),
+  });
+  assert.equal(inlineBad.ok, false, 'inline 갈래가 통과시키면 판정이 두 벌이다');
+  assert.equal(delegatedBad.ok, false, 'delegated 갈래가 통과시키면 판정이 두 벌이다');
+});

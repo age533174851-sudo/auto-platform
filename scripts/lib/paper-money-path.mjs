@@ -163,19 +163,32 @@ function movesByDelta(body, column = 'balance') {
     `${column}\\s*=\\s*(?:([A-Za-z_]\\w*)\\.)?${column}\\s*[-+]`, 'gi');
   let m;
   while ((m = re.exec(src))) {
-    if (!m[1]) return true;                       // 수식어 없음 — 대상 자신이다
-    // 이 대입 앞의 가장 가까운 `UPDATE <표> [AS] [별칭]`
-    const before = src.slice(0, m.index);
-    const up = [...before.matchAll(
-      /\bUPDATE\s+((?:[A-Za-z_]\w*\.)?[A-Za-z_]\w*)(?:\s+AS)?(?:\s+([A-Za-z_]\w*))?/gi)].pop();
-    if (!up) continue;                            // 어느 UPDATE 인지 모른다 — 통과시키지 않는다
-    const table = up[1].split('.').pop().toLowerCase();
-    const alias = (up[2] || '').toLowerCase();
-    const q = m[1].toLowerCase();
-    // `SET`·`WHERE` 같은 낱말이 별칭으로 잡히는 것은 별칭 없음과 같다
-    if (q === table || (alias && q === alias)) return true;
+    if (qualifierIsTarget(src, m.index, m[1])) return true;
   }
   return false;
+}
+
+/**
+ * 이 대입의 수식어가 **갱신 대상**의 것인가. 수식어가 없으면 참이다.
+ *
+ * ★ 이 판정이 두 곳에 사본으로 있었다. `movesByDelta`만 고치고
+ *   `inlineDelta`의 사본을 그대로 뒀더니, **inline 갈래에서는
+ *   `v_row.balance - p_entry_fee`가 계속 통과했다** (돌려서 확인했다).
+ *   이 저장소가 이름 붙여 둔 고장 그대로다 — "경로가 둘인데 한쪽만 고침".
+ *   그래서 판정을 한 곳에 두고 양쪽이 같은 함수를 쓴다.
+ */
+function qualifierIsTarget(src, at, qualifier) {
+  if (!qualifier) return true;                    // 수식어 없음 — 대상 자신이다
+  // 이 대입 앞의 가장 가까운 `UPDATE <표> [AS] [별칭]`
+  const before = String(src).slice(0, at);
+  const up = [...before.matchAll(
+    /\bUPDATE\s+((?:[A-Za-z_]\w*\.)?[A-Za-z_]\w*)(?:\s+AS)?(?:\s+([A-Za-z_]\w*))?/gi)].pop();
+  if (!up) return false;                          // 어느 UPDATE 인지 모른다 — 통과시키지 않는다
+  const table = up[1].split('.').pop().toLowerCase();
+  const alias = (up[2] || '').toLowerCase();
+  const q = qualifier.toLowerCase();
+  // `SET`·`WHERE` 같은 낱말이 별칭으로 잡히는 것은 별칭 없음과 같다
+  return q === table || (alias && q === alias);
 }
 
 /**
@@ -192,8 +205,17 @@ export function feeDeductionContract({ sql, fnBody, feeParam = 'p_entry_fee' }) 
   const body = String(fnBody ?? '');
 
   // ── ① 함수 안에서 직접 빼는 모양 (074–084) ──
-  const inlineDelta = new RegExp(
-    `balance\\s*=\\s*(?:[A-Za-z_]\\w*\\.)?balance\\s*-\\s*${feeParam}\\b`, 'i').test(body);
+  //
+  //   ★ 수식어 판정은 `qualifierIsTarget` **한 곳**에 있다. 예전에는 이
+  //     자리에 같은 정규식의 사본이 있었고, `movesByDelta`만 고쳤더니
+  //     inline 갈래에서 `v_row.balance - p_entry_fee`가 계속 통과했다.
+  const inlineRe = new RegExp(
+    `balance\\s*=\\s*(?:([A-Za-z_]\\w*)\\.)?balance\\s*-\\s*${feeParam}\\b`, 'gi');
+  let inlineDelta = false;
+  let im;
+  while ((im = inlineRe.exec(body))) {
+    if (qualifierIsTarget(body, im.index, im[1])) { inlineDelta = true; break; }
+  }
   if (inlineDelta) {
     if (!abortsOnNoRows(body)) {
       return {
