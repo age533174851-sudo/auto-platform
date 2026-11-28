@@ -78,7 +78,12 @@ const CLAIMS = [
  * `측정`만으로는 잡지 않는다 — "측정한 우위"처럼 개념을 가리키는 말이
  * 훨씬 흔하고, 그걸 막으면 검사가 틀린 것이 되어 사람들이 검사를 끈다.
  */
-const MEASURED = /실측|실제로 확인해/;
+// `실측 주장`은 **개념을 가리키는 말**이다 — "날짜 없는 실측 주장을
+// 막는다" 처럼 규칙을 설명하는 쪽이지 지금 값을 적는 쪽이 아니다. 위
+// 주석이 이미 같은 원칙을 적어 두었다: "`측정`만으로는 잡지 않는다 —
+// 개념을 가리키는 말이 훨씬 흔하고, 그걸 막으면 검사가 틀린 것이 되어
+// 사람들이 검사를 끈다."
+const MEASURED = /실측(?!\s*주장)|실제로 확인해/;
 const HAS_DATE = /20\d{2}[-.\/]\d{1,2}[-.\/]\d{1,2}/;
 
 /**
@@ -89,19 +94,29 @@ const HAS_DATE = /20\d{2}[-.\/]\d{1,2}[-.\/]\d{1,2}/;
  */
 export function agingProblems(line) {
   const out = [];
-  // 이 검사 파일 자체를 설명하는 줄은 예로 든 것이다.
-  if (/check-status-claims/.test(line)) return out;
+  // 이 검사 파일 자체를 가리키는 말은 예로 든 것이다. **그런데 전에는
+  // 그 줄을 통째로 건너뛰었다** — 자기 이름을 적으면 그 줄의 늙는 문장이
+  // 전부 안 보였다. 기계 탐침으로 실제로 돌려 확인했다:
+  //
+  //     - 실측 main = Vercel = Fly = 3c46151 이고 Fly Worker alive 다
+  //       … 평범하게 넣으면                          rc=1 (세 규칙 다 걸린다)
+  //       … 같은 줄에 `check-status-claims` 를 적으면  rc=0  ← 구멍
+  //       … 다른 토큰을 적으면                        rc=1  ← 원인이 그 토큰
+  //
+  // 상태판은 "이 규칙은 `check-status-claims`가 지킨다"처럼 검사기를
+  // 가리킬 수 있어야 한다. 그래서 **줄을 버리지 않고 그 말만 지운다.**
+  const l = String(line).replace(/check-status-claims(?:\.mjs)?/g, '');
 
-  for (const m of line.match(SHA) || []) {
+  for (const m of l.match(SHA) || []) {
     // 순수 숫자는 SHA가 아니다(연도·개수 등). 글자가 하나는 있어야 한다.
     if (!/[a-f]/.test(m)) continue;
     out.push({ what: `커밋 SHA \`${m}\``,
       why: '적는 순간부터 늙습니다 — 다음 배포에 바로 거짓이 됩니다' });
   }
   for (const c of CLAIMS) {
-    if (c.re.test(line)) out.push({ what: '런타임 상태 단정', why: c.why });
+    if (c.re.test(l)) out.push({ what: '런타임 상태 단정', why: c.why });
   }
-  if (MEASURED.test(line) && !HAS_DATE.test(line)) {
+  if (MEASURED.test(l) && !HAS_DATE.test(l)) {
     out.push({ what: '언제 쟀는지 없는 실측 주장',
       why: '언제 잰 값인지 없으면 지금 값으로 읽힙니다 — 날짜를 같이 적으십시오' });
   }
@@ -115,9 +130,14 @@ export function agingProblems(line) {
     ['커밋 220f8001 기준', /SHA/],
     ['Fly Worker alive', /상태 단정/],
     ['실측 진입 12건', /언제 쟀는지/],
+    // ★ 자기 이름을 적어도 그 줄의 늙는 문장은 보인다.
+    ['커밋 220f8001 기준 (check-status-claims 예시)', /SHA/],
+    ['Fly Worker alive — check-status-claims.mjs 가 막는다', /상태 단정/],
   ];
   const fails = must.filter(([line, want]) => !agingProblems(line).some(p => want.test(p.what)));
-  const quiet = ['PR #170에서 고쳤다', '2026-08-21에 쟀다 — 실측 12건', 'MATCHED가 무슨 뜻인가'];
+  const quiet = ['PR #170에서 고쳤다', '2026-08-21에 쟀다 — 실측 12건', 'MATCHED가 무슨 뜻인가',
+    // 규칙을 **설명하는** 말은 조용해야 한다 — 이 문서가 실제로 그렇게 적는다.
+    '`check-status-claims`가 커밋 SHA·날짜 없는 실측 주장을 CI에서 막는다'];
   const noisy = quiet.filter(line => agingProblems(line).length > 0);
   if (fails.length > 0 || noisy.length > 0) {
     console.error('❌ 자기 점검 실패 — 늙는 문장 판별이 깨졌습니다');
