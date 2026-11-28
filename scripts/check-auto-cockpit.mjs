@@ -34,12 +34,32 @@ for (const f of [PLAN, PLANT, PAGE]) {
 if (bad) { console.error('\n검사할 파일을 못 읽었습니다. 여기서 멈춥니다.\n'); process.exit(1); }
 
 const plan = stripJsComments(readFileSync(PLAN, 'utf8'));
-const planT = readFileSync(PLANT, 'utf8');
+// **시험 파일도 걷는다.** 전에는 이것만 원문이었다. 그 위에서 "시험이
+// 있는가 · 위험한 케이스를 짚는가"를 아홉 자리에서 판정하므로, 주석 한
+// 줄이 그 전부를 만족시켰다. 기계 탐침으로 실제로 돌려 확인했다:
+//
+//   시험 선언을 개명하면                      rc=1  ← 판정은 동작한다
+//     (❌ …: 테스트가 없습니다)
+//   개명하고 주석에 옛 선언을 적으면          rc=0  ← 구멍
+//
+// 러너(`run-tests.mjs`) 쪽 등록 판정은 **아직 열려 있다** — 아래 그 자리에
+// 이유를 적어 두었다.
+const planT = stripJsComments(readFileSync(PLANT, 'utf8'));
 const page = stripJsComments(readFileSync(PAGE, 'utf8'));
 
 /* ── ① 판정이 한 곳에 있고 테스트가 돈다 ────────────────── */
 if (!/export function cockpitVerdict\s*\(/.test(plan)) err(`${PLAN}: 첫 화면 판정 함수가 없습니다`);
 if (!/export function runAutoCockpitTests/.test(planT)) err(`${PLANT}: 테스트가 없습니다`);
+// **이 줄은 아직 주석으로 뚫린다.** 등록 호출은 `run-tests.mjs` 의
+// `RUN_SRC` 템플릿(47~586행) **안**에 있다 — 거기 적힌 것은 생성되는
+// 프로그램의 소스 텍스트다. 공용 제거기는 템플릿 내용을 (의도대로)
+// 건드리지 않으므로, 템플릿 안에서 `/* … */` 로 주석 처리하면 생성된
+// 프로그램에서는 시험이 **실제로 안 돌면서** 이 검사는 통과한다.
+// 측정했다: 호출 제거 rc=1 · 토큰 없는 주석 rc=1 · 주석 처리 rc=0.
+// 닫으려면 템플릿 내용을 꺼내 **그 안에서** 주석을 걷어야 한다
+// (#807 이 `check-order-type-fidelity` 에 넣은 생성 소스 추출기와 같은
+// 일이고, 그 추출기가 `scripts/lib/` 로 옮겨지면 여기도 같이 쓴다 —
+// 같은 등록 앵커 자리가 7곳이라 복제하지 않는다). 0으로 적지 않는다.
 const runner = readFileSync('scripts/run-tests.mjs', 'utf8');
 if (!/runAutoCockpitTests\s*\(\s*\)/.test(runner)) {
   err('scripts/run-tests.mjs에 runAutoCockpitTests()가 등록되지 않았습니다 — 테스트가 돌지 않습니다');
