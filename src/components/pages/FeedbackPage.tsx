@@ -166,9 +166,20 @@ export default function FeedbackPage({ screen }: { screen?: string } = {}) {
     setNotice(null); setError('');
   }, [viewer]);
 
-  const loadList = useCallback(async () => {
+  /**
+   * 목록을 읽는다.
+   *
+   * `fromGen` — **부른 쪽의 세대.** 생략하면 지금 세대다.
+   *
+   * 왜 인자로 받나: 날아가 있던 쓰기 응답이 돌아와 이 함수를 부를 때,
+   * 여기서 세대를 **새로 집으면** 그 오래된 호출이 새 세대를 자기 것으로
+   * 캡처한다. 그러면 바깥에서 막아 둔 것이 안에서 풀린다. 판정을 부르는
+   * 쪽마다 적어 두면 언젠가 한 곳이 빠지므로, **읽는 쪽에서** 받는다.
+   */
+  const loadList = useCallback(async (fromGen?: number) => {
     if (!auth) { setTickets(null); return; }
-    const gen = authGen.current;
+    const gen = fromGen ?? authGen.current;
+    if (gen !== authGen.current) return;
     try {
       const res = await fetch('/api/feedback/reports', { headers: { Authorization: auth }, cache: 'no-store' });
       const d = await res.json();
@@ -183,10 +194,14 @@ export default function FeedbackPage({ screen }: { screen?: string } = {}) {
   }, [auth]);
   useEffect(() => { void loadList(); }, [loadList]);
 
-  const openTicket = useCallback(async (id: string) => {
+  /** `fromGen` 의 뜻은 `loadList` 와 같다 — 부른 쪽의 세대로 판정한다 */
+  const openTicket = useCallback(async (id: string, fromGen?: number) => {
+    const gen = fromGen ?? authGen.current;
+    // 비우기(`setOpenId`·`setMessages`)보다 **먼저** 본다 — 오래된 호출이
+    // 여기까지 오면 그 두 줄만으로도 화면이 이전 사람의 문의로 돌아간다.
+    if (gen !== authGen.current) return;
     setOpenId(id); setMessages(null);
     if (!auth) return;
-    const gen = authGen.current;
     try {
       const res = await fetch(`/api/feedback/reports/${id}`, { headers: { Authorization: auth }, cache: 'no-store' });
       const d = await res.json();
@@ -233,7 +248,7 @@ export default function FeedbackPage({ screen }: { screen?: string } = {}) {
       if (!res.ok || !d?.ok) throw new Error(d?.message || `접수 실패 (${res.status})`);
       setTitle(''); setBody(''); setExtra({ steps: '', expected: '', actual: '' });
       setNotice(d.redactionNotice ?? '접수됐습니다. 내 문의에서 진행 상황을 볼 수 있어요.');
-      setTab('mine'); await loadList();
+      setTab('mine'); await loadList(gen);
     } catch (e) {
       if (gen !== authGen.current) return;
       setError(e instanceof Error ? e.message : '접수 실패');
@@ -259,7 +274,7 @@ export default function FeedbackPage({ screen }: { screen?: string } = {}) {
       if (gen !== authGen.current) return;   // 그 사이 사람이 바뀌었다
       if (!res.ok || !d?.ok) throw new Error(d?.message || `답장 실패 (${res.status})`);
       setReply(''); if (d.redactionNotice) setNotice(d.redactionNotice);
-      await openTicket(id); await loadList();
+      await openTicket(id, gen); await loadList(gen);
     } catch (e) {
       if (gen !== authGen.current) return;
       setError(e instanceof Error ? e.message : '답장 실패');
