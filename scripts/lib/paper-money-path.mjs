@@ -66,19 +66,116 @@ export function plpgsqlBody(sql, name) {
   return { ok: true, body: src.slice(openAt, closeAt) };
 }
 
-/** 계좌 갱신이 0행일 때 되돌리는가. `GET DIAGNOSTICS`와 `NOT FOUND` 둘 다 받는다. */
-function abortsOnNoRows(body) {
-  const checks = /GET\s+DIAGNOSTICS[\s\S]{0,120}ROW_COUNT/i.test(body)
-              || /IF\s+NOT\s+FOUND\s+THEN/i.test(body);
-  return checks && /RAISE\s+EXCEPTION/i.test(body);
+/**
+ * `IF … THEN` 한 블록을 짝을 맞춰 떼어낸다.
+ *
+ * ★ `ELSIF`는 새 블록을 열지 않고 `END IF`가 닫는다. 한 단어이므로
+ *   `\bIF\b`가 그 안을 잡지 않는다.
+ */
+function ifBlockAt(body, from) {
+  const re = /\bEND\s+IF\b|\bIF\b/gi;
+  re.lastIndex = from;
+  let depth = 0;
+  let m;
+  while ((m = re.exec(body))) {
+    if (/^END/i.test(m[0])) {
+      depth -= 1;
+      if (depth <= 0) return body.slice(from, m.index);
+    } else {
+      depth += 1;
+    }
+  }
+  return body.slice(from);          // 닫히지 않았으면 끝까지 — 읽지 못한 것이다
 }
 
-/** 잔고를 증감식으로 미는가 (읽고 고쳐 쓰지 않는가). */
+/**
+ * 계좌 갱신이 0행일 때 되돌리는가.
+ *
+ * ★ **`RAISE EXCEPTION`이 0행 분기 *안에* 있는지 본다.**
+ *
+ *   예전 판정은 "0행을 확인하는 문장이 있다 **그리고** 본문 어딘가에
+ *   `RAISE EXCEPTION`이 있다"였다. 실제 `paper_money_apply`에는 입력 검증용
+ *   `RAISE EXCEPTION`이 **두 개 따로** 있다(사건 시각 없음·금액 없음).
+ *   그래서 0행 분기의 `RAISE`를 무해한 것으로 바꿔도 그 둘이 접속을
+ *   채웠다. 돌려서 얻은 값 — 셋 다 통과했다:
+ *
+ *     IF NOT FOUND THEN RETURN;                     rc=0  구멍
+ *     IF NOT FOUND THEN RAISE WARNING '…';          rc=0  구멍
+ *     IF NOT FOUND THEN NULL;                       rc=0  구멍
+ *
+ *   포지션만 남고 수수료가 안 빠진 계좌가 된다 — 이 판정이 막으려던 바로
+ *   그 상태다.
+ *
+ * `GET DIAGNOSTICS`와 `NOT FOUND` 두 모양을 다 받는다. `GET DIAGNOSTICS`
+ * 쪽은 그 변수를 조건에 쓰는 `IF`의 분기를 본다.
+ */
+function abortsOnNoRows(body) {
+  const src = String(body ?? '');
+
+  // ① `IF NOT FOUND THEN … END IF;`
+  const nf = /\bIF\s+NOT\s+FOUND\s+THEN\b/i.exec(src);
+  if (nf) {
+    return /RAISE\s+EXCEPTION/i.test(ifBlockAt(src, nf.index));
+  }
+
+  // ② `GET DIAGNOSTICS <변수> = ROW_COUNT;` 뒤에 그 변수를 보는 `IF`
+  const gd = /\bGET\s+DIAGNOSTICS\s+([A-Za-z_]\w*)\s*=\s*ROW_COUNT\b/i.exec(src);
+  if (gd) {
+    const v = gd[1];
+    const re = /\bIF\b/gi;
+    re.lastIndex = gd.index + gd[0].length;
+    let m;
+    while ((m = re.exec(src))) {
+      const block = ifBlockAt(src, m.index);
+      const cond = block.slice(0, block.search(/\bTHEN\b/i) + 4);
+      if (new RegExp(`\\b${v}\\b`).test(cond) && /RAISE\s+EXCEPTION/i.test(block)) return true;
+      re.lastIndex = m.index + m[0].length;
+    }
+  }
+  return false;
+}
+
+/**
+ * 잔고를 증감식으로 미는가 (읽고 고쳐 쓰지 않는가).
+ *
+ * ★ **수식어가 붙은 오른쪽은 갱신 대상의 것이어야 한다.**
+ *
+ *   예전 판정은 `balance = <무엇이든>.balance ±`를 전부 받았다. `a.balance`
+ *   (갱신 대상의 별칭)를 받으려던 것인데, plpgsql **변수**도 같이 통과했다.
+ *   돌려서 얻은 값:
+ *
+ *     SET balance = balance + p_amount          통과  옳다
+ *     SET balance = a.balance + p_amount        통과  옳다 (대상 별칭)
+ *     SET balance = v_row.balance + p_amount    통과  ← 구멍
+ *     SET balance = v_prev.balance - p_fee      통과  ← 구멍
+ *
+ *   `v_row.balance`는 **앞서 읽어 둔 값**이다. 그것으로 덮어쓰면 같은
+ *   계좌에서 동시에 끝난 두 건 중 한쪽 손익이 사라진다 — 이 계약이 막으려던
+ *   바로 그 고장이다.
+ *
+ *   그래서 수식어가 있으면 그 앞의 `UPDATE`가 가리키는 **표 이름이나
+ *   별칭**과 같아야 한다. 지금 저장소는 수식어 없는 형태만 쓴다(측정값:
+ *   `balance = balance -` 8곳 · `balance = balance +` 7곳).
+ */
 function movesByDelta(body, column = 'balance') {
-  // `balance = balance ± x` / `balance = a.balance ± x` 둘 다 받는다.
+  const src = String(body ?? '');
   const re = new RegExp(
-    `${column}\\s*=\\s*(?:[A-Za-z_]\\w*\\.)?${column}\\s*[-+]`, 'i');
-  return re.test(body);
+    `${column}\\s*=\\s*(?:([A-Za-z_]\\w*)\\.)?${column}\\s*[-+]`, 'gi');
+  let m;
+  while ((m = re.exec(src))) {
+    if (!m[1]) return true;                       // 수식어 없음 — 대상 자신이다
+    // 이 대입 앞의 가장 가까운 `UPDATE <표> [AS] [별칭]`
+    const before = src.slice(0, m.index);
+    const up = [...before.matchAll(
+      /\bUPDATE\s+((?:[A-Za-z_]\w*\.)?[A-Za-z_]\w*)(?:\s+AS)?(?:\s+([A-Za-z_]\w*))?/gi)].pop();
+    if (!up) continue;                            // 어느 UPDATE 인지 모른다 — 통과시키지 않는다
+    const table = up[1].split('.').pop().toLowerCase();
+    const alias = (up[2] || '').toLowerCase();
+    const q = m[1].toLowerCase();
+    // `SET`·`WHERE` 같은 낱말이 별칭으로 잡히는 것은 별칭 없음과 같다
+    if (q === table || (alias && q === alias)) return true;
+  }
+  return false;
 }
 
 /**
