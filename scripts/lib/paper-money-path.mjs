@@ -160,7 +160,8 @@ function abortsOnNoRows(body) {
 function movesByDelta(body, { column = 'balance', sign, operand } = {}) {
   const src = String(body ?? '');
   for (const m of src.matchAll(deltaRe({ column, sign, operand }))) {
-    if (qualifierIsTarget(src, m.index, m[1])) return true;
+    // 식 본체가 두 갈래에 들어가므로 수식어 자리도 둘이다 (괄호·bare)
+    if (qualifierIsTarget(src, m.index, m[1] ?? m[2])) return true;
   }
   return false;
 }
@@ -186,16 +187,31 @@ function movesByDelta(body, { column = 'balance', sign, operand } = {}) {
  *   예전 판정을 통과했다.
  *
  * 괄호로 감싼 꼴(`(balance + p_amount)`)은 받는다. 그 뒤는 `,` · `;` · `)` ·
- * `WHERE` · `RETURNING` · 끝만 허용한다 — 산술 접미부를 막는다.
+ * `WHERE` · `RETURNING` · `FROM` · 끝만 허용한다 — 산술 접미부를 막는다.
+ *
+ * ★ 그 괄호 허용을 **선택적 괄호 한 쌍**(`\(?` … `\)?`)으로 적었더니
+ *   **괄호 자체가 종료 자리를 대신했다.** 닫는 괄호가 뒤 산술기호를 만나면
+ *   역추적되어 소비되지 않고, 종료 lookahead 의 독립 `)` 선택지가 바로 그
+ *   괄호에서 통과시킨다. 돌려서 얻은 값 (기대충족 2/6):
+ *
+ *     inline     (balance - p_entry_fee) * 0            ok=true  구멍
+ *     inline     (balance - p_entry_fee) + p_entry_fee  ok=true  구멍
+ *     delegated  (balance + p_amount) * 0               ok=true  구멍
+ *     delegated  (balance + p_amount) - p_amount        ok=true  구멍
+ *
+ *   그래서 괄호를 **짝으로** 받는다. 감싼 갈래는 여는·닫는 괄호를 모두
+ *   소비하고 그 뒤에 종료만 허용한다 — 소비되지 않은 괄호가 남지 않으므로
+ *   종료 자리를 대신할 수 없다. 둘러싼 구문(CTE 등)의 `)` 는 두 갈래 모두
+ *   에서 그대로 종료다. 식 본체는 한 곳에만 적고 두 갈래가 같은 문자열을
+ *   쓴다 — 모양이 갈리지 않게.
  */
 function deltaRe({ column = 'balance', sign, operand } = {}) {
   const signPart = sign === '+' ? '\\+' : sign === '-' ? '-' : '[-+]';
   const operandPart = operand ? `${operand}\\b` : '[A-Za-z_]\\w*\\b';
+  const body = `(?:([A-Za-z_]\\w*)\\.)?${column}\\s*${signPart}\\s*${operandPart}`;
+  const end = '\\s*(?=,|;|\\)|\\bWHERE\\b|\\bRETURNING\\b|\\bFROM\\b|$)';
   return new RegExp(
-    `${column}\\s*=\\s*\\(?\\s*(?:([A-Za-z_]\\w*)\\.)?${column}`
-    + `\\s*${signPart}\\s*${operandPart}\\s*\\)?\\s*`
-    + '(?=,|;|\\)|\\bWHERE\\b|\\bRETURNING\\b|\\bFROM\\b|$)',
-    'gi');
+    `${column}\\s*=\\s*(?:\\(\\s*${body}\\s*\\)|${body})${end}`, 'gi');
 }
 
 /**

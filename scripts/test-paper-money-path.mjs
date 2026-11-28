@@ -378,3 +378,84 @@ test('대조 — 지금 저장소의 실제 식은 정확히 허용 모양이다
   assert.equal(r.ok, true, r.ok ? '' : r.reason);
   assert.equal(r.where, 'delegated');
 });
+
+// ── 괄호 뒤 산술 접미부 (Codex 후속 지적) ──────────────────────────
+// ★ 괄호 허용을 **선택적 괄호 한 쌍**(`\(?` … `\)?`)으로 적었더니 그
+//   **괄호 자체가 종료 자리를 대신했다.** 닫는 괄호가 뒤 산술기호를 만나면
+//   역추적되어 소비되지 않고, 종료 lookahead 의 독립 `)` 선택지가 바로 그
+//   괄호에서 통과시킨다. d04cdf6c 에서 돌려서 얻은 값 — 기대충족 2/6:
+//
+//     inline     (balance - p_entry_fee)                ok=true  옳다
+//     inline     (balance - p_entry_fee) * 0            ok=true  구멍
+//     inline     (balance - p_entry_fee) + p_entry_fee  ok=true  구멍
+//     delegated  (balance + p_amount)                   ok=true  옳다
+//     delegated  (balance + p_amount) * 0               ok=true  구멍
+//     delegated  (balance + p_amount) - p_amount        ok=true  구멍
+//
+//   잔고 100 · 수수료 10 이면 첫 식은 0, 차감 상쇄는 100 이 된다. 위 숫자는
+//   산술 설명이고 PG 를 돌린 결과가 아니다 — 운영에서 수수료 오차나 사용자
+//   손실을 관측했다고 주장하지 않는다.
+//
+//   직전 b8e107fb 는 괄호를 **아예 받지 않아**(정상 두 꼴까지 거부) 이 구멍이
+//   없었다. 그래서 이것은 **괄호 허용과 함께 생긴 새 누락**이고, 앞의 bare 식
+//   여섯 건을 다시 센 것이 아니다.
+//
+//   고친 방향은 괄호를 **짝으로** 받는 것이다. 감싼 갈래가 여는·닫는 괄호를
+//   모두 소비하므로 소비되지 않은 괄호가 남지 않고, 종료 자리를 대신할 수
+//   없다. 식 본체는 한 곳에만 적고 두 갈래가 같은 문자열을 쓴다.
+for (const [how, rhs] of [
+  ['0 배로 상쇄', '(balance - p_entry_fee) * 0'],
+  ['더해서 상쇄', '(balance - p_entry_fee) + p_entry_fee'],
+  ['두 배로 뺀다', '(balance - p_entry_fee) * 2'],
+]) {
+  test(`★ inline — 괄호 뒤 ${how} (${rhs}) 를 막는다`, () => {
+    const r = feeDeductionContract(inlineFee(rhs));
+    assert.equal(r.ok, false, `소비되지 않은 괄호가 종료 자리를 대신하면 안 된다: ${rhs}`);
+  });
+}
+
+for (const [how, rhs] of [
+  ['0 배로 상쇄', '(balance + p_amount) * 0'],
+  ['차감 상쇄', '(balance + p_amount) - p_amount'],
+  ['두 배', '(balance + p_amount) * 2'],
+]) {
+  test(`★ delegated — 괄호 뒤 ${how} (${rhs}) 를 막는다`, () => {
+    const r = feeDeductionContract(delegatedFee(rhs));
+    assert.equal(r.ok, false, `소비되지 않은 괄호가 종료 자리를 대신하면 안 된다: ${rhs}`);
+  });
+}
+
+test('대조 — 괄호 갈래도 같은 수식어 판정을 쓴다', () => {
+  // 식 본체가 두 갈래에 들어가면서 수식어 포획군도 둘이 됐다. 한쪽만 읽으면
+  // 괄호로 감싼 `v_row.balance` 가 다시 통과한다 — 이 저장소가 이름 붙여 둔
+  // "경로가 둘인데 한쪽만 고침" 그대로다.
+  for (const [kind, make, rhs, alias, want] of [
+    ['inline', inlineFee, '(a.balance - p_entry_fee)', ' AS a', true],
+    ['inline', inlineFee, '(v_row.balance - p_entry_fee)', '', false],
+    ['inline', inlineFee, '(  balance  -  p_entry_fee  )', '', true],
+    ['delegated', delegatedFee, '(a.balance + p_amount)', ' AS a', true],
+    ['delegated', delegatedFee, '(v_row.balance + p_amount)', '', false],
+  ]) {
+    const r = feeDeductionContract(make(rhs, alias));
+    assert.equal(r.ok, want, `${kind} — ${rhs}: ${r.ok ? '' : r.reason}`);
+  }
+});
+
+test('대조 — 둘러싼 구문의 닫는 괄호는 그대로 종료다', () => {
+  // 괄호를 짝으로 받게 하면서 `)` 를 종료에서 빼면 CTE 안의 UPDATE 가
+  // 거짓으로 막힌다. 두 갈래 모두에서 `)` 는 종료로 남아야 한다.
+  const cte = (rhs) => ({
+    sql: '',
+    fnBody: `DECLARE p_entry_fee numeric := 10; p_account_id uuid;
+BEGIN
+  WITH upd AS (
+    UPDATE public.paper_accounts SET balance = ${rhs} WHERE id = p_account_id RETURNING id
+  )
+  SELECT 1 FROM upd;
+  IF NOT FOUND THEN RAISE EXCEPTION 'missing'; END IF; END;`,
+  });
+  for (const rhs of ['balance - p_entry_fee', '(balance - p_entry_fee)']) {
+    const r = feeDeductionContract(cte(rhs));
+    assert.equal(r.ok, true, `CTE 안의 정상 식이 막히면 거짓 실패다: ${rhs} — ${r.ok ? '' : r.reason}`);
+  }
+});
