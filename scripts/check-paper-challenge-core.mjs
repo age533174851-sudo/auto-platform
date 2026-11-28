@@ -393,8 +393,14 @@ for (const t of ['paper_challenges', 'paper_challenge_cashflows', 'paper_challen
         allow: [
           // 쓰기는 service_role만
           { cmd: 'ALL', roles: ['service_role'] },
-          // 읽기는 authenticated에게, 본인 행만
-          { cmd: 'SELECT', roles: ['authenticated'], using: /user_id\s*=\s*auth\.uid\(\)/i },
+          // 읽기는 authenticated에게, 본인 행만.
+          //
+          // ★ 정규식 부분일치가 아니라 **정확히 이 식들만** 받는다.
+          //   `USING (user_id = auth.uid() OR true)`는 부분일치를 통과하지만
+          //   격리 PostgreSQL에서 남의 행까지 읽혔다(측정값은 정본 모듈의
+          //   주석에 있다). 모르는 꼴은 막는다.
+          { cmd: 'SELECT', roles: ['authenticated'],
+            using: ['user_id = auth.uid()', 'auth.uid() = user_id'] },
         ],
       });
     if (!v.ok) {

@@ -32,7 +32,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { test } from 'node:test';
 import {
-  checkTableAccessIntent, policyStatements, dropPolicyStatements, rlsToggles,
+  checkTableAccessIntent, policyStatements, dropPolicyStatements, rlsToggles, canonicalExpr,
 } from './lib/migration-policy.mjs';
 
 const root = new URL('../', import.meta.url);
@@ -46,7 +46,8 @@ const INTENT = {
   tables: ['paper_challenges', 'paper_challenge_cashflows', 'paper_challenge_transitions'],
   allow: [
     { cmd: 'ALL', roles: ['service_role'] },
-    { cmd: 'SELECT', roles: ['authenticated'], using: /user_id\s*=\s*auth\.uid\(\)/i },
+    { cmd: 'SELECT', roles: ['authenticated'],
+      using: ['user_id = auth.uid()', 'auth.uid() = user_id'] },
   ],
 };
 
@@ -260,4 +261,107 @@ test('qualifiedName — 네 가지 표기를 같은 이름으로 읽는다', () 
     rlsToggles('ALTER TABLE "public"."paper_challenges" DISABLE ROW LEVEL SECURITY;')[0].table, T);
   assert.equal(
     dropPolicyStatements('DROP POLICY "pc owner" ON "public"."paper_challenges";')[0].table, T);
+});
+
+// ── 소유자 식은 부분일치로 보지 않는다 (Codex 지적) ────────────────
+//
+// `USING (...)` 안에 소유자 비교가 들어 있는지만 보면 의미를 보증하지
+// 못한다. 격리 PostgreSQL 에서 user1·user2 두 행과 `auth.uid() = user1`로
+// 실제 `authenticated` role 로 읽은 값이 보고됐다:
+//
+//   USING (user_id = auth.uid())            읽힌 행 {1}      옳다
+//   USING (user_id = auth.uid() OR true)    읽힌 행 {1, 2}   열렸다
+//   USING (NOT (user_id = auth.uid()))      읽힌 행 {2}      남의 행만
+//
+// 셋 다 유효한 정책이고, 고치기 전 판정은 **전부 통과시켰다.**
+test('★ USING 에 OR true 를 붙이면 막는다', () => {
+  const v = judge(`CREATE POLICY p ON ${T} FOR SELECT TO authenticated`
+    + ' USING (user_id = auth.uid() OR true);');
+  assert.equal(v.ok, false, '소유자 비교가 들어 있다고 소유자 격리가 되는 것이 아니다');
+  assert.equal(v.code, 'POLICY_OUTSIDE_INTENT');
+  assert.match(v.reason, /부분일치/);
+});
+
+test('★ USING 을 NOT 으로 감싸면 막는다 (남의 행만 읽힌다)', () => {
+  const v = judge(`CREATE POLICY p ON ${T} FOR SELECT TO authenticated`
+    + ' USING (NOT (user_id = auth.uid()));');
+  assert.equal(v.ok, false);
+  assert.equal(v.code, 'POLICY_OUTSIDE_INTENT');
+});
+
+test('★ USING 에 OR 1=1 을 붙이면 막는다', () => {
+  const v = judge(`CREATE POLICY p ON ${T} FOR SELECT TO authenticated`
+    + ' USING (user_id = auth.uid() OR 1=1);');
+  assert.equal(v.ok, false);
+  assert.equal(v.code, 'POLICY_OUTSIDE_INTENT');
+});
+
+test('★ 모르는 소유자 식은 막는다 (의미를 증명할 수 없으면 통과가 아니다)', () => {
+  for (const expr of [
+    'user_id IN (SELECT id FROM public.profiles)',
+    'user_id = auth.uid() AND true',
+    'true',
+    "user_id = coalesce(auth.uid(), '00000000-0000-0000-0000-000000000000')",
+  ]) {
+    const v = judge(`CREATE POLICY p ON ${T} FOR SELECT TO authenticated USING (${expr});`);
+    assert.equal(v.ok, false, `모르는 식을 통과시키면 안 된다: ${expr}`);
+    assert.equal(v.code, 'POLICY_OUTSIDE_INTENT');
+  }
+});
+
+test('대조 — 같은 뜻의 서식 차이는 통과한다', () => {
+  for (const expr of [
+    'user_id = auth.uid()',
+    'auth.uid() = user_id',
+    '(user_id = auth.uid())',
+    '((user_id = auth.uid()))',
+    'user_id\n    =   auth.uid()',
+    'USER_ID = AUTH.UID()',
+  ]) {
+    const v = judge(`CREATE POLICY p ON ${T} FOR SELECT TO authenticated USING (${expr});`);
+    assert.equal(v.ok, true, `서식만 다른 식이 막히면 거짓 실패다: ${expr} — ${v.reason}`);
+  }
+});
+
+test('★ 중첩 괄호를 끊어 읽는다 (정규식으로는 끊긴다)', () => {
+  const got = policyStatements(`CREATE POLICY p ON ${T} FOR SELECT TO authenticated`
+    + ' USING (NOT (user_id = auth.uid()));');
+  assert.equal(got[0].using, 'NOT (user_id = auth.uid())',
+    '`\\(([^)]*)\\)` 로 읽으면 첫 `)` 에서 끊겨 식의 일부만 본다');
+});
+
+test('policyStatements — USING 과 WITH CHECK 를 따로 읽는다', () => {
+  const got = policyStatements(`CREATE POLICY p ON ${T} FOR ALL TO service_role`
+    + ' USING (a = 1) WITH CHECK (b = 2);');
+  assert.equal(got[0].using, 'a = 1');
+  assert.equal(got[0].withCheck, 'b = 2');
+});
+
+test('canonicalExpr — 감싼 괄호만 벗기고 가운데 괄호는 건드리지 않는다', () => {
+  assert.equal(canonicalExpr('  (( user_id  =  auth.uid() ))  '), 'user_id = auth.uid()');
+  assert.equal(canonicalExpr('(a) = (b)'), '(a) = (b)');
+  assert.equal(canonicalExpr('(a) AND (b)'), '(a) and (b)');
+});
+
+// ── 인용 role 은 대소문자를 보존한다 (Codex 지적 · #828 과 같은 결함) ──
+test('★ 인용 대문자 role 은 service_role 이 아니다', () => {
+  for (const role of ['"SERVICE_ROLE"', '"Service_Role"']) {
+    const v = judge(`CREATE POLICY p ON ${T} FOR ALL TO ${role} USING (true) WITH CHECK (true);`);
+    assert.equal(v.ok, false, `${role} 를 service_role 로 읽으면 다른 role 에 돈 표가 열린다`);
+    assert.equal(v.code, 'POLICY_OUTSIDE_INTENT');
+  }
+});
+
+test('대조 — 인용하지 않은 role 은 PostgreSQL 규칙대로 접힌다', () => {
+  for (const role of ['service_role', 'SERVICE_ROLE', '"service_role"']) {
+    const v = judge(`CREATE POLICY p ON ${T} FOR ALL TO ${role} USING (true) WITH CHECK (true);`);
+    assert.equal(v.ok, true, `${role} 는 service_role 과 같은 role 이다: ${v.reason}`);
+  }
+});
+
+test('대조 ★ 표를 찾는 쪽은 대소문자를 무시한다 (막는 쪽으로 틀린다)', () => {
+  const v = judge('CREATE POLICY p ON "PUBLIC"."PAPER_CHALLENGES"'
+    + ' FOR SELECT TO authenticated USING (true);');
+  assert.equal(v.ok, false, '표를 다른 이름으로 읽으면 통과한다');
+  assert.equal(v.code, 'POLICY_OUTSIDE_INTENT');
 });
