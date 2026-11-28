@@ -49,6 +49,33 @@ if (bad) { console.error('\n검사할 파일을 못 읽었습니다. 여기서 �
 /* 주석 제거는 `scripts/lib/strip-comments.mjs`에 있다.
    여기에 한 벌 더 두면 언젠가 한쪽만 고쳐지고, 그때부터 그 검사기는
    조용히 아무것도 막지 않는다. */
+/**
+ * **선언 이름의 왼쪽 경계.** `max-width:` 를 찾는 정규식은
+ * `--max-width:` 안에서도 맞는다 — 그건 **사용자 정의 속성**이고 아무
+ * 일도 하지 않는다. 이 파일은 주석은 이미 지우고 보는데(`cssCode`),
+ * 이름 경계는 보지 않았다.
+ *
+ * 같은 결함군을 [Codex 가 #823 에서](https://github.com/age533174851-sudo/auto-platform/pull/823#issuecomment-7237339761)
+ * 먼저 짚었다. 이 검사기에서도 다섯 자리를 재서 확인했다:
+ *
+ *   구멍 (통과시킨다)
+ *     · `.aw` 의 칸 선언 둘을 `--grid-template-columns` 로  → rc=0
+ *       (지우는 대조는 rc=1. 칸이 사라져 PC 3열 골격이 없어지는데 통과한다)
+ *   과검출 (없는 위반을 만든다)
+ *     · `.mc` 에 `--max-width: 820px`                      → rc=1
+ *     · 전역 `*` 에 `--overflow: hidden`                    → rc=1
+ *     · `.menu-grid` 에 `--grid-template-columns: repeat(4,` → rc=1
+ *     · 접힘 규칙에 `--display: none`                        → rc=1
+ *
+ * 네 과검출은 **막는 쪽이 아니라 거짓으로 막는 쪽**이다. 아무 일도 않는
+ * 속성 하나 때문에 멀쩡한 CSS 가 반려된다.
+ *
+ * 공용 모듈로 빼지 않은 이유: 같은 수정이 #823(`check-tap-targets`)·
+ * #824(`check-trading-layout`) 에도 있고, 세 PR 이 같은 새 파일을 만들면
+ * 서로 충돌한다. 셋이 병합된 뒤에 한 곳으로 모은다.
+ */
+const DECL = '(?<![-\\w])';
+
 const cssCode = stripCssComments(src[CSS]);
 
 const toggleCode = stripJsComments(src[TOGGLE]);
@@ -92,7 +119,7 @@ if (!/--sb-w/.test(src[PAGE]) || !/--rp-w/.test(src[PAGE])) {
 }
 // 실제 `.aw`의 칸 선언만 본다. 파일 아무 데나 있는 같은 문자열이
 // 아니라, 이 칸을 정하는 줄이 맞는지 확인한다.
-const awCols = [...cssCode.matchAll(/\.aw[^{}]*\{[^}]*?grid-template-columns:\s*([^;}]+)/g)].map(m => m[1].trim());
+const awCols = [...cssCode.matchAll(new RegExp(`\\.aw[^{}]*\\{[^}]*?${DECL}grid-template-columns:\\s*([^;}]+)`, 'g'))].map(m => m[1].trim());
 if (!awCols.length) err(`${CSS}에서 .aw의 칸 선언을 못 찾았습니다 — 검사기가 고장 났거나 골격이 바뀐 것입니다`);
 if (!awCols.some(c => /var\(--sb-w/.test(c))) err(`${CSS}의 PC 칸이 --sb-w를 쓰지 않습니다`);
 if (!awCols.some(c => /var\(--rp-w/.test(c))) err(`${CSS}의 PC 칸이 --rp-w를 쓰지 않습니다`);
@@ -106,7 +133,7 @@ for (const c of awCols) {
 // 접었을 때 가운데가 늘어나려면 .mc에 max-width 상한이 없어야 한다.
 // 예전 `.mc { max-width: 820px }`가 정확히 그 고장이었다 — 칸은 줄었는데
 // 본문은 안 늘어나고 빈 자리만 생겼다.
-if (/\.mc\s*\{[^}]*max-width:\s*\d+px/.test(cssCode)) {
+if (new RegExp(`\\.mc\\s*\\{[^}]*${DECL}max-width:\\s*\\d+px`).test(cssCode)) {
   err(`${CSS}의 .mc에 고정 max-width가 있습니다 — 패널을 접어도 빈 자리만 남습니다`);
 }
 if (!/data-left=/.test(src[PAGE]) || !/data-right=/.test(src[PAGE])) {
@@ -121,7 +148,7 @@ for (const attr of ['data-left', 'data-right']) {
 /* ── ④ 접은 뒤에 다시 펼 수 있는가 ──────────────────────────
    한 번 접으면 못 펴는 화면은 접기 기능이 아니라 숨기기 사고다.
    접힌 상태에서 사라지는 것들 목록에 토글 자체가 없어야 한다. */
-const collapsedHide = cssCode.match(/\.aw\[data-left='compact'\][^{]*\{[^}]*display:\s*none[^}]*\}/g) || [];
+const collapsedHide = cssCode.match(new RegExp(`\\.aw\\[data-left='compact'\\][^{]*\\{[^}]*${DECL}display:\\s*none[^}]*\\}`, 'g')) || [];
 for (const rule of collapsedHide) {
   if (/PanelToggle|panel-toggle/.test(rule)) err('사이드바를 접으면 펴는 버튼까지 사라집니다');
 }
@@ -205,14 +232,14 @@ if (!/MenuViewToggle/.test(src[HUB]) || !/MenuTile/.test(src[HUB])) {
 if (!/auto-fill|auto-fit/.test(cssCode)) {
   err(`${CSS}의 메뉴 격자가 고정 열 수를 씁니다 — 패널을 접으면 칸 폭이 바뀝니다`);
 }
-if (/\.menu-grid\s*\{[^}]*grid-template-columns:\s*repeat\(\s*\d+\s*,/.test(cssCode)) {
+if (new RegExp(`\\.menu-grid\\s*\\{[^}]*${DECL}grid-template-columns:\\s*repeat\\(\\s*\\d+\\s*,`).test(cssCode)) {
   err(`${CSS}의 .menu-grid가 고정 열 수입니다`);
 }
 
 /* ── ⑦ 넘침을 숨기지 않았는가 ───────────────────────────────
    `overflow: hidden`을 전역에 붙이면 가로 스크롤은 사라지지만 내용도
    같이 사라진다. 안 보이는 것은 고친 것이 아니다. */
-if (/^\s*\*\s*\{[^}]*overflow:\s*hidden/m.test(cssCode)) {
+if (new RegExp(`^\\s*\\*\\s*\\{[^}]*${DECL}overflow:\\s*hidden`, 'm').test(cssCode)) {
   err(`${CSS}에 전역 overflow:hidden이 있습니다 — 넘침을 고치지 않고 숨긴 것입니다`);
 }
 
