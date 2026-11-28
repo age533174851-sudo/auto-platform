@@ -141,3 +141,21 @@ test('★ 임시 폴더를 남기지 않는다', () => {
   const after = readdirSync(tmpdir()).filter((n) => n.startsWith(PREFIX)).length;
   assert.equal(after, before, `임시 폴더가 늘었다 (${before} → ${after})`);
 });
+
+// ── 선언 이름의 왼쪽 경계 ──
+//
+// 주석만 막아서는 부족했다. `position:` 을 찾는 정규식은 `--position:`
+// 안에서도 맞는다 — 그건 **사용자 정의 속성**이고 흐름에서 빼 주지 않는다.
+//
+// 같은 결함군을 [Codex 가 #823 에서](https://github.com/age533174851-sudo/auto-platform/pull/823#issuecomment-7237339761)
+// 먼저 짚었다(거기서는 `margin-right`·`min-height`). 이 파일에서도 재서
+// 확인했다 — rc=0 이었다.
+test('★ position 을 사용자 정의 속성으로 바꿔도 막는다', () => {
+  const rule = overlayRule();
+  const broken = rule.replace('position: fixed;', '--position: fixed;');
+  assert.notEqual(broken, rule, '원문 모양이 바뀌었다 — 이 시험도 같이 봐야 한다');
+  const r = withFixture([[CSS, 'position 사용자 정의 속성화', swap(rule, broken)]], runIn);
+  assert.equal(r.rc, 1,
+    '사용자 정의 속성(--position)을 실제 선언으로 인정했다 — 레일은 여전히 흐름 안에 있다');
+  assert.ok(r.out.includes('흐름에서 빠지지 않습니다'), '막기는 했는데 다른 판정이 울렸다');
+});

@@ -191,7 +191,16 @@ need(APP, /data-rail-overlay=/, '겹쳐 여는 상태를 화면에 표시하지 
   const css = existsSync(CSS) ? stripCssComments(readFileSync(CSS, 'utf8')) : '';
   const m = /\.aw\[data-rail-overlay='1'\]\s+\.rp\s*\{([\s\S]*?)\}/.exec(css);
   if (!m) err(`${CSS}: 겹쳐 여는 레일 규칙이 없습니다 — 표식만 붙고 화면은 그대로입니다`);
-  else if (!/position:\s*fixed/.test(m[1])) {
+  /* **선언 이름의 왼쪽 경계.** `position:` 을 찾는 정규식은
+     `--position:` 안에서도 맞는다 — 그건 **사용자 정의 속성**이고 흐름에서
+     빼 주지 않는다. 실제로 쟀다: `position: fixed` 를 `--position: fixed`
+     로 바꾸면 rc=0 이었다.
+
+     같은 결함군을 [Codex 가 #823 에서](https://github.com/age533174851-sudo/auto-platform/pull/823#issuecomment-7237339761)
+     먼저 짚었고(거기서는 `margin-right`·`min-height`), 그 PR 에도 같이
+     걸었다. 공용 모듈로 빼지 않은 이유는 두 PR 이 같은 새 파일을 만들면
+     서로 충돌하기 때문이다 — 둘이 병합된 뒤에 한 곳으로 모은다. */
+  else if (!/(?<![-\w])position:\s*fixed/.test(m[1])) {
     err(`${CSS}: 겹쳐 여는 레일이 흐름에서 빠지지 않습니다 — 여전히 거래영역의 폭을 가져갑니다`);
   }
 }
