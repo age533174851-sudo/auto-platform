@@ -32,7 +32,7 @@
 // 실제 픽셀 확인은 `scripts/probe/`가 한다(수동, README 참조).
 
 import { readFileSync, existsSync } from 'node:fs';
-import { stripJsComments } from './lib/strip-comments.mjs';
+import { stripCssComments, stripJsComments } from './lib/strip-comments.mjs';
 
 let bad = false;
 const err = (m) => { bad = true; console.error(`❌ ${m}`); };
@@ -174,7 +174,21 @@ need(APP, /railPresentationFor\s*\(/, '레일 표현 방식 판단을 배선하�
 need(APP, /railWidthFor\(\s*railOverlay\s*\?/, '겹쳐 여는 동안에도 칸 폭을 그대로 잡습니다 — 거래영역이 다시 줄어듭니다');
 need(APP, /data-rail-overlay=/, '겹쳐 여는 상태를 화면에 표시하지 않습니다 — CSS가 붙을 곳이 없습니다');
 {
-  const css = existsSync(CSS) ? readFileSync(CSS, 'utf8') : '';
+  /* **주석 처리한 줄은 계약이 아니다.** 이 파일은 TS/TSX 는 주석을 지우고
+     보면서(`code[f]`) CSS 만 원문으로 보고 있었다. 실제로 재서 확인했다
+     (지우는 대조 둘은 rc=1):
+
+       · 규칙 전체를 주석으로 감싼다                        → rc=0
+       · 규칙은 살려 두고 `position: fixed` 한 줄만 주석     → rc=0
+
+     두 번째가 더 그럴듯하다. 규칙은 그대로 있고 한 줄만 꺼 보는 것이라
+     되돌리는 것을 잊기 쉽다. 그때 겹쳐 여는 레일이 다시 흐름 안으로
+     들어와 **거래영역의 폭을 가져가는데** 관문은 초록이다.
+
+     주석을 지우면 덤으로 하나 더 닫힌다: 규칙 안의 주석에 `}` 가 있으면
+     아래 `[\s\S]*?\}` 가 거기서 끊겨 `position: fixed` 를 못 보고
+     **없는 위반을 만든다.** */
+  const css = existsSync(CSS) ? stripCssComments(readFileSync(CSS, 'utf8')) : '';
   const m = /\.aw\[data-rail-overlay='1'\]\s+\.rp\s*\{([\s\S]*?)\}/.exec(css);
   if (!m) err(`${CSS}: 겹쳐 여는 레일 규칙이 없습니다 — 표식만 붙고 화면은 그대로입니다`);
   else if (!/position:\s*fixed/.test(m[1])) {
