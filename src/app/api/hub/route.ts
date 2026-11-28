@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { briefingFromMarket, type MarketRead } from '@/lib/market/hubBriefing';
 
 const KRW = 1375;
 
@@ -55,30 +56,26 @@ async function buildStrategyWithAI(description: string) {
   } catch { return fallback; }
 }
 
+// **못 읽은 시세를 지어내지 않는다.** 판단은 `briefingFromMarket` 한 곳에 있다
+// (`src/lib/market/hubBriefing.test.ts`). 여기서는 읽기만 한다.
 async function generateBriefing() {
-  let btcPrice = 94230000, btcChg = 2.14, fundingRate = 0.0001;
+  const m: MarketRead = { priceUsd: null, chgPct: null, fundingRate: null };
   try {
     const [t, f] = await Promise.allSettled([
       fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT', { signal: AbortSignal.timeout(3000) }).then(r => r.json()),
       fetch('https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT', { signal: AbortSignal.timeout(3000) }).then(r => r.json()),
     ]);
-    if (t.status === 'fulfilled' && t.value && t.value.lastPrice) {
-      const p = parseFloat(t.value.lastPrice);
-      const c = parseFloat(t.value.priceChangePercent);
-      if (Number.isFinite(p) && p > 0) btcPrice = p * KRW;
-      if (Number.isFinite(c))           btcChg   = c;
+    if (t.status === 'fulfilled' && t.value && t.value.lastPrice != null) {
+      m.priceUsd = parseFloat(t.value.lastPrice);
+      m.chgPct = parseFloat(t.value.priceChangePercent);
     }
-    if (f.status === 'fulfilled' && f.value && f.value.lastFundingRate) {
-      const fr = parseFloat(f.value.lastFundingRate);
-      if (Number.isFinite(fr)) fundingRate = fr;
+    if (f.status === 'fulfilled' && f.value && f.value.lastFundingRate != null) {
+      m.fundingRate = parseFloat(f.value.lastFundingRate);
     }
-  } catch {}
-  // 최종 가드 — 어떻게든 NaN이 끼면 mock 기본값으로
-  if (!Number.isFinite(btcPrice) || btcPrice <= 0) btcPrice = 94230000;
-  if (!Number.isFinite(btcChg))                     btcChg   = 0;
-  if (!Number.isFinite(fundingRate))                fundingRate = 0.0001;
-  const sentiment = btcChg > 3 ? 'STRONG_BULLISH' : btcChg > 1 ? 'BULLISH' : btcChg < -3 ? 'STRONG_BEARISH' : btcChg < -1 ? 'BEARISH' : 'NEUTRAL';
-  const fundBias  = fundingRate > 0.0005 ? '롱 과열' : fundingRate < -0.0001 ? '숏 과열' : '중립';
+  } catch { /* 못 읽었다 — null로 남는다 */ }
+  const base = briefingFromMarket(m, KRW, null, new Date().toISOString());
+  // 시세를 못 읽었으면 AI에 넘길 숫자가 없다 — 부르지 않는다.
+  if (!base.marketOk || base.btcPrice == null || base.btcChg == null) return base;
   const key = process.env.OPENAI_API_KEY || '';
   let aiSummary: string | null = null;
   if (key) {
@@ -87,16 +84,14 @@ async function generateBriefing() {
         method:'POST', headers:{'Content-Type':'application/json',Authorization:`Bearer ${key}`},
         body: JSON.stringify({ model:'gpt-4o-mini', max_tokens:150,
           messages:[{role:'system',content:'한국어 100자 이내 암호화폐 시장 브리핑. ⚠️투자조언아님'},
-          {role:'user',content:`BTC: ₩${Math.round(btcPrice/10000)}만 (${btcChg.toFixed(2)}%), 펀딩:${fundBias}, 시장:${sentiment}`}],
+          {role:'user',content:`BTC: ₩${Math.round(base.btcPrice/10000)}만 (${base.btcChg.toFixed(2)}%), 펀딩:${base.fundBias ?? '확인 불가'}, 시장:${base.sentiment}`}],
         }),
         signal: AbortSignal.timeout(8000),
       });
       if (r.ok) { const d = await r.json(); aiSummary = d.choices?.[0]?.message?.content || null; }
     } catch {}
   }
-  return { btcPrice, btcChg, fundingRate, sentiment, fundBias,
-    aiSummary: aiSummary || `BTC ₩${Math.round(btcPrice/10000)}만 (${btcChg >= 0 ? '+' : ''}${btcChg.toFixed(2)}%) · 펀딩 ${fundBias} · ${sentiment}`,
-    source: aiSummary ? 'openai' : 'fallback', timestamp: new Date().toISOString() };
+  return aiSummary ? briefingFromMarket(m, KRW, aiSummary, base.timestamp) : base;
 }
 
 async function analyzeNewsImpact(headline: string) {

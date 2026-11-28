@@ -371,7 +371,7 @@ function MarketBriefing() {
           <div style={{ display:'flex', justifyContent:'space-between', marginBottom:8 }}>
             <div style={{ color:T.acl, fontWeight:700, fontSize:11 }}>오늘의 시장</div>
             <span style={{ background:data.source==='openai'?A(T.grn,'20'):A(T.ylw,'20'), color:data.source==='openai'?T.grn:T.ylw, fontSize:8, padding:'1px 6px', borderRadius:5 }}>
-              {data.source==='openai'?'GPT-4o':'기본'}
+              {data.source==='openai'?'GPT-4o':data.source==='unavailable'?'시세 확인 불가':'기본'}
             </span>
           </div>
           <div style={{ color:T.txt, fontSize:12, lineHeight:1.7, marginBottom:10, whiteSpace:'pre-wrap' }}>{data.aiSummary}</div>
@@ -381,12 +381,12 @@ function MarketBriefing() {
               const c = Number(data.btcChg);
               const priceLabel = Number.isFinite(p) && p > 0
                 ? `₩${Math.round(p/10000).toLocaleString('ko-KR')}만`
-                : '데이터 로딩 중';
+                : '확인 불가';
               const chgColor = Number.isFinite(c) ? (c >= 0 ? T.grn : T.red) : T.muted;
               return [
                 { label:'BTC',       value: priceLabel,                color: chgColor },
-                { label:'펀딩 편향', value: data.fundBias || '중립',    color: T.ylw },
-                { label:'시장 감성', value: data.sentiment || '분석중',  color: T.acl },
+                { label:'펀딩 편향', value: data.fundBias || '확인 불가', color: data.fundBias ? T.ylw : T.muted },
+                { label:'시장 감성', value: data.sentiment || '확인 불가', color: data.sentiment ? T.acl : T.muted },
               ];
             })().map(m => (
               <div key={m.label} style={{ background:T.alt, borderRadius:8, padding:'6px', textAlign:'center' }}>
