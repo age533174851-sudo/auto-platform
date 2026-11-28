@@ -33,6 +33,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { test } from 'node:test';
 import {
   checkTableAccessIntent, policyStatements, dropPolicyStatements, rlsToggles, canonicalExpr,
+  alterPolicyStatements,
 } from './lib/migration-policy.mjs';
 
 const root = new URL('../', import.meta.url);
@@ -364,4 +365,84 @@ test('대조 ★ 표를 찾는 쪽은 대소문자를 무시한다 (막는 쪽�
     + ' FOR SELECT TO authenticated USING (true);');
   assert.equal(v.ok, false, '표를 다른 이름으로 읽으면 통과한다');
   assert.equal(v.code, 'POLICY_OUTSIDE_INTENT');
+});
+
+// ── ALTER POLICY 를 순회하지 않았다 (Codex 세 번째 지적) ───────────
+//
+// `CREATE POLICY`·`DROP POLICY`·`ALTER TABLE … RLS` 만 봤으므로 **이미
+// 있는 정책을 제자리에서 고치는** 문장이 전혀 보이지 않았다. 경계를
+// 되돌리는 가장 자연스러운 방법이 비어 있던 것이다. 고치기 전 측정 —
+// 아래 다섯 가지 전부 `ok:true/OK`:
+//
+//   ALTER POLICY … USING (true)
+//   ALTER POLICY … TO PUBLIC USING (true)
+//   ALTER POLICY … TO anon
+//   ALTER POLICY … RENAME TO …
+//   ALTER POLICY <service 정책> … TO authenticated
+test('★ ALTER POLICY 로 소유자 식을 열면 막는다', () => {
+  const v = judge(`ALTER POLICY paper_challenges_owner ON ${T} USING (true);`);
+  assert.equal(v.ok, false);
+  assert.equal(v.code, 'POLICY_ALTERED');
+});
+
+test('★ ALTER POLICY 로 role 을 바꾸면 막는다', () => {
+  for (const tail of ['TO PUBLIC USING (true)', 'TO anon', 'TO authenticated']) {
+    const v = judge(`ALTER POLICY paper_challenges_owner ON ${T} ${tail};`);
+    assert.equal(v.ok, false, `ALTER POLICY ${tail} 가 보이지 않으면 경계를 되돌릴 수 있다`);
+    assert.equal(v.code, 'POLICY_ALTERED');
+  }
+});
+
+test('★ service 정책의 role 만 바꾸는 줄도 막는다 (합집합 판정으로는 새어 나간다)', () => {
+  // `service` 정책은 `FOR ALL` 이다. "허용 목록의 role 합집합 안에 있으면
+  // 통과"로 느슨하게 잡으면 이 한 줄이 **authenticated 에게 쓰기를 준다.**
+  // 그래서 결과 모양을 따져 보지 않고 전부 막는다.
+  const v = judge(`ALTER POLICY paper_challenges_service ON ${T} TO authenticated;`);
+  assert.equal(v.ok, false);
+  assert.equal(v.code, 'POLICY_ALTERED');
+});
+
+test('★ 소유자 식을 다시 적는 ALTER POLICY 도 막는다 (결과를 알 수 없다)', () => {
+  const v = judge(`ALTER POLICY paper_challenges_owner ON ${T} USING (user_id = auth.uid());`);
+  assert.equal(v.ok, false, '바꾸지 않은 절이 그대로 남으므로 결과 모양을 알 수 없다');
+  assert.equal(v.code, 'POLICY_ALTERED');
+  assert.match(v.reason, /지우고 같은 파일에서 다시 만들면/);
+});
+
+test('★ ALTER POLICY · 인용 표기도 같은 표로 읽는다', () => {
+  const v = judge('ALTER POLICY p ON "public"."paper_challenges" USING (true);');
+  assert.equal(v.ok, false);
+  assert.equal(v.code, 'POLICY_ALTERED');
+});
+
+test('대조 — 지키지 않는 표의 ALTER POLICY 는 건드리지 않는다', () => {
+  const v = judge('ALTER POLICY p ON public.some_other_table TO anon USING (true);');
+  assert.equal(v.ok, true, v.reason);
+});
+
+test('대조 — 주석 안의 ALTER POLICY 는 읽지 않는다', () => {
+  const v = judge(`-- ALTER POLICY paper_challenges_owner ON ${T} USING (true);\n`
+    + `/* ALTER POLICY paper_challenges_owner ON ${T} TO anon; */\n`);
+  assert.equal(v.ok, true, `주석을 코드로 읽으면 반대쪽 거짓말이다: ${v.reason}`);
+});
+
+test('대조 ★ 지우고 다시 만드는 길은 열려 있다 (약하게 만들지 않고도 길이 있다)', () => {
+  const v = judge(`DROP POLICY IF EXISTS paper_challenges_owner ON ${T};\n`
+    + `CREATE POLICY paper_challenges_owner ON ${T}`
+    + ' FOR SELECT TO authenticated USING (user_id = auth.uid());');
+  assert.equal(v.ok, true, `이 길이 막히면 ALTER 금지가 막다른 길이 된다: ${v.reason}`);
+});
+
+test('alterPolicyStatements 가 이름과 표를 읽는다', () => {
+  const got = alterPolicyStatements(
+    'ALTER POLICY "my policy" ON "public"."paper_challenges" USING (true);');
+  assert.equal(got.length, 1);
+  assert.equal(got[0].name, 'my policy');
+  assert.equal(got[0].table, T);
+});
+
+test('대조 — 지금 저장소에는 ALTER POLICY 가 없다', () => {
+  const all = realFiles().flatMap(f => alterPolicyStatements(f.sql));
+  assert.equal(all.length, 0,
+    `ALTER POLICY 가 생기면 이 판정이 막는다 — 생긴 것: ${all.map(a => a.table).join(', ')}`);
 });

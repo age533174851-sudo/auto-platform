@@ -208,6 +208,30 @@ export function dropPolicyStatements(sql) {
   });
 }
 
+/**
+ * `ALTER POLICY [이름] ON [표] …`
+ *
+ * ★ Codex 가 세 번째로 지적한 것이 이 자리였다. `CREATE POLICY`·
+ *   `DROP POLICY`·`ALTER TABLE … RLS` 만 순회했으므로, **이미 있는 정책을
+ *   제자리에서 고치는** 다음 두 줄이 보이지 않았다 (측정값: 둘 다 통과):
+ *
+ *     ALTER POLICY paper_challenges_owner ON public.paper_challenges
+ *       USING (true);
+ *     ALTER POLICY paper_challenges_owner ON public.paper_challenges
+ *       TO PUBLIC USING (true);
+ *
+ *   경계를 되돌리는 **가장 자연스러운 방법**이 비어 있었던 것이다.
+ */
+export function alterPolicyStatements(sql) {
+  const HEAD = new RegExp(`^ALTER\\s+POLICY\\s+(${QNAME})\\s+ON\\s+(${QNAME})`, 'i');
+  return spansFrom(stripSqlComments(sql), /\bALTER\s+POLICY\b/i).map((raw) => {
+    const m = HEAD.exec(raw);
+    return m
+      ? { name: ident(m[1]), table: qualifiedName(m[2]), raw }
+      : { name: '', table: '', raw };
+  });
+}
+
 /** `ALTER TABLE <표> ENABLE|DISABLE ROW LEVEL SECURITY` */
 export function rlsToggles(sql) {
   const out = [];
@@ -296,7 +320,34 @@ export function checkTableAccessIntent(files, intent) {
       }
     }
 
-    // ③ 정책을 지우고 다시 만들지 않는가
+    // ③ 이미 있는 정책을 제자리에서 고치지 않는가
+    //
+    //   **왜 결과 모양을 따져 보지 않고 전부 막는가.** `ALTER POLICY`는
+    //   `TO`·`USING`·`WITH CHECK`를 **따로따로** 바꾸고, 바꾸지 않은 절은
+    //   그대로 남는다. 그래서 이 문장 하나만 보고는 **결과 정책의 모양을
+    //   알 수 없다** — 특히 원래 `cmd`(`FOR ALL`인지 `FOR SELECT`인지)를
+    //   모른다.
+    //
+    //   "허용 목록의 role 합집합 안에 있으면 통과"로 느슨하게 잡으면
+    //   이런 줄이 새어 나간다:
+    //
+    //     ALTER POLICY paper_challenges_service ON …  TO authenticated;
+    //
+    //   `service` 정책은 `FOR ALL`이므로, 그 한 줄이 **authenticated 에게
+    //   쓰기를 준다.** 합집합 판정으로는 막지 못한다.
+    //
+    //   그래서 지키는 표의 `ALTER POLICY`는 전부 막는다. 일부러 바꿔야
+    //   한다면 **지우고 다시 만들면 된다** — 그 꼴은 ②·④가 결과 모양을
+    //   실제로 본다. 검사기를 약하게 만들지 않고도 길이 있다.
+    for (const a of alterPolicyStatements(sql)) {
+      if (!guarded.has(guardKey(a.table))) continue;
+      return no('POLICY_ALTERED',
+        `${where}: ${a.table}의 정책 ${a.name || '(이름 미상)'}을 ALTER POLICY로 바꿉니다`
+        + ' — 바꾸지 않은 절이 그대로 남으므로 이 문장만으로는 결과 모양을 알 수'
+        + ' 없습니다. 지우고 같은 파일에서 다시 만들면 결과를 실제로 봅니다');
+    }
+
+    // ④ 정책을 지우고 다시 만들지 않는가
     //
     //   083은 `DROP POLICY IF EXISTS` 다음에 같은 이름을 다시 만든다 (다시
     //   돌려도 안전하게). 그 꼴은 통과시키고, **같은 파일에서 다시 만들지
