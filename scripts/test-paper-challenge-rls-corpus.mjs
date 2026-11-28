@@ -197,3 +197,67 @@ test('rlsToggles가 켜기와 끄기를 구분한다', () => {
   // 스키마를 적지 않으면 public 으로 읽는다
   assert.equal(got[1].table, C);
 });
+
+// ── 인용 식별자 (Codex가 #828의 같은 판정에서 찾은 구멍) ───────────
+//
+// 표를 `("?[\w$.]+"?)`로 읽으면 `"public"."paper_challenges"`에서 `"public"`만
+// 집어 **`public.public`**이 됐고, 그 이름은 지키는 목록에 없으므로 통과했다.
+// `DROP POLICY`·`ALTER TABLE … DISABLE` 쪽도 같은 패턴을 썼다.
+const REFS = [
+  ['스키마·표 모두 인용', '"public"."paper_challenges"'],
+  ['표만 인용', '"paper_challenges"'],
+  ['스키마만 인용', '"public".paper_challenges'],
+  ['점 주위에 공백', 'public . paper_challenges'],
+];
+
+for (const [how, ref] of REFS) {
+  test(`★ 인용 표기 — ${how} · 정책을 PUBLIC 에 열면 막는다`, () => {
+    const v = judge(`CREATE POLICY pc_open ON ${ref} FOR SELECT TO PUBLIC USING (true);`);
+    assert.equal(v.ok, false, `${ref} 를 다른 표로 읽으면 통과한다`);
+    assert.equal(v.code, 'POLICY_OUTSIDE_INTENT');
+  });
+
+  test(`★ 인용 표기 — ${how} · RLS 를 끄면 막는다`, () => {
+    const v = judge(`ALTER TABLE ${ref} DISABLE ROW LEVEL SECURITY;`);
+    assert.equal(v.ok, false, `${ref} 를 다른 표로 읽으면 통과한다`);
+    assert.equal(v.code, 'RLS_DISABLED');
+  });
+
+  test(`★ 인용 표기 — ${how} · 소유자 정책을 지우면 막는다`, () => {
+    const v = judge(`DROP POLICY paper_challenges_owner ON ${ref};`);
+    assert.equal(v.ok, false, `${ref} 를 다른 표로 읽으면 통과한다`);
+    assert.equal(v.code, 'POLICY_DROPPED');
+  });
+}
+
+test('★ 인용 표기 — role 도 인용할 수 있다', () => {
+  const v = judge('CREATE POLICY pc_q ON "public"."paper_challenges"'
+    + ' FOR SELECT TO "anon" USING (true);');
+  assert.equal(v.ok, false);
+  assert.equal(v.code, 'POLICY_OUTSIDE_INTENT');
+  assert.match(v.reason, /anon/);
+});
+
+test('대조 — 인용한 허용 모양은 통과한다', () => {
+  const v = judge('CREATE POLICY pc_q_svc ON "public"."paper_challenges"'
+    + ' FOR ALL TO "service_role" USING (true) WITH CHECK (true);\n'
+    + 'CREATE POLICY pc_q_own ON "public"."paper_challenge_cashflows"'
+    + ' FOR SELECT TO "authenticated" USING (user_id = auth.uid());');
+  assert.equal(v.ok, true, v.reason);
+});
+
+test('대조 — 인용 표기라도 지키지 않는 표는 건드리지 않는다', () => {
+  const v = judge('CREATE POLICY o ON "public"."some_other_table" FOR ALL TO anon USING (true);\n'
+    + 'ALTER TABLE "public"."some_other_table" DISABLE ROW LEVEL SECURITY;');
+  assert.equal(v.ok, true, v.reason);
+});
+
+test('qualifiedName — 네 가지 표기를 같은 이름으로 읽는다', () => {
+  const seen = REFS.map(([, ref]) =>
+    policyStatements(`CREATE POLICY p ON ${ref} FOR SELECT TO anon USING (true);`)[0].table);
+  for (const t of seen) assert.equal(t, T);
+  assert.equal(
+    rlsToggles('ALTER TABLE "public"."paper_challenges" DISABLE ROW LEVEL SECURITY;')[0].table, T);
+  assert.equal(
+    dropPolicyStatements('DROP POLICY "pc owner" ON "public"."paper_challenges";')[0].table, T);
+});

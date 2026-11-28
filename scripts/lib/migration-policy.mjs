@@ -40,8 +40,40 @@ export function stripSqlComments(sql) {
 }
 
 const norm = (s) => String(s).trim().replace(/\s+/g, ' ');
-const ident = (s) => norm(s).toLowerCase().replace(/^"|"$/g, '');
-const qualify = (t) => (t.includes('.') ? t : `public.${t}`);
+
+/**
+ * 식별자 한 조각 — 인용(`"a b"`)과 원시(`a_b`)를 모두 받는다.
+ *
+ * ★ Codex가 #828의 같은 판정에서 찾은 구멍이 여기였다. 표를
+ *   `("?[\w$.]+"?)`로 읽으면 `"public"."paper_challenges"`에서 `"public"`만
+ *   집어 **`public.public`**이 됐고, 그 이름은 지키는 목록에 없으므로
+ *   통과했다. 유효한 SQL이다.
+ */
+const QID = '(?:"[^"]*"|[\\w$]+)';
+/** 수식 이름 — `t` · `s.t` · `"s"."t"` · `s."t"` */
+const QNAME = `${QID}(?:\\s*\\.\\s*${QID})*`;
+
+/** 따옴표를 벗기고 소문자로 모은 한 조각 */
+const ident = (s) => norm(s).replace(/^"|"$/g, '').trim().toLowerCase();
+
+/**
+ * 수식 이름을 `schema.table`로 정규화한다.
+ *
+ * ★ 인용 식별자는 PostgreSQL에서 **대소문자를 보존한다** — 엄밀히는
+ *   `"Tbl"`과 `tbl`은 다른 표다. 그래도 소문자로 모아 같은 표로 읽는다.
+ *   관문은 놓치는 쪽이 아니라 **막는 쪽으로 틀려야 한다.**
+ */
+function qualifiedName(raw) {
+  const parts = (String(raw ?? '').match(/"[^"]*"|[\w$]+/g) ?? []).map(ident).filter(Boolean);
+  if (parts.length === 0) return '';
+  return parts.length >= 2
+    ? `${parts[parts.length - 2]}.${parts[parts.length - 1]}`
+    : `public.${parts[0]}`;
+}
+
+/** 쉼표로 이어진 role들 — 인용 표기도 받는다 */
+const roleListOf = (s) =>
+  (String(s ?? '').match(new RegExp(QID, 'g')) ?? []).map(ident).filter(Boolean);
 
 /**
  * `re`가 걸린 자리부터 다음 `;`까지를 한 조각으로 끊는다.
@@ -71,8 +103,9 @@ function spansFrom(body, re) {
  *   PostgreSQL에서 `TO` 절이 없는 정책은 모든 role에 걸린다.
  */
 export function policyStatements(sql) {
+  const HEAD = new RegExp(`^CREATE\\s+POLICY\\s+(${QNAME})\\s+ON\\s+(${QNAME})`, 'i');
   return spansFrom(stripSqlComments(sql), /\bCREATE\s+POLICY\b/i).map((raw) => {
-    const head = /^CREATE\s+POLICY\s+("?[\w$.]+"?)\s+ON\s+("?[\w$.]+"?)/i.exec(raw);
+    const head = HEAD.exec(raw);
     if (!head) return { name: '', table: '', cmd: 'ALL', roles: [], using: '', raw };
     const tail = raw.slice(head[0].length);
     const stop = tail.search(/\b(USING|WITH\s+CHECK)\b/i);
@@ -82,10 +115,10 @@ export function policyStatements(sql) {
     const using = stop === -1 ? '' : norm(tail.slice(stop));
     return {
       name: ident(head[1]),
-      table: qualify(ident(head[2])),
+      table: qualifiedName(head[2]),
       // `FOR`를 적지 않은 정책은 PostgreSQL에서 ALL이다
       cmd: forCmd ? forCmd[1].toUpperCase() : 'ALL',
-      roles: to ? to[1].split(',').map(ident).filter(Boolean) : [],
+      roles: to ? roleListOf(to[1]) : [],
       using,
       raw,
     };
@@ -95,9 +128,10 @@ export function policyStatements(sql) {
 /** `DROP POLICY [IF EXISTS] <이름> ON <표>` */
 export function dropPolicyStatements(sql) {
   return spansFrom(stripSqlComments(sql), /\bDROP\s+POLICY\b/i).map((raw) => {
-    const m = /^DROP\s+POLICY\s+(?:IF\s+EXISTS\s+)?("?[\w$.]+"?)\s+ON\s+("?[\w$.]+"?)/i.exec(raw);
+    const m = new RegExp(
+      `^DROP\\s+POLICY\\s+(?:IF\\s+EXISTS\\s+)?(${QNAME})\\s+ON\\s+(${QNAME})`, 'i').exec(raw);
     return m
-      ? { name: ident(m[1]), table: qualify(ident(m[2])), raw }
+      ? { name: ident(m[1]), table: qualifiedName(m[2]), raw }
       : { name: '', table: '', raw };
   });
 }
@@ -105,10 +139,11 @@ export function dropPolicyStatements(sql) {
 /** `ALTER TABLE <표> ENABLE|DISABLE ROW LEVEL SECURITY` */
 export function rlsToggles(sql) {
   const out = [];
-  const re = /\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?("?[\w$.]+"?)\s+(ENABLE|DISABLE)\s+ROW\s+LEVEL\s+SECURITY/gi;
+  const re = new RegExp(
+    `\\bALTER\\s+TABLE\\s+(?:IF\\s+EXISTS\\s+)?(${QNAME})\\s+(ENABLE|DISABLE)\\s+ROW\\s+LEVEL\\s+SECURITY`, 'gi');
   let m;
   while ((m = re.exec(stripSqlComments(sql)))) {
-    out.push({ table: qualify(ident(m[1])), on: m[2].toUpperCase() === 'ENABLE', raw: norm(m[0]) });
+    out.push({ table: qualifiedName(m[1]), on: m[2].toUpperCase() === 'ENABLE', raw: norm(m[0]) });
   }
   return out;
 }
@@ -126,7 +161,7 @@ const no = (code, reason) => ({ ok: false, code, reason });
  * 넘어오는 것을 가정한다.
  */
 export function checkTableAccessIntent(files, intent) {
-  const guarded = new Set((intent?.tables ?? []).map(t => qualify(String(t).toLowerCase())));
+  const guarded = new Set((intent?.tables ?? []).map(qualifiedName));
   const allow = intent?.allow ?? [];
   if (guarded.size === 0 || allow.length === 0) {
     return no('INTENT_EMPTY', '지킬 표나 허용 모양이 비어 있습니다 — 빈 의도는 전부 통과시킵니다');
