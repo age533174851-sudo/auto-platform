@@ -482,6 +482,45 @@ export function runGatePlanTests() {
     eq(gateStopSpec('LONG', null, 63912.1, TICK).triggerPrice, null);
   });
 
+  // ── 호가 단위가 10의 거듭제곱이 아닐 때 ──
+  //
+  // 소수 자릿수를 `round(-log10(tick))`로 뽑으면 0.5 → 0자리, 0.25 → 1자리,
+  // 0.05 → 1자리가 된다. 격자에 맞춘 값을 그 자릿수로 `toFixed`하는 순간
+  // **다시 반올림된다** — 0.75가 0.8(격자 밖, Gate 400)이 되고, LONG 손절
+  // 62653.5가 62654(요청한 손절가보다 위 = 진입 쪽)가 된다. 위에서 "멀어지는
+  // 쪽으로 민다"고 한 약속이 마지막 한 줄에서 깨진다.
+  //
+  // 자릿수는 커널의 `decimalsOf` 한 벌로만 정한다.
+  console.log('[Gate — 10의 거듭제곱이 아닌 호가 단위]');
+
+  const onGrid = (p: number | null, tick: number) =>
+    p != null && Math.abs(p / tick - Math.round(p / tick)) < 1e-6;
+
+  test('tick 0.25 — LONG 손절이 진입 쪽으로 올라가지 않고 격자에 맞는다', () => {
+    const s = gateStopSpec('LONG', 0.79, null, { quantoMultiplier: 1, orderPriceRound: 0.25 });
+    eq(s.ok, true, s.reason);
+    eq(s.triggerPrice, 0.75);
+    assert(onGrid(s.triggerPrice, 0.25), `격자 밖: ${s.triggerPrice}`);
+  });
+
+  test('tick 0.5 — LONG 손절 62653.7은 62653.5다 (62654는 요청보다 위)', () => {
+    const s = gateStopSpec('LONG', 62653.7, null, { quantoMultiplier: 0.0001, orderPriceRound: 0.5 });
+    eq(s.triggerPrice, 62653.5);
+    assert((s.triggerPrice ?? Infinity) <= 62653.7, `손절이 진입 쪽으로 움직였다: ${s.triggerPrice}`);
+  });
+
+  test('tick 0.05 — SHORT 손절은 한 틱만 올린다', () => {
+    const s = gateStopSpec('SHORT', 1.12, null, { quantoMultiplier: 1, orderPriceRound: 0.05 });
+    eq(s.triggerPrice, 1.15);
+  });
+
+  test('tick 0.05 — LONG 익절도 같은 자릿수 규칙을 쓴다', () => {
+    const s = gateTakeProfitSpec('LONG', 1.12, null, { quantoMultiplier: 1, orderPriceRound: 0.05 });
+    eq(s.triggerPrice, 1.15);
+    const t = gateTakeProfitSpec('SHORT', 0.79, null, { quantoMultiplier: 1, orderPriceRound: 0.25 });
+    eq(t.triggerPrice, 0.75);
+  });
+
   // ── 계산해 놓고 배선을 안 하면 아무 소용이 없다 ──
   //
   // 실제로 그랬다. gateStopSpec이 호가 단위에 맞춘 triggerPrice를 만들어
