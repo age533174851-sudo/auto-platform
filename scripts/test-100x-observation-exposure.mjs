@@ -52,7 +52,10 @@ runInNewContext(src, {
   exports: mod,
   require(id) { throw new Error(`예상 못 한 import: ${id}`); },
 });
-const { checkObservationExposure, parsePolicyStatements, parseAlterPolicyStatements } = mod;
+const {
+  checkObservationExposure, parsePolicyStatements, parseAlterPolicyStatements,
+  stripSqlComments, dynamicPolicySql,
+} = mod;
 
 // `runInNewContext`가 만든 배열은 이 realm의 `Array.prototype`이 아니다.
 // `deepStrictEqual`은 프로토타입까지 보므로 모양이 같아도 어긋난다 —
@@ -375,4 +378,135 @@ test('대조 — 지금 저장소에는 ALTER POLICY 가 없다', () => {
   const all = realFiles().flatMap(f => parseAlterPolicyStatements(f.sql));
   assert.equal(all.length, 0,
     `ALTER POLICY 가 생기면 이 판정이 막는다 — 생긴 것: ${all.map(a => a.table).join(', ')}`);
+});
+
+// ── 주석 제거기가 코드를 먹었다 (Codex 지적 · 가장 나쁜 방향) ───────
+//
+// 예전 제거기는 `--`를 줄 끝까지, 블록을 통째로 지웠고 **인용 식별자를
+// 몰랐다.** 그래서 이름 안의 `--` 한 개가 줄 주석을 열어 뒤의 코드를 먹었다:
+//
+//   CREATE POLICY "p--" ON public.exact100x_risk_observations
+//     FOR SELECT TO anon USING (true);
+//
+//   제거기가 남긴 것:  'CREATE POLICY "p'
+//   판정:              지키는 표가 아니라고 **건너뜀** → 통과
+//
+// 같은 정책을 평범한 이름으로 쓰면 차단된다. **이름 한 글자로 관문이 눈을
+// 감은 것**이다. PostgreSQL 에서 인용 식별자는 NUL 을 뺀 아무 문자나 담을
+// 수 있고 `""`는 따옴표 한 글자다.
+for (const [how, name] of [
+  ['이름 안 --', '"p--"'],
+  ['이름 안 /*', '"p/*"'],
+  ['이름 안 ;', '"p;q"'],
+  ['이름 안 이중 따옴표', '"p""q"'],
+  ['이름 안 공백과 점', '"my policy.v2"'],
+]) {
+  test(`★ ${how} — anon 정책을 그대로 막는다`, () => {
+    const v = checkObservationExposure(withLate(
+      `CREATE POLICY ${name} ON ${RISK} FOR SELECT TO anon USING (true);`));
+    assert.equal(v.ok, false, `${name} 은 이름일 뿐이다 — 판정이 눈을 감으면 안 된다`);
+    assert.equal(v.code, 'POLICY_NOT_SERVICE_ONLY');
+  });
+}
+
+test('★ 이름 안 /* 와 뒤 줄의 */ 가 블록 주석을 만들지 않는다', () => {
+  const v = checkObservationExposure(withLate(
+    `CREATE POLICY "p/*" ON ${RISK} FOR SELECT TO anon USING (true); -- */`));
+  assert.equal(v.ok, false);
+  assert.equal(v.code, 'POLICY_NOT_SERVICE_ONLY');
+});
+
+test('★ 인용 이름의 GRANT 도 그대로 읽는다', () => {
+  const v = checkObservationExposure(withLate(
+    `GRANT SELECT ON TABLE "public"."exact100x_risk_observations" TO "anon--x";`));
+  assert.equal(v.ok, false);
+  assert.equal(v.code, 'PUBLIC_ROLE_GRANTED');
+});
+
+test('대조 — 진짜 주석은 그대로 지운다', () => {
+  for (const sql of [
+    `-- CREATE POLICY p ON ${RISK} FOR SELECT TO anon USING (true);`,
+    `/* CREATE POLICY p ON ${RISK} FOR SELECT TO anon USING (true); */`,
+    `/* 여러 줄\n   GRANT SELECT ON TABLE ${RISK} TO anon;\n*/`,
+  ]) {
+    const v = checkObservationExposure(withLate(sql));
+    assert.equal(v.ok, true, `주석을 코드로 읽으면 반대쪽 거짓말이다: ${v.reason}`);
+  }
+});
+
+test('대조 — 인용 이름이 다른 표를 가리키면 건드리지 않는다', () => {
+  // `"exact100x_risk_observations--x"` 는 **진짜로 다른 표다.** 통과가 옳다.
+  const v = checkObservationExposure(withLate(
+    'GRANT SELECT ON TABLE "exact100x_risk_observations--x" TO anon;'));
+  assert.equal(v.ok, true, v.reason);
+});
+
+test('stripSqlComments — 인용과 문자열 안을 보존한다', () => {
+  assert.equal(stripSqlComments('a "b--c" d'), 'a "b--c" d');
+  assert.equal(stripSqlComments("a 'b--c' d"), "a 'b--c' d");
+  assert.equal(stripSqlComments('a "b/*c" d'), 'a "b/*c" d');
+  assert.equal(stripSqlComments('a """b--c" d'), 'a """b--c" d');
+  assert.equal(stripSqlComments('a -- b\nc'), 'a \nc');
+  assert.equal(stripSqlComments('a /* b */ c'), 'a   c');
+  assert.equal(stripSqlComments("a 'it''s -- x' b"), "a 'it''s -- x' b");
+});
+
+// ── 읽지 못한 정책을 건너뛰지 않는다 (2차 방어선) ────────────────
+test('★ 읽지 못한 정책 문장은 막는다', () => {
+  for (const sql of [
+    'CREATE POLICY p FOR SELECT TO anon USING (true);',
+    `CREATE POLICY "p ON ${RISK} FOR SELECT TO anon USING (true);`,
+    'ALTER POLICY p USING (true);',
+    'CREATE POLICY;',
+  ]) {
+    const v = checkObservationExposure(withLate(sql));
+    assert.equal(v.ok, false, `읽지 못한 것을 통과로 적으면 관문이 눈을 감는다: ${sql}`);
+    assert.equal(v.code, 'POLICY_UNREADABLE');
+  }
+});
+
+test('대조 — 지금 저장소에는 읽지 못하는 정책 문장이 없다', () => {
+  for (const f of realFiles()) {
+    for (const [verb, list] of [
+      ['CREATE POLICY', parsePolicyStatements(f.sql)],
+      ['ALTER POLICY', parseAlterPolicyStatements(f.sql)],
+    ]) {
+      for (const x of list) {
+        assert.ok(x.table, `${f.name}: ${verb} 를 읽지 못했다 — ${String(x.raw).slice(0, 60)}`);
+      }
+    }
+  }
+});
+
+// ── 문자열로 만들어 EXECUTE 하는 정책 SQL ──────────────────────────
+//
+// `022_rls_worker_tables.sql`은 `EXECUTE format('CREATE POLICY %I ON
+// public.%I …')`로 정책을 만든다. 그 문자열을 문장으로 읽으면 표가 `%I`라서
+// 읽지 못하고, "읽지 못한 것을 막는다"는 판정이 **멀쩡한 파일을 막는다.**
+// (#830 에서 실제로 그렇게 만들었다가 시험 57개가 깨져서 발견했다.)
+test('대조 — 지키는 표를 언급하지 않는 동적 정책 SQL 은 통과한다', () => {
+  const v = checkObservationExposure(withLate(
+    "DO $$ BEGIN EXECUTE format("
+    + "'CREATE POLICY %I ON public.%I FOR ALL TO service_role USING (true)',"
+    + " 'worker_service', 'worker_runs'); END $$;"));
+  assert.equal(v.ok, true, `022 와 같은 꼴이다: ${v.reason}`);
+});
+
+test('★ 동적 정책 SQL 이 지키는 표를 언급하면 막는다', () => {
+  const v = checkObservationExposure(withLate(
+    "DO $$ BEGIN EXECUTE format("
+    + "'CREATE POLICY %I ON public.%I FOR SELECT TO anon USING (true)',"
+    + " 'x', 'exact100x_risk_observations'); END $$;"));
+  assert.equal(v.ok, false, '어느 표에 걸릴지 모르면 통과가 아니다');
+  assert.equal(v.code, 'POLICY_DYNAMIC');
+  assert.match(v.reason, /exact100x_risk_observations/);
+});
+
+test('dynamicPolicySql — 문자열 안의 정책 SQL만 모은다', () => {
+  const got = dynamicPolicySql(
+    'CREATE POLICY real_one ON public.t FOR ALL TO service_role USING (true);\n'
+    + "EXECUTE format('ALTER POLICY %I ON public.%I', a, b);\n"
+    + "-- EXECUTE format('CREATE POLICY in_comment ON public.t')\n");
+  assert.equal(got.length, 1, '진짜 문장과 주석은 세지 않는다');
+  assert.match(got[0], /%I/);
 });
