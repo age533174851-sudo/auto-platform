@@ -13,7 +13,7 @@
 //    하는 것이 생긴 뒤에 붙인다.
 // ③ **기기가 모드를 정하지 않는다.** 폭은 배치만 바꾼다.
 // ─────────────────────────────────────────────────────────────
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { watchAuthToken } from '@/lib/auth/authToken';
 import {
   CATEGORIES, CATEGORY_LABEL, STATUS_LABEL, SEVERITY_LABEL,
@@ -100,14 +100,50 @@ export default function FeedbackPage({ screen }: { screen?: string } = {}) {
   const [messages, setMessages] = useState<MessageRow[] | null>(null);
   const [reply, setReply] = useState('');
 
+  /**
+   * **인증 세대.** 로그인한 사람이 바뀌면 올라간다.
+   *
+   * 왜 필요한가 — 이 화면은 `tickets`·`openId`·`messages`·`reply`를 상태로
+   * 들고 있고, 토큰은 `watchAuthToken`으로 **화면을 다시 그리지 않고도**
+   * 바뀐다(토큰 갱신·다른 계정 로그인). 그때 들고 있던 것을 비우지 않으면
+   * **이전 사람의 문의가 다음 사람 화면에 남는다.**
+   *
+   * 브라우저로 실제로 재서 확인했다(`scripts/probe/feedback-auth-isolation.mjs`):
+   * A 로 문의를 열어 둔 뒤 인증을 B 로 바꾸고 B 의 목록 응답을 늦추면
+   *
+   *   · A 의 문의 제목이 그대로 보였다
+   *   · A 에게만 보낸 직원 답장이 그대로 보였다
+   *   · '답장 보내기'가 **B 의 Authorization 으로 A 의 ticket id 에 POST** 했다
+   *
+   * 세 번째가 가장 나쁘다. 서버가 소유자를 확인해 거절해도, 화면은 다른
+   * 사람의 글에 쓰려고 한 것이다.
+   *
+   * 세대를 쓰는 이유는 비우는 것만으로는 **늦게 오는 응답**을 못 막기
+   * 때문이다. 비운 뒤에도 이전 세대의 `fetch`가 돌아와 `setTickets`를
+   * 부르면 같은 자리로 돌아간다. 그래서 응답을 쓸 때마다 "내가 떠날 때의
+   * 세대가 지금 세대와 같은가"를 본다.
+   */
+  const authGen = useRef(0);
+  useEffect(() => {
+    // 이 effect 는 아래 목록 읽기보다 **먼저** 선언돼 있어야 한다 —
+    // 같은 커밋에서 비우기가 먼저 돌아야 이전 사람의 것이 한 프레임도
+    // 남지 않는다.
+    authGen.current += 1;
+    setTickets(null); setOpenId(null); setMessages(null);
+    setReply(''); setListError('');
+  }, [auth]);
+
   const loadList = useCallback(async () => {
     if (!auth) { setTickets(null); return; }
+    const gen = authGen.current;
     try {
       const res = await fetch('/api/feedback/reports', { headers: { Authorization: auth }, cache: 'no-store' });
       const d = await res.json();
+      if (gen !== authGen.current) return;   // 그 사이 사람이 바뀌었다
       if (!res.ok || !d.ok) throw new Error(d.message || '문의 목록을 확인하지 못했습니다');
       setTickets(d.tickets); setListError('');
     } catch (e) {
+      if (gen !== authGen.current) return;
       // **값을 지우지 않는다.** 못 읽은 것과 없는 것은 다르다.
       setListError(e instanceof Error ? e.message : '문의 목록을 확인하지 못했습니다');
     }
@@ -117,12 +153,17 @@ export default function FeedbackPage({ screen }: { screen?: string } = {}) {
   const openTicket = useCallback(async (id: string) => {
     setOpenId(id); setMessages(null);
     if (!auth) return;
+    const gen = authGen.current;
     try {
       const res = await fetch(`/api/feedback/reports/${id}`, { headers: { Authorization: auth }, cache: 'no-store' });
       const d = await res.json();
+      if (gen !== authGen.current) return;
       if (!res.ok || !d.ok) throw new Error(d.message || '문의를 확인하지 못했습니다');
       setMessages(d.messages);
-    } catch (e) { setListError(e instanceof Error ? e.message : '문의를 확인하지 못했습니다'); }
+    } catch (e) {
+      if (gen !== authGen.current) return;
+      setListError(e instanceof Error ? e.message : '문의를 확인하지 못했습니다');
+    }
   }, [auth]);
 
   /** 앱이 아는 것만 담는다 — 서버가 다시 허용 목록으로 거른다 */
