@@ -52,7 +52,7 @@ runInNewContext(src, {
   exports: mod,
   require(id) { throw new Error(`예상 못 한 import: ${id}`); },
 });
-const { checkObservationExposure, parsePolicyStatements } = mod;
+const { checkObservationExposure, parsePolicyStatements, parseAlterPolicyStatements } = mod;
 
 // `runInNewContext`가 만든 배열은 이 realm의 `Array.prototype`이 아니다.
 // `deepStrictEqual`은 프로토타입까지 보므로 모양이 같아도 어긋난다 —
@@ -314,4 +314,65 @@ test('대조 — 두 선택은 한 함수에 섞여 있지 않다', () => {
   assert.equal(upperRoleOnGuardedTable.ok, false,
     '표는 대소문자 무시로 찾고, role 은 정확히 비교해야 이 한 줄이 막힌다');
   assert.equal(upperRoleOnGuardedTable.code, 'POLICY_NOT_SERVICE_ONLY');
+});
+
+// ── ALTER POLICY 를 순회하지 않았다 (Codex 세 번째 지적) ───────────
+//
+// `CREATE POLICY`와 GRANT 만 봤으므로 **이미 있는 정책을 제자리에서
+// 고치는** 문장이 전혀 보이지 않았다. 경계를 되돌리는 가장 자연스러운
+// 방법이 비어 있던 것이다. 고치기 전 측정: 아래 전부 `ok:true/OK`.
+test('★ ALTER POLICY 로 정책을 제자리에서 고치면 막는다', () => {
+  for (const tail of ['USING (true)', 'TO PUBLIC USING (true)', 'TO anon',
+                      'RENAME TO other_name', 'USING (true) WITH CHECK (true)']) {
+    const v = checkObservationExposure(withLate(
+      `ALTER POLICY exact100x_risk_obs_service ON ${RISK} ${tail};`));
+    assert.equal(v.ok, false, `ALTER POLICY ${tail} 가 보이지 않으면 경계를 되돌릴 수 있다`);
+    assert.equal(v.code, 'POLICY_ALTERED');
+  }
+});
+
+test('★ ALTER POLICY · 인용 표기도 같은 표로 읽는다', () => {
+  const v = checkObservationExposure(withLate(
+    'ALTER POLICY p ON "public"."exact100x_risk_observations" USING (true);'));
+  assert.equal(v.ok, false);
+  assert.equal(v.code, 'POLICY_ALTERED');
+});
+
+test('★ 소유자 식을 다시 적는 ALTER POLICY 도 막는다 (결과를 알 수 없다)', () => {
+  // `ALTER POLICY`는 `TO`·`USING`·`WITH CHECK`를 **따로** 바꾸고 바꾸지
+  // 않은 절은 그대로 남는다. 그래서 이 문장 하나로는 결과 모양을 알 수
+  // 없다 — 특히 원래 `cmd`를 모른다. 느슨하게 잡으면 `FOR ALL` 정책의
+  // role 만 바꿔치우는 줄이 새어 나간다.
+  const v = checkObservationExposure(withLate(
+    `ALTER POLICY exact100x_risk_obs_service ON ${RISK} TO service_role;`));
+  assert.equal(v.ok, false);
+  assert.equal(v.code, 'POLICY_ALTERED');
+  assert.match(v.reason, /지우고 같은 파일에서 다시 만들면/);
+});
+
+test('대조 — 지키지 않는 표의 ALTER POLICY 는 건드리지 않는다', () => {
+  const v = checkObservationExposure(withLate(
+    'ALTER POLICY p ON public.some_other_table TO anon USING (true);'));
+  assert.equal(v.ok, true, v.reason);
+});
+
+test('대조 — 주석 안의 ALTER POLICY 는 읽지 않는다', () => {
+  const v = checkObservationExposure(withLate(
+    `-- ALTER POLICY p ON ${RISK} USING (true);\n`
+    + `/* ALTER POLICY p ON ${RISK} TO anon; */\n`));
+  assert.equal(v.ok, true, `주석을 코드로 읽으면 반대쪽 거짓말이다: ${v.reason}`);
+});
+
+test('parseAlterPolicyStatements 가 이름과 표를 읽는다', () => {
+  const got = parseAlterPolicyStatements(
+    `ALTER POLICY "my policy" ON "public"."exact100x_risk_observations" USING (true);`);
+  assert.equal(got.length, 1);
+  assert.equal(got[0].name, 'my policy');
+  assert.equal(got[0].table, 'public.exact100x_risk_observations');
+});
+
+test('대조 — 지금 저장소에는 ALTER POLICY 가 없다', () => {
+  const all = realFiles().flatMap(f => parseAlterPolicyStatements(f.sql));
+  assert.equal(all.length, 0,
+    `ALTER POLICY 가 생기면 이 판정이 막는다 — 생긴 것: ${all.map(a => a.table).join(', ')}`);
 });

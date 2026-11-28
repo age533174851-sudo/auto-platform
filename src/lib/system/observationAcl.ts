@@ -51,6 +51,13 @@ export type AclCode =
   /** ACL과 무관한 문장이 섞였다 */
   | 'NOT_ACL_ONLY'
   /**
+   * 이미 있는 정책을 `ALTER POLICY`로 제자리에서 고친다.
+   *
+   * 바꾸지 않은 절이 그대로 남으므로 그 문장만으로는 결과 모양을 알 수
+   * 없다. 지우고 다시 만들면 결과를 실제로 본다.
+   */
+  | 'POLICY_ALTERED'
+  /**
    * 지켜야 할 표의 RLS 정책이 service_role 전용이 아니다.
    *
    * ★ `TO` 절을 적지 않은 `CREATE POLICY`는 PostgreSQL에서 **PUBLIC**이다.
@@ -265,6 +272,28 @@ export function parsePolicyStatements(sql: string): PolicyStatement[] {
   });
 }
 
+/**
+ * `ALTER POLICY [이름] ON [표] …`
+ *
+ * ★ `CREATE POLICY`와 GRANT만 순회했으므로 **이미 있는 정책을 제자리에서
+ *   고치는** 문장이 보이지 않았다 (측정값: `USING (true)`·`TO PUBLIC`·
+ *   `TO anon` 모두 통과). 경계를 되돌리는 가장 자연스러운 방법이다.
+ *
+ *   결과 모양을 따져 보지 않고 전부 막는다: `ALTER POLICY`는 `TO`·
+ *   `USING`·`WITH CHECK`를 따로 바꾸고 바꾸지 않은 절은 그대로 남으므로,
+ *   이 문장 하나로는 결과를 알 수 없다. 일부러 바꿔야 한다면 지우고 다시
+ *   만들면 되고, 그 꼴은 정책 판정이 결과를 실제로 본다.
+ */
+export function parseAlterPolicyStatements(sql: string): { name: string; table: string; raw: string }[] {
+  const HEAD = new RegExp(`^ALTER\\s+POLICY\\s+(${QNAME})\\s+ON\\s+(${QNAME})`, 'i');
+  return spansFrom(stripSqlComments(sql), /\bALTER\s+POLICY\b/i).map((raw) => {
+    const m = HEAD.exec(raw);
+    return m
+      ? { name: foldIdent(m[1]), table: qualifiedName(m[2]), raw }
+      : { name: '', table: '', raw };
+  });
+}
+
 const no = (code: AclCode, reason: string): AclVerdict => ({ ok: false, code, reason });
 
 /**
@@ -373,6 +402,15 @@ export function checkObservationExposure(files: readonly MigrationSource[]): Acl
           `${where}: ${p.table}의 정책 ${which}이 ${outside.join(', ')}에 걸립니다`
           + ' — 이 표는 service 경로 전용입니다');
       }
+    }
+
+    // ②-0 이미 있는 정책을 제자리에서 고치지 않는가
+    for (const a of parseAlterPolicyStatements(sql)) {
+      if (!guarded.has(guardKey(a.table))) continue;
+      return no('POLICY_ALTERED',
+        `${where}: ${a.table}의 정책 ${a.name || '(이름 미상)'}을 ALTER POLICY로 바꿉니다`
+        + ' — 바꾸지 않은 절이 그대로 남으므로 이 문장만으로는 결과 모양을 알 수'
+        + ' 없습니다. 지우고 같은 파일에서 다시 만들면 결과를 실제로 봅니다');
     }
 
     // ② GRANT가 표 권한을 다시 주지 않는가 (`DO` 블록 안도 본다)
