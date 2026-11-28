@@ -46,7 +46,7 @@ import { readFileSync, existsSync, readdirSync, mkdtempSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { stripJsComments } from './lib/strip-comments.mjs';
+import { stripJsComments, stripYamlComments } from './lib/strip-comments.mjs';
 
 const JUDGE = 'src/lib/ops/cronAuthContract.ts';
 const SYNC = 'scripts/sync-secrets.mjs';
@@ -100,8 +100,24 @@ function workflowAuthSecrets() {
   for (const name of readdirSync(WF_DIR)) {
     if (!/\.ya?ml$/.test(name)) continue;
     const raw = readFileSync(join(WF_DIR, name), 'utf8');
-    // YAML 주석(#)을 지운다 — 설명에 적힌 이름을 배선으로 읽지 않는다
-    const src = raw.split('\n').map((l) => l.replace(/(^|\s)#.*$/, '')).join('\n');
+    // YAML 주석(#)을 지운다 — 설명에 적힌 이름을 배선으로 읽지 않는다.
+    //
+    // **공용 제거기를 쓴다.** 전에는 여기서 `l.replace(/(^|\s)#.*$/, '')`
+    // 한 줄로 했는데, 그건 **인용부호 안의 `#`도 주석으로 읽는다.**
+    // 공용 `strip-comments.mjs` 머리말이 바로 그 실수를 적어 둔 자리다
+    // (`"color: #fff"`까지 잘라 먹는다).
+    //
+    // 실제로 재서 확인했다. 거울 사본에 미선언 손-비밀을 보내는 워크플로
+    // 하나를 넣고 돌렸다:
+    //
+    //   평범한 줄                            → rc=1, 표에 나타남   (막는다)
+    //   같은 줄 앞에 `"X-Tag: build #1"`      → rc=0, **표에 아예 없음**
+    //
+    // 뒤쪽이 더 나쁘다. 그 `#`부터 줄이 잘려 `Authorization` 도 안 보이게
+    // 되므로 **그 워크플로가 목록에서 통째로 빠진다** — 보내는 비밀이
+    // 하나도 검사되지 않는다. 손으로 맞추는 비밀이 갈려서 401이 30회
+    // 연속 났던 것이 이 검사기가 막으려는 고장이다.
+    const src = stripYamlComments(raw);
     const sendsBearer = /Authorization:\s*Bearer/i.test(src);
     const sendsAdmin = /x-admin-secret\s*:/i.test(src);
     if (!sendsBearer && !sendsAdmin) continue;
