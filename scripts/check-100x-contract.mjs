@@ -5201,6 +5201,38 @@ const EXECUTOR  = 'src/lib/engine/orderExecutor.ts';
               if (bad.test(sql)) err(`095가 거래 판단(${bad})을 건드립니다`);
             }
           }
+
+          // ★ 095 한 장만 읽으면 **뒤 파일이 다시 열어도 보이지 않는다.**
+          //
+          //   이 자리의 판정 셋(092+093 · 094 · 095)은 모두 파일 이름을
+          //   적어 놓고 그 파일만 읽었다. 마이그레이션은 쌓이는 것이므로
+          //   096 이후 아무 파일에서나 되돌릴 수 있다. fixture로 돌려서
+          //   얻은 값 — 199에서 `TO anon`·`TO public`·`TO` 절 없는 정책,
+          //   그리고 anon에 GRANT까지, **네 가지 모두 rc=0(통과)이었다.**
+          //   같은 `TO anon`을 093에 적으면 잡혔다. 이름에 묶인 판정이
+          //   원인이었다.
+          //
+          //   그래서 전수 판정을 `system/observationAcl.ts`에 **한 벌로**
+          //   두고(GRANT/REVOKE 정본이 이미 거기 있다) 여기서는 입력만
+          //   넘긴다. 판정을 검사기 쪽에 복제하지 않는다.
+          if (typeof am?.checkObservationExposure !== 'function') {
+            err(`${ACLM}: 전수 노출 판정(checkObservationExposure)이 없습니다`
+              + ' — 095 뒤 파일이 관측 표를 다시 열어도 아무도 보지 못합니다');
+          } else {
+            const EXD = 'supabase/migrations';
+            let exNames = null;
+            try {
+              exNames = readdirSync(EXD).filter(n => n.endsWith('.sql')).sort();
+            } catch { exNames = null; }
+            // **못 읽은 것을 통과로 적지 않는다.**
+            if (!exNames || exNames.length === 0) {
+              err(`${EXD}를 읽지 못했습니다 — 관측 표 전수 노출 판정을 돌리지 못했습니다`);
+            } else {
+              const ex = am.checkObservationExposure(
+                exNames.map(n => ({ name: n, sql: read(`${EXD}/${n}`) })));
+              if (!ex?.ok) err(`관측 표 노출 ${ex?.code}: ${ex?.reason}`);
+            }
+          }
           // manifest에 095가 있는가 (자동생성 — 다시 굽지 않으면 낡는다)
           const man095 = read('src/lib/system/migrationManifest.ts');
           if (!/name:\s*'095_exact100x_observation_acl_hardening\.sql'[^}]*id:\s*95\b/.test(man095)) {
