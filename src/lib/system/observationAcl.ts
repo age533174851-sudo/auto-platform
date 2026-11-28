@@ -118,8 +118,41 @@ const QID = '(?:"[^"]*"|[\\w$]+)';
 /** 수식 이름 — `t` · `s.t` · `"s"."t"` · `s."t"` */
 const QNAME = `${QID}(?:\\s*\\.\\s*${QID})*`;
 
-/** 따옴표를 벗기고 소문자로 모은 한 조각 */
-const plain = (s: string) => norm(s).replace(/^"|"$/g, '').trim().toLowerCase();
+/**
+ * 식별자 한 조각을 PostgreSQL 규칙대로 접는다.
+ *
+ * ★ **인용한 식별자는 대소문자를 보존하고, 인용하지 않은 것만 소문자로
+ *   접힌다.** `"SERVICE_ROLE"`은 `service_role`과 **다른 role이다.**
+ *
+ *   Codex가 두 번째로 지적한 것이 이 자리였다. 표 이름과 role을 같은
+ *   `toLowerCase()`로 묶었더니, 표 쪽에서는 보수적(놓치지 않는 쪽)이던
+ *   같은 선택이 role 쪽에서는 **반대로 통과를 넓혔다.** 측정값:
+ *
+ *     role=service_role     정책 허용  GRANT 허용   (옳다)
+ *     role="service_role"   정책 허용  GRANT 허용   (옳다)
+ *     role="SERVICE_ROLE"   정책 허용  GRANT 허용   ← 구멍
+ *     role="Service_Role"   정책 허용  GRANT 허용   ← 구멍
+ *     role=authenticated    정책 차단  GRANT 차단
+ *
+ *   격리 PostgreSQL에서 `pg_roles`가 `service_role`(bypassrls=true)과
+ *   `SERVICE_ROLE`(bypassrls=false)을 **별개로** 반환한다고 보고됐다.
+ *
+ * 그래서 이 함수는 의미 그대로 접고, **표를 지키는 쪽만** 그 위에서
+ * 대소문자를 무시한다(`guardKey`). 두 선택을 한 함수에 섞지 않는다.
+ */
+const foldIdent = (s: string) => {
+  const t = norm(s);
+  return /^".*"$/.test(t) ? t.slice(1, -1) : t.toLowerCase();
+};
+
+/**
+ * 지키는 표를 찾을 때 쓰는 열쇠 — **대소문자를 무시한다.**
+ *
+ * 인용한 `"EXACT100X_RISK_OBSERVATIONS"`는 엄밀히 다른 표다. 그래도 같은
+ * 표로 본다: 관문은 놓치는 쪽이 아니라 **막는 쪽으로 틀려야 한다.** 이
+ * 선택이 낼 수 있는 잘못은 **거짓 차단**뿐이고, 거짓 통과는 아니다.
+ */
+const guardKey = (s: string) => s.toLowerCase();
 
 /**
  * 수식 이름을 `schema.table`로 정규화한다.
@@ -130,7 +163,7 @@ const plain = (s: string) => norm(s).replace(/^"|"$/g, '').trim().toLowerCase();
  */
 function qualifiedName(raw: string): string {
   const parts = (String(raw ?? '').match(/"[^"]*"|[\w$]+/g) ?? [])
-    .map(plain).filter(Boolean);
+    .map(foldIdent).filter(Boolean);
   if (parts.length === 0) return '';
   return parts.length >= 2
     ? `${parts[parts.length - 2]}.${parts[parts.length - 1]}`
@@ -141,9 +174,14 @@ function qualifiedName(raw: string): string {
 const nameList = (s: string) =>
   (String(s ?? '').match(new RegExp(QNAME, 'g')) ?? []).map(qualifiedName).filter(Boolean);
 
-/** 쉼표로 이어진 role들 */
+/**
+ * 쉼표로 이어진 role들 — **인용한 것은 대소문자를 보존한다.**
+ *
+ * 허용 목록(`service_role`)과의 비교는 정확해야 한다. 여기서 소문자로
+ * 모으면 `"SERVICE_ROLE"`이 허용으로 새어 들어간다.
+ */
 const roleListOf = (s: string) =>
-  (String(s ?? '').match(new RegExp(QID, 'g')) ?? []).map(plain).filter(Boolean);
+  (String(s ?? '').match(new RegExp(QID, 'g')) ?? []).map(foldIdent).filter(Boolean);
 
 /**
  * 문장을 끊어 동사·권한·표·role을 읽는다.
@@ -218,7 +256,7 @@ export function parsePolicyStatements(sql: string): PolicyStatement[] {
   return spansFrom(stripSqlComments(sql), /\bCREATE\s+POLICY\b/i).map((raw): PolicyStatement => {
     const head = HEAD.exec(raw);
     if (!head) return { name: '', table: '', roles: [], raw };
-    const name = plain(head[1]);
+    const name = foldIdent(head[1]);
     const table = qualifiedName(head[2]);
     const tail = raw.slice(head[0].length);
     const stop = tail.search(/\b(USING|WITH\s+CHECK)\b/i);
@@ -313,7 +351,8 @@ export function checkObservationAcl(sql: string): AclVerdict {
  * 두 개만 본다.
  */
 export function checkObservationExposure(files: readonly MigrationSource[]): AclVerdict {
-  const guarded = new Set<string>(PROTECTED_OBSERVATION_TABLES);
+  // 지키는 표는 **대소문자를 무시해서** 찾는다 (`guardKey`의 주석을 보라).
+  const guarded = new Set<string>(PROTECTED_OBSERVATION_TABLES.map(guardKey));
 
   for (const f of files) {
     const where = f?.name || '(파일 이름 미상)';
@@ -321,7 +360,7 @@ export function checkObservationExposure(files: readonly MigrationSource[]): Acl
 
     // ① RLS 정책이 service_role 전용인가
     for (const p of parsePolicyStatements(sql)) {
-      if (!guarded.has(p.table)) continue;
+      if (!guarded.has(guardKey(p.table))) continue;
       const which = p.name || '(이름 미상)';
       if (p.roles.length === 0) {
         return no('POLICY_NOT_SERVICE_ONLY',
@@ -340,7 +379,7 @@ export function checkObservationExposure(files: readonly MigrationSource[]): Acl
     for (const raw of spansFrom(stripSqlComments(sql), /\bGRANT\b/i)) {
       const st = parseAclSpan(raw.replace(/^[\s\S]*?(?=GRANT\b)/i, ''));
       if (st.verb !== 'GRANT') continue;
-      const touched = st.tables.filter(t => guarded.has(t));
+      const touched = st.tables.filter(t => guarded.has(guardKey(t)));
       if (touched.length === 0) continue;
       const outside = st.roles.filter(r => r !== SERVICE_ROLE);
       if (outside.length > 0) {

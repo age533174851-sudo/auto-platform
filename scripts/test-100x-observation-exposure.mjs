@@ -252,3 +252,66 @@ test('parsePolicyStatements — 인용 수식 이름을 schema.table 로 읽는�
   assert.equal(got[0].name, 'my policy');
   assert.deepEqual([...got[0].roles], ['public']);
 });
+
+// ── 인용 role 은 대소문자를 보존한다 (Codex 두 번째 지적) ──────────
+//
+// 표 이름과 role 을 같은 `toLowerCase()`로 묶은 것이 잘못이었다. 표 쪽에서
+// 보수적(놓치지 않는 쪽)이던 선택이 role 쪽에서는 **반대로 통과를 넓혔다.**
+// `"SERVICE_ROLE"`은 PostgreSQL 에서 `service_role`과 다른 role 이고,
+// 격리 PG 에서 `pg_roles`가 두 role 의 `bypassrls`를 별개로 반환한다고
+// 보고됐다 — `service_role`은 true, `SERVICE_ROLE`은 false.
+//
+// 고치기 전 측정: 인용 대문자·혼합 모두 정책·GRANT 양쪽에서 **허용**.
+test('★ 인용 대문자 role 은 service_role 이 아니다 — 정책을 막는다', () => {
+  for (const role of ['"SERVICE_ROLE"', '"Service_Role"', '"ServiceRole"']) {
+    const v = checkObservationExposure(withLate(
+      `CREATE POLICY rp ON ${RISK} FOR ALL TO ${role} USING (true) WITH CHECK (true);`));
+    assert.equal(v.ok, false, `${role} 를 service_role 로 읽으면 다른 role 에 표가 열린다`);
+    assert.equal(v.code, 'POLICY_NOT_SERVICE_ONLY');
+  }
+});
+
+test('★ 인용 대문자 role 은 service_role 이 아니다 — GRANT 를 막는다', () => {
+  for (const role of ['"SERVICE_ROLE"', '"Service_Role"']) {
+    const v = checkObservationExposure(withLate(
+      `GRANT SELECT ON TABLE ${RISK} TO ${role};`));
+    assert.equal(v.ok, false, `${role} 를 service_role 로 읽으면 다른 role 에 표가 열린다`);
+    assert.equal(v.code, 'PUBLIC_ROLE_GRANTED');
+  }
+});
+
+test('대조 — 인용하지 않은 role 은 PostgreSQL 규칙대로 소문자로 접힌다', () => {
+  // 인용하지 않은 식별자는 PostgreSQL 이 소문자로 접는다. `SERVICE_ROLE`과
+  // `service_role`은 **같은** role 이다 — 여기서 막으면 거짓 실패가 난다.
+  for (const role of ['service_role', 'SERVICE_ROLE', 'Service_Role', '"service_role"']) {
+    const v = checkObservationExposure(withLate(
+      `GRANT ALL PRIVILEGES ON TABLE ${RISK} TO ${role};`));
+    assert.equal(v.ok, true, `${role} 는 service_role 과 같은 role 이다: ${v.reason}`);
+  }
+});
+
+test('대조 ★ 표를 찾는 쪽은 대소문자를 무시한다 (막는 쪽으로 틀린다)', () => {
+  // `"EXACT100X_RISK_OBSERVATIONS"`는 엄밀히 다른 표다. 그래도 같은 표로
+  // 봐서 막는다 — 이 선택이 낼 수 있는 잘못은 **거짓 차단**뿐이다.
+  // 이 대조를 지우면 후속 파서 통합에서 그 선택이 조용히 뒤집힌다.
+  for (const ref of [
+    '"public"."exact100x_risk_observations"',
+    '"PUBLIC"."EXACT100X_RISK_OBSERVATIONS"',
+    '"Public"."Exact100X_Risk_Observations"',
+  ]) {
+    const v = checkObservationExposure(withLate(`GRANT SELECT ON TABLE ${ref} TO anon;`));
+    assert.equal(v.ok, false, `${ref} 를 다른 표로 읽으면 통과한다`);
+    assert.equal(v.code, 'PUBLIC_ROLE_GRANTED');
+  }
+});
+
+test('대조 — 두 선택은 한 함수에 섞여 있지 않다', () => {
+  // role 은 의미대로 접고(인용은 보존), 표는 그 위에서 대소문자를 무시한다.
+  // 한 함수로 묶으면 둘 중 하나가 반드시 틀린다 — 그것이 이 지적의 핵심이다.
+  const upperRoleOnGuardedTable = checkObservationExposure(withLate(
+    `CREATE POLICY rp ON "PUBLIC"."EXACT100X_RISK_OBSERVATIONS"`
+    + ' FOR ALL TO "SERVICE_ROLE" USING (true) WITH CHECK (true);'));
+  assert.equal(upperRoleOnGuardedTable.ok, false,
+    '표는 대소문자 무시로 찾고, role 은 정확히 비교해야 이 한 줄이 막힌다');
+  assert.equal(upperRoleOnGuardedTable.code, 'POLICY_NOT_SERVICE_ONLY');
+});
