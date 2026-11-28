@@ -135,7 +135,7 @@ test('★ 잔고를 plpgsql 변수로 덮어쓰면 막는다', () => {
       `SET balance    = ${rhs},`));
     const r = feeDeductionContract({ sql, fnBody: openBody() });
     assert.equal(r.ok, false, `${rhs} 는 앞서 읽어 둔 값으로 덮어쓰는 것이다`);
-    assert.match(r.reason, /증감식으로 밀지 않습니다/);
+    assert.match(r.reason, /balance \+ p_amount`로 밀지 않습니다/);
   }
 });
 
@@ -159,7 +159,7 @@ test('★ 잔고를 읽어 계산한 값으로 덮어쓰면 막는다', () => {
     'SET balance    = v_new_balance,'));
   const r = feeDeductionContract({ sql, fnBody: openBody() });
   assert.equal(r.ok, false);
-  assert.match(r.reason, /증감식으로 밀지 않습니다/);
+  assert.match(r.reason, /balance \+ p_amount`로 밀지 않습니다/);
 });
 
 // ── 넘긴 곳을 못 읽으면 통과시키지 않는가 ──────────────────────
@@ -285,4 +285,96 @@ test('대조 — 두 갈래가 같은 수식어 판정을 쓴다', () => {
   });
   assert.equal(inlineBad.ok, false, 'inline 갈래가 통과시키면 판정이 두 벌이다');
   assert.equal(delegatedBad.ok, false, 'delegated 갈래가 통과시키면 판정이 두 벌이다');
+});
+
+// ── 산술식과 부호 (Codex 지적) ─────────────────────────────────────
+//
+// 예전 판정은 부호를 `[-+]` 둘 다 받고 **식 뒤를 보지 않았다.** 그래서
+// 금액이 맞는지 아무도 확인하지 않았다. 돌려서 얻은 값 — 여섯 가지 모두
+// `ok:true` 였다 (balance 100 · p_entry_fee 10 · p_amount = -10):
+//
+//   inline     balance - p_entry_fee * 0            → 100  수수료 안 빠짐
+//   inline     balance - p_entry_fee + p_entry_fee  → 100  차감 상쇄
+//   inline     balance - p_entry_fee * 2            →  80  두 배
+//   delegated  balance - p_amount                   → 110  **수수료를 더한다**
+//   delegated  balance + p_amount * 0               → 100
+//   delegated  balance + p_amount * 2               →  80
+//
+// ★ `delegated`의 부호가 판정적이다. 호출부는
+//   `paper_money_apply(…, -p_entry_fee)` 로 **음수를 넘긴다.** 그러므로
+//   받는 쪽은 `balance + p_amount` 여야 하고, `balance - p_amount` 는
+//   수수료를 **더하는** 방향이다. 부호 하나로 손익이 반대로 움직인다.
+//
+// 위 숫자는 산술 설명이고 PG 를 돌린 결과가 아니다.
+const inlineFee = (rhs, alias = '') => ({
+  sql: '',
+  fnBody: `DECLARE p_entry_fee numeric := 10; p_account_id uuid;
+BEGIN UPDATE public.paper_accounts${alias} SET balance = ${rhs} WHERE id = p_account_id;
+  IF NOT FOUND THEN RAISE EXCEPTION 'missing'; END IF; END;`,
+});
+
+const delegatedFee = (rhs, alias = '') => ({
+  sql: `CREATE FUNCTION public.paper_money_apply(p_account uuid, p_amount numeric)
+  RETURNS void AS $money$
+BEGIN
+  UPDATE public.paper_accounts${alias} SET balance = ${rhs} WHERE id = p_account;
+  IF NOT FOUND THEN RAISE EXCEPTION 'missing'; END IF;
+END $money$ LANGUAGE plpgsql;`,
+  fnBody: 'BEGIN PERFORM public.paper_money_apply(p_account_id, -p_entry_fee); END;',
+});
+
+for (const [how, rhs] of [
+  ['0 배로 상쇄', 'balance - p_entry_fee * 0'],
+  ['더해서 상쇄', 'balance - p_entry_fee + p_entry_fee'],
+  ['두 배로 뺀다', 'balance - p_entry_fee * 2'],
+  ['부호가 반대', 'balance + p_entry_fee'],
+  ['다른 금액', 'balance - v_other'],
+]) {
+  test(`★ inline — ${how} (${rhs}) 를 막는다`, () => {
+    const r = feeDeductionContract(inlineFee(rhs));
+    assert.equal(r.ok, false, `식 뒤를 보지 않으면 금액이 맞는지 아무도 확인하지 않는다: ${rhs}`);
+  });
+}
+
+test('★ delegated — balance - p_amount 는 수수료를 더하는 방향이다', () => {
+  // 호출부가 음수를 넘기므로 `-` 는 부호가 겹쳐 더하기가 된다.
+  const r = feeDeductionContract(delegatedFee('balance - p_amount'));
+  assert.equal(r.ok, false, '부호 하나로 손익이 반대로 움직인다');
+  assert.match(r.reason, /balance \+ p_amount`로 밀지 않습니다/);
+});
+
+for (const [how, rhs] of [
+  ['0 배로 상쇄', 'balance + p_amount * 0'],
+  ['두 배', 'balance + p_amount * 2'],
+  ['다른 금액', 'balance + v_other'],
+  ['뒤에 더하기', 'balance + p_amount + 1'],
+]) {
+  test(`★ delegated — ${how} (${rhs}) 를 막는다`, () => {
+    const r = feeDeductionContract(delegatedFee(rhs));
+    assert.equal(r.ok, false, `식 뒤를 보지 않으면 금액이 맞는지 아무도 확인하지 않는다: ${rhs}`);
+  });
+}
+
+test('대조 — 정확한 식과 서식 차이는 통과한다', () => {
+  for (const [kind, make, rhs, alias] of [
+    ['inline', inlineFee, 'balance - p_entry_fee', ''],
+    ['inline', inlineFee, 'a.balance - p_entry_fee', ' AS a'],
+    ['inline', inlineFee, 'paper_accounts.balance - p_entry_fee', ''],
+    ['inline', inlineFee, '(balance - p_entry_fee)', ''],
+    ['inline', inlineFee, 'balance\n       -   p_entry_fee', ''],
+    ['delegated', delegatedFee, 'balance + p_amount', ''],
+    ['delegated', delegatedFee, 'a.balance + p_amount', ' AS a'],
+    ['delegated', delegatedFee, '(balance + p_amount)', ''],
+  ]) {
+    const r = feeDeductionContract(make(rhs, alias));
+    assert.equal(r.ok, true, `${kind} 의 정상 식이 막히면 거짓 실패다: ${rhs} — ${r.ok ? '' : r.reason}`);
+  }
+});
+
+test('대조 — 지금 저장소의 실제 식은 정확히 허용 모양이다', () => {
+  // 085 는 `SET balance = balance + p_amount,` 다. 뒤에 `,` 가 오므로
+  // 접미부 금지에 걸리지 않는다. 이 대조가 깨지면 전수가 빨강이 된다.
+  const r = feeDeductionContract({ sql: corpus(), fnBody: openBody() });
+  assert.equal(r.ok, true, r.ok ? '' : r.reason);
+  assert.equal(r.where, 'delegated');
 });

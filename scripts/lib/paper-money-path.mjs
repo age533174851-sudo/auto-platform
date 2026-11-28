@@ -157,15 +157,45 @@ function abortsOnNoRows(body) {
  *   별칭**과 같아야 한다. 지금 저장소는 수식어 없는 형태만 쓴다(측정값:
  *   `balance = balance -` 8곳 · `balance = balance +` 7곳).
  */
-function movesByDelta(body, column = 'balance') {
+function movesByDelta(body, { column = 'balance', sign, operand } = {}) {
   const src = String(body ?? '');
-  const re = new RegExp(
-    `${column}\\s*=\\s*(?:([A-Za-z_]\\w*)\\.)?${column}\\s*[-+]`, 'gi');
-  let m;
-  while ((m = re.exec(src))) {
+  for (const m of src.matchAll(deltaRe({ column, sign, operand }))) {
     if (qualifierIsTarget(src, m.index, m[1])) return true;
   }
   return false;
+}
+
+/**
+ * `balance = [수식어.]balance <부호> <매개변수>` — **뒤에 아무것도 없어야**
+ * 한다.
+ *
+ * ★ 예전 판정은 부호를 `[-+]` 둘 다 받고 **식 뒤를 보지 않았다.** 그래서
+ *   금액이 맞는지 아무도 확인하지 않았다. 돌려서 얻은 값
+ *   (balance 100 · p_entry_fee 10 · p_amount = -10):
+ *
+ *     inline     balance - p_entry_fee * 0            → 100  수수료 안 빠짐
+ *     inline     balance - p_entry_fee + p_entry_fee  → 100  차감 상쇄
+ *     inline     balance - p_entry_fee * 2            →  80  두 배
+ *     delegated  balance - p_amount                   → 110  **수수료를 더한다**
+ *     delegated  balance + p_amount * 0               → 100
+ *     delegated  balance + p_amount * 2               →  80
+ *
+ *   `delegated`의 부호가 판정적이다. 호출부는 `paper_money_apply(…, -p_entry_fee)`
+ *   로 **음수를 넘긴다.** 그러므로 받는 쪽은 `balance + p_amount`여야 하고,
+ *   `balance - p_amount`는 수수료를 **더하는** 방향이다. 여섯 가지 모두
+ *   예전 판정을 통과했다.
+ *
+ * 괄호로 감싼 꼴(`(balance + p_amount)`)은 받는다. 그 뒤는 `,` · `;` · `)` ·
+ * `WHERE` · `RETURNING` · 끝만 허용한다 — 산술 접미부를 막는다.
+ */
+function deltaRe({ column = 'balance', sign, operand } = {}) {
+  const signPart = sign === '+' ? '\\+' : sign === '-' ? '-' : '[-+]';
+  const operandPart = operand ? `${operand}\\b` : '[A-Za-z_]\\w*\\b';
+  return new RegExp(
+    `${column}\\s*=\\s*\\(?\\s*(?:([A-Za-z_]\\w*)\\.)?${column}`
+    + `\\s*${signPart}\\s*${operandPart}\\s*\\)?\\s*`
+    + '(?=,|;|\\)|\\bWHERE\\b|\\bRETURNING\\b|\\bFROM\\b|$)',
+    'gi');
 }
 
 /**
@@ -209,13 +239,9 @@ export function feeDeductionContract({ sql, fnBody, feeParam = 'p_entry_fee' }) 
   //   ★ 수식어 판정은 `qualifierIsTarget` **한 곳**에 있다. 예전에는 이
   //     자리에 같은 정규식의 사본이 있었고, `movesByDelta`만 고쳤더니
   //     inline 갈래에서 `v_row.balance - p_entry_fee`가 계속 통과했다.
-  const inlineRe = new RegExp(
-    `balance\\s*=\\s*(?:([A-Za-z_]\\w*)\\.)?balance\\s*-\\s*${feeParam}\\b`, 'gi');
-  let inlineDelta = false;
-  let im;
-  while ((im = inlineRe.exec(body))) {
-    if (qualifierIsTarget(body, im.index, im[1])) { inlineDelta = true; break; }
-  }
+  //   부호는 `-`, 금액은 `feeParam` 그대로여야 하고 **뒤에 아무것도 올 수
+  //   없다.** `* 0` · `* 2` · `+ p_entry_fee` 는 전부 막힌다.
+  const inlineDelta = movesByDelta(body, { sign: '-', operand: feeParam });
   if (inlineDelta) {
     if (!abortsOnNoRows(body)) {
       return {
@@ -255,11 +281,17 @@ export function feeDeductionContract({ sql, fnBody, feeParam = 'p_entry_fee' }) 
         + ` (${money.reason}) — 넘긴 곳을 못 읽으면 계약이 지켜지는지 알 수 없습니다`,
     };
   }
-  if (!movesByDelta(money.body)) {
+  // ★ 호출부가 **음수**를 넘기므로(`-${feeParam}`) 받는 쪽은 `+`여야 한다.
+  //   `balance - p_amount`는 수수료를 **더하는** 방향이다. 금액 이름이
+  //   바뀌면 여기서 막힌다 — 그때는 이 상수를 같이 고쳐야 한다.
+  const AMOUNT = 'p_amount';
+  if (!movesByDelta(money.body, { sign: '+', operand: AMOUNT })) {
     return {
       ok: false,
-      reason: `${MONEY}이 잔고를 증감식으로 밀지 않습니다`
-        + ' — 읽어서 덮어쓰면 같은 계좌에서 동시에 끝난 두 건 중 한쪽 손익이 사라집니다',
+      reason: `${MONEY}이 잔고를 \`balance = balance + ${AMOUNT}\`로 밀지 않습니다`
+        + ' — 읽어서 덮어쓰면 같은 계좌에서 동시에 끝난 두 건 중 한쪽 손익이'
+        + ` 사라지고, 부호가 \`-\`이면 호출부가 넘긴 음수와 겹쳐 수수료를 더합니다.`
+        + ' 식 뒤에 산술(`* 2` · `* 0` · `+ …`)을 붙이는 것도 막습니다',
     };
   }
   if (!abortsOnNoRows(money.body)) {
