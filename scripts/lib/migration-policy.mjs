@@ -32,11 +32,89 @@
 // 하나가 병합되면 **이 파일을 유일한 집으로 삼아 합쳐야 한다** — 같은 판단이
 // 두 벌이면 언젠가 갈린다. 그때까지는 이 중복이 선언된 상태다.
 
-/** `--` 주석과 `/* *\/` 블록을 지운다 */
+/**
+ * `--` 주석과 블록 주석을 지운다 — **인용 식별자와 문자열 안은 건드리지
+ * 않는다.**
+ *
+ * ★ 예전 판정은 `--`를 줄 끝까지, 블록을 통째로 지웠다. 그래서 **이름 안의
+ *   `--`가 줄 주석을 열어 뒤의 코드를 먹었다.** 돌려서 얻은 값:
+ *
+ *     CREATE POLICY "p--" ON public.paper_challenges
+ *       FOR SELECT TO authenticated USING (true);
+ *
+ *   제거기가 남긴 것:  `CREATE POLICY "p`
+ *   읽힌 모양:         name='' table='' roles=[]
+ *   판정:              지키는 표가 아니라고 **건너뜀** → 통과
+ *
+ *   같은 broad 정책을 평범한 이름으로 쓰면 차단된다. 즉 **이름 한 글자로
+ *   관문이 눈을 감았다.** 제거기가 코드를 먹는 쪽이 가장 나쁜 방향이다.
+ *
+ *   PostgreSQL 에서 인용 식별자는 NUL 을 뺀 아무 문자나 담을 수 있다.
+ *   `""`는 따옴표 한 글자다.
+ */
 export function stripSqlComments(sql) {
-  return String(sql ?? '')
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')
-    .split('\n').map(l => l.replace(/--.*$/, '')).join('\n');
+  const s = String(sql ?? '');
+  let out = '';
+  let i = 0;
+  while (i < s.length) {
+    const c = s[i];
+    // 문자열(`'…'`)과 인용 식별자(`"…"`) 안은 그대로 옮긴다
+    if (c === "'" || c === '"') {
+      const q = c;
+      out += c;
+      i += 1;
+      while (i < s.length) {
+        if (s[i] === q) {
+          if (s[i + 1] === q) { out += q + q; i += 2; continue; }   // `''` · `""`
+          out += q; i += 1; break;
+        }
+        out += s[i]; i += 1;
+      }
+      continue;
+    }
+    if (c === '-' && s[i + 1] === '-') {
+      while (i < s.length && s[i] !== '\n') i += 1;
+      continue;
+    }
+    if (c === '/' && s[i + 1] === '*') {
+      i += 2;
+      while (i < s.length && !(s[i] === '*' && s[i + 1] === '/')) i += 1;
+      i += 2;
+      out += ' ';
+      continue;
+    }
+    out += c;
+    i += 1;
+  }
+  return out;
+}
+
+/**
+ * 인용 안을 건너뛰고 문장 끝(`;`)을 찾는다.
+ *
+ * 이름이나 문자열에 `;`이 있으면 문장이 거기서 끊긴 것처럼 보인다.
+ * (주석은 이 시점에 이미 지워져 있다.)
+ */
+function stmtEnd(s, from) {
+  let i = from;
+  while (i < s.length) {
+    const c = s[i];
+    if (c === "'" || c === '"') {
+      const q = c;
+      i += 1;
+      while (i < s.length) {
+        if (s[i] === q) {
+          if (s[i + 1] === q) { i += 2; continue; }
+          i += 1; break;
+        }
+        i += 1;
+      }
+      continue;
+    }
+    if (c === ';') return i;
+    i += 1;
+  }
+  return -1;
 }
 
 const norm = (s) => String(s).trim().replace(/\s+/g, ' ');
@@ -49,7 +127,7 @@ const norm = (s) => String(s).trim().replace(/\s+/g, ' ');
  *   집어 **`public.public`**이 됐고, 그 이름은 지키는 목록에 없으므로
  *   통과했다. 유효한 SQL이다.
  */
-const QID = '(?:"[^"]*"|[\\w$]+)';
+const QID = '(?:"(?:[^"]|"")*"|[\\w$]+)';
 /** 수식 이름 — `t` · `s.t` · `"s"."t"` · `s."t"` */
 const QNAME = `${QID}(?:\\s*\\.\\s*${QID})*`;
 
@@ -67,7 +145,8 @@ const QNAME = `${QID}(?:\\s*\\.\\s*${QID})*`;
  */
 const ident = (s) => {
   const t = norm(s);
-  return /^".*"$/.test(t) ? t.slice(1, -1) : t.toLowerCase();
+  // `""`는 따옴표 한 글자다 — 벗길 때 되돌린다
+  return /^".*"$/.test(t) ? t.slice(1, -1).replace(/""/g, '"') : t.toLowerCase();
 };
 
 /**
@@ -133,7 +212,7 @@ export function canonicalExpr(raw) {
  *   관문은 놓치는 쪽이 아니라 **막는 쪽으로 틀려야 한다.**
  */
 function qualifiedName(raw) {
-  const parts = (String(raw ?? '').match(/"[^"]*"|[\w$]+/g) ?? []).map(ident).filter(Boolean);
+  const parts = (String(raw ?? '').match(/"(?:[^"]|"")*"|[\w$]+/g) ?? []).map(ident).filter(Boolean);
   if (parts.length === 0) return '';
   return parts.length >= 2
     ? `${parts[parts.length - 2]}.${parts[parts.length - 1]}`
@@ -153,14 +232,67 @@ const roleListOf = (s) =>
  */
 function spansFrom(body, re) {
   const out = [];
+  const quoted = quotedRanges(body);
   const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
   let m;
   while ((m = g.exec(body))) {
-    const end = body.indexOf(';', m.index);
-    out.push(norm(body.slice(m.index, end === -1 ? body.length : end)));
+    // ★ **문자열 안의 `CREATE POLICY`는 문장이 아니다.**
+    //   `022_rls_worker_tables.sql`은 `EXECUTE format('CREATE POLICY %I ON
+    //   public.%I …')`로 정책을 만든다. 그 문자열을 문장으로 읽으면 표가
+    //   `%I`라서 읽지 못하고, 읽지 못한 것을 막는 판정이 **멀쩡한 파일을
+    //   막는다.** (실제로 그렇게 됐고 시험 57개가 깨져서 발견했다.)
+    //   동적 SQL 은 아래 `dynamicPolicySql`이 따로 본다.
+    if (!quoted.some(([a, b]) => m.index >= a && m.index < b)) {
+      const end = stmtEnd(body, m.index);
+      out.push(norm(body.slice(m.index, end === -1 ? body.length : end)));
+    }
     if (g.lastIndex <= m.index) g.lastIndex = m.index + 1;
   }
   return out;
+}
+
+/** 문자열(`'…'`)과 인용 식별자(`"…"`)가 차지한 구간 */
+function quotedRanges(s) {
+  const out = [];
+  let i = 0;
+  while (i < s.length) {
+    const c = s[i];
+    if (c === "'" || c === '"') {
+      const q = c;
+      const a = i;
+      i += 1;
+      while (i < s.length) {
+        if (s[i] === q) {
+          if (s[i + 1] === q) { i += 2; continue; }
+          i += 1; break;
+        }
+        i += 1;
+      }
+      out.push([a, i]);
+      continue;
+    }
+    i += 1;
+  }
+  return out;
+}
+
+/**
+ * 문자열로 만들어 `EXECUTE` 하는 정책 SQL 이 있는가.
+ *
+ * ★ 동적으로 만든 SQL 의 표 이름은 실행할 때 정해진다(`%I`). 정적 판정으로는
+ *   **어느 표에 걸릴지 알 수 없다.** 그래서 같은 파일이 지키는 표를 언급하면
+ *   막는다 — 모르면 통과가 아니다.
+ *
+ *   지키는 표를 언급하지 않는 동적 SQL 은 통과시킨다 (`022`가 그 꼴이다:
+ *   worker 표 목록을 돌며 service_role 정책을 만든다). 다만 그 목록에
+ *   지키는 표가 **런타임에** 들어가는 경우는 이 판정이 보지 못한다 —
+ *   닫았다고 적지 않는다.
+ */
+export function dynamicPolicySql(sql) {
+  const body = stripSqlComments(sql);
+  return quotedRanges(body)
+    .map(([a, b]) => body.slice(a, b))
+    .filter(t => /\b(?:CREATE|ALTER|DROP)\s+POLICY\b/i.test(t));
 }
 
 /**
@@ -270,6 +402,42 @@ export function checkTableAccessIntent(files, intent) {
   for (const f of files ?? []) {
     const where = f?.name || '(파일 이름 미상)';
     const sql = String(f?.sql ?? '');
+
+    // ①-00 동적으로 만든 정책 SQL 이 지키는 표를 건드릴 수 있는가
+    const dyn = dynamicPolicySql(sql);
+    if (dyn.length > 0) {
+      const mentioned = [...guarded].filter(
+        t => new RegExp(`\\b${t.split('.').pop()}\\b`, 'i').test(sql));
+      if (mentioned.length > 0) {
+        return no('POLICY_DYNAMIC',
+          `${where}: 문자열로 만든 정책 SQL 이 있고 이 파일이 ${mentioned.join(', ')}을`
+          + ` 언급합니다 (${String(dyn[0]).slice(0, 60)})`
+          + ' — 동적 SQL 의 표 이름은 실행할 때 정해지므로 어느 표에 걸릴지'
+          + ' 알 수 없습니다. 지키는 표에는 정책을 직접 적으세요');
+      }
+    }
+
+    // ①-0 읽지 못한 정책 문장을 **건너뛰지 않는다**
+    //
+    //   제거기를 인용 인식으로 고쳤지만, 그것만으로는 모자라다. 어떤 이유로든
+    //   `CREATE/ALTER/DROP POLICY` 문장을 표까지 읽어내지 못하면 예전 판정은
+    //   "지키는 표가 아니다"로 보고 **조용히 건너뛰었다.** 읽지 못한 것을
+    //   통과로 적는 그 한 줄이 관문의 눈을 감겼다.
+    //
+    //   이제 읽지 못한 문장은 막는다. 어느 표에 걸리는지 모르면 그것이
+    //   지키는 표일 수도 있다.
+    const unreadable = [
+      ...policyStatements(sql).map(x => ['CREATE POLICY', x]),
+      ...alterPolicyStatements(sql).map(x => ['ALTER POLICY', x]),
+      ...dropPolicyStatements(sql).map(x => ['DROP POLICY', x]),
+    ].filter(([, x]) => !x.table);
+    if (unreadable.length > 0) {
+      const [verb, x] = unreadable[0];
+      return no('POLICY_UNREADABLE',
+        `${where}: ${verb} 문장을 읽지 못했습니다 (${String(x.raw).slice(0, 60)})`
+        + ' — 어느 표에 걸리는지 모르면 지키는 표일 수도 있습니다.'
+        + ' 이름에 따옴표나 특수 문자가 있으면 평범한 이름으로 바꾸세요');
+    }
 
     // ① RLS를 끄지 않는가
     for (const t of rlsToggles(sql)) {
