@@ -28,11 +28,12 @@
 // 실제 Postgres가 정말로 거부하는가는 supabase-replay의 제약 시험이 본다.
 // 여기는 정적 검사다 — 둘 다 필요하다.
 
-import { readFileSync, existsSync, mkdtempSync, cpSync } from 'node:fs';
+import { readFileSync, existsSync, mkdtempSync, cpSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { checkTableAccessIntent } from './lib/migration-policy.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SQL_FILE = 'supabase/migrations/083_paper_challenge_core.sql';
@@ -356,6 +357,51 @@ for (const t of ['paper_challenges', 'paper_challenge_cashflows', 'paper_challen
     err(`${SQL_FILE}: authenticated에게 쓰기 정책이 열려 있습니다 — 돈에 닿는 표는 service_role만 씁니다`);
   } else {
     notes.push('쓰기는 service_role만, 읽기는 본인 행만');
+  }
+}
+
+// ── ⑦-2 전수: 나중 파일이 되돌리지 않는가 ──
+//
+//   위 ⑦은 **083 한 장만** 읽는다. 마이그레이션은 쌓이는 것이므로 084 이후
+//   아무 파일에서나 되돌릴 수 있다. 198 한 장을 더해 돌려서 얻은 값 —
+//   여섯 가지가 **모두 통과(rc=0)했다**:
+//
+//     authenticated 에 전체 읽기를 연다 · 쓰기를 연다 · 소유자 정책을 지운다
+//     RLS 를 끈다 · cashflows 를 anon 에 연다 · TO 절 없이 정책을 만든다
+//
+//   ★ RLS 정책은 **OR로 합쳐진다.** 소유자 정책이 그대로 있어도
+//     `USING (true)` 한 줄이 더 생기면 격리가 사라진다. "소유자 정책이
+//     있는가"만 보는 판정은 그것을 통과시킨다.
+//
+//   허용 모양은 ⑦이 이미 요구하던 것을 그대로 옮긴 것이다 — 여기서 새
+//   정책을 정하지 않는다. 판정은 `scripts/lib/migration-policy.mjs` 한 곳에
+//   있고 이 파일은 입력만 넘긴다.
+{
+  const MIGD = 'supabase/migrations';
+  let names = null;
+  try {
+    names = readdirSync(join(root, MIGD)).filter((n) => n.endsWith('.sql')).sort();
+  } catch { names = null; }
+  // **못 읽은 것을 통과로 적지 않는다.**
+  if (!names || names.length === 0) {
+    err(`${MIGD}를 읽지 못했습니다 — 전수 접근 경계 판정을 돌리지 못했습니다`);
+  } else {
+    const v = checkTableAccessIntent(
+      names.map((n) => ({ name: n, sql: readFileSync(join(root, MIGD, n), 'utf8') })),
+      {
+        tables: ['paper_challenges', 'paper_challenge_cashflows', 'paper_challenge_transitions'],
+        allow: [
+          // 쓰기는 service_role만
+          { cmd: 'ALL', roles: ['service_role'] },
+          // 읽기는 authenticated에게, 본인 행만
+          { cmd: 'SELECT', roles: ['authenticated'], using: /user_id\s*=\s*auth\.uid\(\)/i },
+        ],
+      });
+    if (!v.ok) {
+      err(`챌린지 표 접근 경계 ${v.code}: ${v.reason}`);
+    } else {
+      notes.push('전수 확인 — 나중 마이그레이션이 챌린지 표를 다시 열지 않는다');
+    }
   }
 }
 
