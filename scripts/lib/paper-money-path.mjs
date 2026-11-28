@@ -66,19 +66,175 @@ export function plpgsqlBody(sql, name) {
   return { ok: true, body: src.slice(openAt, closeAt) };
 }
 
-/** 계좌 갱신이 0행일 때 되돌리는가. `GET DIAGNOSTICS`와 `NOT FOUND` 둘 다 받는다. */
-function abortsOnNoRows(body) {
-  const checks = /GET\s+DIAGNOSTICS[\s\S]{0,120}ROW_COUNT/i.test(body)
-              || /IF\s+NOT\s+FOUND\s+THEN/i.test(body);
-  return checks && /RAISE\s+EXCEPTION/i.test(body);
+/**
+ * `IF … THEN` 한 블록을 짝을 맞춰 떼어낸다.
+ *
+ * ★ `ELSIF`는 새 블록을 열지 않고 `END IF`가 닫는다. 한 단어이므로
+ *   `\bIF\b`가 그 안을 잡지 않는다.
+ */
+function ifBlockAt(body, from) {
+  const re = /\bEND\s+IF\b|\bIF\b/gi;
+  re.lastIndex = from;
+  let depth = 0;
+  let m;
+  while ((m = re.exec(body))) {
+    if (/^END/i.test(m[0])) {
+      depth -= 1;
+      if (depth <= 0) return body.slice(from, m.index);
+    } else {
+      depth += 1;
+    }
+  }
+  return body.slice(from);          // 닫히지 않았으면 끝까지 — 읽지 못한 것이다
 }
 
-/** 잔고를 증감식으로 미는가 (읽고 고쳐 쓰지 않는가). */
-function movesByDelta(body, column = 'balance') {
-  // `balance = balance ± x` / `balance = a.balance ± x` 둘 다 받는다.
-  const re = new RegExp(
-    `${column}\\s*=\\s*(?:[A-Za-z_]\\w*\\.)?${column}\\s*[-+]`, 'i');
-  return re.test(body);
+/**
+ * 계좌 갱신이 0행일 때 되돌리는가.
+ *
+ * ★ **`RAISE EXCEPTION`이 0행 분기 *안에* 있는지 본다.**
+ *
+ *   예전 판정은 "0행을 확인하는 문장이 있다 **그리고** 본문 어딘가에
+ *   `RAISE EXCEPTION`이 있다"였다. 실제 `paper_money_apply`에는 입력 검증용
+ *   `RAISE EXCEPTION`이 **두 개 따로** 있다(사건 시각 없음·금액 없음).
+ *   그래서 0행 분기의 `RAISE`를 무해한 것으로 바꿔도 그 둘이 접속을
+ *   채웠다. 돌려서 얻은 값 — 셋 다 통과했다:
+ *
+ *     IF NOT FOUND THEN RETURN;                     rc=0  구멍
+ *     IF NOT FOUND THEN RAISE WARNING '…';          rc=0  구멍
+ *     IF NOT FOUND THEN NULL;                       rc=0  구멍
+ *
+ *   포지션만 남고 수수료가 안 빠진 계좌가 된다 — 이 판정이 막으려던 바로
+ *   그 상태다.
+ *
+ * `GET DIAGNOSTICS`와 `NOT FOUND` 두 모양을 다 받는다. `GET DIAGNOSTICS`
+ * 쪽은 그 변수를 조건에 쓰는 `IF`의 분기를 본다.
+ */
+function abortsOnNoRows(body) {
+  const src = String(body ?? '');
+
+  // ① `IF NOT FOUND THEN … END IF;`
+  const nf = /\bIF\s+NOT\s+FOUND\s+THEN\b/i.exec(src);
+  if (nf) {
+    return /RAISE\s+EXCEPTION/i.test(ifBlockAt(src, nf.index));
+  }
+
+  // ② `GET DIAGNOSTICS <변수> = ROW_COUNT;` 뒤에 그 변수를 보는 `IF`
+  const gd = /\bGET\s+DIAGNOSTICS\s+([A-Za-z_]\w*)\s*=\s*ROW_COUNT\b/i.exec(src);
+  if (gd) {
+    const v = gd[1];
+    const re = /\bIF\b/gi;
+    re.lastIndex = gd.index + gd[0].length;
+    let m;
+    while ((m = re.exec(src))) {
+      const block = ifBlockAt(src, m.index);
+      const cond = block.slice(0, block.search(/\bTHEN\b/i) + 4);
+      if (new RegExp(`\\b${v}\\b`).test(cond) && /RAISE\s+EXCEPTION/i.test(block)) return true;
+      re.lastIndex = m.index + m[0].length;
+    }
+  }
+  return false;
+}
+
+/**
+ * 잔고를 증감식으로 미는가 (읽고 고쳐 쓰지 않는가).
+ *
+ * ★ **수식어가 붙은 오른쪽은 갱신 대상의 것이어야 한다.**
+ *
+ *   예전 판정은 `balance = <무엇이든>.balance ±`를 전부 받았다. `a.balance`
+ *   (갱신 대상의 별칭)를 받으려던 것인데, plpgsql **변수**도 같이 통과했다.
+ *   돌려서 얻은 값:
+ *
+ *     SET balance = balance + p_amount          통과  옳다
+ *     SET balance = a.balance + p_amount        통과  옳다 (대상 별칭)
+ *     SET balance = v_row.balance + p_amount    통과  ← 구멍
+ *     SET balance = v_prev.balance - p_fee      통과  ← 구멍
+ *
+ *   `v_row.balance`는 **앞서 읽어 둔 값**이다. 그것으로 덮어쓰면 같은
+ *   계좌에서 동시에 끝난 두 건 중 한쪽 손익이 사라진다 — 이 계약이 막으려던
+ *   바로 그 고장이다.
+ *
+ *   그래서 수식어가 있으면 그 앞의 `UPDATE`가 가리키는 **표 이름이나
+ *   별칭**과 같아야 한다. 지금 저장소는 수식어 없는 형태만 쓴다(측정값:
+ *   `balance = balance -` 8곳 · `balance = balance +` 7곳).
+ */
+function movesByDelta(body, { column = 'balance', sign, operand } = {}) {
+  const src = String(body ?? '');
+  for (const m of src.matchAll(deltaRe({ column, sign, operand }))) {
+    // 식 본체가 두 갈래에 들어가므로 수식어 자리도 둘이다 (괄호·bare)
+    if (qualifierIsTarget(src, m.index, m[1] ?? m[2])) return true;
+  }
+  return false;
+}
+
+/**
+ * `balance = [수식어.]balance <부호> <매개변수>` — **뒤에 아무것도 없어야**
+ * 한다.
+ *
+ * ★ 예전 판정은 부호를 `[-+]` 둘 다 받고 **식 뒤를 보지 않았다.** 그래서
+ *   금액이 맞는지 아무도 확인하지 않았다. 돌려서 얻은 값
+ *   (balance 100 · p_entry_fee 10 · p_amount = -10):
+ *
+ *     inline     balance - p_entry_fee * 0            → 100  수수료 안 빠짐
+ *     inline     balance - p_entry_fee + p_entry_fee  → 100  차감 상쇄
+ *     inline     balance - p_entry_fee * 2            →  80  두 배
+ *     delegated  balance - p_amount                   → 110  **수수료를 더한다**
+ *     delegated  balance + p_amount * 0               → 100
+ *     delegated  balance + p_amount * 2               →  80
+ *
+ *   `delegated`의 부호가 판정적이다. 호출부는 `paper_money_apply(…, -p_entry_fee)`
+ *   로 **음수를 넘긴다.** 그러므로 받는 쪽은 `balance + p_amount`여야 하고,
+ *   `balance - p_amount`는 수수료를 **더하는** 방향이다. 여섯 가지 모두
+ *   예전 판정을 통과했다.
+ *
+ * 괄호로 감싼 꼴(`(balance + p_amount)`)은 받는다. 그 뒤는 `,` · `;` · `)` ·
+ * `WHERE` · `RETURNING` · `FROM` · 끝만 허용한다 — 산술 접미부를 막는다.
+ *
+ * ★ 그 괄호 허용을 **선택적 괄호 한 쌍**(`\(?` … `\)?`)으로 적었더니
+ *   **괄호 자체가 종료 자리를 대신했다.** 닫는 괄호가 뒤 산술기호를 만나면
+ *   역추적되어 소비되지 않고, 종료 lookahead 의 독립 `)` 선택지가 바로 그
+ *   괄호에서 통과시킨다. 돌려서 얻은 값 (기대충족 2/6):
+ *
+ *     inline     (balance - p_entry_fee) * 0            ok=true  구멍
+ *     inline     (balance - p_entry_fee) + p_entry_fee  ok=true  구멍
+ *     delegated  (balance + p_amount) * 0               ok=true  구멍
+ *     delegated  (balance + p_amount) - p_amount        ok=true  구멍
+ *
+ *   그래서 괄호를 **짝으로** 받는다. 감싼 갈래는 여는·닫는 괄호를 모두
+ *   소비하고 그 뒤에 종료만 허용한다 — 소비되지 않은 괄호가 남지 않으므로
+ *   종료 자리를 대신할 수 없다. 둘러싼 구문(CTE 등)의 `)` 는 두 갈래 모두
+ *   에서 그대로 종료다. 식 본체는 한 곳에만 적고 두 갈래가 같은 문자열을
+ *   쓴다 — 모양이 갈리지 않게.
+ */
+function deltaRe({ column = 'balance', sign, operand } = {}) {
+  const signPart = sign === '+' ? '\\+' : sign === '-' ? '-' : '[-+]';
+  const operandPart = operand ? `${operand}\\b` : '[A-Za-z_]\\w*\\b';
+  const body = `(?:([A-Za-z_]\\w*)\\.)?${column}\\s*${signPart}\\s*${operandPart}`;
+  const end = '\\s*(?=,|;|\\)|\\bWHERE\\b|\\bRETURNING\\b|\\bFROM\\b|$)';
+  return new RegExp(
+    `${column}\\s*=\\s*(?:\\(\\s*${body}\\s*\\)|${body})${end}`, 'gi');
+}
+
+/**
+ * 이 대입의 수식어가 **갱신 대상**의 것인가. 수식어가 없으면 참이다.
+ *
+ * ★ 이 판정이 두 곳에 사본으로 있었다. `movesByDelta`만 고치고
+ *   `inlineDelta`의 사본을 그대로 뒀더니, **inline 갈래에서는
+ *   `v_row.balance - p_entry_fee`가 계속 통과했다** (돌려서 확인했다).
+ *   이 저장소가 이름 붙여 둔 고장 그대로다 — "경로가 둘인데 한쪽만 고침".
+ *   그래서 판정을 한 곳에 두고 양쪽이 같은 함수를 쓴다.
+ */
+function qualifierIsTarget(src, at, qualifier) {
+  if (!qualifier) return true;                    // 수식어 없음 — 대상 자신이다
+  // 이 대입 앞의 가장 가까운 `UPDATE <표> [AS] [별칭]`
+  const before = String(src).slice(0, at);
+  const up = [...before.matchAll(
+    /\bUPDATE\s+((?:[A-Za-z_]\w*\.)?[A-Za-z_]\w*)(?:\s+AS)?(?:\s+([A-Za-z_]\w*))?/gi)].pop();
+  if (!up) return false;                          // 어느 UPDATE 인지 모른다 — 통과시키지 않는다
+  const table = up[1].split('.').pop().toLowerCase();
+  const alias = (up[2] || '').toLowerCase();
+  const q = qualifier.toLowerCase();
+  // `SET`·`WHERE` 같은 낱말이 별칭으로 잡히는 것은 별칭 없음과 같다
+  return q === table || (alias && q === alias);
 }
 
 /**
@@ -95,8 +251,13 @@ export function feeDeductionContract({ sql, fnBody, feeParam = 'p_entry_fee' }) 
   const body = String(fnBody ?? '');
 
   // ── ① 함수 안에서 직접 빼는 모양 (074–084) ──
-  const inlineDelta = new RegExp(
-    `balance\\s*=\\s*(?:[A-Za-z_]\\w*\\.)?balance\\s*-\\s*${feeParam}\\b`, 'i').test(body);
+  //
+  //   ★ 수식어 판정은 `qualifierIsTarget` **한 곳**에 있다. 예전에는 이
+  //     자리에 같은 정규식의 사본이 있었고, `movesByDelta`만 고쳤더니
+  //     inline 갈래에서 `v_row.balance - p_entry_fee`가 계속 통과했다.
+  //   부호는 `-`, 금액은 `feeParam` 그대로여야 하고 **뒤에 아무것도 올 수
+  //   없다.** `* 0` · `* 2` · `+ p_entry_fee` 는 전부 막힌다.
+  const inlineDelta = movesByDelta(body, { sign: '-', operand: feeParam });
   if (inlineDelta) {
     if (!abortsOnNoRows(body)) {
       return {
@@ -136,11 +297,17 @@ export function feeDeductionContract({ sql, fnBody, feeParam = 'p_entry_fee' }) 
         + ` (${money.reason}) — 넘긴 곳을 못 읽으면 계약이 지켜지는지 알 수 없습니다`,
     };
   }
-  if (!movesByDelta(money.body)) {
+  // ★ 호출부가 **음수**를 넘기므로(`-${feeParam}`) 받는 쪽은 `+`여야 한다.
+  //   `balance - p_amount`는 수수료를 **더하는** 방향이다. 금액 이름이
+  //   바뀌면 여기서 막힌다 — 그때는 이 상수를 같이 고쳐야 한다.
+  const AMOUNT = 'p_amount';
+  if (!movesByDelta(money.body, { sign: '+', operand: AMOUNT })) {
     return {
       ok: false,
-      reason: `${MONEY}이 잔고를 증감식으로 밀지 않습니다`
-        + ' — 읽어서 덮어쓰면 같은 계좌에서 동시에 끝난 두 건 중 한쪽 손익이 사라집니다',
+      reason: `${MONEY}이 잔고를 \`balance = balance + ${AMOUNT}\`로 밀지 않습니다`
+        + ' — 읽어서 덮어쓰면 같은 계좌에서 동시에 끝난 두 건 중 한쪽 손익이'
+        + ` 사라지고, 부호가 \`-\`이면 호출부가 넘긴 음수와 겹쳐 수수료를 더합니다.`
+        + ' 식 뒤에 산술(`* 2` · `* 0` · `+ …`)을 붙이는 것도 막습니다',
     };
   }
   if (!abortsOnNoRows(money.body)) {
