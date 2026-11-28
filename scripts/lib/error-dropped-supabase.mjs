@@ -38,6 +38,58 @@
 const TABLE_CHAIN = /\.from\s*\(/;
 
 /**
+ * 주석만 공백으로 덮는다 — **문자열·템플릿 안은 건드리지 않고, 길이를
+ * 유지한다.**
+ *
+ * 길이를 유지하므로 줄번호와 칸이 원문과 같다. 문자열 안의 `//`·`/*`는
+ * 주석이 아니므로 그대로 둔다.
+ *
+ * 아직 열려 있는 것 (닫았다고 적지 않는다): 템플릿 안의 `${…}` 는 통째로
+ * 문자열로 본다. 그 안에 **진짜 주석**이 있으면 지우지 않는다 — 코드를
+ * 지우는 쪽이 아니라 남기는 쪽으로 틀리므로 개수가 줄지는 않는다.
+ */
+export function stripCommentsKeepingLength(text) {
+  const s = String(text ?? '');
+  let out = '';
+  let i = 0;
+  while (i < s.length) {
+    const c = s[i];
+    // 문자열·템플릿 — 그대로 옮긴다
+    if (c === "'" || c === '"' || c === '`') {
+      const q = c;
+      out += c;
+      i += 1;
+      while (i < s.length) {
+        if (s[i] === '\\') { out += s[i] + (s[i + 1] ?? ''); i += 2; continue; }
+        if (s[i] === q) { out += q; i += 1; break; }
+        out += s[i];
+        i += 1;
+      }
+      continue;
+    }
+    // 줄 주석 — 줄바꿈 앞까지 공백으로
+    if (c === '/' && s[i + 1] === '/') {
+      while (i < s.length && s[i] !== '\n') { out += ' '; i += 1; }
+      continue;
+    }
+    // 블록 주석 — 줄바꿈은 살리고 나머지는 공백으로
+    if (c === '/' && s[i + 1] === '*') {
+      out += '  ';
+      i += 2;
+      while (i < s.length && !(s[i] === '*' && s[i + 1] === '/')) {
+        out += s[i] === '\n' ? '\n' : ' ';
+        i += 1;
+      }
+      if (i < s.length) { out += '  '; i += 2; }     // 닫는 `*/`
+      continue;
+    }
+    out += c;
+    i += 1;
+  }
+  return out;
+}
+
+/**
  * 한 파일에서 `error`를 버린 자리를 센다.
  *
  * 줄 단위가 아니라 **문장 단위**로 본다 — 이 저장소의 체인은 여러 줄에
@@ -57,10 +109,30 @@ export function errorDroppedSites(src, where = '') {
   //   보고 198·247·255·265 → 실제 211·285·293·303 (밀린 양 13 → 38로 증가)
   //
   // 길이를 유지하면 줄도 칸도 그대로다.
-  const blank = (m) => m.replace(/[^\n]/g, ' ');
-  const code = text
-    .replace(/\/\*[\s\S]*?\*\//g, blank)
-    .split('\n').map((l) => l.replace(/\/\/.*$/, blank)).join('\n');
+  // ★ **문자열 안의 `/*`·`//`는 주석이 아니다.**
+  //
+  //   예전에는 정규식으로 주석을 걷었고 문자열을 몰랐다. 그래서 완전히
+  //   정상적인 한 줄이 이 관문의 **개수를 내렸다.** 실측(전체 1403개 파일):
+  //
+  //     자리 앞에 `const probeTag = '/*';` 를 넣으면 개수가 내려간 파일 39개
+  //       src/app/api/autotrade/mode/route.ts           3 → 0
+  //       src/app/api/autotrade/daily-ladder/route.ts   1 → 0
+  //       src/app/api/autotrade/schedule/route.ts      10 → 9
+  //
+  //   `'/*'` 가 블록 주석을 열어 **다음 `*/` 까지를 통째로 지웠다.** 이것은
+  //   개수 기준 관문이므로 적게 세는 쪽이 치명적이다 — 아무것도 고치지
+  //   않고 기준선을 내릴 수 있고, 그 사이에 들어온 새 자리까지 가려진다.
+  //   이 판정이 막으려던 "조용히 들어오는 네 번째"가 바로 그것이다.
+  //
+  //   그래서 한 번 훑으면서 문자열·템플릿 안은 그대로 두고 주석만 공백으로
+  //   덮는다. **길이를 유지한다** — 줄도 칸도 그대로여야 한다(위의 줄번호
+  //   주석을 보라).
+  //
+  //   공용 `scripts/lib/strip-comments.mjs`를 쓰지 않는 이유: 그 함수는
+  //   블록 주석의 줄바꿈을 지워 **위치가 어긋난다.** 이 판정은 줄번호를
+  //   보고하므로 길이 보존이 계약이다. 둘을 합치려면 길이 보존 모드가
+  //   먼저 필요하다.
+  const code = stripCommentsKeepingLength(text);
 
   // ① 읽기: `const {` … `}` `= await` … `;`  — 구조분해에 error 가 없는 것
   const readRe = /const\s*\{([^}]*)\}\s*=\s*await\s+([\s\S]*?);/g;
@@ -96,6 +168,7 @@ export function errorDroppedSites(src, where = '') {
 export function selfTest() {
   const failed = [];
   const n = (src) => errorDroppedSites(src).length;
+  const lineOf0 = (src) => errorDroppedSites(src).map((x) => x.line);
   const kinds = (src) => errorDroppedSites(src).map((s) => s.kind).sort().join(',');
 
   // 읽기 — error 를 버린 것은 센다
@@ -125,6 +198,39 @@ export function selfTest() {
   // 빈 입력
   if (n('') !== 0) failed.push('빈 입력을 셌다');
 
+  // ── 문자열 안의 주석 기호 ──
+  //
+  // **개수 기준 관문에서는 적게 세는 쪽이 치명적이다.** 정상적인 한 줄로
+  // 개수를 내릴 수 있으면 아무것도 고치지 않고 기준선을 내릴 수 있다.
+  if (n("const s = '/*';\nconst { data } = await sb.from('t').select('*');") !== 1) {
+    failed.push("문자열 안의 '/*' 가 뒤의 자리를 지웠다");
+  }
+  if (n('const s = `/*`;\nawait sb.from(\'t\').insert({});') !== 1) {
+    failed.push('템플릿 안의 `/*` 가 뒤의 자리를 지웠다');
+  }
+  if (n("const u = 'https://x';\nconst { data } = await sb.from('t').select('*');") !== 1) {
+    failed.push("문자열 안의 '//' 가 뒤의 자리를 지웠다");
+  }
+  // 같은 줄에서도 지우지 않는다
+  if (n("const u = 'a//b'; const { data } = await sb.from('t').select('*');") !== 1) {
+    failed.push('같은 줄 문자열 안의 // 가 뒤의 자리를 지웠다');
+  }
+  // 반대쪽 — 진짜 주석은 그대로 지운다
+  if (n("const s = 'ok'; // const { data } = await sb.from('t').select('*');") !== 0) {
+    failed.push('문자열 뒤의 진짜 줄 주석을 코드로 읽었다');
+  }
+  if (n("const s = 'ok'; /* const { data } = await sb.from('t').select('*'); */") !== 0) {
+    failed.push('문자열 뒤의 진짜 블록 주석을 코드로 읽었다');
+  }
+  // 이스케이프된 따옴표가 문자열을 일찍 닫지 않는다
+  if (n("const s = 'a\\'/*b'; const { data } = await sb.from('t').select('*');") !== 1) {
+    failed.push('이스케이프된 따옴표에서 문자열이 일찍 닫혔다');
+  }
+  // 줄번호 — 문자열을 보존해도 밀리지 않는다
+  if (String(lineOf0("const s = '/*';\nconst { data } = await sb.from('t').select('*');")) !== '2') {
+    failed.push('문자열을 보존하면서 줄번호가 밀렸다');
+  }
+
   // ── 줄번호 ──
   //
   // **세는 것만으로는 부족하다.** 개수가 맞아도 가리키는 줄이 틀리면
@@ -142,5 +248,5 @@ export function selfTest() {
     failed.push('앞선 줄 주석만큼 줄번호가 밀렸다');
   }
 
-  return { total: 16, failed };
+  return { total: 24, failed };
 }
