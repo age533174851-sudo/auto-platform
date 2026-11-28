@@ -14,6 +14,7 @@
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadInventory, render, OUT } from './generate-ui-inventory.mjs';
+import { stripJsComments } from './lib/strip-comments.mjs';
 
 let bad = 0;
 const err = (m) => { console.error(`❌ ${m}`); console.error(`::error::${m}`); bad += 1; };
@@ -226,8 +227,21 @@ for (const c of CONVERGENCE) {
 // 의미는 여전히 추측하지 않는다. **존재만 등록을 요구한다.**
 // 조사 안 한 화면은 이름만 있고 나머지는 `UNSURVEYED`로 남는다.
 {
-  const page = read('src/app/page.tsx') ?? '';
-  if (!page) err('src/app/page.tsx를 읽지 못했습니다 — 대조할 것이 없으면 이 검사는 무의미합니다');
+  const pageRaw = read('src/app/page.tsx');
+  if (!pageRaw) err('src/app/page.tsx를 읽지 못했습니다 — 대조할 것이 없으면 이 검사는 무의미합니다');
+  // **주석은 화면이 아니다.** 주석 처리된 `case 'x': return <Y` 가 그대로
+  // 분기로 세어지면, registry 에 남은 항목이 "그릴 화면이 있다"로 통과한다.
+  // 기계 탐침으로 실제로 돌려 확인했다(변이는 저장소의 TypeScript 파서로
+  // 구문 유효성 확인, 끝나면 바이트 동일 복원):
+  //
+  //   easy 분기를 삭제하면                               rc=1  ← 판정은 동작한다
+  //     (`화면 easy: tab:easy를 그리는 분기가 … 없습니다`)
+  //   삭제하고 그 토큰 없는 주석을 적으면                rc=1  ← 대조
+  //   삭제하고 주석에만 그 한 줄을 적으면                rc=0  ← 구멍
+  //
+  // 존재 확인은 **원문**으로 한다 — 주석만 있는 파일을 "없는 파일"로
+  // 읽으면 안 된다.
+  const page = stripJsComments(pageRaw ?? '');
   const cases = [...page.matchAll(/case\s+'([^']+)'\s*:\s*return\s*<(\w+)/g)].map(m => m[1]);
   if (!cases.length) err('page.tsx에서 화면 분기를 하나도 못 찾았습니다 — 검사기가 고장 난 것입니다');
 
@@ -282,7 +296,12 @@ for (const c of CONVERGENCE) {
   for (const n of NAVIGATION) {
     const src = read(n.file);
     if (!src) { err(`네비게이션 ${n.id}: ${n.file}이 없습니다`); continue; }
-    if (!new RegExp(`\\b${n.symbol}\\b`).test(src)) {
+    // 이름이 **주석에만** 남아 있으면 개명이 그대로 지나간다. 같은 탐침:
+    //   MENU 를 개명하면                     rc=1  ← 판정은 동작한다
+    //     (`네비게이션 menu: … MENU이 없습니다 — 이름이 바뀌었습니다`)
+    //   개명하고 그 이름 없는 주석을 적으면  rc=1  ← 대조
+    //   개명하고 주석에만 옛 이름을 적으면   rc=0  ← 구멍
+    if (!new RegExp(`\\b${n.symbol}\\b`).test(stripJsComments(src))) {
       err(`네비게이션 ${n.id}: ${n.file}에 \`${n.symbol}\`이 없습니다 — 이름이 바뀌었습니다`);
     }
   }
