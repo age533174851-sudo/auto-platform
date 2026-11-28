@@ -43,6 +43,30 @@ for (const f of [PREFS, CSS, NOTIFY, APP, ...SCREENS]) {
 }
 if (bad) { console.error('\n검사할 파일을 못 읽었습니다. 여기서 멈춥니다.\n'); process.exit(1); }
 
+/**
+ * **선언 이름의 왼쪽 경계.** `margin-right:` 를 찾는 정규식은
+ * `--margin-right:` 안에서도 맞는다 — 그건 **사용자 정의 속성**이고
+ * 여백을 만들지 않는다. 그래서 속성 이름 앞에 `-` 나 글자가 붙어 있으면
+ * 그 선언으로 인정하지 않는다.
+ *
+ * [Codex 독립 재현](https://github.com/age533174851-sudo/auto-platform/pull/823#issuecomment-7237339761)
+ * 이 짚었고 내가 다시 쟀다. 네 자리 전부 열려 있었다(지우는 대조는 rc=1):
+ *
+ *   · `margin-right` → `--margin-right`        → rc=0
+ *   · `min-height`   → `--min-height`          → rc=0
+ *   · `--tap:`       → `--probe--tap:`         → rc=0
+ *   · `--notify-band:` → `--probe--notify-band:` → rc=0
+ *
+ * 첫 번째는 Chromium 에서 헤더의 `margin-right` 가 48px → **0px** 가 되는
+ * 것까지 확인됐다. 예약해 둔 띠가 사라지는데 관문은 초록이었다.
+ *
+ * 왜 공용 모듈로 안 뺐나 — 같은 자리가 `check-trading-layout` 에도 있고
+ * 그 수정은 **다른 PR(#824)** 이다. 둘이 같은 새 파일을 만들면 서로
+ * 충돌해서, 지금 0인 "내 PR 끼리 파일 공유" 를 내가 깨는 셈이 된다.
+ * 둘이 병합된 뒤에 한 곳으로 모은다.
+ */
+const DECL = '(?<![-\\w])';
+
 const prefs = stripJsComments(readFileSync(PREFS, 'utf8'));
 /**
  * **주석 처리한 줄은 계약이 아니다.**
@@ -79,17 +103,17 @@ const railTs = Number(/export const RAIL_COLLAPSED\s*=\s*MIN_CONTROL_TARGET\s*\+
 if (Number.isNaN(railTs)) err(`${PREFS}: RAIL_COLLAPSED가 MIN_CONTROL_TARGET에서 나오지 않습니다 — 띠가 버튼보다 좁아질 수 있습니다`);
 const railCollapsed = tapTs + railTs;
 
-const tapCss = Number(/--tap:\s*(\d+)px/.exec(css)?.[1] || 0);
+const tapCss = Number(new RegExp(`${DECL}--tap:\\s*(\\d+)px`).exec(css)?.[1] || 0);
 if (!tapCss) err(`${CSS}: --tap 변수가 없습니다`);
 else if (tapCss !== tapTs) err(`${CSS}: --tap이 ${tapCss}px인데 ${PREFS}의 MIN_CONTROL_TARGET은 ${tapTs}px입니다 — 두 값이 갈라졌습니다`);
 
-const bandCss = Number(/--notify-band:\s*(\d+)px/.exec(css)?.[1] || 0);
+const bandCss = Number(new RegExp(`${DECL}--notify-band:\\s*(\\d+)px`).exec(css)?.[1] || 0);
 if (!bandCss) err(`${CSS}: --notify-band 변수가 없습니다 — 떠 있는 벨이 비울 자리가 정해져 있지 않습니다`);
 
 /* ── ② 레일이 없는 폭에서 헤더가 그 띠를 비운다 ──────────────
    1024px는 오른쪽 레일이 나타나는 폭이다(globals.css). 그 아래에서는
    레일이 없으므로 헤더가 직접 비워야 한다. */
-if (!/@media \(max-width: 1023px\)[\s\S]{0,200}?\.hdr-actions\s*\{[^}]*margin-right:\s*var\(--notify-band\)/.test(css)) {
+if (!new RegExp(`@media \\(max-width: 1023px\\)[\\s\\S]{0,200}?\\.hdr-actions\\s*\\{[^}]*${DECL}margin-right:\\s*var\\(--notify-band\\)`).test(css)) {
   err(`${CSS}: 레일이 없는 폭에서 헤더가 알림 벨의 띠를 비우지 않습니다 — 벨이 로그인·프로필 버튼을 덮습니다`);
 }
 
@@ -201,7 +225,7 @@ for (const f of SCREENS) {
    주석을 지우기 시작한 뒤 대조군이 rc=0 이 됐다). 선택자 목록 뒤 첫 `{`
    부터 첫 `}` 까지가 그 규칙의 본문이고, 거기서만 찾는다. */
 const autoFloor = /\[data-region='autoPage'\][^{}]*\{([^}]*)\}/.exec(css);
-if (!autoFloor || !/min-height:\s*var\(--tap\)/.test(autoFloor[1])) {
+if (!autoFloor || !new RegExp(`${DECL}min-height:\\s*var\\(--tap\\)`).test(autoFloor[1])) {
   err(`${CSS}: 자동매매 화면의 조작 대상 바닥 규칙이 없습니다`);
 }
 // 표식도 주석이면 안 된다 — 블록·줄 주석 둘 다로 통과했다(측정 rc=0).

@@ -198,3 +198,46 @@ test('★ 임시 폴더를 남기지 않는다', () => {
   const after = readdirSync(tmpdir()).filter((n) => n.startsWith(PREFIX)).length;
   assert.equal(after, before, `임시 폴더가 늘었다 (${before} → ${after})`);
 });
+
+// ── 선언 이름의 왼쪽 경계 ──
+//
+// 주석만 막아서는 부족했다. `margin-right:` 를 찾는 정규식은
+// `--margin-right:` 안에서도 맞는다 — 그건 **사용자 정의 속성**이고
+// 여백을 만들지 않는다. 글자를 보는 검사기의 같은 병이다: **적혀 있는
+// 모양이 비슷하면 통과한다.**
+//
+// [Codex 독립 재현](https://github.com/age533174851-sudo/auto-platform/pull/823#issuecomment-7237339761)
+// 이 둘을 짚었고, 내가 다시 재면서 변수 정의 쪽 둘을 더 찾았다. 네 자리
+// 전부 rc=0 이었다. 첫 번째는 Chromium 에서 헤더의 `margin-right` 가
+// 48px → **0px** 가 되는 것까지 확인됐다 — 예약해 둔 띠가 사라지는데
+// 관문은 초록이었다.
+test('★ 선언을 사용자 정의 속성으로 바꿔도 막는다 (헤더 띠 · 바닥 규칙)', () => {
+  for (const [what, pick, from, to, msg] of [
+    ['헤더 띠', BAND_RULE, 'margin-right: var(--notify-band)', '--margin-right: var(--notify-band)',
+      '띠를 비우지 않습니다'],
+    ['바닥 규칙', FLOOR_RULE, 'min-height: var(--tap)', '--min-height: var(--tap)',
+      '바닥 규칙이 없습니다'],
+  ]) {
+    const rule = pick();
+    const broken = rule.replace(from, to);
+    assert.notEqual(broken, rule, `원문 모양이 바뀌었다 (${what}) — 이 시험도 같이 봐야 한다`);
+    const r = withFixture([[CSS, `${what} 사용자 정의 속성화`, sub(rule, broken)]], runIn);
+    assert.equal(r.rc, 1,
+      `사용자 정의 속성(${to.split(':')[0]})을 실제 선언으로 인정했다 (${what}) — 선언은 아무 일도 하지 않는다`);
+    assert.ok(r.out.includes(msg), `막기는 했는데 다른 판정이 울렸다 (${what})`);
+  }
+});
+
+test('★ 변수 이름이 더 길어져도 그 변수가 있다고 읽지 않는다', () => {
+  for (const [decl, msg] of [
+    [TAP_DECL, '--tap 변수가 없습니다'],
+    [BAND_DECL, '--notify-band'],
+  ]) {
+    const longer = decl.replace('  --', '  --probe--');
+    assert.notEqual(longer, decl, '원문 모양이 바뀌었다 — 이 시험도 같이 봐야 한다');
+    const r = withFixture([[CSS, `${decl.trim()} 이름 연장`, sub(decl, longer)]], runIn);
+    assert.equal(r.rc, 1,
+      `더 긴 사용자 정의 이름을 그 변수로 읽었다 (${decl.trim()}) — 실제 변수는 사라졌고 var()는 빈 값이 된다`);
+    assert.ok(r.out.includes(msg), '막기는 했는데 다른 판정이 울렸다');
+  }
+});
