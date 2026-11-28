@@ -24,6 +24,11 @@ import { readFileSync, existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { findOverrideKeys, selfTest, OAUTH_OVERRIDE_NAMES } from './lib/oauth-override-names.mjs';
 import {
+  MUST_DENY_COMMANDS,
+  denyCovers,
+  selfTest as denySelfTest,
+} from './lib/deny-coverage.mjs';
+import {
   deliveryFindings,
   selfTest as deliverySelfTest,
   FORBIDDEN_SHAPES,
@@ -74,6 +79,14 @@ for (const f of SELF.failed) {
 const DELIVERY_SELF = deliverySelfTest();
 for (const f of DELIVERY_SELF.failed) {
   err(`제출 통로 판단 자기 점검 실패 — ${f}`);
+}
+
+// 금지 대조 판단도 같은 자리에서 자기를 증명한다. **이 판단이 틀리면
+// ⑨가 "막혔다"고 적는 것이 거짓이 된다** — 낱말만 품은 무해한 항목이
+// 금지 요구를 채우던 자리가 그것이다.
+const DENY_SELF = denySelfTest();
+for (const f of DENY_SELF.failed) {
+  err(`금지 대조 판단 자기 점검 실패 — ${f}`);
 }
 
 // 통로가 가리키는 스크립트가 실제로 있어야 한다. 허용 목록에만 있고
@@ -286,15 +299,33 @@ const src = stripComments(raw);
 //
 // 권한으로 막는 것이 1차고 이것은 2차다. `curl` 하나만 열려 있어도
 // 배포된 앱이나 거래소로 직접 요청을 만들 수 있다.
+//
+// ★ 이 자리가 **금지 목록 문자열 전체에 대한 부분일치**였다
+//   (`m[1].includes(d)`). 그래서 낱말만 들어 있으면 통과했다 — 실제
+//   금지 목록을 바꿔 넣고 돌려서 얻은 값(대조 rc=0 · 삭제 대조 rc=1):
+//
+//     Bash(curl:*) → Bash(curl --unix-socket:*)         rc=0  구멍
+//     Bash(psql:*) → Bash(psql-dump:*)                  rc=0  구멍
+//     Bash(gh pr merge:*) → Bash(gh pr merge-queue:*)   rc=0  구멍
+//     Bash(gh workflow run:*) → Bash(echo gh workflow run)  rc=0  구멍
+//     Bash(curl:*) → Read(docs/curl.md)                 rc=0  구멍
+//
+//   뒤의 둘이 방향을 보여 준다 — 무해한 항목이 금지 요구를 채웠다.
+//   목록과 판정 모두 `scripts/lib/deny-coverage.mjs` 한 곳으로 옮겼다.
+//
+//   같은 결함이 `scripts/lib/autodev-delivery.mjs` ④에도 있다. 그 파일은
+//   **제출 통로 울타리 경로**라서 무인 회차가 고칠 수 없다(관문이 옳다).
+//   그래서 ④는 아직 부분일치다 — 닫았다고 적지 않고, 통과한다는 사실을
+//   `scripts/test-autodev-deny-coverage.mjs` 에 시험으로 남겼다.
 {
-  const MUST_DENY = ['gh workflow run', 'gh pr merge', 'curl', 'psql'];
   const m = src.match(/--disallowedTools\s+"([^"]*)"/);
   if (!m) {
     err(`${WF}: \`--disallowedTools\`가 없습니다 — 도구 수준 차단이 없습니다`);
   } else {
-    for (const d of MUST_DENY) {
-      if (!m[1].includes(d)) {
-        err(`${WF}: \`${d}\`를 막지 않습니다 — 이 하나로 울타리를 넘을 수 있습니다`);
+    for (const d of MUST_DENY_COMMANDS) {
+      if (!denyCovers(m[1], d)) {
+        err(`${WF}: \`${d}\`를 실제로 막지 않습니다 — 낱말이 적혀 있는 것과 `
+          + '그 명령이 막히는 것은 다릅니다 · 이 하나로 울타리를 넘을 수 있습니다');
       }
     }
   }
@@ -568,6 +599,9 @@ if (bad === 0) {
   console.log(`✅ 제출 통로 판단 자기 점검 ${DELIVERY_SELF.total}/${DELIVERY_SELF.total} — `
     + '허용 규칙을 문서의 매칭 규칙으로 대조하고, 복합 명령은 조각마다 세고, '
     + '`:*` 두 읽기 중 어느 쪽으로든 금지된 모양이 통과하면 실패로 센다');
+  console.log(`✅ 금지 대조 판단 자기 점검 ${DENY_SELF.total}/${DENY_SELF.total} — `
+    + '금지 목록에 낱말이 적혀 있는 것을 "막혔다"로 읽지 않고, `Bash(...)` 규칙만 '
+    + '세고, 맨 명령과 인자가 붙은 꼴을 둘 다 막아야 막힌 것으로 센다');
   console.log(`✅ 무인 회차 울타리 ${LANES.length}갈래 — 다른 워크플로 실행 불가 · `
     + '거래소/DB 시크릿 없음 · 도구 차단 · 겹침 방지 · 시간 상한 · '
     + '변경 안전 관문 · 금지 지시 보존 · 체크아웃 설정의 인증 바꿔치기 없음 · '
