@@ -19,6 +19,7 @@ import { getSupabaseAdmin, resolveUserId } from '@/lib/supabase/admin';
 import { aggregateStrategies, paperRowToTrade, type ClosedTrade } from '@/lib/portfolio/stats';
 import { scoreAll } from '@/lib/portfolio/strategyScore';
 import { allocate, readTiers, RISK_PER_TRADE_PCT } from '@/lib/portfolio/allocation';
+import { readClosedPaperRows } from '@/lib/portfolio/closedTradesRead';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -46,14 +47,11 @@ export async function GET(req: NextRequest) {
     const { resolvePaperScope, paperScopeFailed } = await import('@/lib/engine/paperScope');
     const scope = await resolvePaperScope(sb, uid);
     if (paperScopeFailed(scope)) throw new Error(scope.reason);
-    const { data, error } = await sb.from('paper_positions')
-      .select('strategy_id, realized_pnl, closed_at')
-      .eq('user_id', uid).eq('paper_account_id', scope.accountId).eq('status', 'closed')
-      .gte('closed_at', since)
-      .order('closed_at', { ascending: true })
-      .limit(5000);
-    if (error) throw new Error(error.message);
-    const rows = Array.isArray(data) ? data : [];
+    // 한 번에 읽으면 서버 상한(1000행)에 **가장 최근 거래부터** 잘린다.
+    // 전부 읽었거나, 못 읽었다고 말하거나 — 둘 중 하나다.
+    const read = await readClosedPaperRows(sb, { userId: uid, accountId: scope.accountId, sinceIso: since });
+    if (!read.ok || !read.rows) throw new Error(read.reason || '청산 기록을 읽지 못했습니다');
+    const rows = read.rows;
     trades = rows.map(paperRowToTrade).filter(Boolean) as ClosedTrade[];
     tradesOk = true;
     // 손익·청산 시각을 모르는 행은 0원 거래로 세지 않고 뺐다 — 뺐다는 사실은 남긴다.

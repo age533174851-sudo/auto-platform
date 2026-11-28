@@ -10,6 +10,7 @@
 
 import { test, eq, assert, close } from '../../test/harness';
 import { aggregateStrategies, sharpeOf, paperRowToTrade, MIN_DAYS_FOR_SHARPE, type ClosedTrade } from './stats';
+import { readClosedPaperRows } from './closedTradesRead';
 
 const DAY = 86_400_000;
 const NOW = 1_800_000_000_000;
@@ -192,5 +193,106 @@ export function runStatsTests() {
     // 진짜 0은 관측이다 — 버리지 않는다.
     eq(paperRowToTrade({ strategy_id: 'a', realized_pnl: 0, closed_at: at })?.realizedPnl, 0);
     eq(paperRowToTrade({ strategy_id: 'a', realized_pnl: '0', closed_at: at })?.realizedPnl, 0);
+  });
+
+  // ── 청산 기록 읽기: 서버 행 상한에 잘린 것을 전부로 적지 않는다 ──
+  //
+  // 배분 라우트는 `.order(asc).limit(5000)` 한 번으로 읽었다. Supabase는
+  // 한 응답을 1000행으로 자른다(`paperBotPerf.ts`가 이미 그 상한을 다룬다).
+  // 그러면 180일 안에 청산이 1000건을 넘는 순간 **가장 최근 거래부터**
+  // 조용히 빠지고, 배분표는 경고 없이 옛 성적으로 돈을 나눈다.
+  console.log('[통계 — 청산 기록 읽기]');
+
+  /** PostgREST처럼 한 응답을 `cap`행으로 자르는 가짜 */
+  const fakeSb = (all: any[], cap = 1000, failAt: number | null = null) => {
+    let calls = 0;
+    const sb: any = {
+      from(table: string) {
+        eq(table, 'paper_positions');
+        const f: Record<string, any> = {};
+        let gte: string | null = null;
+        let lo = 0, hi = Infinity;
+        const q: any = {
+          select: () => q,
+          eq: (k: string, v: any) => { f[k] = v; return q; },
+          gte: (_k: string, v: string) => { gte = v; return q; },
+          order: () => q,
+          limit: (n: number) => { hi = n - 1; return q; },
+          range: (a: number, b: number) => { lo = a; hi = b; return q; },
+          then: (res: any, rej: any) => {
+            const n = calls++;
+            if (failAt != null && n === failAt) {
+              return Promise.resolve({ data: null, error: { message: 'boom' } }).then(res, rej);
+            }
+            const rows = all
+              .filter(r => r.user_id === f.user_id && r.paper_account_id === f.paper_account_id
+                && r.status === f.status && (gte == null || r.closed_at >= gte))
+              .sort((a, b) => (a.closed_at < b.closed_at ? -1 : a.closed_at > b.closed_at ? 1
+                : String(a.id) < String(b.id) ? -1 : 1));
+            const end = Math.min(hi + 1, rows.length, lo + cap);
+            return Promise.resolve({ data: rows.slice(lo, end), error: null }).then(res, rej);
+          },
+        };
+        return q;
+      },
+      get calls() { return calls; },
+    };
+    return sb;
+  };
+  const rowsOf = (n: number) => Array.from({ length: n }, (_, i) => ({
+    id: `p${String(i).padStart(6, '0')}`,
+    user_id: 'u1', paper_account_id: 'acc1', status: 'closed', strategy_id: 's',
+    realized_pnl: 1,
+    closed_at: new Date(NOW - (n - i) * 60_000).toISOString(),
+  }));
+  const Q = { userId: 'u1', accountId: 'acc1', sinceIso: new Date(NOW - 180 * DAY).toISOString() };
+
+  test('1000행 상한을 넘는 청산 기록도 **최근 거래까지** 전부 읽는다', async () => {
+    const all = rowsOf(2500);
+    const r = await readClosedPaperRows(fakeSb(all), Q);
+    assert(r.ok && r.rows != null, '읽기 실패');
+    const rows = r.rows as any[];
+    eq(rows.length, 2500, `상한에 잘렸다: ${rows.length}건`);
+    eq(rows[rows.length - 1].closed_at, all[all.length - 1].closed_at, '가장 최근 거래가 빠졌다');
+  });
+
+  test('서버 상한이 페이지보다 작아도(500) 끝으로 오인하지 않는다', async () => {
+    const r = await readClosedPaperRows(fakeSb(rowsOf(1700), 500), Q);
+    assert(r.ok, '읽기 실패');
+    eq(r.rows?.length, 1700);
+  });
+
+  test('딱 한 페이지(1000건)여도 하나도 빼지 않는다', async () => {
+    const r = await readClosedPaperRows(fakeSb(rowsOf(1000)), Q);
+    assert(r.ok, '읽기 실패');
+    eq(r.rows?.length, 1000);
+  });
+
+  test('중간 페이지가 실패하면 **앞 페이지만으로 ok를 주지 않는다**', async () => {
+    const r = await readClosedPaperRows(fakeSb(rowsOf(2500), 1000, 1), Q);
+    eq(r.ok, false, '부분 기록을 완전한 기록으로 돌려줬다');
+    eq(r.rows, null, '실패인데 앞 페이지를 쥐여 줬다');
+  });
+
+  test('상한(maxRows)을 넘으면 잘린 채 배분하지 않도록 ok:false + truncated', async () => {
+    const r = await readClosedPaperRows(fakeSb(rowsOf(2500)), { ...Q, maxRows: 2000 });
+    eq(r.ok, false);
+    eq(r.truncated, true);
+    eq(r.rows, null);
+  });
+
+  test('기록이 없으면 빈 목록 ok — 없음은 관측이다', async () => {
+    const r = await readClosedPaperRows(fakeSb([]), Q);
+    assert(r.ok);
+    eq(r.rows?.length, 0);
+  });
+
+  test('다른 계좌·열린 포지션은 섞지 않는다', async () => {
+    const all = [...rowsOf(3),
+      { ...rowsOf(1)[0], id: 'x1', paper_account_id: 'acc2' },
+      { ...rowsOf(1)[0], id: 'x2', status: 'open' }];
+    const r = await readClosedPaperRows(fakeSb(all), Q);
+    assert(r.ok);
+    eq(r.rows?.length, 3);
   });
 }
