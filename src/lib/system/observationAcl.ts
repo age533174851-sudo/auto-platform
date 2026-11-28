@@ -106,6 +106,46 @@ function stripSqlComments(sql: string): string {
 const norm = (s: string) => s.trim().replace(/\s+/g, ' ');
 
 /**
+ * 식별자 한 조각 — 인용(`"a b"`)과 원시(`a_b`)를 모두 받는다.
+ *
+ * ★ Codex가 #828에서 찾은 구멍이 여기였다. `("?[\w$.]+"?)`로 표를 읽으면
+ *   `"public"."exact100x_risk_observations"`에서 `"public"`만 집어
+ *   **`public.public`**이 됐고, 그 이름은 지키는 목록에 없으므로 통과했다.
+ *   GRANT 쪽은 따옴표를 아예 벗기지 않아 역시 어긋났다. 유효한 SQL이다 —
+ *   격리 PostgreSQL에서 `pg_policies.roles = {public}`으로 확인됐다.
+ */
+const QID = '(?:"[^"]*"|[\\w$]+)';
+/** 수식 이름 — `t` · `s.t` · `"s"."t"` · `s."t"` */
+const QNAME = `${QID}(?:\\s*\\.\\s*${QID})*`;
+
+/** 따옴표를 벗기고 소문자로 모은 한 조각 */
+const plain = (s: string) => norm(s).replace(/^"|"$/g, '').trim().toLowerCase();
+
+/**
+ * 수식 이름을 `schema.table`로 정규화한다.
+ *
+ * ★ 인용 식별자는 PostgreSQL에서 **대소문자를 보존한다** — 엄밀히는
+ *   `"Tbl"`과 `tbl`은 다른 표다. 그래도 여기서는 소문자로 모아 같은 표로
+ *   읽는다. 관문은 놓치는 쪽이 아니라 **막는 쪽으로 틀려야 한다.**
+ */
+function qualifiedName(raw: string): string {
+  const parts = (String(raw ?? '').match(/"[^"]*"|[\w$]+/g) ?? [])
+    .map(plain).filter(Boolean);
+  if (parts.length === 0) return '';
+  return parts.length >= 2
+    ? `${parts[parts.length - 2]}.${parts[parts.length - 1]}`
+    : `public.${parts[0]}`;
+}
+
+/** 쉼표로 이어진 수식 이름들 — `"a,b"`처럼 쉼표를 품은 인용 이름도 끊지 않는다 */
+const nameList = (s: string) =>
+  (String(s ?? '').match(new RegExp(QNAME, 'g')) ?? []).map(qualifiedName).filter(Boolean);
+
+/** 쉼표로 이어진 role들 */
+const roleListOf = (s: string) =>
+  (String(s ?? '').match(new RegExp(QID, 'g')) ?? []).map(plain).filter(Boolean);
+
+/**
  * 문장을 끊어 동사·권한·표·role을 읽는다.
  *
  * **줄바꿈·대소문자·여분 공백은 결과를 바꾸지 않는다.** 그래야 서식만
@@ -119,8 +159,7 @@ export function parseAclStatements(sql: string): AclStatement[] {
 }
 
 /** `a, b` → `['a','b']` — 소문자·따옴표 제거 */
-const roleList = (s: string) =>
-  s.split(',').map(r => norm(r).toLowerCase().replace(/^"|"$/g, '')).filter(Boolean);
+const roleList = roleListOf;
 
 /**
  * GRANT/REVOKE 한 문장을 읽는다.
@@ -143,8 +182,8 @@ function parseAclSpan(raw: string): AclStatement {
   if (!m) return { verb: isGrant ? 'GRANT' : 'REVOKE', privileges: [], tables: [], roles: [], raw };
   const privileges = m[1].toUpperCase()
     .replace(/\bPRIVILEGES\b/g, '').split(',').map(norm).filter(Boolean);
-  const tables = m[2].split(',').map(t => norm(t).toLowerCase())
-    .map(t => (t.includes('.') ? t : `public.${t}`));
+  // 인용 표기(`"public"."t"`)도 같은 이름으로 읽는다
+  const tables = nameList(m[2]);
   return { verb: isGrant ? 'GRANT' : 'REVOKE', privileges, tables, roles: roleList(m[3]), raw };
 }
 
@@ -175,12 +214,12 @@ function spansFrom(body: string, re: RegExp): string[] {
  *   `TO`(예: `USING (note = 'TO anon')`)를 role로 읽으면 거짓 실패가 난다.
  */
 export function parsePolicyStatements(sql: string): PolicyStatement[] {
+  const HEAD = new RegExp(`^CREATE\\s+POLICY\\s+(${QNAME})\\s+ON\\s+(${QNAME})`, 'i');
   return spansFrom(stripSqlComments(sql), /\bCREATE\s+POLICY\b/i).map((raw): PolicyStatement => {
-    const head = /^CREATE\s+POLICY\s+("?[\w$.]+"?)\s+ON\s+("?[\w$.]+"?)/i.exec(raw);
+    const head = HEAD.exec(raw);
     if (!head) return { name: '', table: '', roles: [], raw };
-    const name = head[1].replace(/"/g, '').toLowerCase();
-    const bare = head[2].replace(/"/g, '').toLowerCase();
-    const table = bare.includes('.') ? bare : `public.${bare}`;
+    const name = plain(head[1]);
+    const table = qualifiedName(head[2]);
     const tail = raw.slice(head[0].length);
     const stop = tail.search(/\b(USING|WITH\s+CHECK)\b/i);
     const to = /\bTO\s+([\s\S]+)$/i.exec(stop === -1 ? tail : tail.slice(0, stop));

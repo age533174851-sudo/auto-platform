@@ -190,3 +190,65 @@ test('parsePolicyStatements — TO 절이 없으면 roles 가 빈 배열이다',
   const got = parsePolicyStatements(`CREATE POLICY p ON ${RISK} FOR SELECT USING (true);`);
   assert.deepEqual([...got[0].roles], []);
 });
+
+// ── 인용 식별자 (Codex가 #828에서 찾은 구멍) ──────────────────────
+//
+// `("?[\w$.]+"?)`로 표를 읽으면 `"public"."exact100x_risk_observations"`에서
+// `"public"`만 집어 **`public.public`**이 됐고, 그 이름은 지키는 목록에
+// 없으므로 통과했다. GRANT 쪽은 따옴표를 아예 벗기지 않아 역시 어긋났다.
+// 유효한 SQL이다 — 격리 PostgreSQL에서 `pg_policies.roles = {public}`으로
+// 확인됐다고 보고됐고, 두 경우 모두 이 저장소에서 다시 재현했다.
+const QUOTED = [
+  ['스키마·표 모두 인용', '"public"."exact100x_risk_observations"'],
+  ['표만 인용', '"exact100x_risk_observations"'],
+  ['스키마만 인용', '"public".exact100x_risk_observations'],
+  ['점 주위에 공백', 'public . exact100x_risk_observations'],
+];
+
+for (const [how, ref] of QUOTED) {
+  test(`★ 인용 표기 — ${how} · 정책을 PUBLIC 에 열면 막는다`, () => {
+    const v = checkObservationExposure(withLate(
+      `CREATE POLICY probe_open ON ${ref} FOR SELECT TO PUBLIC USING (true);`));
+    assert.equal(v.ok, false, `${ref} 를 다른 표로 읽으면 통과한다`);
+    assert.equal(v.code, 'POLICY_NOT_SERVICE_ONLY');
+  });
+
+  test(`★ 인용 표기 — ${how} · GRANT 를 PUBLIC 에 주면 막는다`, () => {
+    const v = checkObservationExposure(withLate(
+      `GRANT SELECT ON TABLE ${ref} TO PUBLIC;`));
+    assert.equal(v.ok, false, `${ref} 를 다른 표로 읽으면 통과한다`);
+    assert.equal(v.code, 'PUBLIC_ROLE_GRANTED');
+  });
+}
+
+test('★ 인용 표기 — role 도 인용할 수 있다', () => {
+  const v = checkObservationExposure(withLate(
+    `GRANT SELECT ON TABLE "public"."exact100x_risk_observations" TO "anon";`));
+  assert.equal(v.ok, false);
+  assert.equal(v.code, 'PUBLIC_ROLE_GRANTED');
+  assert.match(v.reason, /anon/);
+});
+
+test('대조 — 인용한 service_role 은 통과한다', () => {
+  const v = checkObservationExposure(withLate(
+    `GRANT ALL PRIVILEGES ON TABLE "public"."exact100x_risk_observations" TO "service_role";\n`
+    + `CREATE POLICY p ON "public"."exact100x_exit_escape_observations"`
+    + ' FOR ALL TO "service_role" USING (true) WITH CHECK (true);'));
+  assert.equal(v.ok, true, v.reason);
+});
+
+test('대조 — 인용 표기라도 다른 표는 건드리지 않는다', () => {
+  const v = checkObservationExposure(withLate(
+    'CREATE POLICY p ON "public"."some_other_table" FOR SELECT TO anon USING (true);\n'
+    + 'GRANT SELECT ON TABLE "public"."some_other_table" TO anon;'));
+  assert.equal(v.ok, true, v.reason);
+});
+
+test('parsePolicyStatements — 인용 수식 이름을 schema.table 로 읽는다', () => {
+  const got = parsePolicyStatements(
+    'CREATE POLICY "my policy" ON "public"."exact100x_risk_observations"'
+    + ' FOR SELECT TO PUBLIC USING (true);');
+  assert.equal(got[0].table, 'public.exact100x_risk_observations');
+  assert.equal(got[0].name, 'my policy');
+  assert.deepEqual([...got[0].roles], ['public']);
+});
