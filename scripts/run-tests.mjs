@@ -405,6 +405,7 @@ import { runWalletOverviewTests } from './src/lib/portfolio/walletOverview.test'
 import { runPerformanceTests } from './src/lib/portfolio/performance.test';
 import { runSnapshotBucketTests } from './src/lib/portfolio/snapshotBucket.test';
 import { runFxRateTests } from './src/lib/portfolio/fxRate.test';
+import { runHubBriefingTests } from './src/lib/market/hubBriefing.test';
 import { runCoverageSetTests } from './src/lib/ledger/coverageSet.test';
 import { runScheduleExitTests } from './src/lib/engine/scheduleExit.test';
 import { runOAuthProvidersTests } from './src/lib/auth/oauthProviders.test';
@@ -525,7 +526,7 @@ runAiResultSourceTests(); runReconcilePlanTests(); runPersistentRuntimeTests(); 
 runWalletScreenTests(); runStrategySyncTests(); runKillSwitchGateTests(); runEquityCurveTests(); runWalletDetailTests(); runWalletOverviewTests(); runPerformanceTests(); runExitMonitorTests();
 runExitMonitorScheduleTests(); runExitMonitorLeaseTests(); runOpsCommandTests(); runOpsQueueTests(); runOpsViewTests(); runSelfHealTests(); runAutoVerifyTests(); runSecretParityTests();
 runIncomeIngestTests(); runStrategyConflictGateTests(); runLeverageMathTests(); runLiveTradingGateTests(); runLadderGateTests(); runEdgeTypesTests(); runWalletTruthViewTests(); runSnapshotBucketTests();
-runFxRateTests(); runCoverageSetTests(); runExecutionRuntimeTests(); runRecoveryCenterTests(); runSecretSyncTests(); runWorkerAliveTests(); runHeartbeatVerifyTests(); runExecutorEvidenceTests();
+runFxRateTests(); runHubBriefingTests(); runCoverageSetTests(); runExecutionRuntimeTests(); runRecoveryCenterTests(); runSecretSyncTests(); runWorkerAliveTests(); runHeartbeatVerifyTests(); runExecutorEvidenceTests();
 runVercelEnvTests(); runKillSwitchTruthTests(); runKillTargetsTests(); runKillClosePlanTests(); runKillCloseRunTests(); runKillAlertTests(); runManagedPositionTests(); runLifecycleActionTests();
 runMutationGuardTests(); runEntryExitSafetyTests(); runLifecycleRowsTests(); runPostEntryRiskTests(); runPositionRiskProvenanceTests(); runRiskObservationStoreTests(); runRiskObservationEligibilityTests(); runEscapeTelemetryTests();
 runExitMonitorWakeTests(); runMigrationLineageTests(); runObservationAclTests(); runTestnetReadinessTests(); runTestnetDiagnoseVerdictTests(); runConnectionIdentityTests(); runOrderExecutorIdentityTests(); runBracketCacheTests();
