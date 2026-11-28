@@ -37,10 +37,13 @@
 //
 // 프로브 빌드에는 `scripts/probe/lib/auth.mjs` 의 PROBE_ENV 를 준다.
 import { chromium } from '/opt/node22/lib/node_modules/playwright/index.mjs';
+// 저장소 키는 **공용 것을 쓴다** — 베낀 값이 `PROBE_SUPABASE_URL` 과
+// 갈리면 세션이 안 심기고, 프로브는 구멍을 "재현 안 됨" 으로 적는다.
+import { PROBE_STORAGE_KEY } from './lib/auth.mjs';
 
 const PORT = process.argv[2] ?? '3941';
 const BASE = `http://127.0.0.1:${PORT}`;
-const STORAGE_KEY = 'sb-probe-local-auth-token';
+const STORAGE_KEY = PROBE_STORAGE_KEY;
 const HOUR = 3600;
 
 const session = (who) => {

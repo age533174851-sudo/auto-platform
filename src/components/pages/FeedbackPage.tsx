@@ -15,6 +15,9 @@
 // ─────────────────────────────────────────────────────────────
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { watchAuthToken } from '@/lib/auth/authToken';
+// 토큰에서 누구인지 읽는 **정본**. 여기서 다시 파싱하지 않는다 —
+// 같은 판단이 두 곳에 있으면 언젠가 갈린다.
+import { readClaims } from '@/lib/auth/adminGate';
 import {
   CATEGORIES, CATEGORY_LABEL, STATUS_LABEL, SEVERITY_LABEL,
   mustBePrivate, TITLE_MAX, BODY_MAX, STEPS_MAX, EXPECTED_MAX, ACTUAL_MAX,
@@ -101,37 +104,67 @@ export default function FeedbackPage({ screen }: { screen?: string } = {}) {
   const [reply, setReply] = useState('');
 
   /**
-   * **인증 세대.** 로그인한 사람이 바뀌면 올라간다.
+   * **누가 보고 있는가.** 토큰 문자열이 아니라 **신원**으로 가른다.
    *
-   * 왜 필요한가 — 이 화면은 `tickets`·`openId`·`messages`·`reply`를 상태로
-   * 들고 있고, 토큰은 `watchAuthToken`으로 **화면을 다시 그리지 않고도**
-   * 바뀐다(토큰 갱신·다른 계정 로그인). 그때 들고 있던 것을 비우지 않으면
-   * **이전 사람의 문의가 다음 사람 화면에 남는다.**
+   * 왜 토큰으로 가르면 안 되나
+   * ──────────────────────────
+   * `watchAuthToken`은 `TOKEN_REFRESHED`에도 불리고, 갱신된 토큰은 다른
+   * 문자열이다(한 시간마다 · 휴대폰을 깨울 때마다). 토큰이 바뀔 때마다
+   * 비우면 **같은 사람이 적던 글을 시스템이 지운다.** 유출을 막으려고
+   * 사용자의 글을 버리는 것이고, 그건 고치는 게 아니다.
    *
-   * 브라우저로 실제로 재서 확인했다(`scripts/probe/feedback-auth-isolation.mjs`):
-   * A 로 문의를 열어 둔 뒤 인증을 B 로 바꾸고 B 의 목록 응답을 늦추면
+   * 신원을 **읽지 못하면 토큰 자체를 신원으로 쓴다.** 누구인지 확인하지
+   * 못한 것은 "같은 사람"이 아니다 — 그때는 바뀐 것으로 보고 비운다.
+   */
+  const viewer = auth ? (readClaims(auth.replace(/^Bearer\s+/i, ''))?.sub ?? auth) : null;
+
+  /**
+   * **인증 세대.** 보는 사람이 바뀌면 올라간다.
+   *
+   * 브라우저로 실제로 재서 확인했다. 먼저 **읽기** 두 곳
+   * (`scripts/probe/feedback-auth-isolation.mjs`) — A 로 문의를 열어 둔 뒤
+   * 인증을 B 로 바꾸고 B 의 목록 응답을 늦추면
    *
    *   · A 의 문의 제목이 그대로 보였다
    *   · A 에게만 보낸 직원 답장이 그대로 보였다
    *   · '답장 보내기'가 **B 의 Authorization 으로 A 의 ticket id 에 POST** 했다
    *
-   * 세 번째가 가장 나쁘다. 서버가 소유자를 확인해 거절해도, 화면은 다른
-   * 사람의 글에 쓰려고 한 것이다.
+   * 그 셋을 막은 뒤에도 **쓰기** 두 곳이 남아 있었다
+   * (`scripts/probe/feedback-auth-write-paths.mjs`) — 답장 POST 를 띄워 둔
+   * 채 인증을 바꾸고 응답을 놓아 주면
+   *
+   *   · A 가 적다 만 제목·내용·재현 단계가 B 의 접수 칸에 그대로 남았다
+   *   · 응답이 돌아오며 `await openTicket(openId)` 가 **닫힌 함수가 들고
+   *     있던 A 의 ticket id** 로 화면을 되돌렸다 (A 의 토큰으로 재조회)
+   *   · A 의 응답에만 실려 온 안내문이 B 의 화면에 떴다
+   *
+   * 두 번째가 가장 나쁘다. 비우기는 **돌았는데 그 뒤에 되돌려 놓는다.**
+   * 되돌아온 화면에서 한 번 더 누르면 A 의 ticket 으로 나간다.
    *
    * 세대를 쓰는 이유는 비우는 것만으로는 **늦게 오는 응답**을 못 막기
    * 때문이다. 비운 뒤에도 이전 세대의 `fetch`가 돌아와 `setTickets`를
    * 부르면 같은 자리로 돌아간다. 그래서 응답을 쓸 때마다 "내가 떠날 때의
-   * 세대가 지금 세대와 같은가"를 본다.
+   * 세대가 지금 세대와 같은가"를 본다 — 읽기든 쓰기든.
    */
   const authGen = useRef(0);
+  /** 직전에 보던 사람. 처음 로그인은 "바뀐 것"이 아니다 */
+  const prevViewer = useRef<string | null>(null);
   useEffect(() => {
     // 이 effect 는 아래 목록 읽기보다 **먼저** 선언돼 있어야 한다 —
     // 같은 커밋에서 비우기가 먼저 돌아야 이전 사람의 것이 한 프레임도
     // 남지 않는다.
+    const had = prevViewer.current;
+    prevViewer.current = viewer;
     authGen.current += 1;
     setTickets(null); setOpenId(null); setMessages(null);
     setReply(''); setListError('');
-  }, [auth]);
+    // **처음 로그인에는 적다 만 글을 지우지 않는다.** 토큰이 늦게 도착하는
+    // 사이에 적기 시작할 수 있고, 그때 지우면 지울 "남의 글"이 아니라
+    // 지금 이 사람의 글을 지운다. 로그아웃(viewer → null)은 비운다.
+    if (had === null) return;
+    setTitle(''); setBody(''); setExtra({ steps: '', expected: '', actual: '' });
+    setNotice(null); setError('');
+  }, [viewer]);
 
   const loadList = useCallback(async () => {
     if (!auth) { setTickets(null); return; }
@@ -180,6 +213,8 @@ export default function FeedbackPage({ screen }: { screen?: string } = {}) {
 
   async function submit() {
     if (!auth || busy) return;
+    // 보내기 전에 세대를 적어 둔다. 응답이 돌아올 때까지 사람이 바뀔 수 있다.
+    const gen = authGen.current;
     setBusy(true); setError(''); setNotice(null);
     try {
       const res = await fetch('/api/feedback/reports', {
@@ -194,27 +229,41 @@ export default function FeedbackPage({ screen }: { screen?: string } = {}) {
         }),
       });
       const d = await res.json().catch(() => null);
+      if (gen !== authGen.current) return;   // 그 사이 사람이 바뀌었다
       if (!res.ok || !d?.ok) throw new Error(d?.message || `접수 실패 (${res.status})`);
       setTitle(''); setBody(''); setExtra({ steps: '', expected: '', actual: '' });
       setNotice(d.redactionNotice ?? '접수됐습니다. 내 문의에서 진행 상황을 볼 수 있어요.');
       setTab('mine'); await loadList();
-    } catch (e) { setError(e instanceof Error ? e.message : '접수 실패'); }
+    } catch (e) {
+      if (gen !== authGen.current) return;
+      setError(e instanceof Error ? e.message : '접수 실패');
+    }
+    // `busy`는 **언제나** 내린다 — 사람이 바뀌었다고 남겨 두면 다음 사람의
+    // 화면이 "보내는 중…"에 멈춘다.
     finally { setBusy(false); }
   }
 
   async function sendReply() {
     if (!auth || busy || openId == null) return;
+    const gen = authGen.current;
+    // 보낼 때의 ticket id 를 그대로 쓴다. 응답 뒤에 `openId` 를 다시 읽으면
+    // **닫힌 함수가 들고 있던 이전 사람의 id** 를 되돌려 놓는다.
+    const id = openId;
     setBusy(true); setError('');
     try {
-      const res = await fetch(`/api/feedback/reports/${openId}`, {
+      const res = await fetch(`/api/feedback/reports/${id}`, {
         method: 'POST', headers: { Authorization: auth, 'Content-Type': 'application/json' },
         body: JSON.stringify({ body: reply }),
       });
       const d = await res.json().catch(() => null);
+      if (gen !== authGen.current) return;   // 그 사이 사람이 바뀌었다
       if (!res.ok || !d?.ok) throw new Error(d?.message || `답장 실패 (${res.status})`);
       setReply(''); if (d.redactionNotice) setNotice(d.redactionNotice);
-      await openTicket(openId); await loadList();
-    } catch (e) { setError(e instanceof Error ? e.message : '답장 실패'); }
+      await openTicket(id); await loadList();
+    } catch (e) {
+      if (gen !== authGen.current) return;
+      setError(e instanceof Error ? e.message : '답장 실패');
+    }
     finally { setBusy(false); }
   }
 
