@@ -23,6 +23,7 @@
 // 한 번에 하나이고, 실패하면 바로 안다. **타이머는 아무도 안 볼 때
 // 반복해서 낸다.** 그래서 여기서 막는 것은 타이머가 도는 파일뿐이다.
 import { existsSync, readFileSync, globSync } from 'node:fs';
+import { stripJsComments } from './lib/strip-comments.mjs';
 
 /** 자동으로(사람 없이) 반복 실행되는 브라우저 코드 */
 const AUTO_ENGINES = [
@@ -39,6 +40,53 @@ const ORDER_ENDPOINTS = [
   '/api/gate/order',
   '/api/stock/order',
 ];
+
+/**
+ * **주석을 걷은 줄.** 줄 번호를 쓰는 곳이 있어 줄마다 따로 걷는다
+ * (여러 줄을 한 번에 걷으면 블록 주석의 줄바꿈이 사라져 줄 번호가 밀린다).
+ *
+ * 전에는 줄머리만 봤다:
+ *
+ *     if (t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')
+ *         || t.startsWith('{/*')) return;
+ *
+ * 줄머리가 그 모양이면 **그 줄의 나머지 진짜 코드까지 버렸다.** TSX 에서
+ * `{/* … *\/}` 는 주석을 쓰는 평범한 방법이라 사고로도 생긴다. 기계 탐침으로
+ * 실제로 돌려 확인했다(변이는 저장소의 TypeScript 파서로 구문 유효성 확인):
+ *
+ *     setInterval(() => {
+ *       {/* 메모 *\/} void fetch('/api/binance/futures/order', { method: 'POST' });
+ *     }, 60000);
+ *
+ *   평범하게 부르면                          rc=1  ← 금지는 동작한다
+ *   줄 전체를 `//` 로 주석 처리하면          rc=0  ← 맞는 동작(대조)
+ *   위처럼 줄머리에 주석을 두고 부르면       rc=0  ← 구멍
+ *   `/* 메모 *\/` 로 두고 부르면              rc=0  ← 구멍
+ *
+ * 즉 **타이머가 아무도 안 볼 때 반복해서 내는 주문**이 주석 한 개 뒤에
+ * 숨었다. 이 파일이 막으려는 바로 그것이고, 본문이 결과를 적어 두었다 —
+ * "탭을 닫으면 진입한 포지션을 아무도 청산하지 않습니다."
+ */
+export function codeLines(src) {
+  return String(src).split('\n').map((l) => {
+    const t = l.trim();
+    if (!t.startsWith('*')) return stripJsComments(l);
+    // 여러 줄 블록 주석의 **가운데 줄**(` * …`)은 한 줄만 보면 구분할 수
+    // 없다. 그 줄은 버린다 — 버려서 생기는 쪽은 과대검출(주석에 적어 둔
+    // 코드를 호출로 세는 것)이라 닫히는 방향이다.
+    //
+    // **다만 닫는 줄은 다르다.** `*/` 뒤에는 진짜 코드가 올 수 있다:
+    //
+    //     /* 메모
+    //      *\/ void fetch('/api/binance/futures/order', { method: 'POST' });
+    //
+    // 통째로 버리면 그 호출이 사라진다 — 숨는 쪽(과소검출)이다. 측정했다:
+    // 이 모양은 **고치기 전에도, 첫 수정 뒤에도** 못 잡았다(main 과 같다).
+    // 그래서 `*/` 뒤를 남긴다.
+    const at = l.indexOf('*/');
+    return at < 0 ? '' : stripJsComments(l.slice(at + 2));
+  });
+}
 
 /** 클라이언트가 붙이면 안 되는 확인 토큰 */
 const CONFIRM_TOKENS = ['LIVE_ORDER_CONFIRMED'];
@@ -59,11 +107,11 @@ for (const f of AUTO_ENGINES) {
     continue;
   }
   enginesRead.push(f);
-  const lines = src.split('\n');
+  const rawLines = src.split('\n');
+  const lines = codeLines(src);   // 줄 번호가 그대로 맞는다
   lines.forEach((line, i) => {
-    const t = line.trim();
-    // 주석은 검사하지 않는다 — 왜 없앴는지 설명하려면 경로를 적어야 한다.
-    if (t.startsWith('//') || t.startsWith('*') || t.startsWith('/*') || t.startsWith('{/*')) return;
+    const t = rawLines[i].trim();   // 사람에게 보여 줄 때는 원문을 쓴다
+    if (!line.trim()) return;
 
     for (const ep of ORDER_ENDPOINTS) {
       if (line.includes(ep)) {
@@ -107,11 +155,9 @@ const MANUAL_ORDER_OK = {
  * 갈린다 — 그때 갈리는 쪽은 늘 검사기다.
  */
 export function rogueHits(src) {
-  if (!/setInterval\s*\(/.test(String(src))) return [];
-  const lines = String(src).split('\n').filter(l => {
-    const t = l.trim();
-    return !(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*') || t.startsWith('{/*'));
-  });
+  const lines = codeLines(src);
+  // **타이머도 주석이면 타이머가 아니다.** 걷은 줄에서 찾는다.
+  if (!/setInterval\s*\(/.test(lines.join('\n'))) return [];
   return ORDER_ENDPOINTS.filter(ep => lines.some(l => l.includes(ep)));
 }
 
@@ -145,7 +191,16 @@ let scanned = 0;
   // 규칙이 실제로 걸리는지. 통과만 하는 검사기는 없는 것보다 나쁘다.
   if (rogueHits(`setInterval(() => { fetch('${ORDER_ENDPOINTS[0]}'); }, 1000);`).length !== 1
       || rogueHits(`// setInterval(() => fetch('${ORDER_ENDPOINTS[0]}'))`).length !== 0
-      || rogueHits(`fetch('${ORDER_ENDPOINTS[0]}')`).length !== 0) {
+      || rogueHits(`fetch('${ORDER_ENDPOINTS[0]}')`).length !== 0
+      // ★ 줄머리 주석 뒤의 **진짜 호출**을 본다. 전에는 줄을 통째로 버려서
+      //   이 둘이 0건이었다 — 타이머가 도는 주문이 주석 한 개 뒤에 숨었다.
+      || rogueHits(`setInterval(() => { {/* m */} fetch('${ORDER_ENDPOINTS[0]}'); }, 1000);`).length !== 1
+      || rogueHits(`setInterval(() => { /* m */ fetch('${ORDER_ENDPOINTS[0]}'); }, 1000);`).length !== 1
+      // ★ 여러 줄 주석의 **닫는 줄** 뒤의 진짜 호출. `*` 로 시작하는 줄을
+      //   통째로 버리면 이것이 사라진다.
+      || rogueHits(`setInterval(() => {\n/* m\n */ fetch('${ORDER_ENDPOINTS[0]}');\n}, 1000);`).length !== 1
+      // 대조 — 별표 붙은 주석 본문은 세지 않는다.
+      || rogueHits(`setInterval(() => {\n/*\n * fetch('${ORDER_ENDPOINTS[0]}');\n */\n}, 1000);`).length !== 0) {
     err('자기 점검 실패 — 타이머+주문 판별이 깨졌습니다');
   }
 
